@@ -1,6 +1,6 @@
 use axum::{
     extract::{Query, State},
-    response::{Html, IntoResponse, Redirect, Response},
+    response::{IntoResponse, Redirect, Response},
 };
 use axum_extra::extract::cookie::SignedCookieJar;
 use base64ct::{Base64UrlUnpadded, Encoding};
@@ -103,166 +103,28 @@ pub async fn get_authorize(
         }
     }
 
-    tracing::debug!("no session cookie, serving login form");
+    tracing::debug!("no session cookie, redirecting to web-client login page");
 
-    // 6. Serve the login form with all OIDC params as hidden fields
-    let nonce_field = params
-        .nonce
-        .as_deref()
-        .map(|n| format!(r#"<input type="hidden" name="nonce" value="{}">"#, html_escape(n)))
-        .unwrap_or_default();
-
-    let html = format!(
-        r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Sign in — Pīna'i</title>
-  <style>
-    *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
-    body {{
-      min-height: 100vh;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      background: #0a0a0f;
-      font-family: system-ui, -apple-system, sans-serif;
-      color: #e8e8f0;
-    }}
-    .card {{
-      background: #111118;
-      border: 1px solid #1e1e2e;
-      padding: 40px;
-      width: 100%;
-      max-width: 400px;
-    }}
-    h1 {{ font-size: 1.5rem; font-weight: 700; margin-bottom: 8px; }}
-    .subtitle {{ color: #6b6b8a; font-size: 0.88rem; margin-bottom: 32px; }}
-    .tabs {{
-      display: flex;
-      gap: 0;
-      margin-bottom: 28px;
-      border-bottom: 1px solid #1e1e2e;
-    }}
-    .tab {{
-      flex: 1;
-      padding: 10px;
-      text-align: center;
-      cursor: pointer;
-      font-size: 0.85rem;
-      color: #6b6b8a;
-      border-bottom: 2px solid transparent;
-      margin-bottom: -1px;
-      background: none;
-      border-top: none;
-      border-left: none;
-      border-right: none;
-      color: inherit;
-    }}
-    .tab.active {{ color: #5865f2; border-bottom-color: #5865f2; }}
-    label {{ display: block; font-size: 0.78rem; color: #6b6b8a; margin-bottom: 6px; }}
-    input[type=text], input[type=email], input[type=password] {{
-      width: 100%;
-      padding: 10px 14px;
-      background: #0a0a0f;
-      border: 1px solid #1e1e2e;
-      color: #e8e8f0;
-      font-size: 0.9rem;
-      margin-bottom: 16px;
-      outline: none;
-    }}
-    input:focus {{ border-color: #5865f2; }}
-    button[type=submit] {{
-      width: 100%;
-      padding: 12px;
-      background: #5865f2;
-      color: #fff;
-      border: none;
-      font-size: 0.9rem;
-      font-weight: 600;
-      cursor: pointer;
-    }}
-    button[type=submit]:hover {{ background: #4752c4; }}
-    .error {{ color: #ed4245; font-size: 0.82rem; margin-bottom: 16px; }}
-  </style>
-</head>
-<body>
-<div class="card">
-  <h1>Pīna'i</h1>
-  <p class="subtitle">Sign in to continue</p>
-
-  <div class="tabs">
-    <button type="button" class="tab active" onclick="showTab('login')">Sign in</button>
-    <button type="button" class="tab" onclick="showTab('register')">Register</button>
-  </div>
-
-  <!-- LOGIN FORM -->
-  <form id="login-form" action="/login" method="POST">
-    <input type="hidden" name="client_id" value="{client_id}">
-    <input type="hidden" name="redirect_uri" value="{redirect_uri}">
-    <input type="hidden" name="scope" value="{scope}">
-    <input type="hidden" name="state" value="{state}">
-    <input type="hidden" name="code_challenge" value="{code_challenge}">
-    <input type="hidden" name="code_challenge_method" value="{code_challenge_method}">
-    {nonce_field}
-
-    <label for="login-username">Username</label>
-    <input type="text" id="login-username" name="username" required autocomplete="username">
-
-    <label for="login-password">Password</label>
-    <input type="password" id="login-password" name="password" required autocomplete="current-password">
-
-    <button type="submit">Sign in</button>
-  </form>
-
-  <!-- REGISTER FORM -->
-  <form id="register-form" action="/register-and-login" method="POST" style="display:none">
-    <input type="hidden" name="client_id" value="{client_id}">
-    <input type="hidden" name="redirect_uri" value="{redirect_uri}">
-    <input type="hidden" name="scope" value="{scope}">
-    <input type="hidden" name="state" value="{state}">
-    <input type="hidden" name="code_challenge" value="{code_challenge}">
-    <input type="hidden" name="code_challenge_method" value="{code_challenge_method}">
-    {nonce_field}
-
-    <label for="reg-username">Username</label>
-    <input type="text" id="reg-username" name="username" required autocomplete="username">
-
-    <label for="reg-email">Email</label>
-    <input type="email" id="reg-email" name="email" required autocomplete="email">
-
-    <label for="reg-password">Password</label>
-    <input type="password" id="reg-password" name="password" required autocomplete="new-password">
-
-    <button type="submit">Create account</button>
-  </form>
-</div>
-
-<script>
-  function showTab(tab) {{
-    document.getElementById('login-form').style.display = tab === 'login' ? '' : 'none';
-    document.getElementById('register-form').style.display = tab === 'register' ? '' : 'none';
-    document.querySelectorAll('.tab').forEach((el, i) => {{
-      el.classList.toggle('active', (tab === 'login' && i === 0) || (tab === 'register' && i === 1));
-    }});
-  }}
-</script>
-</body>
-</html>"#,
-        client_id = html_escape(&params.client_id),
-        redirect_uri = html_escape(&params.redirect_uri),
-        scope = html_escape(&params.scope),
-        state = html_escape(&params.state),
-        code_challenge = html_escape(&params.code_challenge),
-        code_challenge_method = html_escape(&params.code_challenge_method),
-        nonce_field = nonce_field,
+    // 6. Redirect to the web-client login page with all OIDC params as query string
+    let mut query = format!(
+        "client_id={}&redirect_uri={}&scope={}&state={}&code_challenge={}&code_challenge_method={}",
+        urlencoded(&params.client_id),
+        urlencoded(&params.redirect_uri),
+        urlencoded(&params.scope),
+        urlencoded(&params.state),
+        urlencoded(&params.code_challenge),
+        urlencoded(&params.code_challenge_method),
     );
+    if let Some(n) = &params.nonce {
+        query.push_str(&format!("&nonce={}", urlencoded(n)));
+    }
 
-    Ok(Html(html).into_response())
+    let login_url = format!("{}/login?{}", state.config.frontend_url, query);
+    Ok(Redirect::to(&login_url).into_response())
 }
 
 /// Generate a random auth code and persist it in the database.
+
 async fn generate_and_store_code(
     pool: &idp_db::PgPool,
     user_id: Uuid,
@@ -294,10 +156,3 @@ async fn generate_and_store_code(
     Ok(code)
 }
 
-/// Minimal HTML escaping to prevent XSS when embedding values in HTML attributes.
-fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('"', "&quot;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-}

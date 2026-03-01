@@ -1,7 +1,7 @@
 use argon2::{Argon2, PasswordHash, PasswordVerifier};
 use axum::{
     extract::State,
-    response::{IntoResponse, Redirect},
+    response::{IntoResponse, Redirect, Response},
     Form,
 };
 use axum_extra::extract::cookie::SignedCookieJar;
@@ -37,12 +37,18 @@ pub async fn post_login(
     State(state): State<AppState>,
     jar: SignedCookieJar,
     Form(form): Form<LoginForm>,
-) -> Result<impl IntoResponse, OidcError> {
-    // 1. Look up the user
-    let user = users::find_by_username(&state.pool, &form.username)
+) -> Result<Response, OidcError> {
+    // 1. Look up the user — redirect back on not found (don't leak whether username exists)
+    let user = match users::find_by_username(&state.pool, &form.username)
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?
-        .ok_or_else(|| OidcError::invalid_grant("Invalid username or password"))?;
+    {
+        Some(u) => u,
+        None => {
+            tracing::warn!("login failed: unknown username");
+            return Ok(login_error_redirect(&state.config.frontend_url, &form, "Invalid username or password"));
+        }
+    };
 
     // 2. Verify Argon2id password hash (constant-time)
     let parsed_hash = PasswordHash::new(&user.password_hash)
@@ -53,12 +59,12 @@ pub async fn post_login(
         .is_err()
     {
         tracing::warn!("login failed: incorrect password");
-        return Err(OidcError::invalid_grant("Invalid username or password"));
+        return Ok(login_error_redirect(&state.config.frontend_url, &form, "Invalid username or password"));
     }
 
     // 3. Validate the code_challenge_method (defense in depth)
     if form.code_challenge_method != "S256" {
-        return Err(OidcError::invalid_request("code_challenge_method must be 'S256'"));
+        return Ok(login_error_redirect(&state.config.frontend_url, &form, "Invalid request"));
     }
 
     // 4. Generate a random authorization code (32 bytes → 43 base64url chars)
@@ -86,8 +92,7 @@ pub async fn post_login(
     // 6. Set the session cookie (HttpOnly, SameSite=Lax, 30-day max-age)
     let secure = !state.config.domain.starts_with("localhost")
         && !state.config.domain.starts_with("127.");
-    let session_cookie = build_session_cookie(user.id, secure);
-    let updated_jar = jar.add(session_cookie);
+    let updated_jar = jar.add(build_session_cookie(user.id, secure));
 
     tracing::info!(user_id = %user.id, "login successful, auth code issued");
 
@@ -99,5 +104,25 @@ pub async fn post_login(
         urlencoded(&form.state),
     );
 
-    Ok((updated_jar, Redirect::to(&redirect_url)))
+    Ok((updated_jar, Redirect::to(&redirect_url)).into_response())
+}
+
+/// Build a redirect back to the web-client login page with an error message in the query string.
+/// Used when authentication fails so the browser returns to the login form instead of showing
+/// a raw JSON error body.
+fn login_error_redirect(frontend_url: &str, form: &LoginForm, error: &str) -> Response {
+    let mut query = format!(
+        "client_id={}&redirect_uri={}&scope={}&state={}&code_challenge={}&code_challenge_method={}&error={}",
+        urlencoded(&form.client_id),
+        urlencoded(&form.redirect_uri),
+        urlencoded(&form.scope),
+        urlencoded(&form.state),
+        urlencoded(&form.code_challenge),
+        urlencoded(&form.code_challenge_method),
+        urlencoded(error),
+    );
+    if let Some(n) = &form.nonce {
+        query.push_str(&format!("&nonce={}", urlencoded(n)));
+    }
+    Redirect::to(&format!("{}/login?{}", frontend_url, query)).into_response()
 }

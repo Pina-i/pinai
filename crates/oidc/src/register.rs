@@ -2,12 +2,22 @@ use argon2::{
     password_hash::{rand_core::OsRng, SaltString},
     Argon2, PasswordHasher,
 };
-use axum::{extract::State, http::StatusCode, Form, Json};
+use axum::{
+    extract::State,
+    http::StatusCode,
+    response::{IntoResponse, Redirect, Response},
+    Form, Json,
+};
+use base64ct::{Base64UrlUnpadded, Encoding};
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 
-use idp_db::repos::users;
+use idp_db::repos::{auth_codes, clients, users};
 
-use crate::{AppState, OidcError};
+use crate::{
+    cookies::{build_session_cookie, urlencoded},
+    AppState, OidcError,
+};
 
 #[derive(Debug, Deserialize)]
 pub struct RegisterRequest {
@@ -95,19 +105,13 @@ pub async fn post_register_and_login(
     State(state): State<AppState>,
     jar: axum_extra::extract::cookie::SignedCookieJar,
     Form(form): Form<RegisterAndLoginForm>,
-) -> Result<impl axum::response::IntoResponse, OidcError> {
-    use argon2::password_hash::rand_core::OsRng;
-    use axum::response::Redirect;
-    use base64ct::{Base64UrlUnpadded, Encoding as _};
-    use idp_db::repos::{auth_codes, clients};
-    use rand::RngCore;
-
-    // 1. Basic validation
+) -> Result<Response, OidcError> {
+    // 1. Basic validation — redirect back on user-facing errors
     if form.username.len() < 3 {
-        return Err(OidcError::invalid_request("username must be at least 3 characters"));
+        return Ok(register_error_redirect(&state.config.frontend_url, &form, "Username must be at least 3 characters"));
     }
     if form.password.len() < 8 {
-        return Err(OidcError::invalid_request("password must be at least 8 characters"));
+        return Ok(register_error_redirect(&state.config.frontend_url, &form, "Password must be at least 8 characters"));
     }
 
     // 2. Check uniqueness
@@ -116,14 +120,14 @@ pub async fn post_register_and_login(
         .map_err(|e| OidcError::server_error(e.to_string()))?
         .is_some()
     {
-        return Err(OidcError::invalid_request("Username already taken"));
+        return Ok(register_error_redirect(&state.config.frontend_url, &form, "Username already taken"));
     }
     if users::find_by_email(&state.pool, &form.email)
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?
         .is_some()
     {
-        return Err(OidcError::invalid_request("Email already registered"));
+        return Ok(register_error_redirect(&state.config.frontend_url, &form, "Email already registered"));
     }
 
     // 3. Validate client + redirect_uri
@@ -179,16 +183,33 @@ pub async fn post_register_and_login(
     // 7. Set the session cookie
     let secure = !state.config.domain.starts_with("localhost")
         && !state.config.domain.starts_with("127.");
-    let session_cookie = crate::cookies::build_session_cookie(user.id, secure);
-    let updated_jar = jar.add(session_cookie);
+    let updated_jar = jar.add(build_session_cookie(user.id, secure));
 
     let redirect_url = format!(
         "{}?code={}&state={}",
         form.redirect_uri,
-        crate::cookies::urlencoded(&code),
-        crate::cookies::urlencoded(&form.state),
+        urlencoded(&code),
+        urlencoded(&form.state),
     );
-    Ok((updated_jar, Redirect::to(&redirect_url)))
+    Ok((updated_jar, Redirect::to(&redirect_url)).into_response())
+}
+
+/// Build a redirect back to the web-client login page (register tab) with an error message.
+fn register_error_redirect(frontend_url: &str, form: &RegisterAndLoginForm, error: &str) -> Response {
+    let mut query = format!(
+        "tab=register&client_id={}&redirect_uri={}&scope={}&state={}&code_challenge={}&code_challenge_method={}&error={}",
+        urlencoded(&form.client_id),
+        urlencoded(&form.redirect_uri),
+        urlencoded(&form.scope),
+        urlencoded(&form.state),
+        urlencoded(&form.code_challenge),
+        urlencoded(&form.code_challenge_method),
+        urlencoded(error),
+    );
+    if let Some(n) = &form.nonce {
+        query.push_str(&format!("&nonce={}", urlencoded(n)));
+    }
+    Redirect::to(&format!("{}/login?{}", frontend_url, query)).into_response()
 }
 
 #[derive(Debug, serde::Deserialize)]

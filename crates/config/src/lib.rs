@@ -11,6 +11,9 @@ pub struct Config {
     /// Secret used to sign session cookies. Must be at least 32 bytes.
     /// If not set, a fixed dev-only default is used (sessions invalidated on restart in prod).
     pub session_secret: String,
+    /// Base URL of the web-client, e.g. "http://localhost:5173".
+    /// Used to redirect to the hosted login/register page instead of serving HTML.
+    pub frontend_url: String,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -36,6 +39,8 @@ impl Config {
                 .map_err(|e| ConfigError::InvalidPort(e.to_string()))?,
             session_secret: std::env::var("SESSION_SECRET")
                 .unwrap_or_else(|_| "dev-only-insecure-session-secret-change-in-production-00000000".into()),
+            frontend_url: std::env::var("FRONTEND_URL")
+                .unwrap_or_else(|_| "http://localhost:5173".into()),
         })
     }
 
