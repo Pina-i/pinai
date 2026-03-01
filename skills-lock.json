@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "skills": {
+    "rust-async-patterns": {
+      "source": "wshobson/agents",
+      "sourceType": "github",
+      "computedHash": "7da2b320a51fa7da0b78138132d814e4c9ee078617f7ead6e0e04ffb9e769cc8"
+    },
+    "rust-engineer": {
+      "source": "dymayday/bearded-happiness",
+      "sourceType": "github",
+      "computedHash": "8401a9071956c73a3b2c1c12f8c2a31aa77580501f0a3eb49b7b5bc23029a4c7"
+    }
+  }
+}
