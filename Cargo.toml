@@ -1,0 +1,25 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/config",
+    "crates/db",
+    "crates/oidc",
+    "crates/server",
+]
+
+[workspace.dependencies]
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror  = "2"
+tokio      = { version = "1", features = ["full"] }
+tracing    = "0.1"
+uuid       = { version = "1", features = ["v4", "serde"] }
+time       = { version = "0.3", features = ["serde"] }
+sqlx       = { version = "0.8", features = ["postgres", "runtime-tokio", "uuid", "time", "macros"] }
+axum       = { version = "0.8", features = ["macros", "form"] }
+axum-extra = { version = "0.10", features = ["cookie-signed"] }
+
+# Shared crates from core-libs (path deps relative to this workspace root)
+jwt-utils    = { path = "../core-libs/crates/jwt-utils" }
+common-types = { path = "../core-libs/crates/common-types" }
+observability = { path = "../core-libs/crates/observability" }

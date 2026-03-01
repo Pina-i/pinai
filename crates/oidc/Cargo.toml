@@ -1,0 +1,23 @@
+[package]
+name    = "idp-oidc"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+thiserror    = { workspace = true }
+tokio        = { workspace = true }
+tracing      = { workspace = true }
+uuid         = { workspace = true }
+time         = { workspace = true }
+axum         = { workspace = true }
+axum-extra   = { workspace = true }
+sqlx         = { workspace = true }
+common-types = { workspace = true }
+jwt-utils    = { workspace = true }
+idp-config   = { path = "../config", package = "idp-config" }
+idp-db       = { path = "../db", package = "idp-db" }
+argon2    = "0.5"
+rand      = "0.8"
+base64ct  = { version = "1", features = ["alloc"] }

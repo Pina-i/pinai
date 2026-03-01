@@ -1,0 +1,38 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: pina
+      POSTGRES_PASSWORD: secret
+      POSTGRES_DB: identity_provider
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pina -d identity_provider"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  idp:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    environment:
+      DATABASE_URL: postgres://pina:secret@postgres:5432/identity_provider
+      DOMAIN: localhost:8080
+      JWT_PRIVATE_KEY_PATH: /run/secrets/ed25519.pem
+      JWT_KEY_ID: key-2025-01
+      PORT: "8080"
+      RUST_LOG: info
+    volumes:
+      - ../keys:/run/secrets:ro
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  pgdata:
