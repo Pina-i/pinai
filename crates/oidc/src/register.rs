@@ -13,6 +13,7 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 
 use idp_db::repos::{auth_codes, clients, users};
+use idp_db::repos::users::generate_handle_suffix;
 
 use crate::{
     cookies::{build_session_cookie, urlencoded},
@@ -30,6 +31,7 @@ pub struct RegisterRequest {
 pub struct RegisterResponse {
     pub id: String,
     pub username: String,
+    pub handle: String,
     pub email: String,
 }
 
@@ -81,17 +83,21 @@ pub async fn post_register(
         .map_err(|_| OidcError::server_error("Failed to hash password"))?
         .to_string();
 
-    // 5. Insert user
-    let user = users::create_user(&state.pool, &body.username, &body.email, &password_hash)
+    // 5. Insert user (generate UUID first so we can derive the handle suffix)
+    let user_id = uuid::Uuid::new_v4();
+    let suffix = generate_handle_suffix(user_id);
+    let user = users::create_user_with_id(&state.pool, user_id, &body.username, &body.email, &password_hash, &suffix)
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?;
 
-    tracing::info!(user_id = %user.id, "user registered");
+    let handle = user.handle();
+    tracing::info!(user_id = %user.id, handle = %handle, "user registered");
 
     Ok((
         StatusCode::CREATED,
         Json(RegisterResponse {
             id: user.id.to_string(),
+            handle,
             username: user.username,
             email: user.email,
         }),
@@ -153,12 +159,14 @@ pub async fn post_register_and_login(
         .map_err(|_| OidcError::server_error("Failed to hash password"))?
         .to_string();
 
-    // 5. Create user
-    let user = users::create_user(&state.pool, &form.username, &form.email, &password_hash)
+    // 5. Create user (generate UUID + handle suffix before insert)
+    let user_id = uuid::Uuid::new_v4();
+    let suffix = generate_handle_suffix(user_id);
+    let user = users::create_user_with_id(&state.pool, user_id, &form.username, &form.email, &password_hash, &suffix)
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?;
 
-    tracing::info!(user_id = %user.id, "user registered");
+    tracing::info!(user_id = %user.id, handle = %user.handle(), "user registered (register-and-login)");
     tracing::debug!(user_id = %user.id, "issuing auth code for new user");
 
     // 6. Issue auth code

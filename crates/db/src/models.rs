@@ -6,10 +6,18 @@ use uuid::Uuid;
 pub struct User {
     pub id: Uuid,
     pub username: String,
+    pub handle_suffix: String,
     pub email: String,
     #[serde(skip_serializing)] // never expose the hash
     pub password_hash: String,
     pub created_at: OffsetDateTime,
+}
+
+impl User {
+    /// Returns the full handle: "username-SUFFIX" (e.g. "alex-7G4K").
+    pub fn handle(&self) -> String {
+        format!("{}-{}", self.username, self.handle_suffix)
+    }
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -45,4 +53,29 @@ pub struct UserInfo {
     pub sub: String,
     pub email: String,
     pub preferred_username: String,
+}
+
+// ─── Follow ──────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, sqlx::FromRow, Serialize)]
+pub struct Follow {
+    pub id: Uuid,
+    pub follower_id: Uuid,
+    pub following_id: Uuid,
+    /// "pending" | "accepted" | "rejected"
+    pub state: String,
+    pub ap_activity_id: Option<String>,
+    pub created_at: OffsetDateTime,
+}
+
+// ─── DirectMessage ────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, sqlx::FromRow, Serialize)]
+pub struct DirectMessage {
+    pub id: Uuid,
+    pub sender_id: Uuid,
+    pub recipient_id: Uuid,
+    pub content: String,
+    pub ap_id: Option<String>,
+    pub created_at: OffsetDateTime,
 }
