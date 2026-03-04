@@ -2,6 +2,7 @@ pub mod authorize;
 pub mod cookies;
 pub mod discovery;
 pub mod error;
+pub mod federation;
 pub mod login;
 pub mod logout;
 pub mod register;

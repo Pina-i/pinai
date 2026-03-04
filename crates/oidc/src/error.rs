@@ -63,6 +63,12 @@ impl OidcError {
             error_description: desc,
         }
     }
+
+    pub fn not_found(desc: impl Into<String>) -> Self {
+        let desc = desc.into();
+        tracing::warn!(error = "not_found", description = %desc);
+        Self { status: StatusCode::NOT_FOUND, error: "not_found", error_description: desc }
+    }
 }
 
 impl IntoResponse for OidcError {

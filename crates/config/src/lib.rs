@@ -14,6 +14,10 @@ pub struct Config {
     /// Base URL of the web-client, e.g. "http://localhost:5173".
     /// Used to redirect to the hosted login/register page instead of serving HTML.
     pub frontend_url: String,
+    /// Allowed CORS origins, parsed from the `CORS_ORIGINS` env var
+    /// (comma-separated, e.g. "https://app.example.com,https://admin.example.com").
+    /// Defaults to localhost dev origins when unset.
+    pub cors_origins: Vec<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -41,6 +45,12 @@ impl Config {
                 .unwrap_or_else(|_| "dev-only-insecure-session-secret-change-in-production-00000000".into()),
             frontend_url: std::env::var("FRONTEND_URL")
                 .unwrap_or_else(|_| "http://localhost:5173".into()),
+            cors_origins: std::env::var("CORS_ORIGINS")
+                .unwrap_or_else(|_| "http://localhost:5173,http://localhost:3000".into())
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
         })
     }
 

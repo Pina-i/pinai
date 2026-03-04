@@ -1,5 +1,5 @@
 # Build stage
-FROM rust:1.82 AS builder
+FROM rust:latest AS builder
 
 WORKDIR /build
 
@@ -9,9 +9,6 @@ COPY crates/config/Cargo.toml   crates/config/Cargo.toml
 COPY crates/db/Cargo.toml       crates/db/Cargo.toml
 COPY crates/oidc/Cargo.toml     crates/oidc/Cargo.toml
 COPY crates/server/Cargo.toml   crates/server/Cargo.toml
-
-# Copy core-libs (path dependency — must be resolvable from build context)
-COPY ../../core-libs /core-libs
 
 # Copy source
 COPY crates/ crates/

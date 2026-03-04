@@ -1,3 +1,6 @@
 /target
 keys/
 .env
+docker/.env.alice
+docker/.env.bob
+docker/.env

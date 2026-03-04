@@ -19,7 +19,9 @@ sqlx       = { version = "0.8", features = ["postgres", "runtime-tokio", "uuid",
 axum       = { version = "0.8", features = ["macros", "form"] }
 axum-extra = { version = "0.10", features = ["cookie-signed"] }
 
-# Shared crates from core-libs (path deps relative to this workspace root)
-jwt-utils    = { path = "../core-libs/crates/jwt-utils" }
-common-types = { path = "../core-libs/crates/common-types" }
-observability = { path = "../core-libs/crates/observability" }
+# Shared crates from core-libs
+jwt-utils       = { git = "https://github.com/Pina-i/core-libs.git", package = "jwt-utils" }
+common-types    = { git = "https://github.com/Pina-i/core-libs.git", package = "common-types" }
+observability   = { git = "https://github.com/Pina-i/core-libs.git", package = "observability" }
+activitypub     = { git = "https://github.com/Pina-i/core-libs.git", package = "activitypub" }
+http-signatures = { git = "https://github.com/Pina-i/core-libs.git", package = "http-signatures" }
