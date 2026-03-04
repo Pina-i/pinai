@@ -24,7 +24,7 @@ services:
       dockerfile: docker/Dockerfile
     env_file: .env
     environment:
-      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:${POSTGRES_PORT:-5432}/${POSTGRES_DB}
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       JWT_PRIVATE_KEY_PATH: /run/secrets/ed25519.pem
     volumes:
       - ../keys:/run/secrets:ro
