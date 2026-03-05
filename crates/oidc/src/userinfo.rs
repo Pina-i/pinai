@@ -48,11 +48,12 @@ pub async fn get_userinfo(
 
     tracing::debug!(user_id = %user_id, username = %user.username, "userinfo returned");
 
+    let handle = user.handle();
     Ok(Json(UserinfoResponse {
         sub: user.id.to_string(),
         email: user.email,
-        preferred_username: user.username.clone(),
-        handle: user.handle(),
+        preferred_username: user.username,
+        handle,
         avatar_url: user.avatar_url,
     }))
 }
