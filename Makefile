@@ -15,14 +15,20 @@ bob:
 
 alice-docker:
 	cp docker/.env.alice docker/.env
-	docker compose -f docker/docker-compose.yml --project-name pinai-alice up -d
+	docker compose -f docker/docker-compose.yml --project-name pinai-alice up -d --build
 
 bob-docker:
 	cp docker/.env.bob docker/.env
-	docker compose -f docker/docker-compose.yml --project-name pinai-bob up -d
+	docker compose -f docker/docker-compose.yml --project-name pinai-bob up -d --build
 
 alice-down:
 	docker compose -f docker/docker-compose.yml --project-name pinai-alice down
 
 bob-down:
 	docker compose -f docker/docker-compose.yml --project-name pinai-bob down
+
+alice-down-v:
+	docker compose -f docker/docker-compose.yml --project-name pinai-alice down -v
+
+bob-down-v:
+	docker compose -f docker/docker-compose.yml --project-name pinai-bob down -v
