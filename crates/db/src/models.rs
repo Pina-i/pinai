@@ -10,6 +10,7 @@ pub struct User {
     pub email: String,
     #[serde(skip_serializing)] // never expose the hash
     pub password_hash: String,
+    pub avatar_url: Option<String>,
     pub created_at: OffsetDateTime,
 }
 

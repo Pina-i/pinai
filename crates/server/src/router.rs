@@ -1,6 +1,6 @@
 use axum::{
     http::{HeaderValue, Method},
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
     Json, Router,
 };
 use serde_json::json;
@@ -12,6 +12,7 @@ use tracing::Level;
 
 use idp_oidc::{
     authorize::get_authorize,
+    avatar::{delete_avatar, put_avatar},
     discovery::{jwks, openid_configuration},
     federation::{
         actor::get_actor,
@@ -44,7 +45,7 @@ pub fn build(state: AppState) -> Router {
 
     let cors = CorsLayer::new()
         .allow_origin(origins)
-        .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
+        .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE, Method::OPTIONS])
         .allow_headers(AllowHeaders::any())
         .allow_credentials(false);
 
@@ -90,6 +91,9 @@ pub fn build(state: AppState) -> Router {
         // ── Direct Messages REST API (Bearer-auth) ────────────────────────────
         .route("/api/dm", post(send_message).get(list_conversations))
         .route("/api/dm/{handle}", get(get_conversation))
+
+        // ── Avatar API (Bearer-auth) ────────────────────────────────────
+        .route("/api/avatar", put(put_avatar).delete(delete_avatar))
 
         // ── Health check ──────────────────────────────────────────────────────
         .route("/health", get(|| async { Json(json!({ "ok": true })) }))

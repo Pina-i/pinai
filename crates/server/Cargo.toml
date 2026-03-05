@@ -22,6 +22,7 @@ tower-http = { version = "0.6", features = ["cors", "trace"] }
 dotenvy    = "0.15"
 anyhow     = "1"
 
-idp-config = { path = "../config", package = "idp-config" }
-idp-db     = { path = "../db",     package = "idp-db" }
-idp-oidc   = { path = "../oidc",   package = "idp-oidc" }
+idp-config  = { path = "../config",  package = "idp-config" }
+idp-db      = { path = "../db",     package = "idp-db" }
+idp-oidc    = { path = "../oidc",   package = "idp-oidc" }
+idp-storage = { path = "../storage", package = "idp-storage" }

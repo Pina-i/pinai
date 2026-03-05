@@ -18,6 +18,7 @@ common-types = { workspace = true }
 jwt-utils    = { workspace = true }
 idp-config   = { path = "../config", package = "idp-config" }
 idp-db       = { path = "../db", package = "idp-db" }
+idp-storage  = { path = "../storage", package = "idp-storage" }
 argon2    = "0.5"
 rand      = "0.8"
 base64ct  = { version = "1", features = ["alloc"] }

@@ -18,6 +18,16 @@ pub struct Config {
     /// (comma-separated, e.g. "https://app.example.com,https://admin.example.com").
     /// Defaults to localhost dev origins when unset.
     pub cors_origins: Vec<String>,
+
+    // ── Object Storage (S3-compatible) ──────────────────────────────────
+    /// Internal S3 endpoint (e.g. "http://rustfs:9000" inside Docker).
+    pub storage_endpoint: Option<String>,
+    pub storage_access_key: Option<String>,
+    pub storage_secret_key: Option<String>,
+    pub storage_bucket_avatars: String,
+    pub storage_bucket_attachments: String,
+    /// Externally-reachable base URL for building public avatar URLs.
+    pub storage_public_url: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -51,7 +61,22 @@ impl Config {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect(),
+            storage_endpoint: std::env::var("STORAGE_ENDPOINT").ok(),
+            storage_access_key: std::env::var("STORAGE_ACCESS_KEY").ok(),
+            storage_secret_key: std::env::var("STORAGE_SECRET_KEY").ok(),
+            storage_bucket_avatars: std::env::var("STORAGE_BUCKET_AVATARS")
+                .unwrap_or_else(|_| "avatars".into()),
+            storage_bucket_attachments: std::env::var("STORAGE_BUCKET_ATTACHMENTS")
+                .unwrap_or_else(|_| "attachments".into()),
+            storage_public_url: std::env::var("STORAGE_PUBLIC_URL").ok(),
         })
+    }
+
+    /// Returns true when all required storage env vars are set.
+    pub fn storage_enabled(&self) -> bool {
+        self.storage_endpoint.is_some()
+            && self.storage_access_key.is_some()
+            && self.storage_secret_key.is_some()
     }
 
     /// The OIDC issuer URL. Uses http:// for localhost (dev), https:// otherwise.

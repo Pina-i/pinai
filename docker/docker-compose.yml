@@ -18,6 +18,24 @@ services:
       timeout: 5s
       retries: 10
 
+  rustfs:
+    image: rustfs/rustfs:latest
+    environment:
+      RUSTFS_ACCESS_KEY: ${STORAGE_ACCESS_KEY:-rustfsadmin}
+      RUSTFS_SECRET_KEY: ${STORAGE_SECRET_KEY:-rustfsadmin}
+    volumes:
+      - rustfs-data:/data
+      - rustfs-logs:/logs
+    ports:
+      - "${RUSTFS_PORT:-9000}:9000"
+      - "${RUSTFS_CONSOLE_PORT:-9001}:9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/health"]
+      interval: 5s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
   idp:
     build:
       context: ..
@@ -26,6 +44,7 @@ services:
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       JWT_PRIVATE_KEY_PATH: /run/secrets/ed25519.pem
+      STORAGE_ENDPOINT: http://rustfs:9000
     volumes:
       - ../keys:/run/secrets:ro
     ports:
@@ -33,6 +52,10 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      rustfs:
+        condition: service_healthy
 
 volumes:
   pgdata:
+  rustfs-data:
+  rustfs-logs:
