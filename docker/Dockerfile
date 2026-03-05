@@ -9,6 +9,7 @@ COPY crates/config/Cargo.toml   crates/config/Cargo.toml
 COPY crates/db/Cargo.toml       crates/db/Cargo.toml
 COPY crates/oidc/Cargo.toml     crates/oidc/Cargo.toml
 COPY crates/server/Cargo.toml   crates/server/Cargo.toml
+COPY crates/storage/Cargo.toml  crates/storage/Cargo.toml
 
 # Copy source
 COPY crates/ crates/

@@ -4,6 +4,7 @@ use axum::extract::FromRef;
 use axum_extra::extract::cookie::Key;
 use idp_config::Config;
 use idp_db::PgPool;
+use idp_storage::StorageClient;
 use jwt_utils::EdKeyPair;
 
 /// Shared application state injected into every Axum handler via `State<AppState>`.
@@ -14,6 +15,8 @@ pub struct AppState {
     pub config: Arc<Config>,
     /// HMAC key for signing/verifying session cookies.
     pub cookie_key: Key,
+    /// S3-compatible object storage (None when storage is not configured).
+    pub storage: Option<StorageClient>,
 }
 
 /// Allow `SignedCookieJar` to extract the key from `AppState`.

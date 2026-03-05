@@ -1,4 +1,5 @@
 pub mod authorize;
+pub mod avatar;
 pub mod cookies;
 pub mod discovery;
 pub mod error;

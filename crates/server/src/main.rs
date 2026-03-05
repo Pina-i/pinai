@@ -57,12 +57,43 @@ async fn main() -> anyhow::Result<()> {
     }
     let cookie_key = Key::from(&key_material);
 
+    // Initialize S3-compatible storage (optional — skipped if env vars not set)
+    let storage = if config.storage_enabled() {
+        use idp_storage::{StorageClient, StorageConfig};
+
+        let scfg = StorageConfig {
+            endpoint: config.storage_endpoint.clone().unwrap(),
+            access_key: config.storage_access_key.clone().unwrap(),
+            secret_key: config.storage_secret_key.clone().unwrap(),
+            bucket_avatars: config.storage_bucket_avatars.clone(),
+            bucket_attachments: config.storage_bucket_attachments.clone(),
+            public_url: config
+                .storage_public_url
+                .clone()
+                .unwrap_or_else(|| config.storage_endpoint.clone().unwrap()),
+        };
+
+        let client = StorageClient::new(&scfg)
+            .await
+            .map_err(|e| anyhow::anyhow!("storage init failed: {e}"))?;
+        client
+            .ensure_buckets()
+            .await
+            .map_err(|e| anyhow::anyhow!("bucket init failed: {e}"))?;
+        info!("object storage connected");
+        Some(client)
+    } else {
+        warn!("STORAGE_ENDPOINT not set — object storage disabled");
+        None
+    };
+
     // Build shared state
     let state = AppState {
         pool,
         keypair: Arc::new(keypair),
         config: Arc::new(config.clone()),
         cookie_key,
+        storage,
     };
 
     // Build the Axum router

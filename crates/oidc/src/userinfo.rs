@@ -12,6 +12,8 @@ pub struct UserinfoResponse {
     pub sub: String,
     pub email: String,
     pub preferred_username: String,
+    pub handle: String,
+    pub avatar_url: Option<String>,
 }
 
 /// GET /userinfo
@@ -49,7 +51,9 @@ pub async fn get_userinfo(
     Ok(Json(UserinfoResponse {
         sub: user.id.to_string(),
         email: user.email,
-        preferred_username: user.username,
+        preferred_username: user.username.clone(),
+        handle: user.handle(),
+        avatar_url: user.avatar_url,
     }))
 }
 

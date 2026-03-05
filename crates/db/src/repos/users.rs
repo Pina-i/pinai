@@ -102,6 +102,29 @@ pub async fn find_by_handle(pool: &PgPool, handle: &str) -> Result<Option<User>,
     .await
 }
 
+/// Set the avatar URL for a user.
+pub async fn update_avatar_url(
+    pool: &PgPool,
+    user_id: Uuid,
+    avatar_url: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE users SET avatar_url = $1 WHERE id = $2")
+        .bind(avatar_url)
+        .bind(user_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Clear the avatar URL for a user.
+pub async fn clear_avatar_url(pool: &PgPool, user_id: Uuid) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE users SET avatar_url = NULL WHERE id = $1")
+        .bind(user_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 /// Search users by username prefix (case-insensitive), up to `limit` results.
 pub async fn search_by_username(
     pool: &PgPool,
