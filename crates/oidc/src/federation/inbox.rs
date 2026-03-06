@@ -96,7 +96,7 @@ async fn handle_follow(
         if let Ok(Some(follower)) = users::find_by_id(&state.pool, follower_id).await {
             let payload = FollowPayload {
                 follow_id: follow.id,
-                handle: follower.handle(),
+                address: follower.address(&state.config.domain),
                 username: follower.username,
             };
             state.hub.send_to_user(&recipient_id, WsEvent::FollowRequest(payload.clone()));
@@ -109,9 +109,25 @@ async fn handle_follow(
             "local follow auto-accepted"
         );
     } else {
-        // Remote actor — store as pending; a human Accept/Reject is needed
-        // (or we could auto-accept here too, keeping it simple for now).
-        tracing::info!(actor = %actor_url, "remote follow stored as pending (not yet supported)");
+        // Remote actor — extract info from the actor URL and notify the recipient.
+        let (remote_handle, remote_domain) = parse_remote_actor_url(actor_url)
+            .ok_or_else(|| OidcError::invalid_request("Cannot parse remote actor URL"))?;
+        let remote_address = format!("{}@{}", remote_handle, remote_domain);
+
+        // Fetch the remote actor to get their username (display name).
+        let username = fetch_remote_username(actor_url).await.unwrap_or_else(|| remote_handle.to_string());
+
+        // Push real-time notification to inbox owner.
+        state.hub.send_to_user(
+            &recipient_id,
+            WsEvent::FollowRequest(FollowPayload {
+                follow_id: Uuid::nil(),
+                address: remote_address,
+                username,
+            }),
+        );
+
+        tracing::info!(actor = %actor_url, recipient = %recipient_id, "remote follow request notified");
     }
 
     Ok(())
@@ -142,7 +158,7 @@ async fn handle_accept(state: &AppState, body: &Value) -> Result<(), OidcError> 
             if let Ok(Some(target)) = users::find_by_id(&state.pool, follow.following_id).await {
                 state.hub.send_to_user(&follow.follower_id, WsEvent::FollowAccepted(FollowPayload {
                     follow_id: follow.id,
-                    handle: target.handle(),
+                    address: target.address(&state.config.domain),
                     username: target.username,
                 }));
             }
@@ -176,7 +192,7 @@ async fn handle_reject(state: &AppState, body: &Value) -> Result<(), OidcError> 
             if let Ok(Some(target)) = users::find_by_id(&state.pool, follow.following_id).await {
                 state.hub.send_to_user(&follow.follower_id, WsEvent::FollowRejected(FollowPayload {
                     follow_id: follow.id,
-                    handle: target.handle(),
+                    address: target.address(&state.config.domain),
                     username: target.username,
                 }));
             }
@@ -220,7 +236,7 @@ async fn handle_undo(
         if let Ok(Some(follower)) = users::find_by_id(&state.pool, follower_id).await {
             state.hub.send_to_user(&recipient_id, WsEvent::FollowRemoved(FollowPayload {
                 follow_id: Uuid::nil(),
-                handle: follower.handle(),
+                address: follower.address(&state.config.domain),
                 username: follower.username,
             }));
         }
@@ -270,7 +286,7 @@ async fn handle_create(
         if let Ok(Some(sender)) = users::find_by_id(&state.pool, sender_id).await {
             let event = WsEvent::NewDm(DmPayload {
                 message_id: msg.id,
-                sender_handle: sender.handle(),
+                sender_address: sender.address(&state.config.domain),
                 content: msg.content,
                 created_at: msg.created_at,
             });
@@ -303,4 +319,34 @@ fn extract_object_id(body: &Value) -> Option<String> {
         return Some(s.to_string());
     }
     obj.get("id").and_then(|v| v.as_str()).map(|s| s.to_string())
+}
+
+/// Parse a remote actor URL like `http://domain:port/users/handle` into (handle, domain).
+fn parse_remote_actor_url(actor_url: &str) -> Option<(String, String)> {
+    let url: url::Url = actor_url.parse().ok()?;
+    let handle = url.path().strip_prefix("/users/")?;
+    if handle.is_empty() {
+        return None;
+    }
+    let host = url.host_str()?;
+    let domain = match url.port() {
+        Some(port) => format!("{}:{}", host, port),
+        None => host.to_string(),
+    };
+    Some((handle.to_string(), domain))
+}
+
+/// Fetch the remote actor's display name from their actor document.
+async fn fetch_remote_username(actor_url: &str) -> Option<String> {
+    let resp = reqwest::Client::new()
+        .get(actor_url)
+        .header("Accept", "application/activity+json")
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let actor: activitypub::Actor = resp.json().await.ok()?;
+    Some(actor.name)
 }

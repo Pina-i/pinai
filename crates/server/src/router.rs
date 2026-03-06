@@ -83,7 +83,7 @@ pub fn build(state: AppState) -> Router {
         .route("/api/users/search", get(search_users))
         .route("/api/follow", post(post_follow))
         .route("/api/follow/incoming", get(get_incoming_requests))
-        .route("/api/follow/{handle}", delete(delete_follow))
+        .route("/api/follow/{address}", delete(delete_follow))
         .route("/api/follow/{follow_id}/accept", post(accept_follow))
         .route("/api/follow/{follow_id}/reject", post(reject_follow))
         .route("/api/following", get(get_following))
@@ -91,7 +91,7 @@ pub fn build(state: AppState) -> Router {
 
         // ── Direct Messages REST API (Bearer-auth) ────────────────────────────
         .route("/api/dm", post(send_message).get(list_conversations))
-        .route("/api/dm/{handle}", get(get_conversation))
+        .route("/api/dm/{address}", get(get_conversation))
 
         // ── Avatar API (Bearer-auth) ────────────────────────────────────
         .route("/api/avatar", put(put_avatar).delete(delete_avatar))

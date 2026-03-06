@@ -20,6 +20,7 @@ sqlx       = { version = "0.8", features = ["postgres", "runtime-tokio", "uuid",
 axum       = { version = "0.8", features = ["macros", "form", "ws"] }
 dashmap    = "6"
 futures-util = "0.3"
+reqwest    = { version = "0.12", features = ["json"] }
 axum-extra = { version = "0.10", features = ["cookie-signed"] }
 
 # Shared crates from core-libs

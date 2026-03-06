@@ -16,9 +16,22 @@ pub struct User {
 
 impl User {
     /// Returns the full handle: "username-SUFFIX" (e.g. "alex-7G4K").
+    /// Used internally for ActivityPub URL paths (`/users/alex-7G4K`).
     pub fn handle(&self) -> String {
         format!("{}-{}", self.username, self.handle_suffix)
     }
+
+    /// Returns the federated address: "username-SUFFIX@domain" (e.g. "alex-7G4K@idp.example.com").
+    /// This is the canonical user identifier exposed in all APIs.
+    pub fn address(&self, domain: &str) -> String {
+        format!("{}@{}", self.handle(), domain)
+    }
+}
+
+/// Extract the local handle from an address like "alice-7G4K@domain".
+/// Returns the full string if no `@` is present.
+pub fn handle_from_address(address: &str) -> &str {
+    address.split_once('@').map(|(h, _)| h).unwrap_or(address)
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]

@@ -10,12 +10,15 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use activitypub::Activity;
+use idp_db::models::handle_from_address;
 use idp_db::repos::{follows, users};
 
 use crate::ws::events::{FollowPayload, WsEvent};
 use crate::{AppState, OidcError};
 
 use super::auth::require_auth;
+use super::delivery;
 
 // ─── Search users ─────────────────────────────────────────────────────────────
 
@@ -29,7 +32,7 @@ fn default_limit() -> i64 { 20 }
 
 #[derive(Debug, Serialize)]
 pub struct UserSummary {
-    pub handle: String,
+    pub address: String,
     pub username: String,
 }
 
@@ -47,8 +50,9 @@ pub async fn search_users(
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?;
 
+    let domain = &state.config.domain;
     Ok(Json(results.into_iter().map(|u| UserSummary {
-        handle: u.handle(),
+        address: u.address(domain),
         username: u.username,
     }).collect()))
 }
@@ -57,8 +61,8 @@ pub async fn search_users(
 
 #[derive(Debug, Deserialize)]
 pub struct FollowRequest {
-    /// Handle of the user to follow, e.g. "alice-A1B2".
-    pub handle: String,
+    /// Full address of the user to follow, e.g. `"alice-A1B2@idp.example.com"`.
+    pub address: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -68,7 +72,7 @@ pub struct FollowResponse {
 }
 
 /// POST /api/follow
-/// Body: `{ "handle": "alice-A1B2" }`
+/// Body: `{ "address": "alice-A1B2@localhost:8080" }` (local) or `{ "address": "bob-X1Y2@remote:8081" }` (remote)
 #[tracing::instrument(skip_all)]
 pub async fn post_follow(
     State(state): State<AppState>,
@@ -77,7 +81,26 @@ pub async fn post_follow(
 ) -> Result<(StatusCode, Json<FollowResponse>), OidcError> {
     let caller_id = require_auth(&state, &headers).await?;
 
-    let target = users::find_by_handle(&state.pool, &body.handle)
+    // Parse address into handle + domain.
+    if let Some((handle, domain)) = body.address.split_once('@') {
+        // Check if the domain is our own — if so, treat as local.
+        if domain == state.config.domain {
+            return follow_local(&state, caller_id, handle).await;
+        }
+        return follow_remote(&state, caller_id, handle, domain).await;
+    }
+
+    // Fallback: bare handle (legacy / same-IdP shorthand).
+    follow_local(&state, caller_id, &body.address).await
+}
+
+/// Follow a user on the same IdP (auto-accept).
+async fn follow_local(
+    state: &AppState,
+    caller_id: Uuid,
+    handle: &str,
+) -> Result<(StatusCode, Json<FollowResponse>), OidcError> {
+    let target = users::find_by_handle(&state.pool, handle)
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?
         .ok_or_else(|| OidcError::not_found("User not found"))?;
@@ -86,7 +109,6 @@ pub async fn post_follow(
         return Err(OidcError::invalid_request("Cannot follow yourself"));
     }
 
-    // Build an AP activity ID for the follow (for federation traceability).
     let activity_id = format!(
         "{}/users/{}/follows/{}",
         state.config.issuer(),
@@ -103,21 +125,22 @@ pub async fn post_follow(
     .await
     .map_err(|e| OidcError::server_error(e.to_string()))?;
 
-    // For local users, auto-accept the follow.
+    // Local users: auto-accept.
     let follow = follows::set_follow_state(&state.pool, follow.id, "accepted")
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?
         .ok_or_else(|| OidcError::server_error("Follow not found after insert"))?;
 
-    // Notify target via WebSocket (follow request + auto-accepted).
+    // Notify target via WebSocket.
     let caller = users::find_by_id(&state.pool, caller_id)
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?
         .ok_or_else(|| OidcError::server_error("Caller not found"))?;
 
+    let domain = &state.config.domain;
     let payload = FollowPayload {
         follow_id: follow.id,
-        handle: caller.handle(),
+        address: caller.address(domain),
         username: caller.username,
     };
     state.hub.send_to_user(&target.id, WsEvent::FollowRequest(payload.clone()));
@@ -131,18 +154,75 @@ pub async fn post_follow(
     })))
 }
 
+/// Follow a user on a remote IdP via ActivityPub federation.
+async fn follow_remote(
+    state: &AppState,
+    caller_id: Uuid,
+    handle: &str,
+    domain: &str,
+) -> Result<(StatusCode, Json<FollowResponse>), OidcError> {
+    // Resolve the remote actor via WebFinger + actor fetch.
+    let remote = delivery::resolve_remote_actor(handle, domain, &state.config.issuer()).await?;
+
+    let caller = users::find_by_id(&state.pool, caller_id)
+        .await
+        .map_err(|e| OidcError::server_error(e.to_string()))?
+        .ok_or_else(|| OidcError::server_error("Caller not found"))?;
+
+    let caller_actor_url = format!("{}/users/{}", state.config.issuer(), caller.handle());
+    let activity_id = format!(
+        "{}/users/{}/follows/{}",
+        state.config.issuer(),
+        caller.handle(),
+        Uuid::new_v4(),
+    );
+
+    // Build the Follow activity.
+    let activity = Activity::follow(&activity_id, &caller_actor_url, &remote.actor_url);
+
+    // Store the follow as "pending" (will be accepted/rejected by remote server).
+    let follow = follows::send_follow_request(
+        &state.pool,
+        caller_id,
+        // Use caller_id as a placeholder for the remote user (we don't have their UUID).
+        // The ap_activity_id is what we use to match the Accept/Reject response.
+        caller_id,
+        Some(&activity_id),
+    )
+    .await
+    .map_err(|e| OidcError::server_error(e.to_string()))?;
+
+    // Deliver the signed Follow activity to the remote inbox.
+    let activity_json = serde_json::to_value(&activity)
+        .map_err(|e| OidcError::server_error(e.to_string()))?;
+
+    delivery::deliver_activity(state, &remote.inbox, &activity_json, &caller.handle()).await?;
+
+    tracing::info!(
+        caller = %caller.handle(),
+        remote_actor = %remote.actor_url,
+        "follow request sent to remote IdP (pending)"
+    );
+
+    Ok((StatusCode::CREATED, Json(FollowResponse {
+        follow_id: follow.id,
+        state: follow.state,
+    })))
+}
+
 // ─── Unfollow ─────────────────────────────────────────────────────────────────
 
-/// DELETE /api/follow/:handle
-#[tracing::instrument(skip_all, fields(handle = %handle))]
+/// DELETE /api/follow/:address
+#[tracing::instrument(skip_all, fields(address = %address))]
 pub async fn delete_follow(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(handle): Path<String>,
+    Path(address): Path<String>,
 ) -> Result<StatusCode, OidcError> {
     let caller_id = require_auth(&state, &headers).await?;
 
-    let target = users::find_by_handle(&state.pool, &handle)
+    let handle = handle_from_address(&address);
+    let target = users::find_by_handle(&state.pool, handle)
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?
         .ok_or_else(|| OidcError::not_found("User not found"))?;
@@ -156,9 +236,10 @@ pub async fn delete_follow(
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?;
     if let Some(caller) = caller {
+        let domain = &state.config.domain;
         state.hub.send_to_user(&target.id, WsEvent::FollowRemoved(FollowPayload {
             follow_id: Uuid::nil(),
-            handle: caller.handle(),
+            address: caller.address(domain),
             username: caller.username,
         }));
     }
@@ -172,7 +253,7 @@ pub async fn delete_follow(
 #[derive(Debug, Serialize)]
 pub struct FollowRequestSummary {
     pub follow_id: Uuid,
-    pub follower_handle: String,
+    pub follower_address: String,
     pub follower_username: String,
     pub state: String,
 }
@@ -189,6 +270,7 @@ pub async fn get_incoming_requests(
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?;
 
+    let domain = &state.config.domain;
     let mut summaries = Vec::with_capacity(rows.len());
     for row in rows {
         if let Some(follower) = users::find_by_id(&state.pool, row.follower_id)
@@ -197,7 +279,7 @@ pub async fn get_incoming_requests(
         {
             summaries.push(FollowRequestSummary {
                 follow_id: row.id,
-                follower_handle: follower.handle(),
+                follower_address: follower.address(domain),
                 follower_username: follower.username,
                 state: row.state,
             });
@@ -237,9 +319,10 @@ pub async fn accept_follow(
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?;
     if let Some(caller) = caller {
+        let domain = &state.config.domain;
         state.hub.send_to_user(&follow.follower_id, WsEvent::FollowAccepted(FollowPayload {
             follow_id: follow.id,
-            handle: caller.handle(),
+            address: caller.address(domain),
             username: caller.username,
         }));
     }
@@ -275,9 +358,10 @@ pub async fn reject_follow(
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?;
     if let Some(caller) = caller {
+        let domain = &state.config.domain;
         state.hub.send_to_user(&follow.follower_id, WsEvent::FollowRejected(FollowPayload {
             follow_id: follow.id,
-            handle: caller.handle(),
+            address: caller.address(domain),
             username: caller.username,
         }));
     }
@@ -322,13 +406,14 @@ async fn load_user_summaries(
     state: &AppState,
     ids: impl Iterator<Item = Uuid>,
 ) -> Result<Json<Vec<UserSummary>>, OidcError> {
+    let domain = &state.config.domain;
     let mut summaries = Vec::new();
     for id in ids {
         if let Some(u) = users::find_by_id(&state.pool, id)
             .await
             .map_err(|e| OidcError::server_error(e.to_string()))?
         {
-            summaries.push(UserSummary { handle: u.handle(), username: u.username });
+            summaries.push(UserSummary { address: u.address(domain), username: u.username });
         }
     }
     Ok(Json(summaries))
