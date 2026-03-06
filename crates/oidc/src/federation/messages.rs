@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 use idp_db::repos::{messages, users};
 
+use crate::ws::events::{DmPayload, WsEvent};
 use crate::{AppState, OidcError};
 use super::auth::require_auth;
 
@@ -81,6 +82,16 @@ pub async fn send_message(
     )
     .await
     .map_err(|e| OidcError::server_error(e.to_string()))?;
+
+    // Push real-time event to connected WebSocket clients.
+    let event = WsEvent::NewDm(DmPayload {
+        message_id: msg.id,
+        sender_handle: sender.handle(),
+        content: msg.content.clone(),
+        created_at: msg.created_at,
+    });
+    state.hub.send_to_user(&recipient.id, event.clone());
+    state.hub.send_to_user(&sender_id, event);
 
     tracing::info!(
         sender = %sender.handle(),

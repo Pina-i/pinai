@@ -18,6 +18,7 @@ use uuid::Uuid;
 
 use idp_db::repos::{follows, messages, users};
 
+use crate::ws::events::{DmPayload, FollowPayload, WsEvent};
 use crate::{AppState, OidcError};
 
 /// POST /users/:handle/inbox
@@ -91,6 +92,17 @@ async fn handle_follow(
             .await
             .map_err(|e| OidcError::server_error(e.to_string()))?;
 
+        // Push real-time notification to inbox owner.
+        if let Ok(Some(follower)) = users::find_by_id(&state.pool, follower_id).await {
+            let payload = FollowPayload {
+                follow_id: follow.id,
+                handle: follower.handle(),
+                username: follower.username,
+            };
+            state.hub.send_to_user(&recipient_id, WsEvent::FollowRequest(payload.clone()));
+            state.hub.send_to_user(&recipient_id, WsEvent::FollowAccepted(payload));
+        }
+
         tracing::info!(
             follower_id = %follower_id,
             following_id = %recipient_id,
@@ -125,6 +137,16 @@ async fn handle_accept(state: &AppState, body: &Value) -> Result<(), OidcError> 
             follows::set_follow_state(&state.pool, follow.id, "accepted")
                 .await
                 .map_err(|e| OidcError::server_error(e.to_string()))?;
+
+            // Notify the follower their request was accepted.
+            if let Ok(Some(target)) = users::find_by_id(&state.pool, follow.following_id).await {
+                state.hub.send_to_user(&follow.follower_id, WsEvent::FollowAccepted(FollowPayload {
+                    follow_id: follow.id,
+                    handle: target.handle(),
+                    username: target.username,
+                }));
+            }
+
             tracing::info!(follow_id = %follow.id, "follow accepted via AP");
         }
     }
@@ -149,6 +171,16 @@ async fn handle_reject(state: &AppState, body: &Value) -> Result<(), OidcError> 
             follows::set_follow_state(&state.pool, follow.id, "rejected")
                 .await
                 .map_err(|e| OidcError::server_error(e.to_string()))?;
+
+            // Notify the follower their request was rejected.
+            if let Ok(Some(target)) = users::find_by_id(&state.pool, follow.following_id).await {
+                state.hub.send_to_user(&follow.follower_id, WsEvent::FollowRejected(FollowPayload {
+                    follow_id: follow.id,
+                    handle: target.handle(),
+                    username: target.username,
+                }));
+            }
+
             tracing::info!(follow_id = %follow.id, "follow rejected via AP");
         }
     }
@@ -183,6 +215,16 @@ async fn handle_undo(
         follows::delete_follow(&state.pool, follower_id, recipient_id)
             .await
             .map_err(|e| OidcError::server_error(e.to_string()))?;
+
+        // Notify recipient that they lost a follower.
+        if let Ok(Some(follower)) = users::find_by_id(&state.pool, follower_id).await {
+            state.hub.send_to_user(&recipient_id, WsEvent::FollowRemoved(FollowPayload {
+                follow_id: Uuid::nil(),
+                handle: follower.handle(),
+                username: follower.username,
+            }));
+        }
+
         tracing::info!(follower_id = %follower_id, following_id = %recipient_id, "unfollowed via AP Undo");
     }
     Ok(())
@@ -220,9 +262,22 @@ async fn handle_create(
 
     let base = state.config.issuer();
     if let Some(sender_id) = local_actor_id(actor_url, &base, &state.pool).await {
-        messages::create_message(&state.pool, sender_id, recipient_id, &content, note_id)
+        let msg = messages::create_message(&state.pool, sender_id, recipient_id, &content, note_id)
             .await
             .map_err(|e| OidcError::server_error(e.to_string()))?;
+
+        // Push real-time DM notification.
+        if let Ok(Some(sender)) = users::find_by_id(&state.pool, sender_id).await {
+            let event = WsEvent::NewDm(DmPayload {
+                message_id: msg.id,
+                sender_handle: sender.handle(),
+                content: msg.content,
+                created_at: msg.created_at,
+            });
+            state.hub.send_to_user(&recipient_id, event.clone());
+            state.hub.send_to_user(&sender_id, event);
+        }
+
         tracing::info!(sender_id = %sender_id, recipient_id = %recipient_id, "DM stored via AP inbox");
     }
     Ok(())

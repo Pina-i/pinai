@@ -36,6 +36,7 @@ impl StorageClient {
         );
 
         let s3_config = aws_sdk_s3::config::Builder::new()
+            .behavior_version_latest()
             .endpoint_url(&cfg.endpoint)
             .region(Region::new("us-east-1"))
             .credentials_provider(creds)
