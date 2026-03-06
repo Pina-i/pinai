@@ -40,15 +40,14 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile
+    network_mode: host
     env_file: .env
     environment:
-      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@localhost:${POSTGRES_PORT:-5432}/${POSTGRES_DB}
       JWT_PRIVATE_KEY_PATH: /run/secrets/ed25519.pem
-      STORAGE_ENDPOINT: http://rustfs:9000
+      STORAGE_ENDPOINT: http://localhost:${RUSTFS_PORT:-9000}
     volumes:
       - ../keys:/run/secrets:ro
-    ports:
-      - "${PORT:-8080}:${PORT:-8080}"
     depends_on:
       postgres:
         condition: service_healthy

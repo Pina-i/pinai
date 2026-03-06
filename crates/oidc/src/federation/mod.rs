@@ -24,6 +24,7 @@
 //! - `GET  /api/dm/:handle`                 — Conversation with a specific user
 
 pub mod actor;
+pub(crate) mod delivery;
 pub mod follow;
 pub mod inbox;
 pub mod messages;

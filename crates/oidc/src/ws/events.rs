@@ -17,7 +17,7 @@ pub enum WsEvent {
 #[derive(Debug, Clone, Serialize)]
 pub struct DmPayload {
     pub message_id: Uuid,
-    pub sender_handle: String,
+    pub sender_address: String,
     pub content: String,
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
@@ -26,7 +26,7 @@ pub struct DmPayload {
 #[derive(Debug, Clone, Serialize)]
 pub struct FollowPayload {
     pub follow_id: Uuid,
-    pub handle: String,
+    pub address: String,
     pub username: String,
 }
 
@@ -40,6 +40,6 @@ pub enum WsClientMessage {
 
 #[derive(Debug, Deserialize)]
 pub struct SendDmPayload {
-    pub recipient_handle: String,
+    pub recipient_address: String,
     pub content: String,
 }

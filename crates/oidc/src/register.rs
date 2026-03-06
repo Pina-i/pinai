@@ -31,7 +31,7 @@ pub struct RegisterRequest {
 pub struct RegisterResponse {
     pub id: String,
     pub username: String,
-    pub handle: String,
+    pub address: String,
     pub email: String,
 }
 
@@ -90,14 +90,14 @@ pub async fn post_register(
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?;
 
-    let handle = user.handle();
-    tracing::info!(user_id = %user.id, handle = %handle, "user registered");
+    let address = user.address(&state.config.domain);
+    tracing::info!(user_id = %user.id, address = %address, "user registered");
 
     Ok((
         StatusCode::CREATED,
         Json(RegisterResponse {
             id: user.id.to_string(),
-            handle,
+            address,
             username: user.username,
             email: user.email,
         }),

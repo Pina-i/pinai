@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
+use idp_db::models::handle_from_address;
 use idp_db::repos::{messages, users};
 
 use crate::ws::events::{DmPayload, WsEvent};
@@ -21,16 +22,16 @@ use super::auth::require_auth;
 
 #[derive(Debug, Deserialize)]
 pub struct SendMessageRequest {
-    /// Recipient's full handle, e.g. "alice-A1B2".
-    pub recipient_handle: String,
+    /// Recipient's full address, e.g. "alice-A1B2@localhost:8080".
+    pub recipient_address: String,
     pub content: String,
 }
 
 #[derive(Debug, Serialize)]
 pub struct MessageResponse {
     pub id: Uuid,
-    pub sender_handle: String,
-    pub recipient_handle: String,
+    pub sender_address: String,
+    pub recipient_address: String,
     pub content: String,
     pub created_at: OffsetDateTime,
 }
@@ -56,7 +57,8 @@ pub async fn send_message(
         .map_err(|e| OidcError::server_error(e.to_string()))?
         .ok_or_else(|| OidcError::server_error("Sender not found"))?;
 
-    let recipient = users::find_by_handle(&state.pool, &body.recipient_handle)
+    let recipient_handle = handle_from_address(&body.recipient_address);
+    let recipient = users::find_by_handle(&state.pool, recipient_handle)
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?
         .ok_or_else(|| OidcError::not_found("Recipient not found"))?;
@@ -83,10 +85,12 @@ pub async fn send_message(
     .await
     .map_err(|e| OidcError::server_error(e.to_string()))?;
 
+    let domain = &state.config.domain;
+
     // Push real-time event to connected WebSocket clients.
     let event = WsEvent::NewDm(DmPayload {
         message_id: msg.id,
-        sender_handle: sender.handle(),
+        sender_address: sender.address(domain),
         content: msg.content.clone(),
         created_at: msg.created_at,
     });
@@ -94,15 +98,15 @@ pub async fn send_message(
     state.hub.send_to_user(&sender_id, event);
 
     tracing::info!(
-        sender = %sender.handle(),
-        recipient = %recipient.handle(),
+        sender = %sender.address(domain),
+        recipient = %recipient.address(domain),
         "direct message sent"
     );
 
     Ok((StatusCode::CREATED, Json(MessageResponse {
         id: msg.id,
-        sender_handle: sender.handle(),
-        recipient_handle: recipient.handle(),
+        sender_address: sender.address(domain),
+        recipient_address: recipient.address(domain),
         content: msg.content,
         created_at: msg.created_at,
     })))
@@ -110,12 +114,12 @@ pub async fn send_message(
 
 // ─── Get conversation ─────────────────────────────────────────────────────────
 
-/// GET /api/dm/:handle — messages with a specific user (oldest-first, last 100)
-#[tracing::instrument(skip_all, fields(handle = %handle))]
+/// GET /api/dm/:address — messages with a specific user (oldest-first, last 100)
+#[tracing::instrument(skip_all, fields(address = %address))]
 pub async fn get_conversation(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(handle): Path<String>,
+    Path(address): Path<String>,
 ) -> Result<Json<Vec<MessageResponse>>, OidcError> {
     let caller_id = require_auth(&state, &headers).await?;
 
@@ -124,7 +128,8 @@ pub async fn get_conversation(
         .map_err(|e| OidcError::server_error(e.to_string()))?
         .ok_or_else(|| OidcError::server_error("Caller not found"))?;
 
-    let other = users::find_by_handle(&state.pool, &handle)
+    let other_handle = handle_from_address(&address);
+    let other = users::find_by_handle(&state.pool, other_handle)
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?
         .ok_or_else(|| OidcError::not_found("User not found"))?;
@@ -133,18 +138,19 @@ pub async fn get_conversation(
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?;
 
+    let domain = &state.config.domain;
     let responses = msgs
         .into_iter()
         .map(|m| {
-            let (sender_handle, recipient_handle) = if m.sender_id == caller_id {
-                (caller.handle(), other.handle())
+            let (sender_address, recipient_address) = if m.sender_id == caller_id {
+                (caller.address(domain), other.address(domain))
             } else {
-                (other.handle(), caller.handle())
+                (other.address(domain), caller.address(domain))
             };
             MessageResponse {
                 id: m.id,
-                sender_handle,
-                recipient_handle,
+                sender_address,
+                recipient_address,
                 content: m.content,
                 created_at: m.created_at,
             }
@@ -158,7 +164,7 @@ pub async fn get_conversation(
 
 #[derive(Debug, Serialize)]
 pub struct ConversationListItem {
-    pub other_handle: String,
+    pub other_address: String,
     pub other_username: String,
     pub last_message_at: OffsetDateTime,
 }
@@ -175,6 +181,7 @@ pub async fn list_conversations(
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?;
 
+    let domain = &state.config.domain;
     let mut items = Vec::with_capacity(summaries.len());
     for s in summaries {
         if let Some(other) = users::find_by_id(&state.pool, s.other_user_id)
@@ -182,7 +189,7 @@ pub async fn list_conversations(
             .map_err(|e| OidcError::server_error(e.to_string()))?
         {
             items.push(ConversationListItem {
-                other_handle: other.handle(),
+                other_address: other.address(domain),
                 other_username: other.username,
                 last_message_at: s.last_message_at,
             });

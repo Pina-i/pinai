@@ -26,3 +26,5 @@ rand      = "0.8"
 base64ct  = { version = "1", features = ["alloc"] }
 activitypub     = { workspace = true }
 http-signatures = { workspace = true }
+reqwest         = { workspace = true }
+url             = "2"

@@ -13,6 +13,7 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 use uuid::Uuid;
 
+use idp_db::models::handle_from_address;
 use idp_db::repos::{messages, users};
 use jwt_utils::validate_access_token;
 
@@ -134,10 +135,11 @@ async fn handle_client_message(state: &AppState, sender_id: Uuid, msg: WsClientM
                 }
             };
 
-            let recipient = match users::find_by_handle(&state.pool, &payload.recipient_handle).await {
+            let recipient_handle = handle_from_address(&payload.recipient_address);
+            let recipient = match users::find_by_handle(&state.pool, recipient_handle).await {
                 Ok(Some(u)) => u,
                 _ => {
-                    warn!(handle = %payload.recipient_handle, "recipient not found");
+                    warn!(address = %payload.recipient_address, "recipient not found");
                     return;
                 }
             };
@@ -169,9 +171,10 @@ async fn handle_client_message(state: &AppState, sender_id: Uuid, msg: WsClientM
                 }
             };
 
+            let domain = &state.config.domain;
             let event = WsEvent::NewDm(DmPayload {
                 message_id: msg.id,
-                sender_handle: sender.handle(),
+                sender_address: sender.address(domain),
                 content: msg.content,
                 created_at: msg.created_at,
             });
@@ -182,8 +185,8 @@ async fn handle_client_message(state: &AppState, sender_id: Uuid, msg: WsClientM
             state.hub.send_to_user(&sender_id, event);
 
             info!(
-                sender = %sender.handle(),
-                recipient = %recipient.handle(),
+                sender = %sender.address(domain),
+                recipient = %recipient.address(domain),
                 "dm sent via websocket"
             );
         }
