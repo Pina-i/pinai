@@ -17,7 +17,9 @@ tracing    = "0.1"
 uuid       = { version = "1", features = ["v4", "serde"] }
 time       = { version = "0.3", features = ["serde"] }
 sqlx       = { version = "0.8", features = ["postgres", "runtime-tokio", "uuid", "time", "macros"] }
-axum       = { version = "0.8", features = ["macros", "form"] }
+axum       = { version = "0.8", features = ["macros", "form", "ws"] }
+dashmap    = "6"
+futures-util = "0.3"
 axum-extra = { version = "0.10", features = ["cookie-signed"] }
 
 # Shared crates from core-libs

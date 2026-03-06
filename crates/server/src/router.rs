@@ -32,6 +32,7 @@ use idp_oidc::{
     register::{post_register, post_register_and_login},
     token::post_token,
     userinfo::get_userinfo,
+    ws::ws_upgrade,
     AppState,
 };
 
@@ -94,6 +95,9 @@ pub fn build(state: AppState) -> Router {
 
         // ── Avatar API (Bearer-auth) ────────────────────────────────────
         .route("/api/avatar", put(put_avatar).delete(delete_avatar))
+
+        // ── WebSocket ────────────────────────────────────────────────────────
+        .route("/ws", get(ws_upgrade))
 
         // ── Health check ──────────────────────────────────────────────────────
         .route("/health", get(|| async { Json(json!({ "ok": true })) }))

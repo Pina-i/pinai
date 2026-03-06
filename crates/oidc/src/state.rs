@@ -7,6 +7,8 @@ use idp_db::PgPool;
 use idp_storage::StorageClient;
 use jwt_utils::EdKeyPair;
 
+use crate::ws::WsHub;
+
 /// Shared application state injected into every Axum handler via `State<AppState>`.
 #[derive(Clone)]
 pub struct AppState {
@@ -17,6 +19,8 @@ pub struct AppState {
     pub cookie_key: Key,
     /// S3-compatible object storage (None when storage is not configured).
     pub storage: Option<StorageClient>,
+    /// WebSocket connection hub for real-time event delivery.
+    pub hub: Arc<WsHub>,
 }
 
 /// Allow `SignedCookieJar` to extract the key from `AppState`.

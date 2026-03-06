@@ -12,6 +12,7 @@ use uuid::Uuid;
 
 use idp_db::repos::{follows, users};
 
+use crate::ws::events::{FollowPayload, WsEvent};
 use crate::{AppState, OidcError};
 
 use super::auth::require_auth;
@@ -108,6 +109,20 @@ pub async fn post_follow(
         .map_err(|e| OidcError::server_error(e.to_string()))?
         .ok_or_else(|| OidcError::server_error("Follow not found after insert"))?;
 
+    // Notify target via WebSocket (follow request + auto-accepted).
+    let caller = users::find_by_id(&state.pool, caller_id)
+        .await
+        .map_err(|e| OidcError::server_error(e.to_string()))?
+        .ok_or_else(|| OidcError::server_error("Caller not found"))?;
+
+    let payload = FollowPayload {
+        follow_id: follow.id,
+        handle: caller.handle(),
+        username: caller.username,
+    };
+    state.hub.send_to_user(&target.id, WsEvent::FollowRequest(payload.clone()));
+    state.hub.send_to_user(&target.id, WsEvent::FollowAccepted(payload));
+
     tracing::info!(caller = %caller_id, target = %target.id, "follow request sent + accepted (local)");
 
     Ok((StatusCode::CREATED, Json(FollowResponse {
@@ -135,6 +150,18 @@ pub async fn delete_follow(
     follows::delete_follow(&state.pool, caller_id, target.id)
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?;
+
+    // Notify target that they lost a follower.
+    let caller = users::find_by_id(&state.pool, caller_id)
+        .await
+        .map_err(|e| OidcError::server_error(e.to_string()))?;
+    if let Some(caller) = caller {
+        state.hub.send_to_user(&target.id, WsEvent::FollowRemoved(FollowPayload {
+            follow_id: Uuid::nil(),
+            handle: caller.handle(),
+            username: caller.username,
+        }));
+    }
 
     tracing::info!(caller = %caller_id, target = %target.id, "unfollowed");
     Ok(StatusCode::NO_CONTENT)
@@ -205,6 +232,18 @@ pub async fn accept_follow(
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?;
 
+    // Notify the follower their request was accepted.
+    let caller = users::find_by_id(&state.pool, caller_id)
+        .await
+        .map_err(|e| OidcError::server_error(e.to_string()))?;
+    if let Some(caller) = caller {
+        state.hub.send_to_user(&follow.follower_id, WsEvent::FollowAccepted(FollowPayload {
+            follow_id: follow.id,
+            handle: caller.handle(),
+            username: caller.username,
+        }));
+    }
+
     tracing::info!(follow_id = %follow_id, "follow accepted");
     Ok(StatusCode::NO_CONTENT)
 }
@@ -230,6 +269,18 @@ pub async fn reject_follow(
     follows::set_follow_state(&state.pool, follow.id, "rejected")
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?;
+
+    // Notify the follower their request was rejected.
+    let caller = users::find_by_id(&state.pool, caller_id)
+        .await
+        .map_err(|e| OidcError::server_error(e.to_string()))?;
+    if let Some(caller) = caller {
+        state.hub.send_to_user(&follow.follower_id, WsEvent::FollowRejected(FollowPayload {
+            follow_id: follow.id,
+            handle: caller.handle(),
+            username: caller.username,
+        }));
+    }
 
     tracing::info!(follow_id = %follow_id, "follow rejected");
     Ok(StatusCode::NO_CONTENT)

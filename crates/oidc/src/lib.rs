@@ -10,6 +10,7 @@ pub mod register;
 pub mod state;
 pub mod token;
 pub mod userinfo;
+pub mod ws;
 
 pub use crate::error::OidcError;
 pub use crate::state::AppState;

@@ -6,6 +6,7 @@ use tracing::{info, warn};
 
 use idp_config::Config;
 use idp_db::run_migrations;
+use idp_oidc::ws::WsHub;
 use idp_oidc::AppState;
 use jwt_utils::load_ed_keypair_from_pem;
 
@@ -88,12 +89,14 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // Build shared state
+    let hub = Arc::new(WsHub::new());
     let state = AppState {
         pool,
         keypair: Arc::new(keypair),
         config: Arc::new(config.clone()),
         cookie_key,
         storage,
+        hub,
     };
 
     // Build the Axum router
