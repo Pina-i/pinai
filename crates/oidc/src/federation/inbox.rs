@@ -1,12 +1,13 @@
-//! POST /users/:handle/inbox
+//! POST /users/:username/inbox
 //!
 //! Receives ActivityPub activities from remote and local servers.
 //! Supported activities:
-//!   - Follow       → creates a pending follow, auto-accepts for local users
-//!   - Accept{Follow} → marks a follow as accepted
-//!   - Reject{Follow} → marks a follow as rejected
-//!   - Undo{Follow}   → deletes the follow
+//!   - Follow       → creates a pending friendship, auto-accepts for local users
+//!   - Accept{Follow} → marks a friendship as accepted
+//!   - Reject{Follow} → deletes the friendship row
+//!   - Undo{Follow}   → deletes the friendship
 //!   - Create{Note}   → stores a direct message
+//!   - Update{Person} → updates remote_actors cache + propagates profile changes
 
 use axum::{
     extract::{Path, State},
@@ -16,21 +17,21 @@ use axum::{
 use serde_json::Value;
 use uuid::Uuid;
 
-use idp_db::repos::{follows, messages, users};
+use idp_db::repos::{friendships, messages, remote_actors, users};
 
-use crate::ws::events::{DmPayload, FollowPayload, WsEvent};
+use crate::ws::events::{DmPayload, FriendshipPayload, ProfileUpdatePayload, WsEvent};
 use crate::{AppState, OidcError};
 
-/// POST /users/:handle/inbox
-#[tracing::instrument(skip_all, fields(handle = %handle))]
+/// POST /users/:username/inbox
+#[tracing::instrument(skip_all, fields(username = %username))]
 pub async fn post_inbox(
     State(state): State<AppState>,
-    Path(handle): Path<String>,
+    Path(username): Path<String>,
     _headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Result<StatusCode, OidcError> {
     // 1. Resolve the inbox owner.
-    let recipient = users::find_by_handle(&state.pool, &handle)
+    let recipient = users::find_by_username(&state.pool, &username)
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?
         .ok_or_else(|| OidcError::not_found("User not found"))?;
@@ -42,17 +43,18 @@ pub async fn post_inbox(
         .to_string();
 
     tracing::debug!(
-        recipient = %recipient.handle(),
+        recipient = %recipient.username,
         activity_type = %activity_type,
         "inbox activity received"
     );
 
     match activity_type.as_str() {
-        "Follow" => handle_follow(&state, &body, recipient.id).await?,
+        "Follow" => handle_follow(&state, &body, &recipient).await?,
         "Accept" => handle_accept(&state, &body).await?,
         "Reject" => handle_reject(&state, &body).await?,
-        "Undo" => handle_undo(&state, &body, recipient.id).await?,
+        "Undo" => handle_undo(&state, &body, &recipient).await?,
         "Create" => handle_create(&state, &body, recipient.id).await?,
+        "Update" => handle_update(&state, &body).await?,
         other => {
             tracing::warn!(activity_type = %other, "unhandled activity type in inbox");
         }
@@ -61,157 +63,236 @@ pub async fn post_inbox(
     Ok(StatusCode::ACCEPTED)
 }
 
-// ─── Follow ───────────────────────────────────────────────────────────────────
+// ─── Follow (friend request) ─────────────────────────────────────────────────
 
 async fn handle_follow(
     state: &AppState,
     body: &Value,
-    recipient_id: Uuid,
+    recipient: &idp_db::models::User,
 ) -> Result<(), OidcError> {
     let actor_url = body
         .get("actor")
         .and_then(|v| v.as_str())
         .ok_or_else(|| OidcError::invalid_request("Follow missing actor field"))?;
 
-    let activity_id = body.get("id").and_then(|v| v.as_str());
+    let recipient_actor_uri = recipient.actor_uri.as_deref()
+        .ok_or_else(|| OidcError::server_error("Recipient has no actor_uri"))?;
 
-    // For local-origin actors (same domain), resolve by actor URL → user UUID.
+    // Check if this is a local actor.
     let base = state.config.issuer();
-    if let Some(follower_id) = local_actor_id(actor_url, &base, &state.pool).await {
-        // Local-to-local follow: create the row and auto-accept.
-        let follow = follows::send_follow_request(
+    if let Some(follower) = local_actor(actor_url, &base, &state.pool).await {
+        // Local-to-local: create mutual friendships and auto-accept.
+        let follower_uri = follower.actor_uri.as_deref()
+            .ok_or_else(|| OidcError::server_error("Follower has no actor_uri"))?;
+
+        // Follower → recipient
+        let f1 = friendships::create_friendship(
             &state.pool,
-            follower_id,
-            recipient_id,
-            activity_id,
+            follower.id,
+            recipient_actor_uri,
+            recipient.avatar_url.as_deref(),
         )
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?;
+        friendships::set_status(&state.pool, f1.id, "accepted")
+            .await
+            .map_err(|e| OidcError::server_error(e.to_string()))?;
 
-        follows::set_follow_state(&state.pool, follow.id, "accepted")
+        // Recipient → follower
+        let f2 = friendships::create_friendship(
+            &state.pool,
+            recipient.id,
+            follower_uri,
+            follower.avatar_url.as_deref(),
+        )
+        .await
+        .map_err(|e| OidcError::server_error(e.to_string()))?;
+        friendships::set_status(&state.pool, f2.id, "accepted")
             .await
             .map_err(|e| OidcError::server_error(e.to_string()))?;
 
         // Push real-time notification to inbox owner.
-        if let Ok(Some(follower)) = users::find_by_id(&state.pool, follower_id).await {
-            let payload = FollowPayload {
-                follow_id: follow.id,
-                address: follower.address(&state.config.domain),
-                username: follower.username,
-            };
-            state.hub.send_to_user(&recipient_id, WsEvent::FollowRequest(payload.clone()));
-            state.hub.send_to_user(&recipient_id, WsEvent::FollowAccepted(payload));
-        }
+        let payload = FriendshipPayload {
+            friendship_id: f2.id,
+            actor_uri: follower_uri.to_string(),
+            username: follower.username.clone(),
+            display_name: follower.display_name.clone(),
+        };
+        state.hub.send_to_user(&recipient.id, WsEvent::FriendRequest(payload.clone()));
+        state.hub.send_to_user(&recipient.id, WsEvent::FriendAccepted(payload));
 
         tracing::info!(
-            follower_id = %follower_id,
-            following_id = %recipient_id,
-            "local follow auto-accepted"
+            follower = %follower.username,
+            recipient = %recipient.username,
+            "local friend request auto-accepted"
         );
     } else {
-        // Remote actor — extract info from the actor URL and notify the recipient.
-        let (remote_handle, remote_domain) = parse_remote_actor_url(actor_url)
+        // Remote actor — cache and create a pending friendship for the recipient.
+        let (remote_username, remote_domain) = parse_remote_actor_url(actor_url)
             .ok_or_else(|| OidcError::invalid_request("Cannot parse remote actor URL"))?;
-        let remote_address = format!("{}@{}", remote_handle, remote_domain);
 
-        // Fetch the remote actor to get their username (display name).
-        let username = fetch_remote_username(actor_url).await.unwrap_or_else(|| remote_handle.to_string());
+        let display_name = fetch_remote_display_name(actor_url).await;
 
-        // Push real-time notification to inbox owner.
+        // Upsert into remote_actors cache.
+        remote_actors::upsert(
+            &state.pool,
+            actor_url,
+            &remote_username,
+            &remote_domain,
+            display_name.as_deref(),
+            None,
+        )
+        .await
+        .map_err(|e| OidcError::server_error(e.to_string()))?;
+
+        // Create pending friendship: recipient → remote actor.
+        let friendship = friendships::create_friendship(
+            &state.pool,
+            recipient.id,
+            actor_url,
+            None,
+        )
+        .await
+        .map_err(|e| OidcError::server_error(e.to_string()))?;
+
+        // Notify inbox owner of pending friend request.
         state.hub.send_to_user(
-            &recipient_id,
-            WsEvent::FollowRequest(FollowPayload {
-                follow_id: Uuid::nil(),
-                address: remote_address,
-                username,
+            &recipient.id,
+            WsEvent::FriendRequest(FriendshipPayload {
+                friendship_id: friendship.id,
+                actor_uri: actor_url.to_string(),
+                username: remote_username.clone(),
+                display_name,
             }),
         );
 
-        tracing::info!(actor = %actor_url, recipient = %recipient_id, "remote follow request notified");
+        tracing::info!(actor = %actor_url, recipient = %recipient.username, "remote friend request notified");
     }
 
     Ok(())
 }
 
-// ─── Accept ───────────────────────────────────────────────────────────────────
+// ─── Accept ──────────────────────────────────────────────────────────────────
 
 async fn handle_accept(state: &AppState, body: &Value) -> Result<(), OidcError> {
-    // The `object` field should be the original Follow activity or its ID.
-    let follow_activity_id = extract_object_id(body);
+    let accepter_uri = body
+        .get("actor")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
 
-    if let Some(ap_id) = follow_activity_id {
-        // Find the follow row by its ap_activity_id.
-        let result = sqlx::query_as::<_, idp_db::models::Follow>(
-            "SELECT * FROM follows WHERE ap_activity_id = $1",
-        )
-        .bind(&ap_id)
-        .fetch_optional(&state.pool)
-        .await
-        .map_err(|e| OidcError::server_error(e.to_string()))?;
-
-        if let Some(follow) = result {
-            follows::set_follow_state(&state.pool, follow.id, "accepted")
-                .await
-                .map_err(|e| OidcError::server_error(e.to_string()))?;
-
-            // Notify the follower their request was accepted.
-            if let Ok(Some(target)) = users::find_by_id(&state.pool, follow.following_id).await {
-                state.hub.send_to_user(&follow.follower_id, WsEvent::FollowAccepted(FollowPayload {
-                    follow_id: follow.id,
-                    address: target.address(&state.config.domain),
-                    username: target.username,
-                }));
+    // Find the local user who sent the follow by looking at the object's actor.
+    let follow_actor = body
+        .get("object")
+        .and_then(|o| {
+            if o.is_string() {
+                None
+            } else {
+                o.get("actor").and_then(|a| a.as_str())
             }
+        });
 
-            tracing::info!(follow_id = %follow.id, "follow accepted via AP");
+    if let Some(local_actor_uri) = follow_actor {
+        if let Ok(Some(local_user)) = users::find_by_actor_uri(&state.pool, local_actor_uri).await {
+            if let Ok(Some(friendship)) = friendships::find_by_owner_and_uri(
+                &state.pool,
+                local_user.id,
+                accepter_uri,
+            ).await {
+                friendships::set_status(&state.pool, friendship.id, "accepted")
+                    .await
+                    .map_err(|e| OidcError::server_error(e.to_string()))?;
+
+                let (username, display_name) = resolve_remote_name(state, accepter_uri).await;
+                state.hub.send_to_user(&local_user.id, WsEvent::FriendAccepted(FriendshipPayload {
+                    friendship_id: friendship.id,
+                    actor_uri: accepter_uri.to_string(),
+                    username,
+                    display_name,
+                }));
+
+                tracing::info!(user = %local_user.username, accepter = %accepter_uri, "friend request accepted via AP");
+                return Ok(());
+            }
         }
     }
+
+    // Fallback: find any pending friendship with this accepter_uri.
+    let base = state.config.issuer();
+    let prefix = format!("{}/users/", base);
+
+    let rows = sqlx::query_as::<_, idp_db::models::Friendship>(
+        "SELECT * FROM friendships WHERE friend_actor_uri = $1 AND status = 'pending'",
+    )
+    .bind(accepter_uri)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(|e| OidcError::server_error(e.to_string()))?;
+
+    for friendship in rows {
+        if let Ok(Some(owner)) = users::find_by_id(&state.pool, friendship.owner_user_id).await {
+            if owner.actor_uri.as_deref().map_or(false, |u| u.starts_with(&prefix)) {
+                friendships::set_status(&state.pool, friendship.id, "accepted")
+                    .await
+                    .map_err(|e| OidcError::server_error(e.to_string()))?;
+
+                let (username, display_name) = resolve_remote_name(state, accepter_uri).await;
+                state.hub.send_to_user(&owner.id, WsEvent::FriendAccepted(FriendshipPayload {
+                    friendship_id: friendship.id,
+                    actor_uri: accepter_uri.to_string(),
+                    username,
+                    display_name,
+                }));
+
+                tracing::info!(friendship_id = %friendship.id, "friend accepted via AP (fallback)");
+            }
+        }
+    }
+
     Ok(())
 }
 
-// ─── Reject ───────────────────────────────────────────────────────────────────
+// ─── Reject ──────────────────────────────────────────────────────────────────
 
 async fn handle_reject(state: &AppState, body: &Value) -> Result<(), OidcError> {
-    let follow_activity_id = extract_object_id(body);
+    let rejecter_uri = body
+        .get("actor")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
 
-    if let Some(ap_id) = follow_activity_id {
-        let result = sqlx::query_as::<_, idp_db::models::Follow>(
-            "SELECT * FROM follows WHERE ap_activity_id = $1",
-        )
-        .bind(&ap_id)
-        .fetch_optional(&state.pool)
-        .await
-        .map_err(|e| OidcError::server_error(e.to_string()))?;
+    let rows = sqlx::query_as::<_, idp_db::models::Friendship>(
+        "SELECT * FROM friendships WHERE friend_actor_uri = $1 AND status = 'pending'",
+    )
+    .bind(rejecter_uri)
+    .fetch_all(&state.pool)
+    .await
+    .map_err(|e| OidcError::server_error(e.to_string()))?;
 
-        if let Some(follow) = result {
-            follows::set_follow_state(&state.pool, follow.id, "rejected")
-                .await
-                .map_err(|e| OidcError::server_error(e.to_string()))?;
+    for friendship in rows {
+        friendships::delete_friendship(&state.pool, friendship.owner_user_id, rejecter_uri)
+            .await
+            .map_err(|e| OidcError::server_error(e.to_string()))?;
 
-            // Notify the follower their request was rejected.
-            if let Ok(Some(target)) = users::find_by_id(&state.pool, follow.following_id).await {
-                state.hub.send_to_user(&follow.follower_id, WsEvent::FollowRejected(FollowPayload {
-                    follow_id: follow.id,
-                    address: target.address(&state.config.domain),
-                    username: target.username,
-                }));
-            }
+        state.hub.send_to_user(&friendship.owner_user_id, WsEvent::FriendRemoved(FriendshipPayload {
+            friendship_id: friendship.id,
+            actor_uri: rejecter_uri.to_string(),
+            username: String::new(),
+            display_name: None,
+        }));
 
-            tracing::info!(follow_id = %follow.id, "follow rejected via AP");
-        }
+        tracing::info!(friendship_id = %friendship.id, "friend request rejected via AP");
     }
+
     Ok(())
 }
 
-// ─── Undo{Follow} ─────────────────────────────────────────────────────────────
+// ─── Undo{Follow} ────────────────────────────────────────────────────────────
 
 async fn handle_undo(
     state: &AppState,
     body: &Value,
-    recipient_id: Uuid,
+    recipient: &idp_db::models::User,
 ) -> Result<(), OidcError> {
     let obj = body.get("object");
-    // We only handle Undo{Follow}.
     let obj_type = obj
         .and_then(|o| o.get("type"))
         .and_then(|t| t.as_str())
@@ -226,27 +307,35 @@ async fn handle_undo(
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
+    let recipient_actor_uri = recipient.actor_uri.as_deref().unwrap_or("");
+
+    // Remove the friendship: recipient → actor.
+    friendships::delete_friendship(&state.pool, recipient.id, actor_url)
+        .await
+        .map_err(|e| OidcError::server_error(e.to_string()))?;
+
+    // If it was a local actor, also remove the reverse friendship.
     let base = state.config.issuer();
-    if let Some(follower_id) = local_actor_id(actor_url, &base, &state.pool).await {
-        follows::delete_follow(&state.pool, follower_id, recipient_id)
+    if let Some(follower) = local_actor(actor_url, &base, &state.pool).await {
+        friendships::delete_friendship(&state.pool, follower.id, recipient_actor_uri)
             .await
             .map_err(|e| OidcError::server_error(e.to_string()))?;
-
-        // Notify recipient that they lost a follower.
-        if let Ok(Some(follower)) = users::find_by_id(&state.pool, follower_id).await {
-            state.hub.send_to_user(&recipient_id, WsEvent::FollowRemoved(FollowPayload {
-                follow_id: Uuid::nil(),
-                address: follower.address(&state.config.domain),
-                username: follower.username,
-            }));
-        }
-
-        tracing::info!(follower_id = %follower_id, following_id = %recipient_id, "unfollowed via AP Undo");
     }
+
+    // Notify recipient.
+    let (username, display_name) = resolve_remote_name(state, actor_url).await;
+    state.hub.send_to_user(&recipient.id, WsEvent::FriendRemoved(FriendshipPayload {
+        friendship_id: Uuid::nil(),
+        actor_uri: actor_url.to_string(),
+        username,
+        display_name,
+    }));
+
+    tracing::info!(actor = %actor_url, recipient = %recipient.username, "unfriended via AP Undo");
     Ok(())
 }
 
-// ─── Create{Note} (Direct Message) ───────────────────────────────────────────
+// ─── Create{Note} (Direct Message) ──────────────────────────────────────────
 
 async fn handle_create(
     state: &AppState,
@@ -277,55 +366,118 @@ async fn handle_create(
     let actor_url = body.get("actor").and_then(|v| v.as_str()).unwrap_or("");
 
     let base = state.config.issuer();
-    if let Some(sender_id) = local_actor_id(actor_url, &base, &state.pool).await {
-        let msg = messages::create_message(&state.pool, sender_id, recipient_id, &content, note_id)
+    if let Some(sender) = local_actor(actor_url, &base, &state.pool).await {
+        let msg = messages::create_message(&state.pool, sender.id, recipient_id, &content, note_id)
             .await
             .map_err(|e| OidcError::server_error(e.to_string()))?;
 
-        // Push real-time DM notification.
-        if let Ok(Some(sender)) = users::find_by_id(&state.pool, sender_id).await {
-            let event = WsEvent::NewDm(DmPayload {
-                message_id: msg.id,
-                sender_address: sender.address(&state.config.domain),
-                content: msg.content,
-                created_at: msg.created_at,
-            });
-            state.hub.send_to_user(&recipient_id, event.clone());
-            state.hub.send_to_user(&sender_id, event);
-        }
+        let event = WsEvent::NewDm(DmPayload {
+            message_id: msg.id,
+            sender_address: sender.federated_address(&state.config.domain),
+            content: msg.content,
+            created_at: msg.created_at,
+        });
+        state.hub.send_to_user(&recipient_id, event.clone());
+        state.hub.send_to_user(&sender.id, event);
 
-        tracing::info!(sender_id = %sender_id, recipient_id = %recipient_id, "DM stored via AP inbox");
+        tracing::info!(sender = %sender.username, recipient_id = %recipient_id, "DM stored via AP inbox");
     }
     Ok(())
 }
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+// ─── Update{Person} — Profile propagation ───────────────────────────────────
 
-/// Try to resolve a local actor URL (e.g. `https://base/users/alex-7G4K`) to a UUID.
-async fn local_actor_id(actor_url: &str, base: &str, pool: &sqlx::PgPool) -> Option<Uuid> {
+async fn handle_update(state: &AppState, body: &Value) -> Result<(), OidcError> {
+    let obj = match body.get("object") {
+        Some(o) => o,
+        None => return Ok(()),
+    };
+
+    let obj_type = obj
+        .get("type")
+        .and_then(|t| t.as_str())
+        .unwrap_or("");
+
+    if obj_type != "Person" {
+        return Ok(());
+    }
+
+    let actor_uri = obj
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    if actor_uri.is_empty() {
+        return Ok(());
+    }
+
+    let new_username = obj
+        .get("preferredUsername")
+        .and_then(|v| v.as_str());
+    let new_display_name = obj
+        .get("name")
+        .and_then(|v| v.as_str());
+    let new_avatar_url = obj
+        .get("icon")
+        .and_then(|v| v.get("url"))
+        .and_then(|v| v.as_str());
+
+    // 1. Update remote_actors cache.
+    remote_actors::update_profile(
+        &state.pool,
+        actor_uri,
+        new_username,
+        new_display_name,
+        new_avatar_url,
+    )
+    .await
+    .map_err(|e| OidcError::server_error(e.to_string()))?;
+
+    // 2. Update friend_avatar_url on all matching friendships.
+    friendships::update_friend_avatar(&state.pool, actor_uri, new_avatar_url)
+        .await
+        .map_err(|e| OidcError::server_error(e.to_string()))?;
+
+    // 3. Push WebSocket event to all connected clients who have this actor as a friend.
+    let owner_ids = friendships::get_owners_with_friend(&state.pool, actor_uri)
+        .await
+        .map_err(|e| OidcError::server_error(e.to_string()))?;
+
+    let event = WsEvent::FriendProfileUpdated(ProfileUpdatePayload {
+        actor_uri: actor_uri.to_string(),
+        display_name: new_display_name.map(|s| s.to_string()),
+        avatar_url: new_avatar_url.map(|s| s.to_string()),
+    });
+
+    for owner_id in owner_ids {
+        state.hub.send_to_user(&owner_id, event.clone());
+    }
+
+    tracing::info!(actor_uri = %actor_uri, "profile update propagated via AP");
+    Ok(())
+}
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+/// Try to resolve a local actor URL (e.g. `https://base/users/alice`) to a User.
+async fn local_actor(
+    actor_url: &str,
+    base: &str,
+    pool: &sqlx::PgPool,
+) -> Option<idp_db::models::User> {
     let prefix = format!("{}/users/", base);
-    let handle = actor_url.strip_prefix(&prefix)?;
-    users::find_by_handle(pool, handle)
+    let username = actor_url.strip_prefix(&prefix)?;
+    users::find_by_username(pool, username)
         .await
         .ok()
         .flatten()
-        .map(|u| u.id)
 }
 
-/// Extract the `id` field from the `object` in an activity (string or nested object).
-fn extract_object_id(body: &Value) -> Option<String> {
-    let obj = body.get("object")?;
-    if let Some(s) = obj.as_str() {
-        return Some(s.to_string());
-    }
-    obj.get("id").and_then(|v| v.as_str()).map(|s| s.to_string())
-}
-
-/// Parse a remote actor URL like `http://domain:port/users/handle` into (handle, domain).
+/// Parse a remote actor URL like `http://domain:port/users/username` into (username, domain).
 fn parse_remote_actor_url(actor_url: &str) -> Option<(String, String)> {
     let url: url::Url = actor_url.parse().ok()?;
-    let handle = url.path().strip_prefix("/users/")?;
-    if handle.is_empty() {
+    let username = url.path().strip_prefix("/users/")?;
+    if username.is_empty() {
         return None;
     }
     let host = url.host_str()?;
@@ -333,11 +485,11 @@ fn parse_remote_actor_url(actor_url: &str) -> Option<(String, String)> {
         Some(port) => format!("{}:{}", host, port),
         None => host.to_string(),
     };
-    Some((handle.to_string(), domain))
+    Some((username.to_string(), domain))
 }
 
 /// Fetch the remote actor's display name from their actor document.
-async fn fetch_remote_username(actor_url: &str) -> Option<String> {
+async fn fetch_remote_display_name(actor_url: &str) -> Option<String> {
     let resp = reqwest::Client::new()
         .get(actor_url)
         .header("Accept", "application/activity+json")
@@ -349,4 +501,16 @@ async fn fetch_remote_username(actor_url: &str) -> Option<String> {
     }
     let actor: activitypub::Actor = resp.json().await.ok()?;
     Some(actor.name)
+}
+
+/// Resolve actor_uri to (username, display_name) from local users or remote cache.
+async fn resolve_remote_name(state: &AppState, actor_uri: &str) -> (String, Option<String>) {
+    if let Ok(Some(user)) = users::find_by_actor_uri(&state.pool, actor_uri).await {
+        return (user.username, user.display_name);
+    }
+    if let Ok(Some(ra)) = remote_actors::find_by_actor_uri(&state.pool, actor_uri).await {
+        return (ra.username, ra.display_name);
+    }
+    let username = actor_uri.rsplit('/').next().unwrap_or("unknown").to_string();
+    (username, None)
 }

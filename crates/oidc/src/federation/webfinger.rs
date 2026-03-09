@@ -1,7 +1,7 @@
 //! GET /.well-known/webfinger
 //!
 //! Allows remote servers and clients to discover a user's Actor URL
-//! from their handle, e.g. `acct:alex-7G4K@pinai.example.com`.
+//! from their username, e.g. `acct:alice@idp.example.com`.
 
 use axum::{
     extract::{Query, State},
@@ -18,11 +18,11 @@ use crate::{AppState, OidcError};
 
 #[derive(Debug, Deserialize)]
 pub struct WebFingerQuery {
-    /// e.g. `acct:alex-7G4K@example.com` or `acct:alex-7G4K`
+    /// e.g. `acct:alice@example.com` or `acct:alice`
     pub resource: String,
 }
 
-/// GET /.well-known/webfinger?resource=acct:{handle}@{domain}
+/// GET /.well-known/webfinger?resource=acct:{username}@{domain}
 #[tracing::instrument(skip_all, fields(resource = %query.resource))]
 pub async fn get_webfinger(
     State(state): State<AppState>,
@@ -34,21 +34,20 @@ pub async fn get_webfinger(
         .strip_prefix("acct:")
         .unwrap_or(&query.resource);
 
-    // Handle can be `username-SUFFIX` or `username-SUFFIX@domain`.
-    let handle = acct.split('@').next().unwrap_or(acct);
+    // Username can be `alice` or `alice@domain`.
+    let username = acct.split('@').next().unwrap_or(acct);
 
-    let user = users::find_by_handle(&state.pool, handle)
+    let user = users::find_by_username(&state.pool, username)
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?
         .ok_or_else(|| OidcError::not_found("User not found"))?;
 
     let base = state.config.issuer();
-    let actor_url = format!("{}/users/{}", base, user.handle());
-    let subject = format!("acct:{}@{}", user.handle(), state.config.domain);
+    let actor_url = format!("{}/users/{}", base, user.username);
+    let subject = format!("acct:{}@{}", user.username, state.config.domain);
 
     let wf = WebFingerResponse::for_actor(&subject, &actor_url);
 
-    // WebFinger responses use `application/jrd+json`.
     let mut response = Json(wf).into_response();
     response.headers_mut().insert(
         "Content-Type",

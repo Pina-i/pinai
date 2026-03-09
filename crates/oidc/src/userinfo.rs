@@ -12,6 +12,7 @@ pub struct UserinfoResponse {
     pub sub: String,
     pub email: String,
     pub preferred_username: String,
+    pub display_name: Option<String>,
     pub address: String,
     pub avatar_url: Option<String>,
 }
@@ -48,11 +49,12 @@ pub async fn get_userinfo(
 
     tracing::debug!(user_id = %user_id, username = %user.username, "userinfo returned");
 
-    let address = user.address(&state.config.domain);
+    let address = user.federated_address(&state.config.domain);
     Ok(Json(UserinfoResponse {
         sub: user.id.to_string(),
         email: user.email,
         preferred_username: user.username,
+        display_name: user.display_name,
         address,
         avatar_url: user.avatar_url,
     }))

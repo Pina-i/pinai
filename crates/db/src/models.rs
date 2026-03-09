@@ -6,32 +6,23 @@ use uuid::Uuid;
 pub struct User {
     pub id: Uuid,
     pub username: String,
-    pub handle_suffix: String,
     pub email: String,
     #[serde(skip_serializing)] // never expose the hash
     pub password_hash: String,
+    pub display_name: Option<String>,
     pub avatar_url: Option<String>,
+    pub actor_uri: Option<String>,
+    pub inbox_url: Option<String>,
+    pub outbox_url: Option<String>,
     pub created_at: OffsetDateTime,
+    pub updated_at: OffsetDateTime,
 }
 
 impl User {
-    /// Returns the full handle: "username-SUFFIX" (e.g. "alex-7G4K").
-    /// Used internally for ActivityPub URL paths (`/users/alex-7G4K`).
-    pub fn handle(&self) -> String {
-        format!("{}-{}", self.username, self.handle_suffix)
+    /// Returns the federated address: "@username@domain" (e.g. "@alice@idp.example.com").
+    pub fn federated_address(&self, domain: &str) -> String {
+        format!("@{}@{}", self.username, domain)
     }
-
-    /// Returns the federated address: "username-SUFFIX@domain" (e.g. "alex-7G4K@idp.example.com").
-    /// This is the canonical user identifier exposed in all APIs.
-    pub fn address(&self, domain: &str) -> String {
-        format!("{}@{}", self.handle(), domain)
-    }
-}
-
-/// Extract the local handle from an address like "alice-7G4K@domain".
-/// Returns the full string if no `@` is present.
-pub fn handle_from_address(address: &str) -> &str {
-    address.split_once('@').map(|(h, _)| h).unwrap_or(address)
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -69,17 +60,43 @@ pub struct UserInfo {
     pub preferred_username: String,
 }
 
-// ─── Follow ──────────────────────────────────────────────────────────────────
+// ─── RemoteActor ─────────────────────────────────────────────────────────────
+
+/// Cache of a remote user fetched via ActivityPub / WebFinger from another IdP instance.
+#[derive(Debug, Clone, sqlx::FromRow, Serialize)]
+pub struct RemoteActor {
+    pub id: Uuid,
+    pub actor_uri: String,
+    pub username: String,
+    pub instance: String,
+    pub display_name: Option<String>,
+    pub avatar_url: Option<String>,
+    pub fetched_at: OffsetDateTime,
+    pub updated_at: OffsetDateTime,
+}
+
+// ─── Friendship ──────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, sqlx::FromRow, Serialize)]
-pub struct Follow {
+pub struct Friendship {
     pub id: Uuid,
-    pub follower_id: Uuid,
-    pub following_id: Uuid,
-    /// "pending" | "accepted" | "rejected"
-    pub state: String,
-    pub ap_activity_id: Option<String>,
+    pub owner_user_id: Uuid,
+    pub friend_actor_uri: String,
+    pub friend_avatar_url: Option<String>,
+    /// "pending" | "accepted"
+    pub status: String,
     pub created_at: OffsetDateTime,
+    pub updated_at: OffsetDateTime,
+}
+
+/// Result of the friends list JOIN query across users + remote_actors.
+#[derive(Debug, Clone, sqlx::FromRow, Serialize)]
+pub struct FriendListEntry {
+    pub username: Option<String>,
+    pub display_name: Option<String>,
+    pub avatar_url: Option<String>,
+    pub friend_actor_uri: String,
+    pub instance: Option<String>,
 }
 
 // ─── DirectMessage ────────────────────────────────────────────────────────────

@@ -6,28 +6,25 @@ use tracing::{debug, warn};
 
 use crate::{AppState, OidcError};
 
-/// Resolved remote actor with the info needed to deliver activities.
+/// Resolved remote actor with the info needed to deliver activities and cache profiles.
 pub struct RemoteActor {
     pub actor_url: String,
     pub inbox: String,
+    pub preferred_username: Option<String>,
+    pub display_name: Option<String>,
+    pub avatar_url: Option<String>,
 }
 
-/// Resolve a federated handle (`handle@domain`) to a remote actor via WebFinger.
+/// Resolve a federated handle (`username@domain`) to a remote actor via WebFinger.
 ///
-/// 1. GET `{issuer}/.well-known/webfinger?resource=acct:{handle}@{domain}`
+/// 1. GET `{scheme}://{domain}/.well-known/webfinger?resource=acct:{username}@{domain}`
 /// 2. Extract the actor URL from the `self` link
-/// 3. GET the actor URL → parse inbox
-///
-/// The `issuer` of the remote IdP is derived from the domain. The scheme
-/// (http vs https) is determined by the remote IdP's published issuer — for
-/// simplicity we use the scheme from the `ISSUER` of the *calling* IdP when
-/// we don't know the remote one yet. In production both sides use HTTPS.
+/// 3. GET the actor URL → parse inbox + profile info
 pub async fn resolve_remote_actor(
-    handle: &str,
+    username: &str,
     domain: &str,
     local_issuer: &str,
 ) -> Result<RemoteActor, OidcError> {
-    // Derive the scheme from the local issuer (http in dev, https in prod).
     let scheme = if local_issuer.starts_with("https") {
         "https"
     } else {
@@ -35,7 +32,7 @@ pub async fn resolve_remote_actor(
     };
 
     // Step 1: WebFinger
-    let resource = format!("acct:{}@{}", handle, domain);
+    let resource = format!("acct:{}@{}", username, domain);
     let webfinger_url = format!(
         "{}://{}/.well-known/webfinger?resource={}",
         scheme, domain, resource
@@ -72,7 +69,7 @@ pub async fn resolve_remote_actor(
 
     debug!(%actor_url, "fetching remote actor");
 
-    // Step 3: Fetch the actor document to get the inbox URL.
+    // Step 3: Fetch the actor document to get the inbox URL and profile info.
     let actor_resp = client
         .get(&actor_url)
         .header("Accept", "application/activity+json")
@@ -92,6 +89,9 @@ pub async fn resolve_remote_actor(
     Ok(RemoteActor {
         actor_url: actor.id,
         inbox: actor.inbox,
+        preferred_username: Some(actor.preferred_username),
+        display_name: if actor.name.is_empty() { None } else { Some(actor.name) },
+        avatar_url: None, // Actor struct doesn't have icon field yet
     })
 }
 
@@ -100,7 +100,7 @@ pub async fn deliver_activity(
     state: &AppState,
     inbox_url: &str,
     activity: &serde_json::Value,
-    sender_handle: &str,
+    sender_username: &str,
 ) -> Result<(), OidcError> {
     let body = serde_json::to_vec(activity)
         .map_err(|e| OidcError::server_error(format!("Activity serialization failed: {e}")))?;
@@ -124,7 +124,7 @@ pub async fn deliver_activity(
     let key_id = format!(
         "{}/users/{}#main-key",
         state.config.issuer(),
-        sender_handle
+        sender_username
     );
 
     let signature = sign_request(SignParams {
