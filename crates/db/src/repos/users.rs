@@ -14,8 +14,8 @@ pub async fn create_user(
 ) -> Result<User, sqlx::Error> {
     sqlx::query_as::<_, User>(
         r#"
-        INSERT INTO users (username, email, password_hash, actor_uri, inbox_url, outbox_url)
-        VALUES ($1, $2, $3, $4, $5, $6)
+        INSERT INTO users (username, email, password_hash, actor_uri, inbox_url, outbox_url, display_name)
+        VALUES ($1, $2, $3, $4, $5, $6, $1)
         RETURNING *
         "#,
     )
@@ -42,8 +42,8 @@ pub async fn create_user_with_id(
 ) -> Result<User, sqlx::Error> {
     sqlx::query_as::<_, User>(
         r#"
-        INSERT INTO users (id, username, email, password_hash, actor_uri, inbox_url, outbox_url)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        INSERT INTO users (id, username, email, password_hash, actor_uri, inbox_url, outbox_url, display_name)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $2)
         RETURNING *
         "#,
     )

@@ -349,22 +349,54 @@ pub async fn accept_friendship(
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?;
 
-    // Notify the requester (if they're local).
+    let caller = users::find_by_id(&state.pool, caller_id)
+        .await
+        .map_err(|e| OidcError::server_error(e.to_string()))?
+        .ok_or_else(|| OidcError::server_error("Caller not found"))?;
+
+    let caller_actor_uri = caller.actor_uri.as_deref()
+        .ok_or_else(|| OidcError::server_error("Caller has no actor_uri"))?;
+
+    // Notify the requester.
     if let Some(friend_user) = users::find_by_actor_uri(&state.pool, &friendship.friend_actor_uri)
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?
     {
-        let caller = users::find_by_id(&state.pool, caller_id)
+        // Local friend — push WS event directly.
+        state.hub.send_to_user(&friend_user.id, WsEvent::FriendAccepted(FriendshipPayload {
+            friendship_id: friendship.id,
+            actor_uri: caller_actor_uri.to_string(),
+            username: caller.username.clone(),
+            display_name: caller.display_name.clone(),
+        }));
+    } else {
+        // Remote friend — deliver an AP Accept so their IdP updates the friendship.
+        let remote = remote_actors::find_by_actor_uri(&state.pool, &friendship.friend_actor_uri)
             .await
             .map_err(|e| OidcError::server_error(e.to_string()))?;
 
-        if let Some(caller) = caller {
-            state.hub.send_to_user(&friend_user.id, WsEvent::FriendAccepted(FriendshipPayload {
-                friendship_id: friendship.id,
-                actor_uri: caller.actor_uri.unwrap_or_default(),
-                username: caller.username,
-                display_name: caller.display_name,
-            }));
+        if let Some(remote) = remote {
+            let inbox_url = format!("{}/inbox", remote.actor_uri);
+
+            let accept_id = format!("{}/accepts/{}", caller_actor_uri, Uuid::new_v4());
+            let follow_activity = Activity::follow(
+                &format!("{}/follows/{}", &friendship.friend_actor_uri, friendship.id),
+                &friendship.friend_actor_uri,
+                caller_actor_uri,
+            );
+            let follow_value = serde_json::to_value(&follow_activity)
+                .map_err(|e| OidcError::server_error(e.to_string()))?;
+            let accept = Activity::accept(&accept_id, caller_actor_uri, follow_value);
+
+            let activity_json = serde_json::to_value(&accept)
+                .map_err(|e| OidcError::server_error(e.to_string()))?;
+
+            delivery::deliver_activity(&state, &inbox_url, &activity_json, &caller.username).await?;
+
+            tracing::info!(
+                friend = %friendship.friend_actor_uri,
+                "AP Accept delivered to remote IdP"
+            );
         }
     }
 
