@@ -13,7 +13,6 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 
 use idp_db::repos::{auth_codes, clients, users};
-use idp_db::repos::users::generate_handle_suffix;
 
 use crate::{
     cookies::{build_session_cookie, urlencoded},
@@ -83,14 +82,27 @@ pub async fn post_register(
         .map_err(|_| OidcError::server_error("Failed to hash password"))?
         .to_string();
 
-    // 5. Insert user (generate UUID first so we can derive the handle suffix)
+    // 5. Derive federation URIs and insert user
     let user_id = uuid::Uuid::new_v4();
-    let suffix = generate_handle_suffix(user_id);
-    let user = users::create_user_with_id(&state.pool, user_id, &body.username, &body.email, &password_hash, &suffix)
-        .await
-        .map_err(|e| OidcError::server_error(e.to_string()))?;
+    let base = state.config.issuer();
+    let actor_uri = format!("{}/users/{}", base, body.username);
+    let inbox_url = format!("{}/users/{}/inbox", base, body.username);
+    let outbox_url = format!("{}/users/{}/outbox", base, body.username);
 
-    let address = user.address(&state.config.domain);
+    let user = users::create_user_with_id(
+        &state.pool,
+        user_id,
+        &body.username,
+        &body.email,
+        &password_hash,
+        &actor_uri,
+        &inbox_url,
+        &outbox_url,
+    )
+    .await
+    .map_err(|e| OidcError::server_error(e.to_string()))?;
+
+    let address = user.federated_address(&state.config.domain);
     tracing::info!(user_id = %user.id, address = %address, "user registered");
 
     Ok((
@@ -159,14 +171,27 @@ pub async fn post_register_and_login(
         .map_err(|_| OidcError::server_error("Failed to hash password"))?
         .to_string();
 
-    // 5. Create user (generate UUID + handle suffix before insert)
+    // 5. Derive federation URIs and create user
     let user_id = uuid::Uuid::new_v4();
-    let suffix = generate_handle_suffix(user_id);
-    let user = users::create_user_with_id(&state.pool, user_id, &form.username, &form.email, &password_hash, &suffix)
-        .await
-        .map_err(|e| OidcError::server_error(e.to_string()))?;
+    let base = state.config.issuer();
+    let actor_uri = format!("{}/users/{}", base, form.username);
+    let inbox_url = format!("{}/users/{}/inbox", base, form.username);
+    let outbox_url = format!("{}/users/{}/outbox", base, form.username);
 
-    tracing::info!(user_id = %user.id, handle = %user.handle(), "user registered (register-and-login)");
+    let user = users::create_user_with_id(
+        &state.pool,
+        user_id,
+        &form.username,
+        &form.email,
+        &password_hash,
+        &actor_uri,
+        &inbox_url,
+        &outbox_url,
+    )
+    .await
+    .map_err(|e| OidcError::server_error(e.to_string()))?;
+
+    tracing::info!(user_id = %user.id, username = %user.username, "user registered (register-and-login)");
     tracing::debug!(user_id = %user.id, "issuing auth code for new user");
 
     // 6. Issue auth code

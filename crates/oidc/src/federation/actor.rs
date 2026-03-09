@@ -1,4 +1,4 @@
-//! GET /users/:handle — ActivityPub Actor profile
+//! GET /users/:username — ActivityPub Actor profile
 
 use axum::{
     extract::{Path, State},
@@ -12,25 +12,25 @@ use idp_db::repos::users;
 
 use crate::{AppState, OidcError};
 
-/// GET /users/:handle
+/// GET /users/:username
 ///
 /// Returns an ActivityPub `Person` actor document.
-/// Responds to both `text/html` and `application/activity+json` Accept headers.
-#[tracing::instrument(skip_all, fields(handle = %handle))]
+#[tracing::instrument(skip_all, fields(username = %username))]
 pub async fn get_actor(
     State(state): State<AppState>,
-    Path(handle): Path<String>,
+    Path(username): Path<String>,
 ) -> Result<Response, OidcError> {
-    let user = users::find_by_handle(&state.pool, &handle)
+    let user = users::find_by_username(&state.pool, &username)
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?
         .ok_or_else(|| OidcError::not_found("User not found"))?;
 
     let base = state.config.issuer();
+    let display_name = user.display_name.as_deref().unwrap_or(&user.username);
     let actor = Actor::person(
         &base,
-        &user.handle(),
         &user.username,
+        display_name,
         &state.keypair.public_key_pem,
     );
 

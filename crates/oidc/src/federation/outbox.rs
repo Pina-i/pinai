@@ -1,6 +1,6 @@
-//! GET /users/:handle/outbox
-//! GET /users/:handle/followers
-//! GET /users/:handle/following
+//! GET /users/:username/outbox
+//! GET /users/:username/followers
+//! GET /users/:username/following
 
 use axum::{
     extract::{Path, State},
@@ -11,88 +11,80 @@ use axum::{
 use serde_json::json;
 
 use activitypub::OrderedCollection;
-use idp_db::repos::{follows, users};
+use idp_db::repos::{friendships, users};
 
 use crate::{AppState, OidcError};
 
-/// GET /users/:handle/outbox
-#[tracing::instrument(skip_all, fields(handle = %handle))]
+/// GET /users/:username/outbox
+#[tracing::instrument(skip_all, fields(username = %username))]
 pub async fn get_outbox(
     State(state): State<AppState>,
-    Path(handle): Path<String>,
+    Path(username): Path<String>,
 ) -> Result<Response, OidcError> {
-    let user = users::find_by_handle(&state.pool, &handle)
+    let user = users::find_by_username(&state.pool, &username)
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?
         .ok_or_else(|| OidcError::not_found("User not found"))?;
 
     let base = state.config.issuer();
-    let outbox_url = format!("{}/users/{}/outbox", base, user.handle());
+    let outbox_url = format!("{}/users/{}/outbox", base, user.username);
 
     // Empty outbox for now — activities will be appended in future phases.
     let collection = OrderedCollection::new(&outbox_url, 0, vec![]);
     ap_response(Json(collection))
 }
 
-/// GET /users/:handle/followers
-#[tracing::instrument(skip_all, fields(handle = %handle))]
+/// GET /users/:username/followers
+#[tracing::instrument(skip_all, fields(username = %username))]
 pub async fn get_followers(
     State(state): State<AppState>,
-    Path(handle): Path<String>,
+    Path(username): Path<String>,
 ) -> Result<Response, OidcError> {
-    let user = users::find_by_handle(&state.pool, &handle)
+    let user = users::find_by_username(&state.pool, &username)
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?
         .ok_or_else(|| OidcError::not_found("User not found"))?;
 
     let base = state.config.issuer();
-    let followers_url = format!("{}/users/{}/followers", base, user.handle());
+    let followers_url = format!("{}/users/{}/followers", base, user.username);
 
-    let rows = follows::get_followers(&state.pool, user.id)
+    // In the friendship model, "followers" = people who have me as a friend.
+    // We can approximate this with the friends list (symmetric friendships).
+    let friends = friendships::get_friends(&state.pool, user.id)
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?;
 
-    let mut items: Vec<serde_json::Value> = Vec::with_capacity(rows.len());
-    for row in &rows {
-        if let Some(u) = users::find_by_id(&state.pool, row.follower_id)
-            .await
-            .map_err(|e| OidcError::server_error(e.to_string()))?
-        {
-            items.push(json!(format!("{}/users/{}", base, u.handle())));
-        }
-    }
+    let items: Vec<serde_json::Value> = friends
+        .iter()
+        .map(|f| json!(f.friend_actor_uri))
+        .collect();
 
     let collection = OrderedCollection::new(&followers_url, items.len() as i64, items);
     ap_response(Json(collection))
 }
 
-/// GET /users/:handle/following
-#[tracing::instrument(skip_all, fields(handle = %handle))]
+/// GET /users/:username/following
+#[tracing::instrument(skip_all, fields(username = %username))]
 pub async fn get_following(
     State(state): State<AppState>,
-    Path(handle): Path<String>,
+    Path(username): Path<String>,
 ) -> Result<Response, OidcError> {
-    let user = users::find_by_handle(&state.pool, &handle)
+    let user = users::find_by_username(&state.pool, &username)
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?
         .ok_or_else(|| OidcError::not_found("User not found"))?;
 
     let base = state.config.issuer();
-    let following_url = format!("{}/users/{}/following", base, user.handle());
+    let following_url = format!("{}/users/{}/following", base, user.username);
 
-    let rows = follows::get_following(&state.pool, user.id)
+    let friends = friendships::get_friends(&state.pool, user.id)
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?;
 
-    let mut items: Vec<serde_json::Value> = Vec::with_capacity(rows.len());
-    for row in &rows {
-        if let Some(u) = users::find_by_id(&state.pool, row.following_id)
-            .await
-            .map_err(|e| OidcError::server_error(e.to_string()))?
-        {
-            items.push(json!(format!("{}/users/{}", base, u.handle())));
-        }
-    }
+    let items: Vec<serde_json::Value> = friends
+        .iter()
+        .map(|f| json!(f.friend_actor_uri))
+        .collect();
 
     let collection = OrderedCollection::new(&following_url, items.len() as i64, items);
     ap_response(Json(collection))

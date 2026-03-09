@@ -13,7 +13,6 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use idp_db::models::handle_from_address;
 use idp_db::repos::{messages, users};
 use jwt_utils::validate_access_token;
 
@@ -135,8 +134,11 @@ async fn handle_client_message(state: &AppState, sender_id: Uuid, msg: WsClientM
                 }
             };
 
-            let recipient_handle = handle_from_address(&payload.recipient_address);
-            let recipient = match users::find_by_handle(&state.pool, recipient_handle).await {
+            // Parse recipient address: "@username@domain" or "username@domain" or bare "username"
+            let address = payload.recipient_address.strip_prefix('@').unwrap_or(&payload.recipient_address);
+            let username = address.split('@').next().unwrap_or(address);
+
+            let recipient = match users::find_by_username(&state.pool, username).await {
                 Ok(Some(u)) => u,
                 _ => {
                     warn!(address = %payload.recipient_address, "recipient not found");
@@ -151,7 +153,7 @@ async fn handle_client_message(state: &AppState, sender_id: Uuid, msg: WsClientM
             let note_id = format!(
                 "{}/users/{}/notes/{}",
                 state.config.issuer(),
-                sender.handle(),
+                sender.username,
                 Uuid::new_v4(),
             );
 
@@ -174,7 +176,7 @@ async fn handle_client_message(state: &AppState, sender_id: Uuid, msg: WsClientM
             let domain = &state.config.domain;
             let event = WsEvent::NewDm(DmPayload {
                 message_id: msg.id,
-                sender_address: sender.address(domain),
+                sender_address: sender.federated_address(domain),
                 content: msg.content,
                 created_at: msg.created_at,
             });
@@ -185,8 +187,8 @@ async fn handle_client_message(state: &AppState, sender_id: Uuid, msg: WsClientM
             state.hub.send_to_user(&sender_id, event);
 
             info!(
-                sender = %sender.address(domain),
-                recipient = %recipient.address(domain),
+                sender = %sender.federated_address(domain),
+                recipient = %recipient.federated_address(domain),
                 "dm sent via websocket"
             );
         }

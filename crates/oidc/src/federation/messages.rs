@@ -11,7 +11,6 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use idp_db::models::handle_from_address;
 use idp_db::repos::{messages, users};
 
 use crate::ws::events::{DmPayload, WsEvent};
@@ -22,7 +21,7 @@ use super::auth::require_auth;
 
 #[derive(Debug, Deserialize)]
 pub struct SendMessageRequest {
-    /// Recipient's full address, e.g. "alice-A1B2@localhost:8080".
+    /// Recipient's address, e.g. "@alice@idp.example.com" or "alice".
     pub recipient_address: String,
     pub content: String,
 }
@@ -57,8 +56,11 @@ pub async fn send_message(
         .map_err(|e| OidcError::server_error(e.to_string()))?
         .ok_or_else(|| OidcError::server_error("Sender not found"))?;
 
-    let recipient_handle = handle_from_address(&body.recipient_address);
-    let recipient = users::find_by_handle(&state.pool, recipient_handle)
+    // Parse recipient: "@username@domain" or "username@domain" or bare "username"
+    let address = body.recipient_address.strip_prefix('@').unwrap_or(&body.recipient_address);
+    let username = address.split('@').next().unwrap_or(address);
+
+    let recipient = users::find_by_username(&state.pool, username)
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?
         .ok_or_else(|| OidcError::not_found("Recipient not found"))?;
@@ -71,7 +73,7 @@ pub async fn send_message(
     let note_id = format!(
         "{}/users/{}/notes/{}",
         state.config.issuer(),
-        sender.handle(),
+        sender.username,
         Uuid::new_v4(),
     );
 
@@ -90,7 +92,7 @@ pub async fn send_message(
     // Push real-time event to connected WebSocket clients.
     let event = WsEvent::NewDm(DmPayload {
         message_id: msg.id,
-        sender_address: sender.address(domain),
+        sender_address: sender.federated_address(domain),
         content: msg.content.clone(),
         created_at: msg.created_at,
     });
@@ -98,15 +100,15 @@ pub async fn send_message(
     state.hub.send_to_user(&sender_id, event);
 
     tracing::info!(
-        sender = %sender.address(domain),
-        recipient = %recipient.address(domain),
+        sender = %sender.federated_address(domain),
+        recipient = %recipient.federated_address(domain),
         "direct message sent"
     );
 
     Ok((StatusCode::CREATED, Json(MessageResponse {
         id: msg.id,
-        sender_address: sender.address(domain),
-        recipient_address: recipient.address(domain),
+        sender_address: sender.federated_address(domain),
+        recipient_address: recipient.federated_address(domain),
         content: msg.content,
         created_at: msg.created_at,
     })))
@@ -128,8 +130,11 @@ pub async fn get_conversation(
         .map_err(|e| OidcError::server_error(e.to_string()))?
         .ok_or_else(|| OidcError::server_error("Caller not found"))?;
 
-    let other_handle = handle_from_address(&address);
-    let other = users::find_by_handle(&state.pool, other_handle)
+    // Parse address: "@username@domain" or "username@domain" or bare "username"
+    let addr = address.strip_prefix('@').unwrap_or(&address);
+    let username = addr.split('@').next().unwrap_or(addr);
+
+    let other = users::find_by_username(&state.pool, username)
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?
         .ok_or_else(|| OidcError::not_found("User not found"))?;
@@ -143,9 +148,9 @@ pub async fn get_conversation(
         .into_iter()
         .map(|m| {
             let (sender_address, recipient_address) = if m.sender_id == caller_id {
-                (caller.address(domain), other.address(domain))
+                (caller.federated_address(domain), other.federated_address(domain))
             } else {
-                (other.address(domain), caller.address(domain))
+                (other.federated_address(domain), caller.federated_address(domain))
             };
             MessageResponse {
                 id: m.id,
@@ -189,7 +194,7 @@ pub async fn list_conversations(
             .map_err(|e| OidcError::server_error(e.to_string()))?
         {
             items.push(ConversationListItem {
-                other_address: other.address(domain),
+                other_address: other.federated_address(domain),
                 other_username: other.username,
                 last_message_at: s.last_message_at,
             });

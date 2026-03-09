@@ -16,9 +16,9 @@ use idp_oidc::{
     discovery::{jwks, openid_configuration},
     federation::{
         actor::get_actor,
-        follow::{
-            accept_follow, delete_follow, get_followers, get_following, get_incoming_requests,
-            post_follow, reject_follow, search_users,
+        friendship::{
+            accept_friendship, delete_friendship, get_friends, get_incoming_requests,
+            post_friend_request, reject_friendship, search_users,
         },
         inbox::post_inbox,
         messages::{get_conversation, list_conversations, send_message},
@@ -73,21 +73,20 @@ pub fn build(state: AppState) -> Router {
         .route("/logout", get(get_logout))
 
         // ── ActivityPub actor endpoints ───────────────────────────────────────
-        .route("/users/{handle}", get(get_actor))
-        .route("/users/{handle}/inbox", post(post_inbox))
-        .route("/users/{handle}/outbox", get(get_outbox))
-        .route("/users/{handle}/followers", get(get_ap_followers))
-        .route("/users/{handle}/following", get(get_ap_following))
+        .route("/users/{username}", get(get_actor))
+        .route("/users/{username}/inbox", post(post_inbox))
+        .route("/users/{username}/outbox", get(get_outbox))
+        .route("/users/{username}/followers", get(get_ap_followers))
+        .route("/users/{username}/following", get(get_ap_following))
 
-        // ── Social graph REST API (Bearer-auth) ───────────────────────────────
+        // ── Friendship REST API (Bearer-auth) ───────────────────────────────
         .route("/api/users/search", get(search_users))
-        .route("/api/follow", post(post_follow))
-        .route("/api/follow/incoming", get(get_incoming_requests))
-        .route("/api/follow/{address}", delete(delete_follow))
-        .route("/api/follow/{follow_id}/accept", post(accept_follow))
-        .route("/api/follow/{follow_id}/reject", post(reject_follow))
-        .route("/api/following", get(get_following))
-        .route("/api/followers", get(get_followers))
+        .route("/api/friends/request", post(post_friend_request))
+        .route("/api/friends/incoming", get(get_incoming_requests))
+        .route("/api/friends/{actor_uri}", delete(delete_friendship))
+        .route("/api/friends/{friendship_id}/accept", post(accept_friendship))
+        .route("/api/friends/{friendship_id}/reject", delete(reject_friendship))
+        .route("/api/friends", get(get_friends))
 
         // ── Direct Messages REST API (Bearer-auth) ────────────────────────────
         .route("/api/dm", post(send_message).get(list_conversations))

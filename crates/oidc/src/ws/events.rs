@@ -8,10 +8,10 @@ use uuid::Uuid;
 #[serde(rename_all = "snake_case")]
 pub enum WsEvent {
     NewDm(DmPayload),
-    FollowRequest(FollowPayload),
-    FollowAccepted(FollowPayload),
-    FollowRejected(FollowPayload),
-    FollowRemoved(FollowPayload),
+    FriendRequest(FriendshipPayload),
+    FriendAccepted(FriendshipPayload),
+    FriendRemoved(FriendshipPayload),
+    FriendProfileUpdated(ProfileUpdatePayload),
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -24,10 +24,19 @@ pub struct DmPayload {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct FollowPayload {
-    pub follow_id: Uuid,
-    pub address: String,
+pub struct FriendshipPayload {
+    pub friendship_id: Uuid,
+    pub actor_uri: String,
     pub username: String,
+    pub display_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfileUpdatePayload {
+    pub actor_uri: String,
+    pub display_name: Option<String>,
+    pub avatar_url: Option<String>,
 }
 
 /// Client-to-server messages received over WebSocket.
