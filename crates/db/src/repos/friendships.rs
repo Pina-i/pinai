@@ -66,7 +66,7 @@ pub async fn get_friends(
     sqlx::query_as::<_, FriendListEntry>(
         r#"
         SELECT
-          COALESCE(u.username,     ra.username)     AS username,
+          u.username                               AS username,
           COALESCE(u.display_name, ra.display_name) AS display_name,
           f.friend_avatar_url                       AS avatar_url,
           f.friend_actor_uri,

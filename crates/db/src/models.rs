@@ -67,7 +67,6 @@ pub struct UserInfo {
 pub struct RemoteActor {
     pub id: Uuid,
     pub actor_uri: String,
-    pub username: String,
     pub instance: String,
     pub display_name: Option<String>,
     pub avatar_url: Option<String>,

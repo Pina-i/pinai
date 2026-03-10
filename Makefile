@@ -1,7 +1,7 @@
 SHELL := bash
 .SHELLFLAGS := -c
 
-.PHONY: alice bob alice-docker bob-docker alice-down bob-down
+.PHONY: alice bob alice-docker bob-docker alice-docker-win bob-docker-win alice-down bob-down
 
 # ── Local dev (cargo run) ─────────────────────────────────────────────────────
 
@@ -20,6 +20,18 @@ alice-docker:
 bob-docker:
 	cp docker/.env.bob docker/.env
 	docker compose -f docker/docker-compose.yml --project-name pinai-bob up -d --build
+
+# ── Docker (Windows / Docker Desktop) ────────────────────────────────────────
+
+alice-docker-win:
+	cp docker/.env.alice docker/.env
+	docker compose -f docker/docker-compose-win.yml --project-name pinai-alice up -d --build
+
+bob-docker-win:
+	cp docker/.env.bob docker/.env
+	docker compose -f docker/docker-compose-win.yml --project-name pinai-bob up -d --build
+
+# ── Teardown ──────────────────────────────────────────────────────────────────
 
 alice-down:
 	docker compose -f docker/docker-compose.yml --project-name pinai-alice down
