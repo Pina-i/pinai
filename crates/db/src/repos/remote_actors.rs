@@ -6,17 +6,15 @@ use crate::models::RemoteActor;
 pub async fn upsert(
     pool: &PgPool,
     actor_uri: &str,
-    username: &str,
     instance: &str,
     display_name: Option<&str>,
     avatar_url: Option<&str>,
 ) -> Result<RemoteActor, sqlx::Error> {
     sqlx::query_as::<_, RemoteActor>(
         r#"
-        INSERT INTO remote_actors (actor_uri, username, instance, display_name, avatar_url)
-        VALUES ($1, $2, $3, $4, $5)
+        INSERT INTO remote_actors (actor_uri, instance, display_name, avatar_url)
+        VALUES ($1, $2, $3, $4)
         ON CONFLICT (actor_uri) DO UPDATE SET
-            username = EXCLUDED.username,
             display_name = EXCLUDED.display_name,
             avatar_url = EXCLUDED.avatar_url,
             fetched_at = now(),
@@ -25,7 +23,6 @@ pub async fn upsert(
         "#,
     )
     .bind(actor_uri)
-    .bind(username)
     .bind(instance)
     .bind(display_name)
     .bind(avatar_url)
@@ -47,23 +44,20 @@ pub async fn find_by_actor_uri(
 pub async fn update_profile(
     pool: &PgPool,
     actor_uri: &str,
-    username: Option<&str>,
     display_name: Option<&str>,
     avatar_url: Option<&str>,
 ) -> Result<Option<RemoteActor>, sqlx::Error> {
     sqlx::query_as::<_, RemoteActor>(
         r#"
         UPDATE remote_actors
-        SET username     = COALESCE($2, username),
-            display_name = $3,
-            avatar_url   = $4,
+        SET display_name = $2,
+            avatar_url   = $3,
             updated_at   = now()
         WHERE actor_uri = $1
         RETURNING *
         "#,
     )
     .bind(actor_uri)
-    .bind(username)
     .bind(display_name)
     .bind(avatar_url)
     .fetch_optional(pool)

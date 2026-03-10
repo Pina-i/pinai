@@ -42,11 +42,12 @@ pub async fn get_webfinger(
         .map_err(|e| OidcError::server_error(e.to_string()))?
         .ok_or_else(|| OidcError::not_found("User not found"))?;
 
-    let base = state.config.issuer();
-    let actor_url = format!("{}/users/{}", base, user.username);
+    let actor_url = user.actor_uri
+        .as_deref()
+        .ok_or_else(|| OidcError::server_error("User has no actor_uri"))?;
     let subject = format!("acct:{}@{}", user.username, state.config.domain);
 
-    let wf = WebFingerResponse::for_actor(&subject, &actor_url);
+    let wf = WebFingerResponse::for_actor(&subject, actor_url);
 
     let mut response = Json(wf).into_response();
     response.headers_mut().insert(

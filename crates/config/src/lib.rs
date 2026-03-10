@@ -79,9 +79,12 @@ impl Config {
             && self.storage_secret_key.is_some()
     }
 
-    /// The OIDC issuer URL. Uses http:// for localhost (dev), https:// otherwise.
+    /// The OIDC issuer URL. Uses http:// for localhost/dev domains, https:// otherwise.
     pub fn issuer(&self) -> String {
-        if self.domain.starts_with("localhost") || self.domain.starts_with("127.") {
+        let is_dev = self.domain.starts_with("localhost")
+            || self.domain.starts_with("127.")
+            || self.domain.starts_with("host.docker.internal");
+        if is_dev {
             format!("http://{}", self.domain)
         } else {
             format!("https://{}", self.domain)

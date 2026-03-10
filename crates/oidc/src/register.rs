@@ -85,9 +85,10 @@ pub async fn post_register(
     // 5. Derive federation URIs and insert user
     let user_id = uuid::Uuid::new_v4();
     let base = state.config.issuer();
-    let actor_uri = format!("{}/users/{}", base, body.username);
-    let inbox_url = format!("{}/users/{}/inbox", base, body.username);
-    let outbox_url = format!("{}/users/{}/outbox", base, body.username);
+    let slug = format!("{}-{}", body.username, nanoid::nanoid!(5));
+    let actor_uri = format!("{}/users/{}", base, slug);
+    let inbox_url = format!("{}/users/{}/inbox", base, slug);
+    let outbox_url = format!("{}/users/{}/outbox", base, slug);
 
     let user = users::create_user_with_id(
         &state.pool,
@@ -174,9 +175,10 @@ pub async fn post_register_and_login(
     // 5. Derive federation URIs and create user
     let user_id = uuid::Uuid::new_v4();
     let base = state.config.issuer();
-    let actor_uri = format!("{}/users/{}", base, form.username);
-    let inbox_url = format!("{}/users/{}/inbox", base, form.username);
-    let outbox_url = format!("{}/users/{}/outbox", base, form.username);
+    let slug = format!("{}-{}", form.username, nanoid::nanoid!(5));
+    let actor_uri = format!("{}/users/{}", base, slug);
+    let inbox_url = format!("{}/users/{}/inbox", base, slug);
+    let outbox_url = format!("{}/users/{}/outbox", base, slug);
 
     let user = users::create_user_with_id(
         &state.pool,

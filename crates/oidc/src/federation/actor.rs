@@ -12,24 +12,25 @@ use idp_db::repos::users;
 
 use crate::{AppState, OidcError};
 
-/// GET /users/:username
+/// GET /users/:slug
 ///
 /// Returns an ActivityPub `Person` actor document.
-#[tracing::instrument(skip_all, fields(username = %username))]
+#[tracing::instrument(skip_all, fields(slug = %slug))]
 pub async fn get_actor(
     State(state): State<AppState>,
-    Path(username): Path<String>,
+    Path(slug): Path<String>,
 ) -> Result<Response, OidcError> {
-    let user = users::find_by_username(&state.pool, &username)
+    let base = state.config.issuer();
+    let actor_uri = format!("{}/users/{}", base, slug);
+    let user = users::find_by_actor_uri(&state.pool, &actor_uri)
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?
         .ok_or_else(|| OidcError::not_found("User not found"))?;
 
-    let base = state.config.issuer();
     let display_name = user.display_name.as_deref().unwrap_or(&user.username);
     let actor = Actor::person(
         &base,
-        &user.username,
+        &slug,
         display_name,
         &state.keypair.public_key_pem,
     );

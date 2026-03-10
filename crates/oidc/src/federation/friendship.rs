@@ -181,7 +181,6 @@ async fn friend_request_remote(
     remote_actors::upsert(
         &state.pool,
         &remote.actor_url,
-        remote.preferred_username.as_deref().unwrap_or(username),
         domain,
         remote.display_name.as_deref(),
         remote.avatar_url.as_deref(),
@@ -458,14 +457,10 @@ async fn resolve_actor_name(state: &AppState, actor_uri: &str) -> (String, Optio
     if let Ok(Some(user)) = users::find_by_actor_uri(&state.pool, actor_uri).await {
         return (user.username, user.display_name);
     }
-    if let Ok(Some(ra)) = remote_actors::find_by_actor_uri(&state.pool, actor_uri).await {
-        return (ra.username, ra.display_name);
-    }
-    // Fallback: extract username from actor_uri path.
-    let username = actor_uri
-        .rsplit('/')
-        .next()
-        .unwrap_or("unknown")
-        .to_string();
-    (username, None)
+    let display_name = remote_actors::find_by_actor_uri(&state.pool, actor_uri).await
+        .ok()
+        .flatten()
+        .and_then(|ra| ra.display_name);
+    let username = actor_uri.rsplit('/').next().unwrap_or("unknown").to_string();
+    (username, display_name)
 }

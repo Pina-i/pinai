@@ -22,16 +22,17 @@ use idp_db::repos::{friendships, messages, remote_actors, users};
 use crate::ws::events::{DmPayload, FriendshipPayload, ProfileUpdatePayload, WsEvent};
 use crate::{AppState, OidcError};
 
-/// POST /users/:username/inbox
-#[tracing::instrument(skip_all, fields(username = %username))]
+/// POST /users/:slug/inbox
+#[tracing::instrument(skip_all, fields(slug = %slug))]
 pub async fn post_inbox(
     State(state): State<AppState>,
-    Path(username): Path<String>,
+    Path(slug): Path<String>,
     _headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Result<StatusCode, OidcError> {
     // 1. Resolve the inbox owner.
-    let recipient = users::find_by_username(&state.pool, &username)
+    let actor_uri = format!("{}/users/{}", state.config.issuer(), slug);
+    let recipient = users::find_by_actor_uri(&state.pool, &actor_uri)
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?
         .ok_or_else(|| OidcError::not_found("User not found"))?;
@@ -137,7 +138,6 @@ async fn handle_follow(
         remote_actors::upsert(
             &state.pool,
             actor_url,
-            &remote_username,
             &remote_domain,
             display_name.as_deref(),
             None,
@@ -411,9 +411,6 @@ async fn handle_update(state: &AppState, body: &Value) -> Result<(), OidcError> 
         return Ok(());
     }
 
-    let new_username = obj
-        .get("preferredUsername")
-        .and_then(|v| v.as_str());
     let new_display_name = obj
         .get("name")
         .and_then(|v| v.as_str());
@@ -426,7 +423,6 @@ async fn handle_update(state: &AppState, body: &Value) -> Result<(), OidcError> 
     remote_actors::update_profile(
         &state.pool,
         actor_uri,
-        new_username,
         new_display_name,
         new_avatar_url,
     )
@@ -459,15 +455,16 @@ async fn handle_update(state: &AppState, body: &Value) -> Result<(), OidcError> 
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-/// Try to resolve a local actor URL (e.g. `https://base/users/alice`) to a User.
+/// Try to resolve a local actor URL (e.g. `https://base/users/alice-Ab3Kp`) to a User.
 async fn local_actor(
     actor_url: &str,
     base: &str,
     pool: &sqlx::PgPool,
 ) -> Option<idp_db::models::User> {
-    let prefix = format!("{}/users/", base);
-    let username = actor_url.strip_prefix(&prefix)?;
-    users::find_by_username(pool, username)
+    if !actor_url.starts_with(&format!("{}/users/", base)) {
+        return None;
+    }
+    users::find_by_actor_uri(pool, actor_url)
         .await
         .ok()
         .flatten()
@@ -508,9 +505,10 @@ async fn resolve_remote_name(state: &AppState, actor_uri: &str) -> (String, Opti
     if let Ok(Some(user)) = users::find_by_actor_uri(&state.pool, actor_uri).await {
         return (user.username, user.display_name);
     }
-    if let Ok(Some(ra)) = remote_actors::find_by_actor_uri(&state.pool, actor_uri).await {
-        return (ra.username, ra.display_name);
-    }
+    let display_name = remote_actors::find_by_actor_uri(&state.pool, actor_uri).await
+        .ok()
+        .flatten()
+        .and_then(|ra| ra.display_name);
     let username = actor_uri.rsplit('/').next().unwrap_or("unknown").to_string();
-    (username, None)
+    (username, display_name)
 }
