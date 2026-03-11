@@ -88,6 +88,12 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
+    // Connect to Redis (event broker)
+    let broker = idp_broker::RedisBroker::connect(&config.redis_url)
+        .await
+        .map_err(|e| anyhow::anyhow!("redis connection failed: {e}"))?;
+    info!("redis broker connected");
+
     // Build shared state
     let hub = Arc::new(WsHub::new());
     let state = AppState {
@@ -97,6 +103,7 @@ async fn main() -> anyhow::Result<()> {
         cookie_key,
         storage,
         hub,
+        broker: Arc::new(broker),
     };
 
     // Build the Axum router

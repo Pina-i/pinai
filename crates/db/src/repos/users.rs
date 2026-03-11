@@ -6,6 +6,7 @@ use crate::models::User;
 pub async fn create_user(
     pool: &PgPool,
     username: &str,
+    display_name: &str,
     email: &str,
     password_hash: &str,
     actor_uri: &str,
@@ -15,7 +16,7 @@ pub async fn create_user(
     sqlx::query_as::<_, User>(
         r#"
         INSERT INTO users (username, email, password_hash, actor_uri, inbox_url, outbox_url, display_name)
-        VALUES ($1, $2, $3, $4, $5, $6, $1)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         RETURNING *
         "#,
     )
@@ -25,6 +26,7 @@ pub async fn create_user(
     .bind(actor_uri)
     .bind(inbox_url)
     .bind(outbox_url)
+    .bind(display_name)
     .fetch_one(pool)
     .await
 }
@@ -34,6 +36,7 @@ pub async fn create_user_with_id(
     pool: &PgPool,
     id: Uuid,
     username: &str,
+    display_name: &str,
     email: &str,
     password_hash: &str,
     actor_uri: &str,
@@ -43,7 +46,7 @@ pub async fn create_user_with_id(
     sqlx::query_as::<_, User>(
         r#"
         INSERT INTO users (id, username, email, password_hash, actor_uri, inbox_url, outbox_url, display_name)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $2)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         RETURNING *
         "#,
     )
@@ -54,6 +57,7 @@ pub async fn create_user_with_id(
     .bind(actor_uri)
     .bind(inbox_url)
     .bind(outbox_url)
+    .bind(display_name)
     .fetch_one(pool)
     .await
 }

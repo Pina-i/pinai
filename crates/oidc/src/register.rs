@@ -30,6 +30,7 @@ pub struct RegisterRequest {
 pub struct RegisterResponse {
     pub id: String,
     pub username: String,
+    pub display_name: String,
     pub address: String,
     pub email: String,
 }
@@ -51,16 +52,7 @@ pub async fn post_register(
         return Err(OidcError::invalid_request("password must be at least 8 characters"));
     }
 
-    // 2. Check for existing username
-    if users::find_by_username(&state.pool, &body.username)
-        .await
-        .map_err(|e| OidcError::server_error(e.to_string()))?
-        .is_some()
-    {
-        return Err(OidcError::invalid_request("Username already taken"));
-    }
-
-    // 3. Check for existing email
+    // 2. Check for existing email
     if users::find_by_email(&state.pool, &body.email)
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?
@@ -69,7 +61,7 @@ pub async fn post_register(
         return Err(OidcError::invalid_request("Email already registered"));
     }
 
-    // 4. Hash password with Argon2id (secure params: m=65536, t=3, p=4)
+    // 3. Hash password with Argon2id (secure params: m=65536, t=3, p=4)
     let salt = SaltString::generate(&mut OsRng);
     let argon2 = Argon2::new(
         argon2::Algorithm::Argon2id,
@@ -82,18 +74,20 @@ pub async fn post_register(
         .map_err(|_| OidcError::server_error("Failed to hash password"))?
         .to_string();
 
-    // 5. Derive federation URIs and insert user
+    // 4. Generate username (user input + NanoID suffix) and derive federation URIs
+    let display_name = &body.username;
+    let username = format!("{}_{}", display_name, nanoid::nanoid!(5));
     let user_id = uuid::Uuid::new_v4();
     let base = state.config.issuer();
-    let slug = format!("{}-{}", body.username, nanoid::nanoid!(5));
-    let actor_uri = format!("{}/users/{}", base, slug);
-    let inbox_url = format!("{}/users/{}/inbox", base, slug);
-    let outbox_url = format!("{}/users/{}/outbox", base, slug);
+    let actor_uri = format!("{}/users/{}", base, username);
+    let inbox_url = format!("{}/users/{}/inbox", base, username);
+    let outbox_url = format!("{}/users/{}/outbox", base, username);
 
     let user = users::create_user_with_id(
         &state.pool,
         user_id,
-        &body.username,
+        &username,
+        display_name,
         &body.email,
         &password_hash,
         &actor_uri,
@@ -112,6 +106,7 @@ pub async fn post_register(
             id: user.id.to_string(),
             address,
             username: user.username,
+            display_name: user.display_name.unwrap_or_default(),
             email: user.email,
         }),
     ))
@@ -133,14 +128,7 @@ pub async fn post_register_and_login(
         return Ok(register_error_redirect(&state.config.frontend_url, &form, "Password must be at least 8 characters"));
     }
 
-    // 2. Check uniqueness
-    if users::find_by_username(&state.pool, &form.username)
-        .await
-        .map_err(|e| OidcError::server_error(e.to_string()))?
-        .is_some()
-    {
-        return Ok(register_error_redirect(&state.config.frontend_url, &form, "Username already taken"));
-    }
+    // 2. Check email uniqueness
     if users::find_by_email(&state.pool, &form.email)
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?
@@ -172,18 +160,20 @@ pub async fn post_register_and_login(
         .map_err(|_| OidcError::server_error("Failed to hash password"))?
         .to_string();
 
-    // 5. Derive federation URIs and create user
+    // 5. Generate username (user input + NanoID suffix) and derive federation URIs
+    let display_name = &form.username;
+    let username = format!("{}_{}", display_name, nanoid::nanoid!(5));
     let user_id = uuid::Uuid::new_v4();
     let base = state.config.issuer();
-    let slug = format!("{}-{}", form.username, nanoid::nanoid!(5));
-    let actor_uri = format!("{}/users/{}", base, slug);
-    let inbox_url = format!("{}/users/{}/inbox", base, slug);
-    let outbox_url = format!("{}/users/{}/outbox", base, slug);
+    let actor_uri = format!("{}/users/{}", base, username);
+    let inbox_url = format!("{}/users/{}/inbox", base, username);
+    let outbox_url = format!("{}/users/{}/outbox", base, username);
 
     let user = users::create_user_with_id(
         &state.pool,
         user_id,
-        &form.username,
+        &username,
+        display_name,
         &form.email,
         &password_hash,
         &actor_uri,

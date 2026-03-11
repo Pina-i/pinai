@@ -18,6 +18,18 @@ services:
       timeout: 5s
       retries: 10
 
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   rustfs:
     image: rustfs/rustfs:latest
     environment:
@@ -45,6 +57,7 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       JWT_PRIVATE_KEY_PATH: /run/secrets/ed25519.pem
       STORAGE_ENDPOINT: http://rustfs:9000
+      REDIS_URL: redis://redis:6379
       # Use host.docker.internal so cross-IDP federation requests (WebFinger, inbox
       # delivery) exit the container, hit the Windows host, and reach the other IDP
       # via its mapped port. Docker Desktop resolves this hostname automatically.
@@ -58,10 +71,13 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
       rustfs:
         condition: service_healthy
 
 volumes:
   pgdata:
+  redis-data:
   rustfs-data:
   rustfs-logs:

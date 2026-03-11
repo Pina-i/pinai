@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use axum::extract::FromRef;
 use axum_extra::extract::cookie::Key;
+use idp_broker::EventBroker;
 use idp_config::Config;
 use idp_db::PgPool;
 use idp_storage::StorageClient;
@@ -21,6 +22,8 @@ pub struct AppState {
     pub storage: Option<StorageClient>,
     /// WebSocket connection hub for real-time event delivery.
     pub hub: Arc<WsHub>,
+    /// Event broker for durable event delivery (Redis Streams) and presence (pub-sub).
+    pub broker: Arc<dyn EventBroker>,
 }
 
 /// Allow `SignedCookieJar` to extract the key from `AppState`.
