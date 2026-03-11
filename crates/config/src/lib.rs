@@ -19,6 +19,10 @@ pub struct Config {
     /// Defaults to localhost dev origins when unset.
     pub cors_origins: Vec<String>,
 
+    // ── Redis (Message Broker) ───────────────────────────────────────────
+    /// Redis connection URL for the event broker (Streams + pub-sub).
+    pub redis_url: String,
+
     // ── Object Storage (S3-compatible) ──────────────────────────────────
     /// Internal S3 endpoint (e.g. "http://rustfs:9000" inside Docker).
     pub storage_endpoint: Option<String>,
@@ -61,6 +65,8 @@ impl Config {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect(),
+            redis_url: std::env::var("REDIS_URL")
+                .unwrap_or_else(|_| "redis://127.0.0.1:6379".into()),
             storage_endpoint: std::env::var("STORAGE_ENDPOINT").ok(),
             storage_access_key: std::env::var("STORAGE_ACCESS_KEY").ok(),
             storage_secret_key: std::env::var("STORAGE_SECRET_KEY").ok(),

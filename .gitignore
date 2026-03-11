@@ -5,3 +5,4 @@ docker/.env.alice
 docker/.env.bob
 docker/.env
 .idea
+.zed

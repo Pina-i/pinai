@@ -19,7 +19,7 @@ use crate::{
 /// Form fields submitted by the login form (POST /login).
 #[derive(Debug, Deserialize)]
 pub struct LoginForm {
-    pub username: String,
+    pub email: String,
     pub password: String,
     // OIDC params passed through as hidden fields
     pub client_id: String,
@@ -32,21 +32,21 @@ pub struct LoginForm {
 }
 
 /// POST /login — validate credentials, issue authorization code, and set session cookie.
-#[tracing::instrument(skip_all, fields(username = %form.username, client_id = %form.client_id))]
+#[tracing::instrument(skip_all, fields(email = %form.email, client_id = %form.client_id))]
 pub async fn post_login(
     State(state): State<AppState>,
     jar: SignedCookieJar,
     Form(form): Form<LoginForm>,
 ) -> Result<Response, OidcError> {
-    // 1. Look up the user — redirect back on not found (don't leak whether username exists)
-    let user = match users::find_by_username(&state.pool, &form.username)
+    // 1. Look up the user by email — redirect back on not found (don't leak whether email exists)
+    let user = match users::find_by_email(&state.pool, &form.email)
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?
     {
         Some(u) => u,
         None => {
-            tracing::warn!("login failed: unknown username");
-            return Ok(login_error_redirect(&state.config.frontend_url, &form, "Invalid username or password"));
+            tracing::warn!("login failed: unknown email");
+            return Ok(login_error_redirect(&state.config.frontend_url, &form, "Invalid email or password"));
         }
     };
 
@@ -59,7 +59,7 @@ pub async fn post_login(
         .is_err()
     {
         tracing::warn!("login failed: incorrect password");
-        return Ok(login_error_redirect(&state.config.frontend_url, &form, "Invalid username or password"));
+        return Ok(login_error_redirect(&state.config.frontend_url, &form, "Invalid email or password"));
     }
 
     // 3. Validate the code_challenge_method (defense in depth)

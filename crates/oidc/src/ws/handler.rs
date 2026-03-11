@@ -23,9 +23,13 @@ use crate::AppState;
 #[derive(Debug, Deserialize)]
 pub struct WsQuery {
     token: String,
+    /// Optional: last event ID received by the client.
+    /// When provided, the server replays all events after this ID from the
+    /// broker stream before switching to live delivery.
+    last_event_id: Option<String>,
 }
 
-/// GET /ws?token=<jwt> — validate the token, then upgrade to WebSocket.
+/// GET /ws?token=<jwt>&last_event_id=<id> — validate the token, then upgrade to WebSocket.
 pub async fn ws_upgrade(
     State(state): State<AppState>,
     Query(params): Query<WsQuery>,
@@ -47,17 +51,46 @@ pub async fn ws_upgrade(
         }
     };
 
-    ws.on_upgrade(move |socket| handle_socket(socket, user_id, state))
+    let last_event_id = params.last_event_id;
+    ws.on_upgrade(move |socket| handle_socket(socket, user_id, last_event_id, state))
 }
 
 /// Runs after the WebSocket handshake completes.
-async fn handle_socket(socket: WebSocket, user_id: Uuid, state: AppState) {
+async fn handle_socket(
+    socket: WebSocket,
+    user_id: Uuid,
+    last_event_id: Option<String>,
+    state: AppState,
+) {
     let (rx, _handle) = state.hub.subscribe(user_id);
-    let (ws_sink, ws_stream) = socket.split();
+    let (mut ws_sink, ws_stream) = socket.split();
 
     info!(%user_id, "websocket connected");
 
-    // Task: hub events → WebSocket out
+    // Replay missed events from broker if the client provided a last_event_id
+    if let Some(ref last_id) = last_event_id {
+        match state.broker.read_after(user_id, last_id).await {
+            Ok(entries) => {
+                let count = entries.len();
+                for entry in entries {
+                    // Wrap payload with the stream entry ID so the client can track position
+                    let envelope = format!(r#"{{"id":"{}","event":{}}}"#, entry.id, entry.payload);
+                    if ws_sink.send(Message::Text(envelope.into())).await.is_err() {
+                        info!(%user_id, "websocket closed during catch-up replay");
+                        return;
+                    }
+                }
+                if count > 0 {
+                    info!(%user_id, count, "replayed missed events from broker");
+                }
+            }
+            Err(e) => {
+                warn!(%user_id, "broker catch-up failed: {e}");
+            }
+        }
+    }
+
+    // Task: hub events → WebSocket out (live delivery)
     let send_task = tokio::spawn(forward_events(rx, ws_sink));
 
     // Task: WebSocket in → handle client messages
@@ -181,7 +214,28 @@ async fn handle_client_message(state: &AppState, sender_id: Uuid, msg: WsClientM
                 created_at: msg.created_at,
             });
 
-            // Push to recipient
+            // Publish to broker for durability (catch-up on reconnect)
+            let event_json = match serde_json::to_string(&event) {
+                Ok(j) => j,
+                Err(e) => {
+                    warn!(%sender_id, "failed to serialize dm event: {e}");
+                    return;
+                }
+            };
+            // Publish to both users' streams (fire-and-forget, don't block delivery)
+            let broker = state.broker.clone();
+            let recipient_id = recipient.id;
+            let json_clone = event_json.clone();
+            tokio::spawn(async move {
+                if let Err(e) = broker.publish(recipient_id, &json_clone).await {
+                    warn!(%recipient_id, "broker publish failed: {e}");
+                }
+                if let Err(e) = broker.publish(sender_id, &event_json).await {
+                    warn!(%sender_id, "broker publish failed: {e}");
+                }
+            });
+
+            // Push to recipient (immediate local delivery)
             state.hub.send_to_user(&recipient.id, event.clone());
             // Push to sender (multi-device echo)
             state.hub.send_to_user(&sender_id, event);
