@@ -3,7 +3,7 @@
 //! All endpoints require a valid Bearer access token.
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     Json,
 };
@@ -29,9 +29,12 @@ pub struct SendMessageRequest {
 #[derive(Debug, Serialize)]
 pub struct MessageResponse {
     pub id: Uuid,
-    pub sender_address: String,
-    pub recipient_address: String,
+    pub sender_actor_uri: String,
+    pub recipient_actor_uri: String,
     pub content: String,
+    pub activity_uri: String,
+    pub federation_status: String,
+    #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
 }
 
@@ -56,6 +59,9 @@ pub async fn send_message(
         .map_err(|e| OidcError::server_error(e.to_string()))?
         .ok_or_else(|| OidcError::server_error("Sender not found"))?;
 
+    let sender_actor_uri = sender.actor_uri.as_deref()
+        .ok_or_else(|| OidcError::server_error("Sender has no actor_uri"))?;
+
     // Parse recipient: "@username@domain" or "username@domain" or bare "username"
     let address = body.recipient_address.strip_prefix('@').unwrap_or(&body.recipient_address);
     let username = address.split('@').next().unwrap_or(address);
@@ -69,9 +75,12 @@ pub async fn send_message(
         return Err(OidcError::invalid_request("Cannot send a DM to yourself"));
     }
 
-    // Build an AP Note ID for federation traceability.
-    let note_id = format!(
-        "{}/users/{}/notes/{}",
+    let recipient_actor_uri = recipient.actor_uri.as_deref()
+        .ok_or_else(|| OidcError::server_error("Recipient has no actor_uri"))?;
+
+    // Build an ActivityPub activity URI for federation traceability.
+    let activity_uri = format!(
+        "{}/users/{}/activities/{}",
         state.config.issuer(),
         sender.username,
         Uuid::new_v4(),
@@ -79,10 +88,10 @@ pub async fn send_message(
 
     let msg = messages::create_message(
         &state.pool,
-        sender_id,
-        recipient.id,
+        sender_actor_uri,
+        recipient_actor_uri,
         &body.content,
-        Some(&note_id),
+        &activity_uri,
     )
     .await
     .map_err(|e| OidcError::server_error(e.to_string()))?;
@@ -96,6 +105,22 @@ pub async fn send_message(
         content: msg.content.clone(),
         created_at: msg.created_at,
     });
+
+    // Publish to broker for durability
+    if let Ok(json) = serde_json::to_string(&event) {
+        let broker = state.broker.clone();
+        let rid = recipient.id;
+        let json_clone = json.clone();
+        tokio::spawn(async move {
+            if let Err(e) = broker.publish(rid, &json_clone).await {
+                tracing::warn!(%rid, "broker publish failed: {e}");
+            }
+            if let Err(e) = broker.publish(sender_id, &json).await {
+                tracing::warn!(%sender_id, "broker publish failed: {e}");
+            }
+        });
+    }
+
     state.hub.send_to_user(&recipient.id, event.clone());
     state.hub.send_to_user(&sender_id, event);
 
@@ -107,21 +132,35 @@ pub async fn send_message(
 
     Ok((StatusCode::CREATED, Json(MessageResponse {
         id: msg.id,
-        sender_address: sender.federated_address(domain),
-        recipient_address: recipient.federated_address(domain),
+        sender_actor_uri: msg.sender_actor_uri,
+        recipient_actor_uri: msg.recipient_actor_uri,
         content: msg.content,
+        activity_uri: msg.activity_uri,
+        federation_status: msg.federation_status,
         created_at: msg.created_at,
     })))
 }
 
 // ─── Get conversation ─────────────────────────────────────────────────────────
 
-/// GET /api/dm/:address — messages with a specific user (oldest-first, last 100)
+#[derive(Debug, Deserialize)]
+pub struct ConversationQuery {
+    /// Keyset cursor: created_at of the oldest message from the previous page (RFC 3339).
+    pub cursor_created_at: Option<OffsetDateTime>,
+    /// Keyset cursor: id of the oldest message from the previous page.
+    pub cursor_id: Option<Uuid>,
+    /// Page size (default 50, max 100).
+    pub limit: Option<i64>,
+}
+
+/// GET /api/dm/:address?cursor_created_at=...&cursor_id=...&limit=50
+/// Conversation with a specific user, newest-first with keyset pagination.
 #[tracing::instrument(skip_all, fields(address = %address))]
 pub async fn get_conversation(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(address): Path<String>,
+    Query(query): Query<ConversationQuery>,
 ) -> Result<Json<Vec<MessageResponse>>, OidcError> {
     let caller_id = require_auth(&state, &headers).await?;
 
@@ -129,6 +168,9 @@ pub async fn get_conversation(
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?
         .ok_or_else(|| OidcError::server_error("Caller not found"))?;
+
+    let caller_actor_uri = caller.actor_uri.as_deref()
+        .ok_or_else(|| OidcError::server_error("Caller has no actor_uri"))?;
 
     // Parse address: "@username@domain" or "username@domain" or bare "username"
     let addr = address.strip_prefix('@').unwrap_or(&address);
@@ -139,26 +181,39 @@ pub async fn get_conversation(
         .map_err(|e| OidcError::server_error(e.to_string()))?
         .ok_or_else(|| OidcError::not_found("User not found"))?;
 
-    let msgs = messages::get_conversation(&state.pool, caller_id, other.id, 100)
-        .await
-        .map_err(|e| OidcError::server_error(e.to_string()))?;
+    let other_actor_uri = other.actor_uri.as_deref()
+        .ok_or_else(|| OidcError::server_error("User has no actor_uri"))?;
 
-    let domain = &state.config.domain;
+    let limit = query.limit.unwrap_or(50).min(100);
+
+    let msgs = match (query.cursor_created_at, query.cursor_id) {
+        (Some(cursor_ts), Some(cursor_id)) => {
+            messages::get_conversation_before(
+                &state.pool,
+                caller_actor_uri,
+                other_actor_uri,
+                cursor_ts,
+                cursor_id,
+                limit,
+            )
+            .await
+        }
+        _ => {
+            messages::get_conversation(&state.pool, caller_actor_uri, other_actor_uri, limit).await
+        }
+    }
+    .map_err(|e| OidcError::server_error(e.to_string()))?;
+
     let responses = msgs
         .into_iter()
-        .map(|m| {
-            let (sender_address, recipient_address) = if m.sender_id == caller_id {
-                (caller.federated_address(domain), other.federated_address(domain))
-            } else {
-                (other.federated_address(domain), caller.federated_address(domain))
-            };
-            MessageResponse {
-                id: m.id,
-                sender_address,
-                recipient_address,
-                content: m.content,
-                created_at: m.created_at,
-            }
+        .map(|m| MessageResponse {
+            id: m.id,
+            sender_actor_uri: m.sender_actor_uri,
+            recipient_actor_uri: m.recipient_actor_uri,
+            content: m.content,
+            activity_uri: m.activity_uri,
+            federation_status: m.federation_status,
+            created_at: m.created_at,
         })
         .collect();
 
@@ -169,8 +224,8 @@ pub async fn get_conversation(
 
 #[derive(Debug, Serialize)]
 pub struct ConversationListItem {
-    pub other_address: String,
-    pub other_username: String,
+    pub other_actor_uri: String,
+    #[serde(with = "time::serde::rfc3339")]
     pub last_message_at: OffsetDateTime,
 }
 
@@ -182,24 +237,25 @@ pub async fn list_conversations(
 ) -> Result<Json<Vec<ConversationListItem>>, OidcError> {
     let caller_id = require_auth(&state, &headers).await?;
 
-    let summaries = messages::list_conversations(&state.pool, caller_id)
+    let caller = users::find_by_id(&state.pool, caller_id)
+        .await
+        .map_err(|e| OidcError::server_error(e.to_string()))?
+        .ok_or_else(|| OidcError::server_error("Caller not found"))?;
+
+    let caller_actor_uri = caller.actor_uri.as_deref()
+        .ok_or_else(|| OidcError::server_error("Caller has no actor_uri"))?;
+
+    let summaries = messages::list_conversations(&state.pool, caller_actor_uri)
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?;
 
-    let domain = &state.config.domain;
-    let mut items = Vec::with_capacity(summaries.len());
-    for s in summaries {
-        if let Some(other) = users::find_by_id(&state.pool, s.other_user_id)
-            .await
-            .map_err(|e| OidcError::server_error(e.to_string()))?
-        {
-            items.push(ConversationListItem {
-                other_address: other.federated_address(domain),
-                other_username: other.username,
-                last_message_at: s.last_message_at,
-            });
-        }
-    }
+    let items = summaries
+        .into_iter()
+        .map(|s| ConversationListItem {
+            other_actor_uri: s.other_actor_uri,
+            last_message_at: s.last_message_at,
+        })
+        .collect();
 
     Ok(Json(items))
 }

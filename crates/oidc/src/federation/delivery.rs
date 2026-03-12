@@ -7,6 +7,7 @@ use tracing::{debug, warn};
 use crate::{AppState, OidcError};
 
 /// Resolved remote actor with the info needed to deliver activities and cache profiles.
+#[allow(dead_code)]
 pub struct RemoteActor {
     pub actor_url: String,
     pub inbox: String,

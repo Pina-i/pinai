@@ -103,9 +103,12 @@ pub struct FriendListEntry {
 #[derive(Debug, Clone, sqlx::FromRow, Serialize)]
 pub struct DirectMessage {
     pub id: Uuid,
-    pub sender_id: Uuid,
-    pub recipient_id: Uuid,
+    pub sender_actor_uri: String,
+    pub recipient_actor_uri: String,
     pub content: String,
-    pub ap_id: Option<String>,
+    pub activity_uri: String,
+    pub federation_status: String,
     pub created_at: OffsetDateTime,
+    pub edited_at: Option<OffsetDateTime>,
+    pub deleted_at: Option<OffsetDateTime>,
 }

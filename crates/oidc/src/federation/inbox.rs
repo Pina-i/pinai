@@ -54,7 +54,7 @@ pub async fn post_inbox(
         "Accept" => handle_accept(&state, &body).await?,
         "Reject" => handle_reject(&state, &body).await?,
         "Undo" => handle_undo(&state, &body, &recipient).await?,
-        "Create" => handle_create(&state, &body, recipient.id).await?,
+        "Create" => handle_create(&state, &body, &recipient).await?,
         "Update" => handle_update(&state, &body).await?,
         other => {
             tracing::warn!(activity_type = %other, "unhandled activity type in inbox");
@@ -340,7 +340,7 @@ async fn handle_undo(
 async fn handle_create(
     state: &AppState,
     body: &Value,
-    recipient_id: Uuid,
+    recipient: &idp_db::models::User,
 ) -> Result<(), OidcError> {
     let obj = match body.get("object") {
         Some(o) => o,
@@ -362,26 +362,50 @@ async fn handle_create(
         .unwrap_or("")
         .to_string();
 
-    let note_id = obj.get("id").and_then(|v| v.as_str());
     let actor_url = body.get("actor").and_then(|v| v.as_str()).unwrap_or("");
 
-    let base = state.config.issuer();
-    if let Some(sender) = local_actor(actor_url, &base, &state.pool).await {
-        let msg = messages::create_message(&state.pool, sender.id, recipient_id, &content, note_id)
-            .await
-            .map_err(|e| OidcError::server_error(e.to_string()))?;
+    let recipient_actor_uri = recipient.actor_uri.as_deref()
+        .ok_or_else(|| OidcError::server_error("Recipient has no actor_uri"))?;
 
-        let event = WsEvent::NewDm(DmPayload {
-            message_id: msg.id,
-            sender_address: sender.federated_address(&state.config.domain),
-            content: msg.content,
-            created_at: msg.created_at,
+    // activity_uri is the AP activity ID; fall back to the note ID if the activity wrapper has no id
+    let activity_uri = body
+        .get("id")
+        .and_then(|v| v.as_str())
+        .or_else(|| obj.get("id").and_then(|v| v.as_str()))
+        .ok_or_else(|| OidcError::invalid_request("Create activity missing id"))?;
+
+    let msg = messages::create_message(
+        &state.pool,
+        actor_url,
+        recipient_actor_uri,
+        &content,
+        activity_uri,
+    )
+    .await
+    .map_err(|e| OidcError::server_error(e.to_string()))?;
+
+    let event = WsEvent::NewDm(DmPayload {
+        message_id: msg.id,
+        sender_address: actor_url.to_string(),
+        content: msg.content,
+        created_at: msg.created_at,
+    });
+
+    // Publish to broker for durability
+    if let Ok(json) = serde_json::to_string(&event) {
+        let broker = state.broker.clone();
+        let rid = recipient.id;
+        let json_clone = json.clone();
+        tokio::spawn(async move {
+            if let Err(e) = broker.publish(rid, &json_clone).await {
+                tracing::warn!(%rid, "broker publish failed: {e}");
+            }
         });
-        state.hub.send_to_user(&recipient_id, event.clone());
-        state.hub.send_to_user(&sender.id, event);
-
-        tracing::info!(sender = %sender.username, recipient_id = %recipient_id, "DM stored via AP inbox");
     }
+
+    state.hub.send_to_user(&recipient.id, event);
+
+    tracing::info!(sender = %actor_url, recipient = %recipient.username, "DM stored via AP inbox");
     Ok(())
 }
 
