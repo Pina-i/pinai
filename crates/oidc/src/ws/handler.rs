@@ -167,6 +167,14 @@ async fn handle_client_message(state: &AppState, sender_id: Uuid, msg: WsClientM
                 }
             };
 
+            let sender_actor_uri = match sender.actor_uri.as_deref() {
+                Some(uri) => uri,
+                None => {
+                    warn!(%sender_id, "sender has no actor_uri");
+                    return;
+                }
+            };
+
             // Parse recipient address: "@username@domain" or "username@domain" or bare "username"
             let address = payload.recipient_address.strip_prefix('@').unwrap_or(&payload.recipient_address);
             let username = address.split('@').next().unwrap_or(address);
@@ -183,8 +191,16 @@ async fn handle_client_message(state: &AppState, sender_id: Uuid, msg: WsClientM
                 return;
             }
 
-            let note_id = format!(
-                "{}/users/{}/notes/{}",
+            let recipient_actor_uri = match recipient.actor_uri.as_deref() {
+                Some(uri) => uri,
+                None => {
+                    warn!(address = %payload.recipient_address, "recipient has no actor_uri");
+                    return;
+                }
+            };
+
+            let activity_uri = format!(
+                "{}/users/{}/activities/{}",
                 state.config.issuer(),
                 sender.username,
                 Uuid::new_v4(),
@@ -192,10 +208,10 @@ async fn handle_client_message(state: &AppState, sender_id: Uuid, msg: WsClientM
 
             let msg = match messages::create_message(
                 &state.pool,
-                sender_id,
-                recipient.id,
+                sender_actor_uri,
+                recipient_actor_uri,
                 &payload.content,
-                Some(&note_id),
+                &activity_uri,
             )
             .await
             {
