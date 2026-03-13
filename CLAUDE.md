@@ -30,7 +30,8 @@ A user's permanent identity is expressed as `alice@idp.alice.com`. This identity
 | Token format | JWT (RS256, Ed25519) |
 | Federation protocol | ActivityPub (W3C standard) |
 | Inter-server auth | HTTP Signatures |
-| Real-time | WebSockets (for DMs) |
+| Real-time | WebSockets (for DMs) + Redis Streams (durable broker) |
+| Message broker | Redis (Streams for durability, pub-sub for presence) |
 | Containerization | Docker / Docker Compose |
 
 ## Related Repositories
@@ -45,21 +46,24 @@ A user's permanent identity is expressed as `alice@idp.alice.com`. This identity
 
 ```
 identity-provider/
-├── Cargo.toml              # workspace root
+├── Cargo.toml              # workspace root (crates: config, db, oidc, server)
 ├── crates/
-│   ├── server/             # main Axum application, entrypoint
+│   ├── server/             # main Axum application, entrypoint + router
 │   ├── oidc/               # OIDC/OAuth2 flows, JWT issuance, JWKS
-│   ├── federation/         # ActivityPub, WebFinger, HTTP Signatures
-│   ├── messaging/          # Friend graph, DMs, WebSocket handlers
+│   │   ├── src/
+│   │   │   ├── federation/ # ActivityPub, WebFinger, inbox, friends, DMs (REST), delivery
+│   │   │   └── ws/         # WebSocket upgrade handler + hub + events + broker
 │   ├── db/                 # SQLx models, migrations, repositories
 │   └── config/             # Configuration loading, env vars
-├── migrations/             # SQLx migrations
+├── migrations/             # SQLx migrations (numbered, applied by idp-db on startup)
 ├── docker/
 │   ├── Dockerfile
 │   └── docker-compose.yml  # Standalone self-hosted deployment
 ├── keys/                   # JWT signing keys (gitignored)
 └── .env.example
 ```
+
+> **Note**: there is no separate `federation/` or `messaging/` crate. All ActivityPub logic, WebSocket handling, DMs, and friend graph live as modules inside the `oidc` crate.
 
 ## Deployment
 
@@ -111,8 +115,12 @@ volumes:
 | `POST /token` | Token exchange endpoint |
 | `GET /userinfo` | UserInfo endpoint |
 | `POST /register` | User self-registration |
-| `GET /inbox/:username` | ActivityPub inbox |
-| `GET /users/:username` | ActivityPub actor profile |
+| `POST /users/:handle/inbox` | ActivityPub inbox (receives Follow/Accept/Create/etc.) |
+| `GET /users/:handle` | ActivityPub actor profile (JSON-LD) |
+| `GET /ws?token=<jwt>` | WebSocket upgrade (DMs + events) |
+| `POST /api/dm` | Send a DM (REST) |
+| `GET /api/dm` | List DM conversations |
+| `GET /api/dm/:address` | Conversation history with paginated keyset cursor |
 
 ## Key Design Decisions
 
@@ -124,6 +132,10 @@ volumes:
 - **Chat servers cache JWKS** with a TTL and refetch on validation failure — design the JWKS endpoint with this in mind
 - **ActivityPub actor == OIDC subject**: The same PostgreSQL row backs both identities — no sync overhead
 - **HTTP Signatures**: Used for all ActivityPub POST deliveries between IdP instances
+- **`remote_actors.inbox_url`**: Cached on first WebFinger resolution; used for direct ActivityPub delivery without re-resolving. `remote_actors::upsert()` uses `COALESCE(EXCLUDED.inbox_url, remote_actors.inbox_url)` so existing cached values are never overwritten by `None`.
+- **Federated address format**: `username@domain` — **no** leading `@`. `User::federated_address(&self, domain)` produces e.g. `alice_xK9mP@idp.alice.com`. Clients receive raw actor URIs in some WS events and normalise to this format client-side via `actorUriToAddress()`.
+- **DM delivery (remote)**: ActivityPub `Create{Note}` is delivered inline via a background `tokio::spawn`, not via `federation_queue`. Cache-first: check `remote_actors.inbox_url` → WebFinger on miss. Sender gets a WS echo; recipient's IdP handles real-time push when it receives the AP `Create` on its inbox.
+- **DM delivery (local)**: message persisted → `hub.send_to_user()` for live connections + `broker.publish()` to Redis Streams for catch-up on reconnect.
 
 ## Federation Trust Model
 
@@ -137,9 +149,9 @@ volumes:
 
 Following the platform-wide phased approach:
 
-- **Phase 3** (this repo starts here): OIDC provider — registration, login, JWT issuance, JWKS, discovery
-- **Phase 4**: Messaging backbone — friend graph, private DMs, WebSocket
-- **Phase 5**: ActivityPub federation — WebFinger, inbox/outbox, Follow/Accept activities, HTTP Signatures
+- **Phase 3** ✅ DONE: OIDC provider — registration, login, JWT issuance, JWKS, discovery, session cookies
+- **Phase 4** ✅ DONE: Messaging backbone — friend graph, private DMs (REST + WS), WebSocket hub + Redis broker
+- **Phase 5** ✅ DONE: ActivityPub federation — WebFinger, inbox/outbox, Follow/Accept/Undo, HTTP Signatures, remote DM delivery
 
 Phases 1–2 belong to `chat-server` and can be developed in parallel.
 
@@ -151,6 +163,8 @@ DOMAIN=idp.alice.com
 JWT_PRIVATE_KEY_PATH=./keys/ed25519.pem
 JWT_KEY_ID=key-2024-01
 PORT=8080
+REDIS_URL=redis://localhost:6379
+COOKIE_SECRET=<64-byte-hex-or-random-string>
 ```
 
 ## Security Constraints

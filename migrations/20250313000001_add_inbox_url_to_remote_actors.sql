@@ -1,0 +1,1 @@
+ALTER TABLE remote_actors ADD COLUMN IF NOT EXISTS inbox_url TEXT;

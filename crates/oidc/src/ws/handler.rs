@@ -13,9 +13,10 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use idp_db::repos::{messages, users};
+use idp_db::repos::{messages, remote_actors, users};
 use jwt_utils::validate_access_token;
 
+use crate::federation::delivery;
 use crate::ws::events::{DmPayload, WsClientMessage, WsEvent};
 use crate::ws::hub::ConnectionHandle;
 use crate::AppState;
@@ -177,90 +178,229 @@ async fn handle_client_message(state: &AppState, sender_id: Uuid, msg: WsClientM
 
             // Parse recipient address: "@username@domain" or "username@domain" or bare "username"
             let address = payload.recipient_address.strip_prefix('@').unwrap_or(&payload.recipient_address);
-            let username = address.split('@').next().unwrap_or(address);
+            let mut parts = address.splitn(2, '@');
+            let username = parts.next().unwrap_or(address);
+            let domain_opt = parts.next();
 
-            let recipient = match users::find_by_username(&state.pool, username).await {
-                Ok(Some(u)) => u,
-                _ => {
-                    warn!(address = %payload.recipient_address, "recipient not found");
+            let is_remote = domain_opt.map_or(false, |d| d != state.config.domain);
+
+            if is_remote {
+                let domain = domain_opt.unwrap();
+                handle_remote_dm(state, sender_id, &sender, sender_actor_uri, username, domain, &payload.content).await;
+            } else {
+                // ── Local delivery ──────────────────────────────────────────
+                let recipient = match users::find_by_username(&state.pool, username).await {
+                    Ok(Some(u)) => u,
+                    _ => {
+                        warn!(address = %payload.recipient_address, "recipient not found");
+                        return;
+                    }
+                };
+
+                if recipient.id == sender_id {
                     return;
                 }
-            };
 
-            if recipient.id == sender_id {
-                return;
+                let recipient_actor_uri = match recipient.actor_uri.as_deref() {
+                    Some(uri) => uri,
+                    None => {
+                        warn!(address = %payload.recipient_address, "recipient has no actor_uri");
+                        return;
+                    }
+                };
+
+                let activity_uri = format!(
+                    "{}/users/{}/activities/{}",
+                    state.config.issuer(),
+                    sender.username,
+                    Uuid::new_v4(),
+                );
+
+                let msg = match messages::create_message(
+                    &state.pool,
+                    sender_actor_uri,
+                    recipient_actor_uri,
+                    &payload.content,
+                    &activity_uri,
+                )
+                .await
+                {
+                    Ok(m) => m,
+                    Err(e) => {
+                        warn!(%sender_id, "failed to create dm: {e}");
+                        return;
+                    }
+                };
+
+                let local_domain = &state.config.domain;
+                let event = WsEvent::NewDm(DmPayload {
+                    message_id: msg.id,
+                    sender_address: sender.federated_address(local_domain),
+                    content: msg.content,
+                    created_at: msg.created_at,
+                });
+
+                let event_json = match serde_json::to_string(&event) {
+                    Ok(j) => j,
+                    Err(e) => {
+                        warn!(%sender_id, "failed to serialize dm event: {e}");
+                        return;
+                    }
+                };
+                let broker = state.broker.clone();
+                let recipient_id = recipient.id;
+                let json_clone = event_json.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = broker.publish(recipient_id, &json_clone).await {
+                        warn!(%recipient_id, "broker publish failed: {e}");
+                    }
+                    if let Err(e) = broker.publish(sender_id, &event_json).await {
+                        warn!(%sender_id, "broker publish failed: {e}");
+                    }
+                });
+
+                state.hub.send_to_user(&recipient.id, event.clone());
+                state.hub.send_to_user(&sender_id, event);
+
+                info!(
+                    sender = %sender.federated_address(local_domain),
+                    recipient = %recipient.federated_address(local_domain),
+                    "dm sent via websocket"
+                );
             }
-
-            let recipient_actor_uri = match recipient.actor_uri.as_deref() {
-                Some(uri) => uri,
-                None => {
-                    warn!(address = %payload.recipient_address, "recipient has no actor_uri");
-                    return;
-                }
-            };
-
-            let activity_uri = format!(
-                "{}/users/{}/activities/{}",
-                state.config.issuer(),
-                sender.username,
-                Uuid::new_v4(),
-            );
-
-            let msg = match messages::create_message(
-                &state.pool,
-                sender_actor_uri,
-                recipient_actor_uri,
-                &payload.content,
-                &activity_uri,
-            )
-            .await
-            {
-                Ok(m) => m,
-                Err(e) => {
-                    warn!(%sender_id, "failed to create dm: {e}");
-                    return;
-                }
-            };
-
-            let domain = &state.config.domain;
-            let event = WsEvent::NewDm(DmPayload {
-                message_id: msg.id,
-                sender_address: sender.federated_address(domain),
-                content: msg.content,
-                created_at: msg.created_at,
-            });
-
-            // Publish to broker for durability (catch-up on reconnect)
-            let event_json = match serde_json::to_string(&event) {
-                Ok(j) => j,
-                Err(e) => {
-                    warn!(%sender_id, "failed to serialize dm event: {e}");
-                    return;
-                }
-            };
-            // Publish to both users' streams (fire-and-forget, don't block delivery)
-            let broker = state.broker.clone();
-            let recipient_id = recipient.id;
-            let json_clone = event_json.clone();
-            tokio::spawn(async move {
-                if let Err(e) = broker.publish(recipient_id, &json_clone).await {
-                    warn!(%recipient_id, "broker publish failed: {e}");
-                }
-                if let Err(e) = broker.publish(sender_id, &event_json).await {
-                    warn!(%sender_id, "broker publish failed: {e}");
-                }
-            });
-
-            // Push to recipient (immediate local delivery)
-            state.hub.send_to_user(&recipient.id, event.clone());
-            // Push to sender (multi-device echo)
-            state.hub.send_to_user(&sender_id, event);
-
-            info!(
-                sender = %sender.federated_address(domain),
-                recipient = %recipient.federated_address(domain),
-                "dm sent via websocket"
-            );
         }
     }
+}
+
+/// Deliver a DM to a remote recipient via ActivityPub.
+///
+/// Lookup order:
+/// 1. Derive actor URI from address and check `remote_actors` cache for a cached `inbox_url`.
+/// 2. If not cached, resolve via WebFinger and upsert into the cache.
+async fn handle_remote_dm(
+    state: &AppState,
+    sender_id: Uuid,
+    sender: &idp_db::models::User,
+    sender_actor_uri: &str,
+    username: &str,
+    domain: &str,
+    content: &str,
+) {
+    let issuer = state.config.issuer();
+    let scheme = if issuer.starts_with("https") { "https" } else { "http" };
+    let guessed_actor_uri = format!("{}://{}/users/{}", scheme, domain, username);
+
+    // Try cache first
+    let (recipient_actor_uri, inbox_url) =
+        match remote_actors::find_by_actor_uri(&state.pool, &guessed_actor_uri).await {
+            Ok(Some(ra)) if ra.inbox_url.is_some() => {
+                (ra.actor_uri, ra.inbox_url.unwrap())
+            }
+            _ => {
+                // Cache miss — resolve via WebFinger
+                match delivery::resolve_remote_actor(username, domain, &issuer).await {
+                    Ok(ra) => {
+                        let inbox = ra.inbox.clone();
+                        let actor_url = ra.actor_url.clone();
+                        let pool = state.pool.clone();
+                        let domain_owned = domain.to_string();
+                        let display = ra.display_name.clone();
+                        let avatar = ra.avatar_url.clone();
+                        let inbox_clone = inbox.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = remote_actors::upsert(
+                                &pool,
+                                &actor_url,
+                                Some(&inbox_clone),
+                                &domain_owned,
+                                display.as_deref(),
+                                avatar.as_deref(),
+                            )
+                            .await
+                            {
+                                warn!("failed to cache remote actor: {e}");
+                            }
+                        });
+                        (ra.actor_url, inbox)
+                    }
+                    Err(e) => {
+                        warn!(address = %format!("{}@{}", username, domain), "failed to resolve remote actor: {e:?}");
+                        return;
+                    }
+                }
+            }
+        };
+
+    let activity_uri = format!(
+        "{}/users/{}/activities/{}",
+        issuer,
+        sender.username,
+        Uuid::new_v4()
+    );
+
+    let msg = match messages::create_message(
+        &state.pool,
+        sender_actor_uri,
+        &recipient_actor_uri,
+        content,
+        &activity_uri,
+    )
+    .await
+    {
+        Ok(m) => m,
+        Err(e) => {
+            warn!(%sender_id, "failed to create remote dm: {e}");
+            return;
+        }
+    };
+
+    // Build Create{Note} activity
+    let note = activitypub::Note::direct(
+        &activity_uri,
+        sender_actor_uri,
+        &recipient_actor_uri,
+        content,
+    );
+    let activity = activitypub::create_note_activity(
+        &activity_uri,
+        sender_actor_uri,
+        &recipient_actor_uri,
+        note,
+    );
+    let activity_value = match serde_json::to_value(&activity) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("failed to serialize ap activity: {e}");
+            return;
+        }
+    };
+
+    // Deliver to remote inbox in a background task
+    let state_clone = state.clone();
+    let inbox = inbox_url.clone();
+    let sender_username = sender.username.clone();
+    tokio::spawn(async move {
+        if let Err(e) =
+            delivery::deliver_activity(&state_clone, &inbox, &activity_value, &sender_username)
+                .await
+        {
+            warn!(%inbox, "failed to deliver remote dm: {e:?}");
+        }
+    });
+
+    // Echo event to sender only (recipient is on a remote server)
+    let local_domain = &state.config.domain;
+    let event = WsEvent::NewDm(DmPayload {
+        message_id: msg.id,
+        sender_address: sender.federated_address(local_domain),
+        content: msg.content,
+        created_at: msg.created_at,
+    });
+    state.hub.send_to_user(&sender_id, event);
+
+    info!(
+        sender = %sender.federated_address(local_domain),
+        recipient = %format!("{}@{}", username, domain),
+        "dm dispatched to remote actor via ActivityPub"
+    );
 }
