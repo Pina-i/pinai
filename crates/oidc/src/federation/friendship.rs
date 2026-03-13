@@ -181,6 +181,7 @@ async fn friend_request_remote(
     remote_actors::upsert(
         &state.pool,
         &remote.actor_url,
+        Some(&remote.inbox),
         domain,
         remote.display_name.as_deref(),
         remote.avatar_url.as_deref(),

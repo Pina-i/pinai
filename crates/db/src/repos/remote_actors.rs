@@ -6,23 +6,26 @@ use crate::models::RemoteActor;
 pub async fn upsert(
     pool: &PgPool,
     actor_uri: &str,
+    inbox_url: Option<&str>,
     instance: &str,
     display_name: Option<&str>,
     avatar_url: Option<&str>,
 ) -> Result<RemoteActor, sqlx::Error> {
     sqlx::query_as::<_, RemoteActor>(
         r#"
-        INSERT INTO remote_actors (actor_uri, instance, display_name, avatar_url)
-        VALUES ($1, $2, $3, $4)
+        INSERT INTO remote_actors (actor_uri, inbox_url, instance, display_name, avatar_url)
+        VALUES ($1, $2, $3, $4, $5)
         ON CONFLICT (actor_uri) DO UPDATE SET
+            inbox_url    = COALESCE(EXCLUDED.inbox_url, remote_actors.inbox_url),
             display_name = EXCLUDED.display_name,
-            avatar_url = EXCLUDED.avatar_url,
-            fetched_at = now(),
-            updated_at = now()
+            avatar_url   = EXCLUDED.avatar_url,
+            fetched_at   = now(),
+            updated_at   = now()
         RETURNING *
         "#,
     )
     .bind(actor_uri)
+    .bind(inbox_url)
     .bind(instance)
     .bind(display_name)
     .bind(avatar_url)

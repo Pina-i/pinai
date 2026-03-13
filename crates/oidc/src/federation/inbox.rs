@@ -138,6 +138,7 @@ async fn handle_follow(
         remote_actors::upsert(
             &state.pool,
             actor_url,
+            None,
             &remote_domain,
             display_name.as_deref(),
             None,

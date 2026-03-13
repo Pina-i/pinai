@@ -30,6 +30,8 @@ CREATE TABLE users (
 CREATE TABLE remote_actors (
   id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   actor_uri     TEXT NOT NULL UNIQUE,       -- e.g. "https://idp.bob.com/users/bob"
+  inbox_url     TEXT,                       -- e.g. "https://idp.bob.com/users/bob/inbox"
+                                            -- cached on first WebFinger resolution to avoid repeated lookups
   instance      TEXT NOT NULL,              -- e.g. "idp.bob.com"
   display_name  TEXT,
   avatar_url    TEXT,
@@ -50,6 +52,10 @@ CREATE TABLE friendships (
   UNIQUE (owner_user_id, friend_actor_uri)
 );
 ```
+
+> **Federated address format**
+>
+> The canonical address format used throughout the system is `username@domain` (e.g. `alice_xK9mP@idp.alice.com`), **without** a leading `@`. This is produced by `User::federated_address(&self, domain: &str)` on the server side. Clients receive actor URIs (`https://idp.alice.com/users/alice_xK9mP`) in some events and normalise them to `username@domain` via `actorUriToAddress()` before using them as conversation keys.
 
 > **`username` vs `display_name`**
 >
@@ -216,7 +222,7 @@ flowchart TD
 
         subgraph DB_Alice["PostgreSQL (idp.alice.com)"]
             USERS_A[("users\nactor_uri · inbox_url · outbox_url")]
-            REMOTE_A[("remote_actors\ncache · fetched_at TTL")]
+            REMOTE_A[("remote_actors\ncache · inbox_url · fetched_at TTL")]
             FRIENDS_A[("friendships\nowner_user_id · friend_actor_uri\nfriend_avatar_url")]
             FED_Q_A[("federation_queue\nactivity · target_inbox\nattempts · next_attempt")]
         end
@@ -236,7 +242,7 @@ flowchart TD
 
         subgraph DB_Bob["PostgreSQL (idp.bob.com)"]
             USERS_B[("users\nactor_uri · inbox_url · outbox_url")]
-            REMOTE_B[("remote_actors\ncache · fetched_at TTL")]
+            REMOTE_B[("remote_actors\ncache · inbox_url · fetched_at TTL")]
             FRIENDS_B[("friendships\nowner_user_id · friend_actor_uri\nfriend_avatar_url")]
             FED_Q_B[("federation_queue\nactivity · target_inbox\nattempts · next_attempt")]
         end
@@ -340,15 +346,42 @@ CREATE INDEX idx_dm_conversation_cursor_reverse
 
 ### Delivery flow
 
+**Local DM** (sender and recipient on the same IdP):
+
 ```
-Alice types → Alice's IdP persists (federation_status = pending)
-            → publishes to Redis Streams
-            → WebSocket pushes to Alice's clients immediately
-            → federation_queue delivers ActivityPub Create to Bob's IdP
-            → Bob's IdP persists its copy
-            → Bob's IdP pushes to Bob's clients via WebSocket
-            → federation_status updated to 'delivered'
+Alice types → WS handler persists message
+            → publishes JSON event to Redis Streams (broker) for both users
+            → hub.send_to_user() pushes WsEvent::NewDm to both Alice and Bob's live connections
 ```
+
+**Remote DM** (sender and recipient on different IdPs):
+
+```
+Alice types → WS handler resolves Bob's inbox_url
+                ├─ cache hit:  read from remote_actors.inbox_url (no WebFinger needed)
+                └─ cache miss: resolve via WebFinger → upsert into remote_actors (async)
+            → persists message (federation_status = 'pending')
+            → builds ActivityPub Create{Note} activity
+            → delivers to Bob's inbox_url via HTTP Signatures (background task)
+            → hub.send_to_user() echoes WsEvent::NewDm to Alice only (Bob is remote)
+
+Bob's IdP ← receives HTTP POST to /users/bob/inbox
+          → verifies HTTP Signature
+          → persists its own copy of the message
+          → hub.send_to_user() pushes WsEvent::NewDm to Bob's live connections
+          → broker.publish() writes event to Redis Streams for Bob's catch-up
+```
+
+> **Note on `sender_address`**: the `DmPayload.sender_address` field sent over WebSocket contains
+> the raw actor URI (e.g. `https://idp.alice.com/users/alice`). The client normalises it to
+> `username@domain` format using `actorUriToAddress()` before using it as a conversation key.
+> This avoids any server-side conversion and keeps the address format consistent regardless of
+> whether the event originated from a local send or a federated `Create{Note}` received in the inbox.
+
+> **Note on `federation_queue`**: for DMs, ActivityPub delivery is done inline in a background
+> `tokio::spawn` task rather than via `federation_queue`. This is sufficient for the current
+> implementation. Profile updates and other non-time-critical activities still go through
+> `federation_queue` with exponential backoff.
 
 ### Pagination — infinite scroll upward
 

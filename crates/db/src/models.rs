@@ -21,7 +21,7 @@ pub struct User {
 impl User {
     /// Returns the federated address: "@username@domain" (e.g. "@alice@idp.example.com").
     pub fn federated_address(&self, domain: &str) -> String {
-        format!("@{}@{}", self.username, domain)
+        format!("{}@{}", self.username, domain)
     }
 }
 
@@ -67,6 +67,7 @@ pub struct UserInfo {
 pub struct RemoteActor {
     pub id: Uuid,
     pub actor_uri: String,
+    pub inbox_url: Option<String>,
     pub instance: String,
     pub display_name: Option<String>,
     pub avatar_url: Option<String>,
