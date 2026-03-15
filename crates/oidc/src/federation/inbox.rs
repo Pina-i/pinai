@@ -385,9 +385,16 @@ async fn handle_create(
     .await
     .map_err(|e| OidcError::server_error(e.to_string()))?;
 
+    // Look up the remote sender's display name from the actor cache.
+    let sender_display_name = match remote_actors::find_by_actor_uri(&state.pool, actor_url).await {
+        Ok(Some(ra)) => ra.display_name,
+        _ => None,
+    };
+
     let event = WsEvent::NewDm(DmPayload {
         message_id: msg.id,
         sender_address: actor_url.to_string(),
+        sender_display_name,
         content: msg.content,
         created_at: msg.created_at,
     });
