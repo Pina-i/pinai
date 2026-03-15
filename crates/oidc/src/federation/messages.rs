@@ -8,15 +8,29 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
+use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use idp_db::repos::{messages, remote_actors, users};
+use idp_db::repos::{dm_reads, messages, remote_actors, users};
 
 use crate::federation::delivery;
 use crate::ws::events::{DmPayload, WsEvent};
 use crate::{AppState, OidcError};
 use super::auth::require_auth;
+
+/// Look up the display name for an actor URI.
+/// Checks local users first, then the remote actors cache.
+/// For local users, falls back to `username` if `display_name` is unset.
+async fn display_name_for_actor(pool: &PgPool, actor_uri: &str) -> Option<String> {
+    if let Ok(Some(user)) = users::find_by_actor_uri(pool, actor_uri).await {
+        return Some(user.display_name.unwrap_or(user.username));
+    }
+    if let Ok(Some(ra)) = remote_actors::find_by_actor_uri(pool, actor_uri).await {
+        return ra.display_name;
+    }
+    None
+}
 
 // ─── Send a DM ────────────────────────────────────────────────────────────────
 
@@ -31,6 +45,7 @@ pub struct SendMessageRequest {
 pub struct MessageResponse {
     pub id: Uuid,
     pub sender_actor_uri: String,
+    pub sender_display_name: Option<String>,
     pub recipient_actor_uri: String,
     pub content: String,
     pub activity_uri: String,
@@ -62,6 +77,9 @@ pub async fn send_message(
 
     let sender_actor_uri = sender.actor_uri.as_deref()
         .ok_or_else(|| OidcError::server_error("Sender has no actor_uri"))?;
+
+    let sender_display_name: Option<String> =
+        Some(sender.display_name.clone().unwrap_or_else(|| sender.username.clone()));
 
     // Parse recipient: "@username@domain" or "username@domain" or bare "username"
     let address = body.recipient_address.strip_prefix('@').unwrap_or(&body.recipient_address);
@@ -156,6 +174,7 @@ pub async fn send_message(
         let event = WsEvent::NewDm(DmPayload {
             message_id: msg.id,
             sender_address: sender.federated_address(&local_domain),
+            sender_display_name: sender_display_name.clone(),
             content: msg.content.clone(),
             created_at: msg.created_at,
         });
@@ -170,6 +189,7 @@ pub async fn send_message(
         Ok((StatusCode::CREATED, Json(MessageResponse {
             id: msg.id,
             sender_actor_uri: msg.sender_actor_uri,
+            sender_display_name: sender_display_name.clone(),
             recipient_actor_uri: msg.recipient_actor_uri,
             content: msg.content,
             activity_uri: msg.activity_uri,
@@ -203,6 +223,7 @@ pub async fn send_message(
         let event = WsEvent::NewDm(DmPayload {
             message_id: msg.id,
             sender_address: sender.federated_address(&local_domain),
+            sender_display_name: sender_display_name.clone(),
             content: msg.content.clone(),
             created_at: msg.created_at,
         });
@@ -233,6 +254,7 @@ pub async fn send_message(
         Ok((StatusCode::CREATED, Json(MessageResponse {
             id: msg.id,
             sender_actor_uri: msg.sender_actor_uri,
+            sender_display_name,
             recipient_actor_uri: msg.recipient_actor_uri,
             content: msg.content,
             activity_uri: msg.activity_uri,
@@ -344,18 +366,41 @@ pub async fn get_conversation(
     }
     .map_err(|e| OidcError::server_error(e.to_string()))?;
 
+    // Resolve display names for the two participants upfront (at most 2 DB lookups).
+    let caller_display = display_name_for_actor(&state.pool, caller_actor_uri).await;
+    let other_display = display_name_for_actor(&state.pool, other_actor_uri).await;
+
     let responses = msgs
         .into_iter()
-        .map(|m| MessageResponse {
-            id: m.id,
-            sender_actor_uri: m.sender_actor_uri,
-            recipient_actor_uri: m.recipient_actor_uri,
-            content: m.content,
-            activity_uri: m.activity_uri,
-            federation_status: m.federation_status,
-            created_at: m.created_at,
+        .map(|m| {
+            let sender_display = if m.sender_actor_uri == caller_actor_uri {
+                caller_display.clone()
+            } else {
+                other_display.clone()
+            };
+            MessageResponse {
+                id: m.id,
+                sender_actor_uri: m.sender_actor_uri,
+                sender_display_name: sender_display,
+                recipient_actor_uri: m.recipient_actor_uri,
+                content: m.content,
+                activity_uri: m.activity_uri,
+                federation_status: m.federation_status,
+                created_at: m.created_at,
+            }
         })
         .collect();
+
+    // Mark conversation as read when fetching the initial page.
+    if query.cursor_created_at.is_none() {
+        let other = other_actor_uri.to_string();
+        let pool = state.pool.clone();
+        tokio::spawn(async move {
+            if let Err(e) = dm_reads::mark_read(&pool, caller_id, &other).await {
+                tracing::warn!("failed to mark conversation as read: {e}");
+            }
+        });
+    }
 
     Ok(Json(responses))
 }
@@ -365,6 +410,8 @@ pub async fn get_conversation(
 #[derive(Debug, Serialize)]
 pub struct ConversationListItem {
     pub other_actor_uri: String,
+    pub other_display_name: Option<String>,
+    pub unread_count: i64,
     #[serde(with = "time::serde::rfc3339")]
     pub last_message_at: OffsetDateTime,
 }
@@ -385,17 +432,20 @@ pub async fn list_conversations(
     let caller_actor_uri = caller.actor_uri.as_deref()
         .ok_or_else(|| OidcError::server_error("Caller has no actor_uri"))?;
 
-    let summaries = messages::list_conversations(&state.pool, caller_actor_uri)
+    let summaries = messages::list_conversations(&state.pool, caller_id, caller_actor_uri)
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?;
 
-    let items = summaries
-        .into_iter()
-        .map(|s| ConversationListItem {
+    let mut items = Vec::with_capacity(summaries.len());
+    for s in summaries {
+        let other_display = display_name_for_actor(&state.pool, &s.other_actor_uri).await;
+        items.push(ConversationListItem {
             other_actor_uri: s.other_actor_uri,
+            other_display_name: other_display,
+            unread_count: s.unread_count,
             last_message_at: s.last_message_at,
-        })
-        .collect();
+        });
+    }
 
     Ok(Json(items))
 }

@@ -18,6 +18,7 @@ pub enum WsEvent {
 pub struct DmPayload {
     pub message_id: Uuid,
     pub sender_address: String,
+    pub sender_display_name: Option<String>,
     pub content: String,
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,

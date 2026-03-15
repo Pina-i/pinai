@@ -108,30 +108,49 @@ pub async fn update_federation_status(
 pub struct ConversationSummary {
     pub other_actor_uri: String,
     pub last_message_at: OffsetDateTime,
+    /// Messages received from this actor since the user last read the conversation.
+    pub unread_count: i64,
 }
 
 /// Return a list of actors that `actor_uri` has exchanged DMs with,
-/// ordered by most recent message.
+/// ordered by most recent message, with per-conversation unread counts.
 pub async fn list_conversations(
     pool: &PgPool,
-    actor_uri: &str,
+    user_id: Uuid,
+    caller_actor_uri: &str,
 ) -> Result<Vec<ConversationSummary>, sqlx::Error> {
     sqlx::query_as::<_, ConversationSummary>(
         r#"
+        WITH convos AS (
+            SELECT
+                CASE
+                    WHEN dm.sender_actor_uri = $1 THEN dm.recipient_actor_uri
+                    ELSE dm.sender_actor_uri
+                END AS other_actor_uri,
+                dm.recipient_actor_uri,
+                dm.created_at
+            FROM direct_messages dm
+            WHERE (dm.sender_actor_uri = $1 OR dm.recipient_actor_uri = $1)
+              AND dm.deleted_at IS NULL
+        )
         SELECT
-            CASE
-                WHEN sender_actor_uri = $1 THEN recipient_actor_uri
-                ELSE sender_actor_uri
-            END AS other_actor_uri,
-            MAX(created_at) AS last_message_at
-        FROM direct_messages
-        WHERE (sender_actor_uri = $1 OR recipient_actor_uri = $1)
-          AND deleted_at IS NULL
-        GROUP BY other_actor_uri
+            c.other_actor_uri,
+            MAX(c.created_at) AS last_message_at,
+            COUNT(CASE
+                WHEN c.recipient_actor_uri = $1
+                     AND (r.last_read_at IS NULL OR c.created_at > r.last_read_at)
+                THEN 1
+                ELSE NULL
+            END) AS unread_count
+        FROM convos c
+        LEFT JOIN dm_conversation_reads r
+            ON r.user_id = $2 AND r.other_actor_uri = c.other_actor_uri
+        GROUP BY c.other_actor_uri
         ORDER BY last_message_at DESC
         "#,
     )
-    .bind(actor_uri)
+    .bind(caller_actor_uri)
+    .bind(user_id)
     .fetch_all(pool)
     .await
 }

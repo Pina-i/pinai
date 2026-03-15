@@ -233,9 +233,12 @@ async fn handle_client_message(state: &AppState, sender_id: Uuid, msg: WsClientM
                 };
 
                 let local_domain = &state.config.domain;
+                let sender_display_name =
+                    Some(sender.display_name.clone().unwrap_or_else(|| sender.username.clone()));
                 let event = WsEvent::NewDm(DmPayload {
                     message_id: msg.id,
                     sender_address: sender.federated_address(local_domain),
+                    sender_display_name,
                     content: msg.content,
                     created_at: msg.created_at,
                 });
@@ -390,9 +393,12 @@ async fn handle_remote_dm(
 
     // Echo event to sender only (recipient is on a remote server)
     let local_domain = &state.config.domain;
+    let sender_display_name =
+        Some(sender.display_name.clone().unwrap_or_else(|| sender.username.clone()));
     let event = WsEvent::NewDm(DmPayload {
         message_id: msg.id,
         sender_address: sender.federated_address(local_domain),
+        sender_display_name,
         content: msg.content,
         created_at: msg.created_at,
     });

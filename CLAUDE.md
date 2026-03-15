@@ -54,6 +54,7 @@ identity-provider/
 │   │   │   ├── federation/ # ActivityPub, WebFinger, inbox, friends, DMs (REST), delivery
 │   │   │   └── ws/         # WebSocket upgrade handler + hub + events + broker
 │   ├── db/                 # SQLx models, migrations, repositories
+│   │   └── repos/              # auth_codes, clients, dm_reads, friendships, messages, remote_actors, users
 │   └── config/             # Configuration loading, env vars
 ├── migrations/             # SQLx migrations (numbered, applied by idp-db on startup)
 ├── docker/
@@ -119,8 +120,8 @@ volumes:
 | `GET /users/:handle` | ActivityPub actor profile (JSON-LD) |
 | `GET /ws?token=<jwt>` | WebSocket upgrade (DMs + events) |
 | `POST /api/dm` | Send a DM (REST) |
-| `GET /api/dm` | List DM conversations |
-| `GET /api/dm/:address` | Conversation history with paginated keyset cursor |
+| `GET /api/dm` | List DM conversations (includes `unread_count` per conversation) |
+| `GET /api/dm/:address` | Conversation history (keyset cursor); marks conversation as read on initial load |
 
 ## Key Design Decisions
 
@@ -136,6 +137,8 @@ volumes:
 - **Federated address format**: `username@domain` — **no** leading `@`. `User::federated_address(&self, domain)` produces e.g. `alice_xK9mP@idp.alice.com`. Clients receive raw actor URIs in some WS events and normalise to this format client-side via `actorUriToAddress()`.
 - **DM delivery (remote)**: ActivityPub `Create{Note}` is delivered inline via a background `tokio::spawn`, not via `federation_queue`. Cache-first: check `remote_actors.inbox_url` → WebFinger on miss. Sender gets a WS echo; recipient's IdP handles real-time push when it receives the AP `Create` on its inbox.
 - **DM delivery (local)**: message persisted → `hub.send_to_user()` for live connections + `broker.publish()` to Redis Streams for catch-up on reconnect.
+- **DM unread tracking**: `dm_conversation_reads(user_id, other_actor_uri, last_read_at)` table. `GET /api/dm` returns `unread_count` per conversation (SQL CTE). `GET /api/dm/:address` upserts `last_read_at = NOW()` in a background task on initial page load (no cursor).
+- **DM display names**: all DM endpoints (`GET /api/dm`, `GET /api/dm/:address`, `POST /api/dm`) and the WS `new_dm` event include resolved `sender_display_name` / `other_display_name` so clients never need to do secondary lookups.
 
 ## Federation Trust Model
 

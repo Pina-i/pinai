@@ -408,3 +408,97 @@ LIMIT 50;
 ```
 
 The client keeps track of the oldest `(created_at, id)` it has received and passes it as the cursor for the next page request.
+
+---
+
+## 6. DM unread notification tracking
+
+When a user is offline or viewing a different conversation, incoming DMs must not be silently lost — they need to surface as unread counts when the user returns.
+
+### Schema
+
+```sql
+-- Tracks the last time a user opened each DM conversation.
+-- Used to compute per-conversation unread counts on login / reconnect.
+CREATE TABLE dm_conversation_reads (
+  user_id          UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  other_actor_uri  TEXT        NOT NULL,
+  last_read_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (user_id, other_actor_uri)
+);
+```
+
+### Unread count query
+
+Computed inline in the `GET /api/dm` (list conversations) response via a SQL CTE + LEFT JOIN:
+
+```sql
+WITH convos AS (
+    SELECT
+        CASE WHEN dm.sender_actor_uri = $caller THEN dm.recipient_actor_uri
+             ELSE dm.sender_actor_uri END AS other_actor_uri,
+        dm.recipient_actor_uri,
+        dm.created_at
+    FROM direct_messages dm
+    WHERE (dm.sender_actor_uri = $caller OR dm.recipient_actor_uri = $caller)
+      AND dm.deleted_at IS NULL
+)
+SELECT
+    c.other_actor_uri,
+    MAX(c.created_at)                    AS last_message_at,
+    COUNT(CASE
+        WHEN c.recipient_actor_uri = $caller
+             AND (r.last_read_at IS NULL OR c.created_at > r.last_read_at)
+        THEN 1 ELSE NULL
+    END)                                 AS unread_count
+FROM convos c
+LEFT JOIN dm_conversation_reads r
+    ON r.user_id = $user_id AND r.other_actor_uri = c.other_actor_uri
+GROUP BY c.other_actor_uri
+ORDER BY last_message_at DESC;
+```
+
+Only messages **received** by the caller (not sent) count as unread. A `NULL` `last_read_at` means the user has never opened that conversation — all received messages are unread.
+
+### Mark-as-read
+
+`GET /api/dm/:address` (conversation history, initial page only — no cursor) fires a background upsert:
+
+```sql
+INSERT INTO dm_conversation_reads (user_id, other_actor_uri, last_read_at)
+VALUES ($user_id, $other_actor_uri, NOW())
+ON CONFLICT (user_id, other_actor_uri) DO UPDATE SET last_read_at = NOW();
+```
+
+This runs in a `tokio::spawn` so it never blocks the response.
+
+### End-to-end flow
+
+```
+Bob logs in
+  → GET /api/dm returns conversations with unread_count per conversation
+  → client seeds its in-memory unread store from the response
+  → sidebar shows badges immediately
+
+Alice sends a DM while Bob is connected but on a different page
+  → Bob's WS receives new_dm event
+  → client checks active conversation: not this one → increments unread counter + plays sound
+  → badge appears on Alice's conversation in Bob's sidebar
+
+Bob clicks Alice's conversation
+  → GET /api/dm/:address called (initial page, no cursor)
+  → server upserts last_read_at = NOW() in background
+  → client clears the in-memory unread counter for that conversation
+  → badge disappears
+```
+
+### DM API response — display names
+
+All DM API responses include resolved display names to avoid requiring clients to do additional lookups:
+
+| Endpoint | Added field | Source |
+|---|---|---|
+| `GET /api/dm` | `other_display_name` | `users.display_name` or `remote_actors.display_name` |
+| `GET /api/dm/:address` | `sender_display_name` per message | same |
+| `POST /api/dm` (response) | `sender_display_name` | `users.display_name` |
+| WS `new_dm` event | `sender_display_name` | `users.display_name` or `remote_actors.display_name` |
