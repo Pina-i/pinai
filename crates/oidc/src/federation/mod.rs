@@ -18,9 +18,11 @@
 //! - `POST   /api/friends/{id}/accept`       — Accept a friend request
 //! - `DELETE /api/friends/{id}/reject`       — Reject (delete) a friend request
 //! - `GET    /api/friends`                   — My friends list
-//! - `POST   /api/dm`                        — Send a direct message
+//! - `POST   /api/dm`                        — Send a direct message (supports replies via reply_to_id)
 //! - `GET    /api/dm`                        — List DM conversations
-//! - `GET    /api/dm/:address`               — Conversation with a specific user
+//! - `GET    /api/dm/:address`               — Conversation with a specific user (includes reactions + reply previews)
+//! - `POST   /api/dm/:message_id/reactions`  — Add a reaction to a message
+//! - `DELETE /api/dm/:message_id/reactions`  — Remove a reaction from a message
 
 pub mod actor;
 pub(crate) mod delivery;

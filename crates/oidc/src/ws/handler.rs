@@ -222,6 +222,7 @@ async fn handle_client_message(state: &AppState, sender_id: Uuid, msg: WsClientM
                     recipient_actor_uri,
                     &payload.content,
                     &activity_uri,
+                    None,
                 )
                 .await
                 {
@@ -241,6 +242,9 @@ async fn handle_client_message(state: &AppState, sender_id: Uuid, msg: WsClientM
                     sender_display_name,
                     content: msg.content,
                     created_at: msg.created_at,
+                    reply_to_id: None,
+                    reply_to_content: None,
+                    reply_to_sender: None,
                 });
 
                 let event_json = match serde_json::to_string(&event) {
@@ -347,6 +351,7 @@ async fn handle_remote_dm(
         &recipient_actor_uri,
         content,
         &activity_uri,
+        None,
     )
     .await
     {
@@ -401,6 +406,9 @@ async fn handle_remote_dm(
         sender_display_name,
         content: msg.content,
         created_at: msg.created_at,
+        reply_to_id: None,
+        reply_to_content: None,
+        reply_to_sender: None,
     });
     state.hub.send_to_user(&sender_id, event);
 

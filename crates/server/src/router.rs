@@ -21,7 +21,7 @@ use idp_oidc::{
             post_friend_request, reject_friendship, search_users,
         },
         inbox::post_inbox,
-        messages::{get_conversation, list_conversations, send_message},
+        messages::{add_reaction, get_conversation, list_conversations, remove_reaction, send_message},
         outbox::{
             get_followers as get_ap_followers, get_following as get_ap_following, get_outbox,
         },
@@ -91,6 +91,7 @@ pub fn build(state: AppState) -> Router {
         // ── Direct Messages REST API (Bearer-auth) ────────────────────────────
         .route("/api/dm", post(send_message).get(list_conversations))
         .route("/api/dm/{address}", get(get_conversation))
+        .route("/api/dm/{message_id}/reactions", post(add_reaction).delete(remove_reaction))
 
         // ── Avatar API (Bearer-auth) ────────────────────────────────────
         .route("/api/avatar", put(put_avatar).delete(delete_avatar))

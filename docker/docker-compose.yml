@@ -52,8 +52,8 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile
-    network_mode: host
     env_file: .env
+    network_mode: host
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@localhost:${POSTGRES_PORT:-5432}/${POSTGRES_DB}
       JWT_PRIVATE_KEY_PATH: /run/secrets/ed25519.pem

@@ -2,7 +2,7 @@ use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use crate::models::DirectMessage;
+use crate::models::{DirectMessage, DirectMessageWithReply};
 
 /// Create a new direct message using actor URIs.
 /// `federation_status` defaults to 'pending' in the database.
@@ -12,11 +12,12 @@ pub async fn create_message(
     recipient_actor_uri: &str,
     content: &str,
     activity_uri: &str,
+    reply_to_id: Option<Uuid>,
 ) -> Result<DirectMessage, sqlx::Error> {
     sqlx::query_as::<_, DirectMessage>(
         r#"
-        INSERT INTO direct_messages (sender_actor_uri, recipient_actor_uri, content, activity_uri)
-        VALUES ($1, $2, $3, $4)
+        INSERT INTO direct_messages (sender_actor_uri, recipient_actor_uri, content, activity_uri, reply_to_id)
+        VALUES ($1, $2, $3, $4, $5)
         RETURNING *
         "#,
     )
@@ -24,25 +25,59 @@ pub async fn create_message(
     .bind(recipient_actor_uri)
     .bind(content)
     .bind(activity_uri)
+    .bind(reply_to_id)
     .fetch_one(pool)
     .await
 }
 
-/// Fetch the initial page of a conversation (most recent 50 messages, newest first).
-/// Only returns non-deleted messages.
+/// Find a message by its primary key.
+pub async fn find_by_id(
+    pool: &PgPool,
+    id: Uuid,
+) -> Result<Option<DirectMessage>, sqlx::Error> {
+    sqlx::query_as::<_, DirectMessage>(
+        "SELECT * FROM direct_messages WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+}
+
+/// Find a message by its ActivityPub activity URI.
+pub async fn find_by_activity_uri(
+    pool: &PgPool,
+    activity_uri: &str,
+) -> Result<Option<DirectMessage>, sqlx::Error> {
+    sqlx::query_as::<_, DirectMessage>(
+        "SELECT * FROM direct_messages WHERE activity_uri = $1",
+    )
+    .bind(activity_uri)
+    .fetch_optional(pool)
+    .await
+}
+
+/// Fetch the initial page of a conversation (most recent messages, newest first)
+/// with inline reply previews via LEFT JOIN on the parent message.
 pub async fn get_conversation(
     pool: &PgPool,
     actor_a: &str,
     actor_b: &str,
     limit: i64,
-) -> Result<Vec<DirectMessage>, sqlx::Error> {
-    sqlx::query_as::<_, DirectMessage>(
+) -> Result<Vec<DirectMessageWithReply>, sqlx::Error> {
+    sqlx::query_as::<_, DirectMessageWithReply>(
         r#"
-        SELECT * FROM direct_messages
-        WHERE ((sender_actor_uri = $1 AND recipient_actor_uri = $2)
-           OR  (sender_actor_uri = $2 AND recipient_actor_uri = $1))
-          AND deleted_at IS NULL
-        ORDER BY created_at DESC, id DESC
+        SELECT
+            dm.id, dm.sender_actor_uri, dm.recipient_actor_uri, dm.content,
+            dm.activity_uri, dm.federation_status, dm.created_at, dm.edited_at,
+            dm.deleted_at, dm.reply_to_id,
+            parent.content           AS reply_to_content,
+            parent.sender_actor_uri  AS reply_to_sender
+        FROM direct_messages dm
+        LEFT JOIN direct_messages parent ON dm.reply_to_id = parent.id
+        WHERE ((dm.sender_actor_uri = $1 AND dm.recipient_actor_uri = $2)
+           OR  (dm.sender_actor_uri = $2 AND dm.recipient_actor_uri = $1))
+          AND dm.deleted_at IS NULL
+        ORDER BY dm.created_at DESC, dm.id DESC
         LIMIT $3
         "#,
     )
@@ -53,8 +88,8 @@ pub async fn get_conversation(
     .await
 }
 
-/// Fetch older messages before the given cursor `(created_at, id)` for keyset pagination.
-/// Returns messages in newest-first order within the page.
+/// Fetch older messages before the given cursor `(created_at, id)` for keyset pagination,
+/// with inline reply previews.
 pub async fn get_conversation_before(
     pool: &PgPool,
     actor_a: &str,
@@ -62,15 +97,22 @@ pub async fn get_conversation_before(
     cursor_created_at: OffsetDateTime,
     cursor_id: Uuid,
     limit: i64,
-) -> Result<Vec<DirectMessage>, sqlx::Error> {
-    sqlx::query_as::<_, DirectMessage>(
+) -> Result<Vec<DirectMessageWithReply>, sqlx::Error> {
+    sqlx::query_as::<_, DirectMessageWithReply>(
         r#"
-        SELECT * FROM direct_messages
-        WHERE ((sender_actor_uri = $1 AND recipient_actor_uri = $2)
-           OR  (sender_actor_uri = $2 AND recipient_actor_uri = $1))
-          AND deleted_at IS NULL
-          AND (created_at, id) < ($3, $4)
-        ORDER BY created_at DESC, id DESC
+        SELECT
+            dm.id, dm.sender_actor_uri, dm.recipient_actor_uri, dm.content,
+            dm.activity_uri, dm.federation_status, dm.created_at, dm.edited_at,
+            dm.deleted_at, dm.reply_to_id,
+            parent.content           AS reply_to_content,
+            parent.sender_actor_uri  AS reply_to_sender
+        FROM direct_messages dm
+        LEFT JOIN direct_messages parent ON dm.reply_to_id = parent.id
+        WHERE ((dm.sender_actor_uri = $1 AND dm.recipient_actor_uri = $2)
+           OR  (dm.sender_actor_uri = $2 AND dm.recipient_actor_uri = $1))
+          AND dm.deleted_at IS NULL
+          AND (dm.created_at, dm.id) < ($3, $4)
+        ORDER BY dm.created_at DESC, dm.id DESC
         LIMIT $5
         "#,
     )

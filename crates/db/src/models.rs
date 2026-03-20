@@ -112,4 +112,33 @@ pub struct DirectMessage {
     pub created_at: OffsetDateTime,
     pub edited_at: Option<OffsetDateTime>,
     pub deleted_at: Option<OffsetDateTime>,
+    pub reply_to_id: Option<Uuid>,
+}
+
+/// Enriched DM row with LEFT JOIN on the parent message for reply previews.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct DirectMessageWithReply {
+    pub id: Uuid,
+    pub sender_actor_uri: String,
+    pub recipient_actor_uri: String,
+    pub content: String,
+    pub activity_uri: String,
+    pub federation_status: String,
+    pub created_at: OffsetDateTime,
+    pub edited_at: Option<OffsetDateTime>,
+    pub deleted_at: Option<OffsetDateTime>,
+    pub reply_to_id: Option<Uuid>,
+    /// Content of the parent message (NULL if not a reply or parent deleted).
+    pub reply_to_content: Option<String>,
+    /// Sender actor URI of the parent message.
+    pub reply_to_sender: Option<String>,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow, Serialize)]
+pub struct MessageReaction {
+    pub id: Uuid,
+    pub message_id: Uuid,
+    pub reactor_actor_uri: String,
+    pub emoji: String,
+    pub created_at: OffsetDateTime,
 }

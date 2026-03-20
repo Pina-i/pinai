@@ -2,12 +2,14 @@
 //!
 //! Receives ActivityPub activities from remote and local servers.
 //! Supported activities:
-//!   - Follow       → creates a pending friendship, auto-accepts for local users
+//!   - Follow         → creates a pending friendship
 //!   - Accept{Follow} → marks a friendship as accepted
 //!   - Reject{Follow} → deletes the friendship row
 //!   - Undo{Follow}   → deletes the friendship
-//!   - Create{Note}   → stores a direct message
+//!   - Undo{Like}     → removes a message reaction
+//!   - Create{Note}   → stores a direct message (supports inReplyTo)
 //!   - Update{Person} → updates remote_actors cache + propagates profile changes
+//!   - Like           → adds a message reaction
 
 use axum::{
     extract::{Path, State},
@@ -17,9 +19,9 @@ use axum::{
 use serde_json::Value;
 use uuid::Uuid;
 
-use idp_db::repos::{friendships, messages, remote_actors, users};
+use idp_db::repos::{friendships, messages, reactions, remote_actors, users};
 
-use crate::ws::events::{DmPayload, FriendshipPayload, ProfileUpdatePayload, WsEvent};
+use crate::ws::events::{DmPayload, FriendshipPayload, ProfileUpdatePayload, ReactionPayload, WsEvent};
 use crate::{AppState, OidcError};
 
 /// POST /users/:slug/inbox
@@ -56,6 +58,7 @@ pub async fn post_inbox(
         "Undo" => handle_undo(&state, &body, &recipient).await?,
         "Create" => handle_create(&state, &body, &recipient).await?,
         "Update" => handle_update(&state, &body).await?,
+        "Like" => handle_like(&state, &body, &recipient).await?,
         other => {
             tracing::warn!(activity_type = %other, "unhandled activity type in inbox");
         }
@@ -299,10 +302,18 @@ async fn handle_undo(
         .and_then(|t| t.as_str())
         .unwrap_or("");
 
-    if obj_type != "Follow" {
-        return Ok(());
+    match obj_type {
+        "Follow" => handle_undo_follow(state, body, recipient).await,
+        "Like" => handle_undo_like(state, body, recipient).await,
+        _ => Ok(()),
     }
+}
 
+async fn handle_undo_follow(
+    state: &AppState,
+    body: &Value,
+    recipient: &idp_db::models::User,
+) -> Result<(), OidcError> {
     let actor_url = body
         .get("actor")
         .and_then(|v| v.as_str())
@@ -333,6 +344,58 @@ async fn handle_undo(
     }));
 
     tracing::info!(actor = %actor_url, recipient = %recipient.username, "unfriended via AP Undo");
+    Ok(())
+}
+
+/// Handle Undo{Like} — remove a reaction from a remote actor.
+async fn handle_undo_like(
+    state: &AppState,
+    body: &Value,
+    recipient: &idp_db::models::User,
+) -> Result<(), OidcError> {
+    let actor_url = body
+        .get("actor")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    let inner = match body.get("object") {
+        Some(o) if !o.is_string() => o,
+        _ => return Ok(()),
+    };
+
+    let target_uri = inner
+        .get("object")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    let emoji = inner
+        .get("content")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    if target_uri.is_empty() || emoji.is_empty() {
+        return Ok(());
+    }
+
+    let msg = match messages::find_by_activity_uri(&state.pool, target_uri).await {
+        Ok(Some(m)) => m,
+        _ => return Ok(()),
+    };
+
+    let deleted = reactions::remove_reaction(&state.pool, msg.id, actor_url, emoji)
+        .await
+        .map_err(|e| OidcError::server_error(e.to_string()))?;
+
+    if deleted {
+        let event = WsEvent::MessageReactionRemoved(ReactionPayload {
+            message_id: msg.id,
+            reactor_actor_uri: actor_url.to_string(),
+            emoji: emoji.to_string(),
+        });
+        state.hub.send_to_user(&recipient.id, event);
+    }
+
+    tracing::info!(actor = %actor_url, message = %msg.id, emoji = %emoji, "reaction removed via AP Undo(Like)");
     Ok(())
 }
 
@@ -375,12 +438,27 @@ async fn handle_create(
         .or_else(|| obj.get("id").and_then(|v| v.as_str()))
         .ok_or_else(|| OidcError::invalid_request("Create activity missing id"))?;
 
+    // Resolve inReplyTo: look up the parent message by its activity_uri to get
+    // the local DB id for the reply_to_id FK.
+    let in_reply_to_uri = obj.get("inReplyTo").and_then(|v| v.as_str());
+    let mut reply_to_id: Option<Uuid> = None;
+    let mut reply_to_content: Option<String> = None;
+    let mut reply_to_sender: Option<String> = None;
+    if let Some(parent_uri) = in_reply_to_uri {
+        if let Ok(Some(parent)) = messages::find_by_activity_uri(&state.pool, parent_uri).await {
+            reply_to_id = Some(parent.id);
+            reply_to_content = Some(parent.content);
+            reply_to_sender = Some(parent.sender_actor_uri);
+        }
+    }
+
     let msg = messages::create_message(
         &state.pool,
         actor_url,
         recipient_actor_uri,
         &content,
         activity_uri,
+        reply_to_id,
     )
     .await
     .map_err(|e| OidcError::server_error(e.to_string()))?;
@@ -397,6 +475,9 @@ async fn handle_create(
         sender_display_name,
         content: msg.content,
         created_at: msg.created_at,
+        reply_to_id,
+        reply_to_content,
+        reply_to_sender,
     });
 
     // Publish to broker for durability
@@ -482,6 +563,61 @@ async fn handle_update(state: &AppState, body: &Value) -> Result<(), OidcError> 
     }
 
     tracing::info!(actor_uri = %actor_uri, "profile update propagated via AP");
+    Ok(())
+}
+
+// ─── Like (reaction) ─────────────────────────────────────────────────────────
+
+/// Handle a `Like` activity: add a reaction to a message.
+/// The `object` field is the activity_uri of the target message, and `content`
+/// carries the emoji.
+async fn handle_like(
+    state: &AppState,
+    body: &Value,
+    recipient: &idp_db::models::User,
+) -> Result<(), OidcError> {
+    let actor_url = body
+        .get("actor")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    let target_uri = body
+        .get("object")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    let emoji = body
+        .get("content")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    if target_uri.is_empty() || emoji.is_empty() {
+        tracing::warn!("Like activity missing object or content (emoji)");
+        return Ok(());
+    }
+
+    // Look up the target message by its activity_uri.
+    let msg = match messages::find_by_activity_uri(&state.pool, target_uri).await {
+        Ok(Some(m)) => m,
+        Ok(None) => {
+            tracing::warn!(%target_uri, "Like target message not found");
+            return Ok(());
+        }
+        Err(e) => return Err(OidcError::server_error(e.to_string())),
+    };
+
+    reactions::add_reaction(&state.pool, msg.id, actor_url, emoji)
+        .await
+        .map_err(|e| OidcError::server_error(e.to_string()))?;
+
+    let event = WsEvent::MessageReactionAdded(ReactionPayload {
+        message_id: msg.id,
+        reactor_actor_uri: actor_url.to_string(),
+        emoji: emoji.to_string(),
+    });
+    state.hub.send_to_user(&recipient.id, event);
+
+    tracing::info!(actor = %actor_url, message = %msg.id, emoji = %emoji, "reaction added via AP Like");
     Ok(())
 }
 

@@ -12,6 +12,8 @@ pub enum WsEvent {
     FriendAccepted(FriendshipPayload),
     FriendRemoved(FriendshipPayload),
     FriendProfileUpdated(ProfileUpdatePayload),
+    MessageReactionAdded(ReactionPayload),
+    MessageReactionRemoved(ReactionPayload),
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -22,6 +24,12 @@ pub struct DmPayload {
     pub content: String,
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reply_to_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reply_to_content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reply_to_sender: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -38,6 +46,14 @@ pub struct ProfileUpdatePayload {
     pub actor_uri: String,
     pub display_name: Option<String>,
     pub avatar_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReactionPayload {
+    pub message_id: Uuid,
+    pub reactor_actor_uri: String,
+    pub emoji: String,
 }
 
 /// Client-to-server messages received over WebSocket.
