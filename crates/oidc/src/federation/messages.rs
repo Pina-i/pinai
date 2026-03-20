@@ -1,6 +1,8 @@
-//! REST API handlers for Direct Messages.
+//! REST API handlers for Direct Messages, reactions, and replies.
 //!
 //! All endpoints require a valid Bearer access token.
+
+use std::collections::HashMap;
 
 use axum::{
     extract::{Path, Query, State},
@@ -12,10 +14,10 @@ use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use idp_db::repos::{dm_reads, messages, remote_actors, users};
+use idp_db::repos::{dm_reads, messages, reactions, remote_actors, users};
 
 use crate::federation::delivery;
-use crate::ws::events::{DmPayload, WsEvent};
+use crate::ws::events::{DmPayload, ReactionPayload, WsEvent};
 use crate::{AppState, OidcError};
 use super::auth::require_auth;
 
@@ -32,6 +34,15 @@ async fn display_name_for_actor(pool: &PgPool, actor_uri: &str) -> Option<String
     None
 }
 
+// ─── Reaction group (shared response type) ───────────────────────────────────
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ReactionGroup {
+    pub emoji: String,
+    pub count: i64,
+    pub reacted_by_me: bool,
+}
+
 // ─── Send a DM ────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -39,6 +50,8 @@ pub struct SendMessageRequest {
     /// Recipient's address, e.g. "@alice@idp.example.com" or "alice".
     pub recipient_address: String,
     pub content: String,
+    /// Optional: reply to an existing message.
+    pub reply_to_id: Option<Uuid>,
 }
 
 #[derive(Debug, Serialize)]
@@ -52,6 +65,13 @@ pub struct MessageResponse {
     pub federation_status: String,
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reply_to_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reply_to_content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reply_to_sender: Option<String>,
+    pub reactions: Vec<ReactionGroup>,
 }
 
 /// POST /api/dm
@@ -80,6 +100,20 @@ pub async fn send_message(
 
     let sender_display_name: Option<String> =
         Some(sender.display_name.clone().unwrap_or_else(|| sender.username.clone()));
+
+    // If this is a reply, validate the parent message exists.
+    let mut reply_to_content: Option<String> = None;
+    let mut reply_to_sender: Option<String> = None;
+    let mut parent_activity_uri: Option<String> = None;
+    if let Some(parent_id) = body.reply_to_id {
+        let parent = messages::find_by_id(&state.pool, parent_id)
+            .await
+            .map_err(|e| OidcError::server_error(e.to_string()))?
+            .ok_or_else(|| OidcError::not_found("Parent message not found"))?;
+        reply_to_content = Some(parent.content.clone());
+        reply_to_sender = Some(parent.sender_actor_uri.clone());
+        parent_activity_uri = Some(parent.activity_uri.clone());
+    }
 
     // Parse recipient: "@username@domain" or "username@domain" or bare "username"
     let address = body.recipient_address.strip_prefix('@').unwrap_or(&body.recipient_address);
@@ -140,17 +174,28 @@ pub async fn send_message(
             &recipient_actor_uri,
             &body.content,
             &activity_uri,
+            body.reply_to_id,
         )
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?;
 
         // Build and deliver Create{Note} in background
-        let note = activitypub::Note::direct(
-            &activity_uri,
-            sender_actor_uri,
-            &recipient_actor_uri,
-            &body.content,
-        );
+        let note = if let Some(ref parent_uri) = parent_activity_uri {
+            activitypub::Note::direct_reply(
+                &activity_uri,
+                sender_actor_uri,
+                &recipient_actor_uri,
+                &body.content,
+                parent_uri,
+            )
+        } else {
+            activitypub::Note::direct(
+                &activity_uri,
+                sender_actor_uri,
+                &recipient_actor_uri,
+                &body.content,
+            )
+        };
         let activity = activitypub::create_note_activity(
             &activity_uri,
             sender_actor_uri,
@@ -177,6 +222,9 @@ pub async fn send_message(
             sender_display_name: sender_display_name.clone(),
             content: msg.content.clone(),
             created_at: msg.created_at,
+            reply_to_id: body.reply_to_id,
+            reply_to_content: reply_to_content.clone(),
+            reply_to_sender: reply_to_sender.clone(),
         });
         state.hub.send_to_user(&sender_id, event);
 
@@ -195,6 +243,10 @@ pub async fn send_message(
             activity_uri: msg.activity_uri,
             federation_status: msg.federation_status,
             created_at: msg.created_at,
+            reply_to_id: body.reply_to_id,
+            reply_to_content,
+            reply_to_sender,
+            reactions: vec![],
         })))
     } else {
         // ── Local delivery ────────────────────────────────────────────────────
@@ -216,6 +268,7 @@ pub async fn send_message(
             recipient_actor_uri,
             &body.content,
             &activity_uri,
+            body.reply_to_id,
         )
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?;
@@ -226,6 +279,9 @@ pub async fn send_message(
             sender_display_name: sender_display_name.clone(),
             content: msg.content.clone(),
             created_at: msg.created_at,
+            reply_to_id: body.reply_to_id,
+            reply_to_content: reply_to_content.clone(),
+            reply_to_sender: reply_to_sender.clone(),
         });
 
         if let Ok(json) = serde_json::to_string(&event) {
@@ -260,6 +316,10 @@ pub async fn send_message(
             activity_uri: msg.activity_uri,
             federation_status: msg.federation_status,
             created_at: msg.created_at,
+            reply_to_id: body.reply_to_id,
+            reply_to_content,
+            reply_to_sender,
+            reactions: vec![],
         })))
     }
 }
@@ -366,6 +426,29 @@ pub async fn get_conversation(
     }
     .map_err(|e| OidcError::server_error(e.to_string()))?;
 
+    // Batch-fetch reactions for all messages in this page.
+    let message_ids: Vec<Uuid> = msgs.iter().map(|m| m.id).collect();
+    let reaction_rows = reactions::get_reactions_for_messages(
+        &state.pool,
+        &message_ids,
+        caller_actor_uri,
+    )
+    .await
+    .map_err(|e| OidcError::server_error(e.to_string()))?;
+
+    // Group reactions by message_id.
+    let mut reactions_map: HashMap<Uuid, Vec<ReactionGroup>> = HashMap::new();
+    for row in reaction_rows {
+        reactions_map
+            .entry(row.message_id)
+            .or_default()
+            .push(ReactionGroup {
+                emoji: row.emoji,
+                count: row.count,
+                reacted_by_me: row.reacted_by_me,
+            });
+    }
+
     // Resolve display names for the two participants upfront (at most 2 DB lookups).
     let caller_display = display_name_for_actor(&state.pool, caller_actor_uri).await;
     let other_display = display_name_for_actor(&state.pool, other_actor_uri).await;
@@ -378,6 +461,7 @@ pub async fn get_conversation(
             } else {
                 other_display.clone()
             };
+            let msg_reactions = reactions_map.remove(&m.id).unwrap_or_default();
             MessageResponse {
                 id: m.id,
                 sender_actor_uri: m.sender_actor_uri,
@@ -387,6 +471,10 @@ pub async fn get_conversation(
                 activity_uri: m.activity_uri,
                 federation_status: m.federation_status,
                 created_at: m.created_at,
+                reply_to_id: m.reply_to_id,
+                reply_to_content: m.reply_to_content,
+                reply_to_sender: m.reply_to_sender,
+                reactions: msg_reactions,
             }
         })
         .collect();
@@ -448,4 +536,228 @@ pub async fn list_conversations(
     }
 
     Ok(Json(items))
+}
+
+// ─── Add reaction ─────────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct AddReactionRequest {
+    pub emoji: String,
+}
+
+/// POST /api/dm/:message_id/reactions
+#[tracing::instrument(skip_all, fields(message_id = %message_id))]
+pub async fn add_reaction(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(message_id): Path<Uuid>,
+    Json(body): Json<AddReactionRequest>,
+) -> Result<StatusCode, OidcError> {
+    let caller_id = require_auth(&state, &headers).await?;
+
+    if body.emoji.is_empty() {
+        return Err(OidcError::invalid_request("Emoji cannot be empty"));
+    }
+
+    let caller = users::find_by_id(&state.pool, caller_id)
+        .await
+        .map_err(|e| OidcError::server_error(e.to_string()))?
+        .ok_or_else(|| OidcError::server_error("Caller not found"))?;
+
+    let caller_actor_uri = caller.actor_uri.as_deref()
+        .ok_or_else(|| OidcError::server_error("Caller has no actor_uri"))?;
+
+    // Verify message exists and caller is a participant.
+    let msg = messages::find_by_id(&state.pool, message_id)
+        .await
+        .map_err(|e| OidcError::server_error(e.to_string()))?
+        .ok_or_else(|| OidcError::not_found("Message not found"))?;
+
+    if msg.sender_actor_uri != caller_actor_uri && msg.recipient_actor_uri != caller_actor_uri {
+        return Err(OidcError::not_found("Message not found"));
+    }
+
+    reactions::add_reaction(&state.pool, message_id, caller_actor_uri, &body.emoji)
+        .await
+        .map_err(|e| OidcError::server_error(e.to_string()))?;
+
+    // Determine the other participant to notify.
+    let other_actor_uri = if msg.sender_actor_uri == caller_actor_uri {
+        &msg.recipient_actor_uri
+    } else {
+        &msg.sender_actor_uri
+    };
+
+    let event = WsEvent::MessageReactionAdded(ReactionPayload {
+        message_id,
+        reactor_actor_uri: caller_actor_uri.to_string(),
+        emoji: body.emoji.clone(),
+    });
+
+    // Check if the other participant is local.
+    let base = state.config.issuer();
+    if other_actor_uri.starts_with(&format!("{}/users/", base)) {
+        // Local: push via WS + broker.
+        if let Ok(Some(other_user)) = users::find_by_actor_uri(&state.pool, other_actor_uri).await {
+            state.hub.send_to_user(&other_user.id, event.clone());
+            if let Ok(json) = serde_json::to_string(&event) {
+                let broker = state.broker.clone();
+                let rid = other_user.id;
+                tokio::spawn(async move {
+                    if let Err(e) = broker.publish(rid, &json).await {
+                        tracing::warn!(%rid, "broker publish failed: {e}");
+                    }
+                });
+            }
+        }
+    } else {
+        // Remote: deliver Like activity via ActivityPub.
+        let like_activity_uri = format!(
+            "{}/users/{}/activities/{}",
+            base,
+            caller.username,
+            Uuid::new_v4(),
+        );
+        let activity = activitypub::Activity::like(
+            &like_activity_uri,
+            caller_actor_uri,
+            &msg.activity_uri,
+            &body.emoji,
+        );
+        if let Ok(activity_value) = serde_json::to_value(&activity) {
+            // Resolve remote inbox.
+            if let Ok(Some(ra)) = remote_actors::find_by_actor_uri(&state.pool, other_actor_uri).await {
+                if let Some(inbox_url) = ra.inbox_url {
+                    let state_clone = state.clone();
+                    let sender_username = caller.username.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = delivery::deliver_activity(
+                            &state_clone, &inbox_url, &activity_value, &sender_username,
+                        ).await {
+                            tracing::warn!(%inbox_url, "failed to deliver Like activity: {e:?}");
+                        }
+                    });
+                }
+            }
+        }
+    }
+
+    // Also push to the reactor themselves (for multi-device).
+    state.hub.send_to_user(&caller_id, event);
+
+    Ok(StatusCode::CREATED)
+}
+
+// ─── Remove reaction ──────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct RemoveReactionQuery {
+    pub emoji: String,
+}
+
+/// DELETE /api/dm/:message_id/reactions?emoji=...
+#[tracing::instrument(skip_all, fields(message_id = %message_id))]
+pub async fn remove_reaction(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(message_id): Path<Uuid>,
+    Query(query): Query<RemoveReactionQuery>,
+) -> Result<StatusCode, OidcError> {
+    let caller_id = require_auth(&state, &headers).await?;
+
+    if query.emoji.is_empty() {
+        return Err(OidcError::invalid_request("Emoji cannot be empty"));
+    }
+
+    let caller = users::find_by_id(&state.pool, caller_id)
+        .await
+        .map_err(|e| OidcError::server_error(e.to_string()))?
+        .ok_or_else(|| OidcError::server_error("Caller not found"))?;
+
+    let caller_actor_uri = caller.actor_uri.as_deref()
+        .ok_or_else(|| OidcError::server_error("Caller has no actor_uri"))?;
+
+    // Verify message exists and caller is a participant.
+    let msg = messages::find_by_id(&state.pool, message_id)
+        .await
+        .map_err(|e| OidcError::server_error(e.to_string()))?
+        .ok_or_else(|| OidcError::not_found("Message not found"))?;
+
+    if msg.sender_actor_uri != caller_actor_uri && msg.recipient_actor_uri != caller_actor_uri {
+        return Err(OidcError::not_found("Message not found"));
+    }
+
+    let deleted = reactions::remove_reaction(&state.pool, message_id, caller_actor_uri, &query.emoji)
+        .await
+        .map_err(|e| OidcError::server_error(e.to_string()))?;
+
+    if !deleted {
+        return Ok(StatusCode::NO_CONTENT);
+    }
+
+    let other_actor_uri = if msg.sender_actor_uri == caller_actor_uri {
+        &msg.recipient_actor_uri
+    } else {
+        &msg.sender_actor_uri
+    };
+
+    let event = WsEvent::MessageReactionRemoved(ReactionPayload {
+        message_id,
+        reactor_actor_uri: caller_actor_uri.to_string(),
+        emoji: query.emoji.clone(),
+    });
+
+    let base = state.config.issuer();
+    if other_actor_uri.starts_with(&format!("{}/users/", base)) {
+        if let Ok(Some(other_user)) = users::find_by_actor_uri(&state.pool, other_actor_uri).await {
+            state.hub.send_to_user(&other_user.id, event.clone());
+            if let Ok(json) = serde_json::to_string(&event) {
+                let broker = state.broker.clone();
+                let rid = other_user.id;
+                tokio::spawn(async move {
+                    if let Err(e) = broker.publish(rid, &json).await {
+                        tracing::warn!(%rid, "broker publish failed: {e}");
+                    }
+                });
+            }
+        }
+    } else {
+        // Remote: deliver Undo{Like} via ActivityPub.
+        let undo_activity_uri = format!(
+            "{}/users/{}/activities/{}",
+            base,
+            caller.username,
+            Uuid::new_v4(),
+        );
+        let like_value = serde_json::json!({
+            "type": "Like",
+            "actor": caller_actor_uri,
+            "object": msg.activity_uri,
+            "content": query.emoji,
+        });
+        let activity = activitypub::Activity::undo_like(
+            &undo_activity_uri,
+            caller_actor_uri,
+            like_value,
+        );
+        if let Ok(activity_value) = serde_json::to_value(&activity) {
+            if let Ok(Some(ra)) = remote_actors::find_by_actor_uri(&state.pool, other_actor_uri).await {
+                if let Some(inbox_url) = ra.inbox_url {
+                    let state_clone = state.clone();
+                    let sender_username = caller.username.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = delivery::deliver_activity(
+                            &state_clone, &inbox_url, &activity_value, &sender_username,
+                        ).await {
+                            tracing::warn!(%inbox_url, "failed to deliver Undo Like: {e:?}");
+                        }
+                    });
+                }
+            }
+        }
+    }
+
+    state.hub.send_to_user(&caller_id, event);
+
+    Ok(StatusCode::NO_CONTENT)
 }

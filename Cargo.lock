@@ -5,11 +5,12 @@ version = 4
 [[package]]
 name = "activitypub"
 version = "0.1.0"
-source = "git+https://github.com/Pina-i/core-libs.git#7ec0702cf6636ecdfc41e750b14d00df3b4bbb60"
+source = "git+https://github.com/Pina-i/core-libs.git#e81525907d2cbccc0bc3deb18a404a15b29a0782"
 dependencies = [
  "serde",
  "serde_json",
  "time",
+ "uuid",
 ]
 
 [[package]]
@@ -782,7 +783,7 @@ dependencies = [
 [[package]]
 name = "common-types"
 version = "0.1.0"
-source = "git+https://github.com/Pina-i/core-libs.git#7ec0702cf6636ecdfc41e750b14d00df3b4bbb60"
+source = "git+https://github.com/Pina-i/core-libs.git#e81525907d2cbccc0bc3deb18a404a15b29a0782"
 dependencies = [
  "serde",
  "thiserror",
@@ -1570,7 +1571,7 @@ dependencies = [
 [[package]]
 name = "http-signatures"
 version = "0.1.0"
-source = "git+https://github.com/Pina-i/core-libs.git#7ec0702cf6636ecdfc41e750b14d00df3b4bbb60"
+source = "git+https://github.com/Pina-i/core-libs.git#e81525907d2cbccc0bc3deb18a404a15b29a0782"
 dependencies = [
  "base64ct",
  "ed25519-dalek",
@@ -2006,7 +2007,7 @@ dependencies = [
 [[package]]
 name = "jwt-utils"
 version = "0.1.0"
-source = "git+https://github.com/Pina-i/core-libs.git#7ec0702cf6636ecdfc41e750b14d00df3b4bbb60"
+source = "git+https://github.com/Pina-i/core-libs.git#e81525907d2cbccc0bc3deb18a404a15b29a0782"
 dependencies = [
  "base64ct",
  "ed25519-dalek",
@@ -2253,7 +2254,7 @@ dependencies = [
 [[package]]
 name = "observability"
 version = "0.1.0"
-source = "git+https://github.com/Pina-i/core-libs.git#7ec0702cf6636ecdfc41e750b14d00df3b4bbb60"
+source = "git+https://github.com/Pina-i/core-libs.git#e81525907d2cbccc0bc3deb18a404a15b29a0782"
 dependencies = [
  "tracing",
  "tracing-subscriber",

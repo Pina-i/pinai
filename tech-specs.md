@@ -502,3 +502,142 @@ All DM API responses include resolved display names to avoid requiring clients t
 | `GET /api/dm/:address` | `sender_display_name` per message | same |
 | `POST /api/dm` (response) | `sender_display_name` | `users.display_name` |
 | WS `new_dm` event | `sender_display_name` | `users.display_name` or `remote_actors.display_name` |
+
+---
+
+## 7. Message reactions & replies
+
+### Reactions
+
+Reactions are stored in a dedicated table linked to a message by its `id`. The `UNIQUE` constraint on `(message_id, reactor_actor_uri, emoji)` enforces that a user can only react once with the same emoji on the same message.
+
+```sql
+CREATE TABLE message_reactions (
+  id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  message_id        UUID NOT NULL REFERENCES direct_messages(id) ON DELETE CASCADE,
+  reactor_actor_uri TEXT NOT NULL,       -- local or remote actor
+  emoji             TEXT NOT NULL,       -- e.g. "👍" or a custom emoji identifier
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+  UNIQUE (message_id, reactor_actor_uri, emoji)
+);
+```
+
+To render the reaction bar on a message, reactions are grouped by emoji with a count and a flag indicating whether the current user has reacted:
+
+```sql
+SELECT
+  emoji,
+  COUNT(*)                                    AS count,
+  bool_or(reactor_actor_uri = $1)             AS reacted_by_me
+FROM message_reactions
+WHERE message_id = $2
+GROUP BY emoji
+ORDER BY count DESC;
+```
+
+This produces the classic Discord-style reaction bar: `👍 3 · ❤️ 2` with the current user's reactions highlighted.
+
+#### Federation
+
+A reaction is federated as a `Like` activity pointing to the `activity_uri` of the target message:
+
+```json
+{
+  "@context": "https://www.w3.org/ns/activitystreams",
+  "type": "Like",
+  "actor": "https://idp.alice.com/users/alice_xK9mP",
+  "object": "https://idp.bob.com/activities/uuid",
+  "content": "👍"
+}
+```
+
+Removing a reaction is federated as an `Undo{Like}` activity.
+
+---
+
+### Replies
+
+Replies are messages that reference another message via a `reply_to_id` self-referential foreign key added to `direct_messages`:
+
+```sql
+ALTER TABLE direct_messages
+  ADD COLUMN reply_to_id UUID REFERENCES direct_messages(id) ON DELETE SET NULL;
+```
+
+`ON DELETE SET NULL` is intentional — if the parent message is deleted, the reply becomes a standalone message rather than disappearing with it. This matches the expected behavior: Discord shows "Original message was deleted" in this case.
+
+When fetching a conversation page, a single LEFT JOIN pulls the parent message preview inline — only one level deep, never recursive:
+
+```sql
+SELECT
+  dm.*,
+  parent.id                AS reply_to_id,
+  parent.content           AS reply_to_content,
+  parent.sender_actor_uri  AS reply_to_sender
+FROM direct_messages dm
+LEFT JOIN direct_messages parent ON dm.reply_to_id = parent.id
+WHERE ((dm.sender_actor_uri = $1 AND dm.recipient_actor_uri = $2)
+   OR  (dm.sender_actor_uri = $2 AND dm.recipient_actor_uri = $1))
+  AND dm.deleted_at IS NULL
+  AND (dm.created_at, dm.id) < ($3, $4)
+ORDER BY dm.created_at DESC, dm.id DESC
+LIMIT 50;
+```
+
+The conversation remains a **flat list** with inline reply previews — no recursive thread fetching. Threads (a sub-conversation branching off a message) are a separate product decision that would require a `thread_id` column and a `threads` table, deferred until needed.
+
+#### Federation
+
+A reply is federated as a `Create{Note}` activity where the `Note` object includes an `inReplyTo` field pointing to the parent's `activity_uri`:
+
+```json
+{
+  "@context": "https://www.w3.org/ns/activitystreams",
+  "type": "Create",
+  "actor": "https://idp.alice.com/users/alice_xK9mP",
+  "object": {
+    "type": "Note",
+    "id": "https://idp.alice.com/activities/uuid",
+    "inReplyTo": "https://idp.bob.com/activities/parent-uuid",
+    "content": "Hey, replying to your message!"
+  }
+}
+```
+
+---
+
+### Real-time delivery
+
+Both reactions and replies are delivered via the same broker → WebSocket pipeline as DMs. The WebSocket events are:
+
+```json
+// New reaction
+{
+  "event": "message_reaction_added",
+  "messageId": "uuid",
+  "reactorActorUri": "https://idp.alice.com/users/alice_xK9mP",
+  "emoji": "👍"
+}
+
+// Reaction removed
+{
+  "event": "message_reaction_removed",
+  "messageId": "uuid",
+  "reactorActorUri": "https://idp.alice.com/users/alice_xK9mP",
+  "emoji": "👍"
+}
+
+// New reply (same shape as new_dm, with reply fields added)
+{
+  "event": "new_dm",
+  "messageId": "uuid",
+  "senderActorUri": "https://idp.alice.com/users/alice_xK9mP",
+  "senderDisplayName": "alice",
+  "content": "Hey, replying to your message!",
+  "replyToId": "parent-uuid",
+  "replyToContent": "Original message preview...",
+  "replyToSender": "https://idp.bob.com/users/bob_aB3cD",
+  "createdAt": "2026-03-20T12:00:00Z"
+}
+```
