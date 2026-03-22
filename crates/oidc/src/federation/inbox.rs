@@ -21,7 +21,7 @@ use uuid::Uuid;
 
 use idp_db::repos::{friendships, messages, reactions, remote_actors, users};
 
-use crate::ws::events::{DmPayload, FriendshipPayload, ProfileUpdatePayload, ReactionPayload, WsEvent};
+use crate::ws::events::{DmPayload, EditedDmPayload, FriendshipPayload, ProfileUpdatePayload, ReactionPayload, WsEvent};
 use crate::{AppState, OidcError};
 
 /// POST /users/:slug/inbox
@@ -57,7 +57,7 @@ pub async fn post_inbox(
         "Reject" => handle_reject(&state, &body).await?,
         "Undo" => handle_undo(&state, &body, &recipient).await?,
         "Create" => handle_create(&state, &body, &recipient).await?,
-        "Update" => handle_update(&state, &body).await?,
+        "Update" => handle_update(&state, &body, &recipient).await?,
         "Like" => handle_like(&state, &body, &recipient).await?,
         other => {
             tracing::warn!(activity_type = %other, "unhandled activity type in inbox");
@@ -498,9 +498,84 @@ async fn handle_create(
     Ok(())
 }
 
+// ─── Update{Note} — Federated message edit ──────────────────────────────────
+
+async fn handle_update_note(
+    state: &AppState,
+    body: &Value,
+    obj: &Value,
+    recipient: &idp_db::models::User,
+) -> Result<(), OidcError> {
+    let actor_url = body.get("actor").and_then(|v| v.as_str()).unwrap_or("");
+
+    let activity_uri = obj
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    let new_content = obj
+        .get("content")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    if activity_uri.is_empty() || new_content.is_empty() {
+        return Ok(());
+    }
+
+    let updated = match messages::edit_message_by_activity_uri(
+        &state.pool,
+        activity_uri,
+        actor_url,
+        new_content,
+    )
+    .await
+    {
+        Ok(Some(m)) => m,
+        Ok(None) => {
+            tracing::warn!(%activity_uri, "Update{{Note}} target not found or sender mismatch");
+            return Ok(());
+        }
+        Err(e) => return Err(OidcError::server_error(e.to_string())),
+    };
+
+    let edited_at = match updated.edited_at {
+        Some(t) => t,
+        None => return Ok(()),
+    };
+
+    let event = WsEvent::MessageEdited(EditedDmPayload {
+        message_id: updated.id,
+        new_content: updated.content,
+        edited_at,
+    });
+
+    state.hub.send_to_user(&recipient.id, event.clone());
+
+    if let Ok(json) = serde_json::to_string(&event) {
+        let broker = state.broker.clone();
+        let rid = recipient.id;
+        tokio::spawn(async move {
+            if let Err(e) = broker.publish(rid, &json).await {
+                tracing::warn!(%rid, "broker publish failed for message_edited: {e}");
+            }
+        });
+    }
+
+    tracing::info!(
+        actor = %actor_url,
+        message = %updated.id,
+        "message edited via AP Update{{Note}}"
+    );
+    Ok(())
+}
+
 // ─── Update{Person} — Profile propagation ───────────────────────────────────
 
-async fn handle_update(state: &AppState, body: &Value) -> Result<(), OidcError> {
+async fn handle_update(
+    state: &AppState,
+    body: &Value,
+    recipient: &idp_db::models::User,
+) -> Result<(), OidcError> {
     let obj = match body.get("object") {
         Some(o) => o,
         None => return Ok(()),
@@ -510,6 +585,10 @@ async fn handle_update(state: &AppState, body: &Value) -> Result<(), OidcError> 
         .get("type")
         .and_then(|t| t.as_str())
         .unwrap_or("");
+
+    if obj_type == "Note" {
+        return handle_update_note(state, body, obj, recipient).await;
+    }
 
     if obj_type != "Person" {
         return Ok(());

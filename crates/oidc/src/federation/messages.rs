@@ -17,7 +17,7 @@ use uuid::Uuid;
 use idp_db::repos::{dm_reads, messages, reactions, remote_actors, users};
 
 use crate::federation::delivery;
-use crate::ws::events::{DmPayload, ReactionPayload, WsEvent};
+use crate::ws::events::{DmPayload, EditedDmPayload, ReactionPayload, WsEvent};
 use crate::{AppState, OidcError};
 use super::auth::require_auth;
 
@@ -65,6 +65,9 @@ pub struct MessageResponse {
     pub federation_status: String,
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub edited_at: Option<OffsetDateTime>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reply_to_id: Option<Uuid>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -243,6 +246,7 @@ pub async fn send_message(
             activity_uri: msg.activity_uri,
             federation_status: msg.federation_status,
             created_at: msg.created_at,
+            edited_at: msg.edited_at,
             reply_to_id: body.reply_to_id,
             reply_to_content,
             reply_to_sender,
@@ -316,6 +320,7 @@ pub async fn send_message(
             activity_uri: msg.activity_uri,
             federation_status: msg.federation_status,
             created_at: msg.created_at,
+            edited_at: msg.edited_at,
             reply_to_id: body.reply_to_id,
             reply_to_content,
             reply_to_sender,
@@ -471,6 +476,7 @@ pub async fn get_conversation(
                 activity_uri: m.activity_uri,
                 federation_status: m.federation_status,
                 created_at: m.created_at,
+                edited_at: m.edited_at,
                 reply_to_id: m.reply_to_id,
                 reply_to_content: m.reply_to_content,
                 reply_to_sender: m.reply_to_sender,
@@ -760,4 +766,128 @@ pub async fn remove_reaction(
     state.hub.send_to_user(&caller_id, event);
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+// ─── Edit a message ───────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct EditMessageRequest {
+    pub content: String,
+}
+
+/// PATCH /api/dm/:message_id
+/// Edit the content of a message. Only the original sender can edit.
+#[tracing::instrument(skip_all, fields(message_id = %message_id))]
+pub async fn edit_message(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(message_id): Path<Uuid>,
+    Json(body): Json<EditMessageRequest>,
+) -> Result<Json<MessageResponse>, OidcError> {
+    let caller_id = require_auth(&state, &headers).await?;
+
+    if body.content.is_empty() {
+        return Err(OidcError::invalid_request("Message content cannot be empty"));
+    }
+    if body.content.len() > 4096 {
+        return Err(OidcError::invalid_request("Message content too long (max 4096 chars)"));
+    }
+
+    let caller = users::find_by_id(&state.pool, caller_id)
+        .await
+        .map_err(|e| OidcError::server_error(e.to_string()))?
+        .ok_or_else(|| OidcError::server_error("Caller not found"))?;
+
+    let caller_actor_uri = caller.actor_uri.as_deref()
+        .ok_or_else(|| OidcError::server_error("Caller has no actor_uri"))?;
+
+    // Update — the WHERE clause enforces sender ownership and non-deleted.
+    let updated = messages::edit_message(&state.pool, message_id, caller_actor_uri, &body.content)
+        .await
+        .map_err(|e| OidcError::server_error(e.to_string()))?
+        .ok_or_else(|| OidcError::not_found("Message not found or you are not the sender"))?;
+
+    let edited_at = updated.edited_at
+        .ok_or_else(|| OidcError::server_error("edited_at missing after update"))?;
+
+    let event = WsEvent::MessageEdited(EditedDmPayload {
+        message_id: updated.id,
+        new_content: updated.content.clone(),
+        edited_at,
+    });
+
+    // Notify the other participant.
+    let other_actor_uri = &updated.recipient_actor_uri;
+    let base = state.config.issuer();
+
+    if other_actor_uri.starts_with(&format!("{}/users/", base)) {
+        // Local recipient: push via WS + broker.
+        if let Ok(Some(other_user)) = users::find_by_actor_uri(&state.pool, other_actor_uri).await {
+            state.hub.send_to_user(&other_user.id, event.clone());
+            if let Ok(json) = serde_json::to_string(&event) {
+                let broker = state.broker.clone();
+                let rid = other_user.id;
+                tokio::spawn(async move {
+                    if let Err(e) = broker.publish(rid, &json).await {
+                        tracing::warn!(%rid, "broker publish failed: {e}");
+                    }
+                });
+            }
+        }
+    } else {
+        // Remote recipient: deliver Update{Note} via ActivityPub.
+        let update_activity_uri = format!(
+            "{}/users/{}/activities/{}",
+            base,
+            caller.username,
+            Uuid::new_v4(),
+        );
+        let activity = serde_json::json!({
+            "@context": "https://www.w3.org/ns/activitystreams",
+            "type": "Update",
+            "id": update_activity_uri,
+            "actor": caller_actor_uri,
+            "object": {
+                "type": "Note",
+                "id": updated.activity_uri,
+                "content": updated.content,
+            }
+        });
+        if let Ok(Some(ra)) = remote_actors::find_by_actor_uri(&state.pool, other_actor_uri).await {
+            if let Some(inbox_url) = ra.inbox_url {
+                let state_clone = state.clone();
+                let sender_username = caller.username.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = delivery::deliver_activity(
+                        &state_clone, &inbox_url, &activity, &sender_username,
+                    ).await {
+                        tracing::warn!(%inbox_url, "failed to deliver Update{{Note}}: {e:?}");
+                    }
+                });
+            }
+        }
+    }
+
+    // Echo to sender (multi-device).
+    state.hub.send_to_user(&caller_id, event);
+
+    let sender_display_name = Some(caller.display_name.unwrap_or(caller.username));
+
+    tracing::info!(message_id = %updated.id, "message edited");
+
+    Ok(Json(MessageResponse {
+        id: updated.id,
+        sender_actor_uri: updated.sender_actor_uri,
+        sender_display_name,
+        recipient_actor_uri: updated.recipient_actor_uri,
+        content: updated.content,
+        activity_uri: updated.activity_uri,
+        federation_status: updated.federation_status,
+        created_at: updated.created_at,
+        edited_at: Some(edited_at),
+        reply_to_id: updated.reply_to_id,
+        reply_to_content: None,
+        reply_to_sender: None,
+        reactions: vec![],
+    }))
 }

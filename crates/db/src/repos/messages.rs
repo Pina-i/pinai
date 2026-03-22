@@ -125,6 +125,56 @@ pub async fn get_conversation_before(
     .await
 }
 
+/// Edit the content of a message. Only the original sender can edit.
+/// Returns the updated message, or `None` if not found / caller is not the sender.
+pub async fn edit_message(
+    pool: &PgPool,
+    id: Uuid,
+    sender_actor_uri: &str,
+    new_content: &str,
+) -> Result<Option<DirectMessage>, sqlx::Error> {
+    sqlx::query_as::<_, DirectMessage>(
+        r#"
+        UPDATE direct_messages
+        SET content = $3, edited_at = now()
+        WHERE id = $1
+          AND sender_actor_uri = $2
+          AND deleted_at IS NULL
+        RETURNING *
+        "#,
+    )
+    .bind(id)
+    .bind(sender_actor_uri)
+    .bind(new_content)
+    .fetch_optional(pool)
+    .await
+}
+
+/// Update the content of a message matched by activity_uri (used for federated edits).
+/// Returns whether a row was updated.
+pub async fn edit_message_by_activity_uri(
+    pool: &PgPool,
+    activity_uri: &str,
+    sender_actor_uri: &str,
+    new_content: &str,
+) -> Result<Option<DirectMessage>, sqlx::Error> {
+    sqlx::query_as::<_, DirectMessage>(
+        r#"
+        UPDATE direct_messages
+        SET content = $3, edited_at = now()
+        WHERE activity_uri = $1
+          AND sender_actor_uri = $2
+          AND deleted_at IS NULL
+        RETURNING *
+        "#,
+    )
+    .bind(activity_uri)
+    .bind(sender_actor_uri)
+    .bind(new_content)
+    .fetch_optional(pool)
+    .await
+}
+
 /// Update the federation status of a message by its activity_uri.
 pub async fn update_federation_status(
     pool: &PgPool,
