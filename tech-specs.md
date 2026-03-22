@@ -641,3 +641,65 @@ Both reactions and replies are delivered via the same broker → WebSocket pipel
   "createdAt": "2026-03-20T12:00:00Z"
 }
 ```
+
+---
+
+## 8. Message editing
+
+### REST endpoint
+
+```
+PATCH /api/dm/:message_id
+Authorization: Bearer <access_token>
+Content-Type: application/json
+
+{ "content": "corrected text" }
+```
+
+**Authorization**: only the original sender can edit. The `WHERE` clause enforces ownership atomically at the DB level — no separate fetch + check:
+
+```sql
+UPDATE direct_messages
+SET content = $3, edited_at = now()
+WHERE id         = $1
+  AND sender_actor_uri = $2
+  AND deleted_at IS NULL
+RETURNING *;
+```
+
+Returns `404` if the message does not exist, is already deleted, or belongs to a different sender. Content must be 1–4096 characters.
+
+### Real-time delivery
+
+After a successful update the server pushes a `message_edited` WebSocket event to both parties:
+
+```json
+{
+  "event": "message_edited",
+  "messageId": "uuid",
+  "newContent": "corrected text",
+  "editedAt": "2026-03-20T12:05:00Z"
+}
+```
+
+- **Local recipient**: pushed via `hub.send_to_user()` + published to Redis Streams for catch-up.
+- **Sender (multi-device)**: echoed via `hub.send_to_user()`.
+- **Remote recipient**: an `Update{Note}` ActivityPub activity is delivered to the recipient's IdP inbox in a background `tokio::spawn`. The remote IdP applies the edit via `edit_message_by_activity_uri` (matches by `activity_uri` instead of `id`) and then pushes `message_edited` to the remote recipient over their local WS.
+
+### Federation — `Update{Note}`
+
+```json
+{
+  "@context": "https://www.w3.org/ns/activitystreams",
+  "type": "Update",
+  "id": "https://idp.alice.com/users/alice_xK9mP/activities/uuid",
+  "actor": "https://idp.alice.com/users/alice_xK9mP",
+  "object": {
+    "type": "Note",
+    "id": "https://idp.alice.com/activities/original-uuid",
+    "content": "corrected text"
+  }
+}
+```
+
+The `object.id` is the original `activity_uri` stored in `direct_messages.activity_uri`, which is the stable cross-instance identifier used to correlate the two mirrored copies of the message.

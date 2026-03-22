@@ -8,6 +8,7 @@ use uuid::Uuid;
 #[serde(rename_all = "snake_case")]
 pub enum WsEvent {
     NewDm(DmPayload),
+    MessageEdited(EditedDmPayload),
     FriendRequest(FriendshipPayload),
     FriendAccepted(FriendshipPayload),
     FriendRemoved(FriendshipPayload),
@@ -30,6 +31,14 @@ pub struct DmPayload {
     pub reply_to_content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reply_to_sender: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EditedDmPayload {
+    pub message_id: Uuid,
+    pub new_content: String,
+    #[serde(with = "time::serde::rfc3339")]
+    pub edited_at: OffsetDateTime,
 }
 
 #[derive(Debug, Clone, Serialize)]
