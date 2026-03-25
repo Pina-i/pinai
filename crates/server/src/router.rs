@@ -90,7 +90,7 @@ pub fn build(state: AppState) -> Router {
 
         // ── Direct Messages REST API (Bearer-auth) ────────────────────────────
         .route("/api/dm", post(send_message).get(list_conversations))
-        .route("/api/dm/{address}", get(get_conversation))
+        .route("/api/dm/{conversation_id}", get(get_conversation))
         .route("/api/dm/{message_id}/edit", patch(edit_message))
         .route("/api/dm/{message_id}/reactions", post(add_reaction).delete(remove_reaction))
 
