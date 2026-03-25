@@ -19,7 +19,7 @@ use axum::{
 use serde_json::Value;
 use uuid::Uuid;
 
-use idp_db::repos::{friendships, messages, reactions, remote_actors, users};
+use idp_db::repos::{conversations, friendships, messages, reactions, remote_actors, users};
 
 use crate::ws::events::{DmPayload, EditedDmPayload, FriendshipPayload, ProfileUpdatePayload, ReactionPayload, WsEvent};
 use crate::{AppState, OidcError};
@@ -452,10 +452,37 @@ async fn handle_create(
         }
     }
 
+    // Get or create the DM conversation between sender and recipient.
+    // If the AP activity includes a context field with a UUID, use that as the conversation ID.
+    let context_uuid = body
+        .get("object")
+        .and_then(|o| o.get("context"))
+        .and_then(|c| c.as_str())
+        .and_then(|s| s.parse::<Uuid>().ok());
+
+    let (conversation_id, _created) = if let Some(ctx_id) = context_uuid {
+        conversations::get_or_create_dm_with_id(
+            &state.pool,
+            ctx_id,
+            actor_url,
+            recipient_actor_uri,
+        )
+        .await
+        .map_err(|e| OidcError::server_error(e.to_string()))?
+    } else {
+        conversations::get_or_create_dm(
+            &state.pool,
+            actor_url,
+            recipient_actor_uri,
+        )
+        .await
+        .map_err(|e| OidcError::server_error(e.to_string()))?
+    };
+
     let msg = messages::create_message(
         &state.pool,
+        conversation_id,
         actor_url,
-        recipient_actor_uri,
         &content,
         activity_uri,
         reply_to_id,
@@ -471,6 +498,8 @@ async fn handle_create(
 
     let event = WsEvent::NewDm(DmPayload {
         message_id: msg.id,
+        conversation_id,
+        kind: "dm".to_string(),
         sender_address: actor_url.to_string(),
         sender_display_name,
         content: msg.content,

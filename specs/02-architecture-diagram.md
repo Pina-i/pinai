@@ -1,0 +1,119 @@
+# Pina'i — Architecture Diagram
+
+```mermaid
+flowchart TD
+    subgraph ClientAlice["Alice's Clients"]
+        WEB_A["🖥️ Web\nReact + Vite"]
+        DESK_A["🖱️ Desktop\nElectron"]
+    end
+
+    subgraph ClientBob["Bob's Clients"]
+        WEB_B["🖥️ Web\nReact + Vite"]
+        DESK_B["🖱️ Desktop\nElectron"]
+    end
+
+    subgraph IdP_Alice["idp.alice.com — Identity & Messaging Backbone"]
+        OIDC_A["🔐 OIDC\nAuth + JWT"]
+        MSG_A["💬 Msg Backbone\nFriends · DMs · ActivityPub"]
+        WS_A["⚡ WebSocket Layer\nthin delivery only"]
+
+        subgraph Broker_A["Redis (idp.alice.com)"]
+            PUBSUB_A["📡 pub-sub\nPresence — ephemeral"]
+            STREAMS_A["🌊 Streams\nDMs · profile updates · friend requests"]
+        end
+
+        subgraph DB_Alice["PostgreSQL (idp.alice.com)"]
+            USERS_A[("users\nactor_uri · inbox_url · outbox_url")]
+            REMOTE_A[("remote_actors\ncache · inbox_url · fetched_at TTL")]
+            FRIENDS_A[("friendships\nowner_user_id · friend_actor_uri\nfriend_avatar_url")]
+            FED_Q_A[("federation_queue\nactivity · target_inbox\nattempts · next_attempt")]
+        end
+
+        RUSTFS_A["🗄️ RustFS\nAvatars · Attachments"]
+    end
+
+    subgraph IdP_Bob["idp.bob.com — Identity & Messaging Backbone"]
+        OIDC_B["🔐 OIDC\nAuth + JWT"]
+        MSG_B["💬 Msg Backbone\nFriends · DMs · ActivityPub"]
+        WS_B["⚡ WebSocket Layer\nthin delivery only"]
+
+        subgraph Broker_B["Redis (idp.bob.com)"]
+            PUBSUB_B["📡 pub-sub\nPresence — ephemeral"]
+            STREAMS_B["🌊 Streams\nDMs · profile updates · friend requests"]
+        end
+
+        subgraph DB_Bob["PostgreSQL (idp.bob.com)"]
+            USERS_B[("users\nactor_uri · inbox_url · outbox_url")]
+            REMOTE_B[("remote_actors\ncache · inbox_url · fetched_at TTL")]
+            FRIENDS_B[("friendships\nowner_user_id · friend_actor_uri\nfriend_avatar_url")]
+            FED_Q_B[("federation_queue\nactivity · target_inbox\nattempts · next_attempt")]
+        end
+
+        RUSTFS_B["🗄️ RustFS\nAvatars · Attachments"]
+    end
+
+    %% ── Client ↔ IdP connections ──────────────────────────────────────
+    WEB_A  <-->|"OIDC + WebSocket"| OIDC_A
+    DESK_A <-->|"OIDC + WebSocket"| OIDC_A
+    WEB_A  <-->|WebSocket| WS_A
+    DESK_A <-->|WebSocket| WS_A
+
+    WEB_B  <-->|"OIDC + WebSocket"| OIDC_B
+    DESK_B <-->|"OIDC + WebSocket"| OIDC_B
+    WEB_B  <-->|WebSocket| WS_B
+    DESK_B <-->|WebSocket| WS_B
+
+    %% ── IdP internal wiring ───────────────────────────────────────────
+    OIDC_A --> MSG_A
+    MSG_A --> USERS_A
+    MSG_A --> FRIENDS_A
+    MSG_A --> REMOTE_A
+    MSG_A --> FED_Q_A
+    MSG_A --> RUSTFS_A
+
+    MSG_A -->|"publish durable event"| STREAMS_A
+    MSG_A -->|"publish presence"| PUBSUB_A
+    STREAMS_A -->|"consume & push"| WS_A
+    PUBSUB_A  -->|"consume & push"| WS_A
+
+    OIDC_B --> MSG_B
+    MSG_B --> USERS_B
+    MSG_B --> FRIENDS_B
+    MSG_B --> REMOTE_B
+    MSG_B --> FED_Q_B
+    MSG_B --> RUSTFS_B
+
+    MSG_B -->|"publish durable event"| STREAMS_B
+    MSG_B -->|"publish presence"| PUBSUB_B
+    STREAMS_B -->|"consume & push"| WS_B
+    PUBSUB_B  -->|"consume & push"| WS_B
+
+    %% ── Federation (ActivityPub) ──────────────────────────────────────
+    FED_Q_B -->|"HTTP POST ActivityPub Update\nwith exponential backoff retry"| MSG_A
+    MSG_A -->|"update remote_actors cache\n+ friendships.friend_avatar_url"| REMOTE_A
+    MSG_A -->|"update remote_actors cache\n+ friendships.friend_avatar_url"| FRIENDS_A
+
+    FED_Q_A -->|"HTTP POST ActivityPub Update\nwith exponential backoff retry"| MSG_B
+    MSG_B -->|"update remote_actors cache\n+ friendships.friend_avatar_url"| REMOTE_B
+    MSG_B -->|"update remote_actors cache\n+ friendships.friend_avatar_url"| FRIENDS_B
+
+    %% ── Styles ────────────────────────────────────────────────────────
+    classDef client   fill:#1e3a5f,stroke:#3b82f6,color:#bfdbfe
+    classDef oidc     fill:#3b1f1f,stroke:#ef4444,color:#fca5a5
+    classDef backbone fill:#2e1a47,stroke:#a855f7,color:#d8b4fe
+    classDef ws       fill:#1a3a3a,stroke:#06b6d4,color:#67e8f9
+    classDef broker   fill:#1a2a1a,stroke:#22c55e,color:#86efac
+    classDef db       fill:#1a2e1a,stroke:#4ade80,color:#bbf7d0
+    classDef storage  fill:#2a1f0f,stroke:#f97316,color:#fdba74
+
+    class WEB_A,DESK_A,WEB_B,DESK_B client
+    class OIDC_A,OIDC_B oidc
+    class MSG_A,MSG_B backbone
+    class WS_A,WS_B ws
+    class PUBSUB_A,STREAMS_A,PUBSUB_B,STREAMS_B broker
+    class USERS_A,REMOTE_A,FRIENDS_A,FED_Q_A,USERS_B,REMOTE_B,FRIENDS_B,FED_Q_B db
+    class RUSTFS_A,RUSTFS_B storage
+```
+
+---
+

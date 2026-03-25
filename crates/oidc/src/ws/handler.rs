@@ -13,7 +13,7 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use idp_db::repos::{messages, remote_actors, users};
+use idp_db::repos::{conversations, messages, remote_actors, users};
 use jwt_utils::validate_access_token;
 
 use crate::federation::delivery;
@@ -209,6 +209,21 @@ async fn handle_client_message(state: &AppState, sender_id: Uuid, msg: WsClientM
                     }
                 };
 
+                // Get or create the DM conversation.
+                let (conversation_id, _created) = match conversations::get_or_create_dm(
+                    &state.pool,
+                    sender_actor_uri,
+                    recipient_actor_uri,
+                )
+                .await
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        warn!(%sender_id, "failed to get/create conversation: {e}");
+                        return;
+                    }
+                };
+
                 let activity_uri = format!(
                     "{}/users/{}/activities/{}",
                     state.config.issuer(),
@@ -218,8 +233,8 @@ async fn handle_client_message(state: &AppState, sender_id: Uuid, msg: WsClientM
 
                 let msg = match messages::create_message(
                     &state.pool,
+                    conversation_id,
                     sender_actor_uri,
-                    recipient_actor_uri,
                     &payload.content,
                     &activity_uri,
                     None,
@@ -238,6 +253,8 @@ async fn handle_client_message(state: &AppState, sender_id: Uuid, msg: WsClientM
                     Some(sender.display_name.clone().unwrap_or_else(|| sender.username.clone()));
                 let event = WsEvent::NewDm(DmPayload {
                     message_id: msg.id,
+                    conversation_id,
+                    kind: "dm".to_string(),
                     sender_address: sender.federated_address(local_domain),
                     sender_display_name,
                     content: msg.content,
@@ -338,6 +355,21 @@ async fn handle_remote_dm(
             }
         };
 
+    // Get or create the DM conversation.
+    let (conversation_id, _created) = match conversations::get_or_create_dm(
+        &state.pool,
+        sender_actor_uri,
+        &recipient_actor_uri,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            warn!(%sender_id, "failed to get/create conversation: {e}");
+            return;
+        }
+    };
+
     let activity_uri = format!(
         "{}/users/{}/activities/{}",
         issuer,
@@ -347,8 +379,8 @@ async fn handle_remote_dm(
 
     let msg = match messages::create_message(
         &state.pool,
+        conversation_id,
         sender_actor_uri,
-        &recipient_actor_uri,
         content,
         &activity_uri,
         None,
@@ -402,6 +434,8 @@ async fn handle_remote_dm(
         Some(sender.display_name.clone().unwrap_or_else(|| sender.username.clone()));
     let event = WsEvent::NewDm(DmPayload {
         message_id: msg.id,
+        conversation_id,
+        kind: "dm".to_string(),
         sender_address: sender.federated_address(local_domain),
         sender_display_name,
         content: msg.content,

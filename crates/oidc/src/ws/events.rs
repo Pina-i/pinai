@@ -20,6 +20,8 @@ pub enum WsEvent {
 #[derive(Debug, Clone, Serialize)]
 pub struct DmPayload {
     pub message_id: Uuid,
+    pub conversation_id: Uuid,
+    pub kind: String,
     pub sender_address: String,
     pub sender_display_name: Option<String>,
     pub content: String,

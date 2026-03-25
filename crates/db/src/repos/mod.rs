@@ -1,6 +1,7 @@
 pub mod auth_codes;
-pub mod dm_reads;
 pub mod clients;
+pub mod conversation_reads;
+pub mod conversations;
 pub mod friendships;
 pub mod messages;
 pub mod reactions;

@@ -321,28 +321,59 @@ DMs live on the Msg Backbone (IdP layer). Since Alice and Bob can be on differen
 
 ### Schema
 
+Conversations are anchored by a stable UUID that never changes regardless of participant count. This is the single key used for message storage, typing channels, unread tracking, and federation.
+
 ```sql
-CREATE TABLE direct_messages (
-  id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  sender_actor_uri    TEXT NOT NULL,
-  recipient_actor_uri TEXT NOT NULL,
-  content             TEXT NOT NULL,
-  activity_uri        TEXT NOT NULL UNIQUE, -- e.g. "https://idp.alice.com/activities/uuid"
-                                            -- used to correlate federated copies for edits/deletes
-  federation_status   TEXT NOT NULL DEFAULT 'pending'
-    CHECK (federation_status IN ('pending', 'delivered', 'failed')),
-  created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
-  edited_at           TIMESTAMPTZ,
-  deleted_at          TIMESTAMPTZ           -- soft delete, NULL = not deleted
+-- Conversation anchor — one row per conversation, DM or group
+CREATE TABLE conversations (
+  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  kind         TEXT NOT NULL DEFAULT 'dm'
+                 CHECK (kind IN ('dm', 'group')),
+  name         TEXT,                          -- NULL for DMs (title derived client-side from
+                                              -- the other member's display_name)
+                                              -- Required for groups; defaults at creation to
+                                              -- the joined display_names of all initial members
+                                              -- e.g. "Alice, Bob, Harry" — editable afterwards
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- Indexes for keyset pagination in both directions
-CREATE INDEX idx_dm_conversation_cursor
-  ON direct_messages (sender_actor_uri, recipient_actor_uri, created_at DESC, id DESC);
+-- Members of a conversation — local or remote actors
+-- left_at IS NULL means the member is still active
+CREATE TABLE conversation_members (
+  conversation_id  UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  actor_uri        TEXT NOT NULL,             -- local or remote
+  joined_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  left_at          TIMESTAMPTZ,               -- NULL = still a member
+  PRIMARY KEY (conversation_id, actor_uri)
+);
 
-CREATE INDEX idx_dm_conversation_cursor_reverse
-  ON direct_messages (recipient_actor_uri, sender_actor_uri, created_at DESC, id DESC);
+CREATE INDEX idx_conv_members_actor
+  ON conversation_members (actor_uri) WHERE left_at IS NULL;
+
+-- Messages — keyed by conversation_id instead of sender/recipient pair
+CREATE TABLE direct_messages (
+  id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  conversation_id   UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  sender_actor_uri  TEXT NOT NULL,
+  content           TEXT NOT NULL,
+  activity_uri      TEXT NOT NULL UNIQUE,     -- e.g. "https://idp.alice.com/activities/uuid"
+                                              -- used to correlate federated copies for edits/deletes
+  federation_status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (federation_status IN ('pending', 'delivered', 'failed')),
+  reply_to_id       UUID REFERENCES direct_messages(id) ON DELETE SET NULL,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  edited_at         TIMESTAMPTZ,
+  deleted_at        TIMESTAMPTZ               -- soft delete, NULL = not deleted
+);
+
+-- Keyset pagination index
+CREATE INDEX idx_dm_conversation_cursor
+  ON direct_messages (conversation_id, created_at DESC, id DESC);
 ```
+
+> **Conversation ID ownership**: the instance that sends the first message generates the UUID and includes it in the `Create{Note}` ActivityPub activity (`context` field). The receiving instance stores it as-is. No coordination needed — one round-trip in the first message suffices to establish the shared ID on both ends.
+
+> **Group name default**: when a group conversation is created, the server sets `name` to the comma-joined `display_name` values of all initial members excluding the creator, e.g. `"Bob, Harry"`. The creator's own name is omitted since the conversation list is always shown from the perspective of the local user. The name is stored as plain text and can be updated freely via `PATCH /api/dm/:conversation_id` (group only).
 
 ### Delivery flow
 
@@ -374,9 +405,9 @@ Bob's IdP ← receives HTTP POST to /users/bob/inbox
 
 > **Note on `sender_address`**: the `DmPayload.sender_address` field sent over WebSocket contains
 > the raw actor URI (e.g. `https://idp.alice.com/users/alice`). The client normalises it to
-> `username@domain` format using `actorUriToAddress()` before using it as a conversation key.
-> This avoids any server-side conversion and keeps the address format consistent regardless of
-> whether the event originated from a local send or a federated `Create{Note}` received in the inbox.
+> `username@domain` format using `actorUriToAddress()` for display purposes.
+> The `conversation_id` UUID is the stable key used for all conversation routing — the client
+> no longer needs to derive a conversation key from actor URIs.
 
 > **Note on `federation_queue`**: for DMs, ActivityPub delivery is done inline in a background
 > `tokio::spawn` task rather than via `federation_queue`. This is sufficient for the current
@@ -389,20 +420,19 @@ Keyset pagination on `(created_at, id)` is used instead of `LIMIT/OFFSET` to avo
 
 ```sql
 -- Initial load (most recent messages)
+-- $1 = conversation_id UUID
 SELECT * FROM direct_messages
-WHERE ((sender_actor_uri = $1 AND recipient_actor_uri = $2)
-   OR  (sender_actor_uri = $2 AND recipient_actor_uri = $1))
+WHERE conversation_id = $1
   AND deleted_at IS NULL
 ORDER BY created_at DESC, id DESC
 LIMIT 50;
 
 -- Subsequent pages (scroll up: fetch older messages)
--- $3 = oldest created_at from previous page, $4 = oldest id from previous page
+-- $2 = oldest created_at from previous page, $3 = oldest id from previous page
 SELECT * FROM direct_messages
-WHERE ((sender_actor_uri = $1 AND recipient_actor_uri = $2)
-   OR  (sender_actor_uri = $2 AND recipient_actor_uri = $1))
+WHERE conversation_id = $1
   AND deleted_at IS NULL
-  AND (created_at, id) < ($3, $4)
+  AND (created_at, id) < ($2, $3)
 ORDER BY created_at DESC, id DESC
 LIMIT 50;
 ```
@@ -418,13 +448,13 @@ When a user is offline or viewing a different conversation, incoming DMs must no
 ### Schema
 
 ```sql
--- Tracks the last time a user opened each DM conversation.
+-- Tracks the last time a user opened each conversation.
 -- Used to compute per-conversation unread counts on login / reconnect.
-CREATE TABLE dm_conversation_reads (
+CREATE TABLE conversation_reads (
   user_id          UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  other_actor_uri  TEXT        NOT NULL,
+  conversation_id  UUID        NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
   last_read_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  PRIMARY KEY (user_id, other_actor_uri)
+  PRIMARY KEY (user_id, conversation_id)
 );
 ```
 
@@ -433,41 +463,84 @@ CREATE TABLE dm_conversation_reads (
 Computed inline in the `GET /api/dm` (list conversations) response via a SQL CTE + LEFT JOIN:
 
 ```sql
-WITH convos AS (
+-- $1 = caller actor_uri, $2 = caller user_id (local UUID)
+WITH ranked_messages AS (
     SELECT
-        CASE WHEN dm.sender_actor_uri = $caller THEN dm.recipient_actor_uri
-             ELSE dm.sender_actor_uri END AS other_actor_uri,
-        dm.recipient_actor_uri,
-        dm.created_at
+        dm.conversation_id,
+        dm.sender_actor_uri,
+        dm.content,
+        dm.created_at,
+        ROW_NUMBER() OVER (
+            PARTITION BY dm.conversation_id
+            ORDER BY dm.created_at DESC, dm.id DESC
+        ) AS rn
     FROM direct_messages dm
-    WHERE (dm.sender_actor_uri = $caller OR dm.recipient_actor_uri = $caller)
-      AND dm.deleted_at IS NULL
+    WHERE dm.deleted_at IS NULL
 )
 SELECT
-    c.other_actor_uri,
-    MAX(c.created_at)                    AS last_message_at,
+    c.id                                        AS conversation_id,
+    c.kind,
+    c.name,
+    cm_self.conversation_id                     AS _check,
+    MAX(rm.created_at)                          AS last_message_at,
+    -- last message preview (content truncated server-side to 100 chars)
+    (SELECT LEFT(rm2.content, 100)
+     FROM ranked_messages rm2
+     WHERE rm2.conversation_id = c.id AND rm2.rn = 1)
+                                                AS last_message_preview,
+    (SELECT rm2.sender_actor_uri
+     FROM ranked_messages rm2
+     WHERE rm2.conversation_id = c.id AND rm2.rn = 1)
+                                                AS last_message_sender,
     COUNT(CASE
-        WHEN c.recipient_actor_uri = $caller
-             AND (r.last_read_at IS NULL OR c.created_at > r.last_read_at)
+        WHEN rm.sender_actor_uri != $1
+             AND (r.last_read_at IS NULL OR rm.created_at > r.last_read_at)
         THEN 1 ELSE NULL
-    END)                                 AS unread_count
-FROM convos c
-LEFT JOIN dm_conversation_reads r
-    ON r.user_id = $user_id AND r.other_actor_uri = c.other_actor_uri
-GROUP BY c.other_actor_uri
-ORDER BY last_message_at DESC;
+    END)                                        AS unread_count,
+    -- all active members except the caller, as a JSON array
+    COALESCE(
+        JSON_AGG(
+            JSON_BUILD_OBJECT(
+                'actorUri',    cm_other.actor_uri,
+                'displayName', COALESCE(u.display_name, ra.display_name)
+            )
+        ) FILTER (WHERE cm_other.actor_uri != $1),
+        '[]'
+    )                                           AS members
+FROM conversation_members cm_self
+JOIN conversations c
+    ON c.id = cm_self.conversation_id
+JOIN conversation_members cm_other
+    ON cm_other.conversation_id = c.id
+   AND cm_other.left_at IS NULL
+LEFT JOIN users u
+    ON u.actor_uri = cm_other.actor_uri
+LEFT JOIN remote_actors ra
+    ON ra.actor_uri = cm_other.actor_uri
+LEFT JOIN ranked_messages rm
+    ON rm.conversation_id = c.id
+LEFT JOIN conversation_reads r
+    ON r.user_id = $2 AND r.conversation_id = c.id
+WHERE cm_self.actor_uri = $1
+  AND cm_self.left_at IS NULL
+GROUP BY c.id, c.kind, c.name, cm_self.conversation_id
+ORDER BY last_message_at DESC NULLS LAST;
 ```
 
-Only messages **received** by the caller (not sent) count as unread. A `NULL` `last_read_at` means the user has never opened that conversation — all received messages are unread.
+Only messages **not sent by the caller** count as unread — this works correctly for both DMs and group conversations. A `NULL` `last_read_at` means the user has never opened that conversation.
+
+The `members` array contains all active participants **except the caller**. The client uses this to:
+- **DM** (`kind = 'dm'`): use `members[0].displayName` as the conversation title.
+- **Group** (`kind = 'group'`): use `conversations.name` as the title; display `members` list as the subtitle.
 
 ### Mark-as-read
 
-`GET /api/dm/:address` (conversation history, initial page only — no cursor) fires a background upsert:
+`GET /api/dm/:conversation_id` (conversation history, initial page only — no cursor) fires a background upsert:
 
 ```sql
-INSERT INTO dm_conversation_reads (user_id, other_actor_uri, last_read_at)
-VALUES ($user_id, $other_actor_uri, NOW())
-ON CONFLICT (user_id, other_actor_uri) DO UPDATE SET last_read_at = NOW();
+INSERT INTO conversation_reads (user_id, conversation_id, last_read_at)
+VALUES ($user_id, $conversation_id, NOW())
+ON CONFLICT (user_id, conversation_id) DO UPDATE SET last_read_at = NOW();
 ```
 
 This runs in a `tokio::spawn` so it never blocks the response.
@@ -486,7 +559,7 @@ Alice sends a DM while Bob is connected but on a different page
   → badge appears on Alice's conversation in Bob's sidebar
 
 Bob clicks Alice's conversation
-  → GET /api/dm/:address called (initial page, no cursor)
+  → GET /api/dm/:conversation_id called (initial page, no cursor)
   → server upserts last_read_at = NOW() in background
   → client clears the in-memory unread counter for that conversation
   → badge disappears
@@ -496,12 +569,12 @@ Bob clicks Alice's conversation
 
 All DM API responses include resolved display names to avoid requiring clients to do additional lookups:
 
-| Endpoint | Added field | Source |
+| Endpoint | Fields returned | Notes |
 |---|---|---|
-| `GET /api/dm` | `other_display_name` | `users.display_name` or `remote_actors.display_name` |
-| `GET /api/dm/:address` | `sender_display_name` per message | same |
-| `POST /api/dm` (response) | `sender_display_name` | `users.display_name` |
-| WS `new_dm` event | `sender_display_name` | `users.display_name` or `remote_actors.display_name` |
+| `GET /api/dm` | `conversation_id`, `kind`, `name`, `members[]` (actorUri + displayName, excluding caller), `last_message_preview`, `last_message_sender`, `last_message_at`, `unread_count` | Single query — see above. Client derives DM title from `members[0].displayName`; group title from `name` |
+| `GET /api/dm/:conversation_id` | messages with `sender_display_name` per row | Display name resolved from `users` or `remote_actors` |
+| `POST /api/dm` (response) | `conversation_id`, `kind`, `name`, `sender_display_name` | `conversation_id` created here if first message |
+| WS `new_dm` event | `conversation_id`, `kind`, `sender_actor_uri`, `sender_display_name` | Client uses `conversation_id` to route to the right conversation in its local state |
 
 ---
 
@@ -558,11 +631,10 @@ Removing a reaction is federated as an `Undo{Like}` activity.
 
 ### Replies
 
-Replies are messages that reference another message via a `reply_to_id` self-referential foreign key added to `direct_messages`:
+Replies are messages that reference another message via a `reply_to_id` self-referential foreign key on `direct_messages` (already included in the schema defined in §5):
 
 ```sql
-ALTER TABLE direct_messages
-  ADD COLUMN reply_to_id UUID REFERENCES direct_messages(id) ON DELETE SET NULL;
+reply_to_id UUID REFERENCES direct_messages(id) ON DELETE SET NULL
 ```
 
 `ON DELETE SET NULL` is intentional — if the parent message is deleted, the reply becomes a standalone message rather than disappearing with it. This matches the expected behavior: Discord shows "Original message was deleted" in this case.
@@ -570,6 +642,7 @@ ALTER TABLE direct_messages
 When fetching a conversation page, a single LEFT JOIN pulls the parent message preview inline — only one level deep, never recursive:
 
 ```sql
+-- $1 = conversation_id, $2 = cursor created_at, $3 = cursor id
 SELECT
   dm.*,
   parent.id                AS reply_to_id,
@@ -577,10 +650,9 @@ SELECT
   parent.sender_actor_uri  AS reply_to_sender
 FROM direct_messages dm
 LEFT JOIN direct_messages parent ON dm.reply_to_id = parent.id
-WHERE ((dm.sender_actor_uri = $1 AND dm.recipient_actor_uri = $2)
-   OR  (dm.sender_actor_uri = $2 AND dm.recipient_actor_uri = $1))
+WHERE dm.conversation_id = $1
   AND dm.deleted_at IS NULL
-  AND (dm.created_at, dm.id) < ($3, $4)
+  AND (dm.created_at, dm.id) < ($2, $3)
 ORDER BY dm.created_at DESC, dm.id DESC
 LIMIT 50;
 ```
@@ -703,3 +775,334 @@ After a successful update the server pushes a `message_edited` WebSocket event t
 ```
 
 The `object.id` is the original `activity_uri` stored in `direct_messages.activity_uri`, which is the stable cross-instance identifier used to correlate the two mirrored copies of the message.
+
+---
+
+## 9. Presence system
+
+### Overview
+
+The presence system is split into two fully independent subsystems with separate Redis channels, separate fan-out logic, and separate SSE event types:
+
+| Subsystem | Redis channel | Fan-out target | Replay on reconnect |
+|---|---|---|---|
+| **Presence** | `presence:<domain>` | All friends of the actor | Yes — last known state |
+| **Typing** | `typing:<convId>` | One recipient only | Never |
+
+Both are **ephemeral** — never persisted to PostgreSQL. Redis pub-sub is the sole transport. Losing any event is always acceptable.
+
+---
+
+### Part A — Presence states
+
+#### States
+
+| State | Meaning |
+|---|---|
+| `online` | User has at least one active WebSocket connection |
+| `away` | User is connected but has been idle for 10 minutes |
+| `offline` | User has no active WebSocket connections |
+
+#### Redis channel
+
+One global channel per IdP instance:
+
+```
+presence:<domain>
+```
+
+Example: `presence:idp.alice.com`
+
+Every WebSocket worker on the instance subscribes to this channel on startup. Fan-out to individual connected clients is done in the application-level hub (`HashMap<UserId, Vec<WsSender>>`).
+
+#### Payload envelope
+
+```json
+{
+  "type": "presence",
+  "event": "online" | "away" | "offline",
+  "actorUri": "https://idp.alice.com/users/alice_xK9mP",
+  "timestamp": "2026-03-24T12:00:00Z"
+}
+```
+
+#### Publishing rules
+
+| Trigger | Event published |
+|---|---|
+| WebSocket connection established | `online` |
+| Last WebSocket connection closed | `offline` |
+| No `heartbeat` received for 10 minutes | `away` |
+| `away` user sends any message or heartbeat | `online` |
+
+#### Heartbeat
+
+The client sends a heartbeat every **30 seconds** over the existing WebSocket connection:
+
+```json
+{ "type": "heartbeat" }
+```
+
+The server responds immediately:
+
+```json
+{ "type": "heartbeat_ack" }
+```
+
+The server keeps a `last_heartbeat: Instant` per connection. A background task runs every 60 seconds and marks any connection whose `last_heartbeat` is older than 10 minutes as `away` by publishing an `away` event to Redis. The connection is **not closed** — the user is still connected, just idle.
+
+#### Fan-out logic
+
+When the WebSocket worker receives a presence event from Redis:
+
+1. Looks up the actor's friends list from an in-memory cache (refreshed on connect, invalidated on `friend_accepted` events).
+2. For each friend with an active **local** connection, calls `hub.send_to_user()`.
+3. Remote friends are served via the inter-IdP SSE stream — the local worker does not handle them.
+
+#### WebSocket event pushed to clients
+
+```json
+{
+  "event": "presence_update",
+  "actorUri": "https://idp.alice.com/users/alice_xK9mP",
+  "state": "online" | "away" | "offline",
+  "timestamp": "2026-03-24T12:00:00Z"
+}
+```
+
+---
+
+### Part B — Typing indicators
+
+Typing is an independent subsystem. It shares no Redis channel, no payload envelope, and no fan-out path with presence states.
+
+#### Redis channel
+
+One channel per conversation, derived directly from the conversation UUID:
+
+```
+typing:<conversation_id>
+```
+
+Example: `typing:018e1b2c-3d4f-7a8b-9c0d-1e2f3a4b5c6d`
+
+The `conversation_id` is the UUID assigned at conversation creation (see §5). It is stable for the lifetime of the conversation regardless of participant count — adding a member does not change it. No hashing needed since UUIDs are already compact and safe as Redis channel names.
+
+#### Payload envelope
+
+```json
+{
+  "type": "typing",
+  "actorUri": "https://idp.alice.com/users/alice_xK9mP",
+  "conversationId": "<conversation_id>",
+  "timestamp": "2026-03-24T12:00:05Z"
+}
+```
+
+`conversationId` is the raw (pre-hash) conversation ID string. Recipients use it to match the typing event to the correct conversation in their local state.
+
+#### Client → server message
+
+The client sends over WebSocket when the user starts typing:
+
+```json
+{ "type": "typing_start", "conversationId": "<conversation_id>" }
+```
+
+There is no `typing_stop` — the recipient clears the indicator after a **3-second timeout** with no new `typing` event for that conversation.
+
+#### Publishing rules
+
+| Trigger | Action |
+|---|---|
+| Client sends `typing_start` | Publish to `typing:<conversation_id>` |
+| No further `typing_start` from client | Channel goes silent; recipients time out after 3s |
+
+Rate-limit: the server ignores `typing_start` messages sent more than once per second per user, to avoid flooding Redis.
+
+#### Fan-out logic
+
+When the WebSocket worker receives a typing event from Redis:
+
+1. Looks up the conversation's member list (from in-memory cache for active conversations).
+2. For each member **except the sender** who has an active local connection, calls `hub.send_to_user()`.
+3. The sender is **never** echoed the typing event back.
+
+For DMs the member list always has exactly one entry, making this identical in cost to the previous single-recipient lookup. For future group conversations the same logic fans out to all local members without any structural change.
+
+#### WebSocket event pushed to client
+
+```json
+{
+  "event": "typing",
+  "actorUri": "https://idp.alice.com/users/alice_xK9mP",
+  "conversationId": "<conversation_id>",
+  "timestamp": "2026-03-24T12:00:05Z"
+}
+```
+
+---
+
+### Cross-instance — inter-IdP SSE stream
+
+Both presence states and typing indicators are propagated cross-instance via a single authenticated SSE endpoint. The two subsystems are distinguished by the SSE `event:` field.
+
+#### Principle
+
+Each IdP exposes an SSE endpoint that proxies its local Redis channels (both `presence:<domain>` and relevant `typing:<convId>` channels), filtered to a requested set of actors. A remote IdP connects once per domain and receives a real-time filtered stream for all actors it cares about.
+
+```
+idp.bob.com  ──SSE──▶  GET idp.alice.com/api/presence/stream
+                        ?actors[]=alice_xK9mP
+```
+
+#### Endpoint
+
+```
+GET /api/presence/stream?actors[]=<username>&actors[]=...
+Content-Type: text/event-stream
+Authorization: (HTTP Signature — see below)
+```
+
+- Response is a persistent SSE stream.
+- The remote IdP reconnects automatically on disconnect using `Last-Event-ID` + `retry:`.
+- Maximum 500 actors per stream connection.
+
+#### Authentication — HTTP Signatures
+
+The requesting IdP signs the request using its existing ActivityPub RSA key pair, identical to the scheme used for AP activity delivery.
+
+Required signed headers: `(request-target)`, `host`, `date`.
+
+The receiving IdP verifies by:
+1. Extracting `keyId` from the `Signature` header (e.g. `https://idp.bob.com/actor#main-key`).
+2. Fetching the public key from that URI (cached — reuses existing AP actor fetch).
+3. Verifying the signature. Reject `401` if invalid or `date` is older than 5 minutes (replay protection).
+
+No new key material — fully reuses AP infrastructure.
+
+#### SSE event format
+
+The two subsystems use distinct SSE `event:` names so the receiving IdP can route them without inspecting the payload:
+
+```
+// Presence state event
+id: <uuid>
+event: presence
+data: {"type":"presence","event":"online","actorUri":"https://idp.alice.com/users/alice_xK9mP","timestamp":"2026-03-24T12:00:00Z"}
+
+// Typing event
+id: <uuid>
+event: typing
+data: {"type":"typing","actorUri":"https://idp.alice.com/users/alice_xK9mP","conversationId":"alice_xK9mP@idp.alice.com:bob_aB3cD@idp.bob.com","timestamp":"2026-03-24T12:00:05Z"}
+```
+
+On SSE reconnect (`Last-Event-ID`), the server replays the **last known presence state** for each requested actor. Typing events are **never replayed** — a stale "is typing" indicator would be worse than no indicator.
+
+#### Which typing channels does Alice's IdP subscribe to?
+
+Alice's IdP subscribes to `typing:<conversation_id>` channels only for conversations where **at least one participant is local** and the other is the requesting remote instance's actor. It derives the relevant channel IDs by joining `conversation_members` against the `actors[]` query parameter.
+
+#### Connection management on Bob's IdP
+
+Bob's IdP maintains one outbound SSE connection per remote domain:
+
+```
+RemotePresenceRegistry:
+  HashMap<domain, SSEConnection>
+```
+
+When Bob's IdP receives an SSE event:
+- `event: presence` → publishes to local `presence:idp.bob.com` Redis channel → fans out to all Bob's friends who need it.
+- `event: typing` → publishes to local `typing:<convId>` Redis channel → fans out to all local conversation members except the sender.
+
+The cross-instance path is fully transparent to the WebSocket layer, which always reads from local Redis regardless of event origin.
+
+```
+Alice comes online
+  → idp.alice.com: PUBLISH presence:idp.alice.com
+  → SSE stream (event: presence) → idp.bob.com
+  → idp.bob.com: PUBLISH presence:idp.bob.com
+  → Bob's WS worker → hub.send_to_user() → Bob's clients
+
+Alice types in DM with Bob
+  → idp.alice.com: PUBLISH typing:<convId>
+  → SSE stream (event: typing) → idp.bob.com
+  → idp.bob.com: PUBLISH typing:<convId>
+  → Bob's WS worker → looks up conversation members → hub.send_to_user() → all local members except Alice
+```
+
+---
+
+### Initial presence state on connect
+
+When a user opens the friends list or a DM conversation, their IdP serves current presence states immediately from the in-memory store:
+
+```
+GET /api/presence?actors[]=alice_xK9mP@idp.alice.com&actors[]=...
+Authorization: Bearer <access_token>
+```
+
+Response:
+
+```json
+{
+  "presence": [
+    { "actorUri": "https://idp.alice.com/users/alice_xK9mP", "state": "online"  },
+    { "actorUri": "https://idp.bob.com/users/carol_zZ1wX",   "state": "away"    },
+    { "actorUri": "https://idp.bob.com/users/dave_mN4pQ",    "state": "offline" }
+  ]
+}
+```
+
+For remote actors, the state reflects the last event received via the inter-IdP SSE stream. If the SSE connection to that domain is currently down, `offline` is returned as the safe fallback.
+
+Typing state is **not** included in this endpoint — it is too ephemeral to be meaningful as a snapshot.
+
+---
+
+### In-memory presence state store
+
+Each IdP maintains one store, updated by the Redis `presence:<domain>` subscriber:
+
+```rust
+struct PresenceStore {
+    states: DashMap<ActorUri, (PresenceState, Instant)>,
+}
+```
+
+`Instant` records the time of the last state change. Used for `GET /api/presence` responses and for SSE reconnect replay. No persistence — on server restart all actors are `offline` until clients reconnect and heartbeat.
+
+---
+
+### Summary — data flow
+
+```
+── Local presence ──────────────────────────────────────────────────
+Client connect / disconnect / heartbeat timeout
+  → Msg Backbone updates PresenceStore
+  → PUBLISH presence:<domain>
+  → WS worker: hub.send_to_user() → all local friends
+
+── Local typing ────────────────────────────────────────────────────
+Client typing_start (rate-limited: 1/s)
+  → PUBLISH typing:<convId>
+  → WS worker: hub.send_to_user() → recipient only (never sender)
+  → recipient clears indicator after 3s silence
+
+── Cross-instance presence ─────────────────────────────────────────
+PUBLISH presence:idp.alice.com
+  → SSE stream (event: presence) → idp.bob.com
+  → PUBLISH presence:idp.bob.com
+  → WS worker → all local friends of Alice on Bob's instance
+
+── Cross-instance typing ───────────────────────────────────────────
+PUBLISH typing:<convId>
+  → SSE stream (event: typing) → idp.bob.com
+  → PUBLISH typing:<convId> (local)
+  → WS worker → Bob's client only
+
+── Initial state on page load ──────────────────────────────────────
+Client → GET /api/presence?actors[]=...
+       ← PresenceStore snapshot (typing excluded)
+```

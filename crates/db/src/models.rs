@@ -99,13 +99,31 @@ pub struct FriendListEntry {
     pub instance: Option<String>,
 }
 
+// ─── Conversation ─────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, sqlx::FromRow, Serialize)]
+pub struct Conversation {
+    pub id: Uuid,
+    pub kind: String,
+    pub name: Option<String>,
+    pub created_at: OffsetDateTime,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow, Serialize)]
+pub struct ConversationMember {
+    pub conversation_id: Uuid,
+    pub actor_uri: String,
+    pub joined_at: OffsetDateTime,
+    pub left_at: Option<OffsetDateTime>,
+}
+
 // ─── DirectMessage ────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, sqlx::FromRow, Serialize)]
 pub struct DirectMessage {
     pub id: Uuid,
+    pub conversation_id: Uuid,
     pub sender_actor_uri: String,
-    pub recipient_actor_uri: String,
     pub content: String,
     pub activity_uri: String,
     pub federation_status: String,
@@ -119,8 +137,8 @@ pub struct DirectMessage {
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct DirectMessageWithReply {
     pub id: Uuid,
+    pub conversation_id: Uuid,
     pub sender_actor_uri: String,
-    pub recipient_actor_uri: String,
     pub content: String,
     pub activity_uri: String,
     pub federation_status: String,

@@ -6,18 +6,18 @@ use uuid::Uuid;
 pub async fn mark_read(
     pool: &PgPool,
     user_id: Uuid,
-    other_actor_uri: &str,
+    conversation_id: Uuid,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         r#"
-        INSERT INTO dm_conversation_reads (user_id, other_actor_uri, last_read_at)
+        INSERT INTO conversation_reads (user_id, conversation_id, last_read_at)
         VALUES ($1, $2, NOW())
-        ON CONFLICT (user_id, other_actor_uri)
+        ON CONFLICT (user_id, conversation_id)
         DO UPDATE SET last_read_at = NOW()
         "#,
     )
     .bind(user_id)
-    .bind(other_actor_uri)
+    .bind(conversation_id)
     .execute(pool)
     .await?;
     Ok(())

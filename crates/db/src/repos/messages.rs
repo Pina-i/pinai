@@ -4,25 +4,25 @@ use uuid::Uuid;
 
 use crate::models::{DirectMessage, DirectMessageWithReply};
 
-/// Create a new direct message using actor URIs.
+/// Create a new direct message in a conversation.
 /// `federation_status` defaults to 'pending' in the database.
 pub async fn create_message(
     pool: &PgPool,
+    conversation_id: Uuid,
     sender_actor_uri: &str,
-    recipient_actor_uri: &str,
     content: &str,
     activity_uri: &str,
     reply_to_id: Option<Uuid>,
 ) -> Result<DirectMessage, sqlx::Error> {
     sqlx::query_as::<_, DirectMessage>(
         r#"
-        INSERT INTO direct_messages (sender_actor_uri, recipient_actor_uri, content, activity_uri, reply_to_id)
+        INSERT INTO direct_messages (conversation_id, sender_actor_uri, content, activity_uri, reply_to_id)
         VALUES ($1, $2, $3, $4, $5)
         RETURNING *
         "#,
     )
+    .bind(conversation_id)
     .bind(sender_actor_uri)
-    .bind(recipient_actor_uri)
     .bind(content)
     .bind(activity_uri)
     .bind(reply_to_id)
@@ -60,29 +60,26 @@ pub async fn find_by_activity_uri(
 /// with inline reply previews via LEFT JOIN on the parent message.
 pub async fn get_conversation(
     pool: &PgPool,
-    actor_a: &str,
-    actor_b: &str,
+    conversation_id: Uuid,
     limit: i64,
 ) -> Result<Vec<DirectMessageWithReply>, sqlx::Error> {
     sqlx::query_as::<_, DirectMessageWithReply>(
         r#"
         SELECT
-            dm.id, dm.sender_actor_uri, dm.recipient_actor_uri, dm.content,
+            dm.id, dm.conversation_id, dm.sender_actor_uri, dm.content,
             dm.activity_uri, dm.federation_status, dm.created_at, dm.edited_at,
             dm.deleted_at, dm.reply_to_id,
             parent.content           AS reply_to_content,
             parent.sender_actor_uri  AS reply_to_sender
         FROM direct_messages dm
         LEFT JOIN direct_messages parent ON dm.reply_to_id = parent.id
-        WHERE ((dm.sender_actor_uri = $1 AND dm.recipient_actor_uri = $2)
-           OR  (dm.sender_actor_uri = $2 AND dm.recipient_actor_uri = $1))
+        WHERE dm.conversation_id = $1
           AND dm.deleted_at IS NULL
         ORDER BY dm.created_at DESC, dm.id DESC
-        LIMIT $3
+        LIMIT $2
         "#,
     )
-    .bind(actor_a)
-    .bind(actor_b)
+    .bind(conversation_id)
     .bind(limit)
     .fetch_all(pool)
     .await
@@ -92,8 +89,7 @@ pub async fn get_conversation(
 /// with inline reply previews.
 pub async fn get_conversation_before(
     pool: &PgPool,
-    actor_a: &str,
-    actor_b: &str,
+    conversation_id: Uuid,
     cursor_created_at: OffsetDateTime,
     cursor_id: Uuid,
     limit: i64,
@@ -101,23 +97,21 @@ pub async fn get_conversation_before(
     sqlx::query_as::<_, DirectMessageWithReply>(
         r#"
         SELECT
-            dm.id, dm.sender_actor_uri, dm.recipient_actor_uri, dm.content,
+            dm.id, dm.conversation_id, dm.sender_actor_uri, dm.content,
             dm.activity_uri, dm.federation_status, dm.created_at, dm.edited_at,
             dm.deleted_at, dm.reply_to_id,
             parent.content           AS reply_to_content,
             parent.sender_actor_uri  AS reply_to_sender
         FROM direct_messages dm
         LEFT JOIN direct_messages parent ON dm.reply_to_id = parent.id
-        WHERE ((dm.sender_actor_uri = $1 AND dm.recipient_actor_uri = $2)
-           OR  (dm.sender_actor_uri = $2 AND dm.recipient_actor_uri = $1))
+        WHERE dm.conversation_id = $1
           AND dm.deleted_at IS NULL
-          AND (dm.created_at, dm.id) < ($3, $4)
+          AND (dm.created_at, dm.id) < ($2, $3)
         ORDER BY dm.created_at DESC, dm.id DESC
-        LIMIT $5
+        LIMIT $4
         "#,
     )
-    .bind(actor_a)
-    .bind(actor_b)
+    .bind(conversation_id)
     .bind(cursor_created_at)
     .bind(cursor_id)
     .bind(limit)
@@ -195,17 +189,20 @@ pub async fn update_federation_status(
     Ok(())
 }
 
-/// Summary row for the DM conversation list.
+/// Summary row for the conversation list — returned by the enriched CTE query.
 #[derive(Debug, sqlx::FromRow)]
 pub struct ConversationSummary {
-    pub other_actor_uri: String,
-    pub last_message_at: OffsetDateTime,
-    /// Messages received from this actor since the user last read the conversation.
+    pub conversation_id: Uuid,
+    pub kind: String,
+    pub name: Option<String>,
+    pub last_message_at: Option<OffsetDateTime>,
+    pub last_message_preview: Option<String>,
+    pub last_message_sender: Option<String>,
     pub unread_count: i64,
+    pub members: serde_json::Value,
 }
 
-/// Return a list of actors that `actor_uri` has exchanged DMs with,
-/// ordered by most recent message, with per-conversation unread counts.
+/// Return the caller's conversation list with enriched data for rendering.
 pub async fn list_conversations(
     pool: &PgPool,
     user_id: Uuid,
@@ -213,32 +210,65 @@ pub async fn list_conversations(
 ) -> Result<Vec<ConversationSummary>, sqlx::Error> {
     sqlx::query_as::<_, ConversationSummary>(
         r#"
-        WITH convos AS (
+        WITH ranked_messages AS (
             SELECT
-                CASE
-                    WHEN dm.sender_actor_uri = $1 THEN dm.recipient_actor_uri
-                    ELSE dm.sender_actor_uri
-                END AS other_actor_uri,
-                dm.recipient_actor_uri,
-                dm.created_at
+                dm.conversation_id,
+                dm.sender_actor_uri,
+                dm.content,
+                dm.created_at,
+                ROW_NUMBER() OVER (
+                    PARTITION BY dm.conversation_id
+                    ORDER BY dm.created_at DESC, dm.id DESC
+                ) AS rn
             FROM direct_messages dm
-            WHERE (dm.sender_actor_uri = $1 OR dm.recipient_actor_uri = $1)
-              AND dm.deleted_at IS NULL
+            WHERE dm.deleted_at IS NULL
         )
         SELECT
-            c.other_actor_uri,
-            MAX(c.created_at) AS last_message_at,
+            c.id                                        AS conversation_id,
+            c.kind,
+            c.name,
+            MAX(rm.created_at)                          AS last_message_at,
+            (SELECT LEFT(rm2.content, 100)
+             FROM ranked_messages rm2
+             WHERE rm2.conversation_id = c.id AND rm2.rn = 1)
+                                                        AS last_message_preview,
+            (SELECT rm2.sender_actor_uri
+             FROM ranked_messages rm2
+             WHERE rm2.conversation_id = c.id AND rm2.rn = 1)
+                                                        AS last_message_sender,
             COUNT(CASE
-                WHEN c.recipient_actor_uri = $1
-                     AND (r.last_read_at IS NULL OR c.created_at > r.last_read_at)
-                THEN 1
-                ELSE NULL
-            END) AS unread_count
-        FROM convos c
-        LEFT JOIN dm_conversation_reads r
-            ON r.user_id = $2 AND r.other_actor_uri = c.other_actor_uri
-        GROUP BY c.other_actor_uri
-        ORDER BY last_message_at DESC
+                WHEN rm.sender_actor_uri != $1
+                     AND (r.last_read_at IS NULL OR rm.created_at > r.last_read_at)
+                THEN 1 ELSE NULL
+            END)                                        AS unread_count,
+            COALESCE(
+                (SELECT JSON_AGG(
+                    JSON_BUILD_OBJECT(
+                        'actorUri',    cm_other.actor_uri,
+                        'displayName', COALESCE(u.display_name, ra.display_name)
+                    )
+                )
+                FROM conversation_members cm_other
+                LEFT JOIN users u
+                    ON u.actor_uri = cm_other.actor_uri
+                LEFT JOIN remote_actors ra
+                    ON ra.actor_uri = cm_other.actor_uri
+                WHERE cm_other.conversation_id = c.id
+                  AND cm_other.left_at IS NULL
+                  AND cm_other.actor_uri != $1),
+                '[]'
+            )                                           AS members
+        FROM conversation_members cm_self
+        JOIN conversations c
+            ON c.id = cm_self.conversation_id
+        LEFT JOIN ranked_messages rm
+            ON rm.conversation_id = c.id
+        LEFT JOIN conversation_reads r
+            ON r.user_id = $2 AND r.conversation_id = c.id
+        WHERE cm_self.actor_uri = $1
+          AND cm_self.left_at IS NULL
+        GROUP BY c.id, c.kind, c.name, cm_self.conversation_id
+        ORDER BY last_message_at DESC NULLS LAST
         "#,
     )
     .bind(caller_actor_uri)
