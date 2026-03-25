@@ -24,7 +24,7 @@ use super::auth::require_auth;
 /// Look up the display name for an actor URI.
 /// Checks local users first, then the remote actors cache.
 /// For local users, falls back to `username` if `display_name` is unset.
-async fn display_name_for_actor(pool: &PgPool, actor_uri: &str) -> Option<String> {
+pub(crate) async fn display_name_for_actor(pool: &PgPool, actor_uri: &str) -> Option<String> {
     if let Ok(Some(user)) = users::find_by_actor_uri(pool, actor_uri).await {
         return Some(user.display_name.unwrap_or(user.username));
     }
@@ -114,7 +114,8 @@ pub async fn send_message(
             .map_err(|e| OidcError::server_error(e.to_string()))?
             .ok_or_else(|| OidcError::not_found("Parent message not found"))?;
         reply_to_content = Some(parent.content.clone());
-        reply_to_sender = Some(parent.sender_actor_uri.clone());
+        reply_to_sender = display_name_for_actor(&state.pool, &parent.sender_actor_uri).await
+            .or_else(|| Some(parent.sender_actor_uri.clone()));
         parent_activity_uri = Some(parent.activity_uri.clone());
     }
 
@@ -433,24 +434,30 @@ pub async fn get_conversation(
             });
     }
 
-    // Collect unique sender actor URIs and resolve display names in batch.
-    let unique_senders: Vec<&str> = {
+    // Collect unique actor URIs (senders + reply-to senders) and resolve display names in batch.
+    let unique_actors: Vec<&str> = {
         let mut set = std::collections::HashSet::new();
         for m in &msgs {
             set.insert(m.sender_actor_uri.as_str());
+            if let Some(ref rts) = m.reply_to_sender {
+                set.insert(rts.as_str());
+            }
         }
         set.into_iter().collect()
     };
     let mut display_names: HashMap<String, Option<String>> = HashMap::new();
-    for sender_uri in unique_senders {
-        let dn = display_name_for_actor(&state.pool, sender_uri).await;
-        display_names.insert(sender_uri.to_string(), dn);
+    for actor_uri in unique_actors {
+        let dn = display_name_for_actor(&state.pool, actor_uri).await;
+        display_names.insert(actor_uri.to_string(), dn);
     }
 
     let responses = msgs
         .into_iter()
         .map(|m| {
             let sender_display = display_names.get(&m.sender_actor_uri).cloned().flatten();
+            let reply_sender_display = m.reply_to_sender.as_ref().and_then(|uri| {
+                display_names.get(uri).cloned().flatten().or_else(|| Some(uri.clone()))
+            });
             let msg_reactions = reactions_map.remove(&m.id).unwrap_or_default();
             MessageResponse {
                 id: m.id,
@@ -464,7 +471,7 @@ pub async fn get_conversation(
                 edited_at: m.edited_at,
                 reply_to_id: m.reply_to_id,
                 reply_to_content: m.reply_to_content,
-                reply_to_sender: m.reply_to_sender,
+                reply_to_sender: reply_sender_display,
                 reactions: msg_reactions,
             }
         })
