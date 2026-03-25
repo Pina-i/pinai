@@ -21,6 +21,7 @@ use uuid::Uuid;
 
 use idp_db::repos::{conversations, friendships, messages, reactions, remote_actors, users};
 
+use crate::federation::messages::display_name_for_actor;
 use crate::ws::events::{DmPayload, EditedDmPayload, FriendshipPayload, ProfileUpdatePayload, ReactionPayload, WsEvent};
 use crate::{AppState, OidcError};
 
@@ -448,7 +449,9 @@ async fn handle_create(
         if let Ok(Some(parent)) = messages::find_by_activity_uri(&state.pool, parent_uri).await {
             reply_to_id = Some(parent.id);
             reply_to_content = Some(parent.content);
-            reply_to_sender = Some(parent.sender_actor_uri);
+            // Resolve to display name instead of raw actor_uri.
+            reply_to_sender = display_name_for_actor(&state.pool, &parent.sender_actor_uri).await
+                .or_else(|| Some(parent.sender_actor_uri));
         }
     }
 
