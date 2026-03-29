@@ -334,10 +334,6 @@ Response:
 
 State is read directly from the `PresenceStore`. No database access, no persistence. If the requesting IdP asks about an actor not in the store, `offline` is returned as the safe fallback.
 
-#### When to transition
-
-The baseline SSE-for-everything design is simpler and should be implemented first. The tiered hybrid becomes worthwhile when an IdP maintains persistent SSE connections to many remote domains where most friends are inactive. A reasonable threshold: switch to batch polling for a remote domain when fewer than 10% of the streamed actors are involved in an active conversation.
-
 #### SSE connection lifecycle under the tiered model
 
 Under the tiered model, the `RemotePresenceRegistry` changes behavior:
