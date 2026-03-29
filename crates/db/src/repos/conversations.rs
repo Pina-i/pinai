@@ -230,3 +230,20 @@ pub async fn get_other_member_uris(
     .await?;
     Ok(rows)
 }
+
+/// Find all conversation IDs where the given actor is an active member.
+pub async fn find_conversations_for_actor(
+    pool: &PgPool,
+    actor_uri: &str,
+) -> Result<Vec<Uuid>, sqlx::Error> {
+    sqlx::query_scalar::<_, Uuid>(
+        r#"
+        SELECT conversation_id FROM conversation_members
+        WHERE actor_uri = $1
+          AND left_at IS NULL
+        "#,
+    )
+    .bind(actor_uri)
+    .fetch_all(pool)
+    .await
+}

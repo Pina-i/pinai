@@ -16,11 +16,12 @@ thiserror  = "2"
 tokio      = { version = "1", features = ["full"] }
 tracing    = "0.1"
 uuid       = { version = "1", features = ["v4", "serde"] }
-time       = { version = "0.3", features = ["serde"] }
+time       = { version = "0.3", features = ["serde", "formatting"] }
 sqlx       = { version = "0.8", features = ["postgres", "runtime-tokio", "uuid", "time", "macros"] }
 axum       = { version = "0.8", features = ["macros", "form", "ws"] }
 dashmap    = "6"
-futures-util = "0.3"
+futures-util  = "0.3"
+tokio-stream  = "0.1"
 reqwest    = { version = "0.12", features = ["json"] }
 axum-extra = { version = "0.10", features = ["cookie-signed"] }
 nanoid     = "0.4"

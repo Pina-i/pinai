@@ -1,8 +1,10 @@
+use futures_util::StreamExt;
 use redis::aio::ConnectionManager;
 use redis::{AsyncCommands, Client};
+use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use crate::traits::{BrokerError, EventBroker, StreamEntry};
+use crate::traits::{BrokerError, EventBroker, PubSubMessage, StreamEntry};
 
 /// Maximum number of entries kept per user stream (approximate trimming).
 const STREAM_MAXLEN: usize = 10_000;
@@ -27,6 +29,55 @@ impl RedisBroker {
     fn stream_key(user_id: Uuid) -> String {
         format!("user:{user_id}:events")
     }
+}
+
+/// Subscribe to specific Redis pub-sub channels and a pattern, returning messages on an mpsc channel.
+///
+/// This creates a **dedicated** Redis connection (separate from the `ConnectionManager`
+/// used for publishing) because Redis requires a dedicated connection for SUBSCRIBE.
+///
+/// `channels` — exact channel names to SUBSCRIBE to (e.g. `["presence:idp.alice.com"]`).
+/// `patterns` — patterns to PSUBSCRIBE to (e.g. `["typing:*"]`).
+///
+/// Returns a receiver that yields `PubSubMessage` for each received message.
+/// The background task runs until the returned receiver is dropped.
+pub async fn subscribe_channels(
+    redis_url: &str,
+    channels: &[&str],
+    patterns: &[&str],
+) -> Result<mpsc::UnboundedReceiver<PubSubMessage>, BrokerError> {
+    let client = Client::open(redis_url)?;
+    let mut pubsub = client.get_async_pubsub().await?;
+
+    for ch in channels {
+        pubsub.subscribe(*ch).await?;
+    }
+    for pat in patterns {
+        pubsub.psubscribe(*pat).await?;
+    }
+
+    let (tx, rx) = mpsc::unbounded_channel();
+
+    tokio::spawn(async move {
+        loop {
+            let msg = match pubsub.on_message().next().await {
+                Some(msg) => msg,
+                None => break,
+            };
+
+            let channel: String = msg.get_channel_name().to_string();
+            let payload: String = match msg.get_payload() {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+
+            if tx.send(PubSubMessage { channel, payload }).is_err() {
+                break; // receiver dropped
+            }
+        }
+    });
+
+    Ok(rx)
 }
 
 #[async_trait::async_trait]

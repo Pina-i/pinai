@@ -95,7 +95,8 @@ identity-provider/
 | `GET /api/dm/:conversation_id` | Conversation history (keyset cursor); marks as read on initial load |
 | `PATCH /api/dm/:conversation_id` | Edit a message / rename a group conversation |
 | `GET /api/presence` | Current presence snapshot for a set of actors |
-| `GET /api/presence/stream` | Inter-IdP SSE stream (authenticated via HTTP Signatures) |
+| `GET /api/presence/stream` | Inter-IdP SSE stream for active conversations (authenticated via HTTP Signatures) |
+| `POST /api/presence/batch` | Inter-IdP batch presence poll for sidebar (authenticated via HTTP Signatures) |
 
 ---
 

@@ -8,6 +8,8 @@ use idp_db::PgPool;
 use idp_storage::StorageClient;
 use jwt_utils::EdKeyPair;
 
+use crate::presence::store::PresenceStore;
+use crate::presence::sweep::HeartbeatTracker;
 use crate::ws::WsHub;
 
 /// Shared application state injected into every Axum handler via `State<AppState>`.
@@ -24,6 +26,10 @@ pub struct AppState {
     pub hub: Arc<WsHub>,
     /// Event broker for durable event delivery (Redis Streams) and presence (pub-sub).
     pub broker: Arc<dyn EventBroker>,
+    /// In-memory presence state store (online/away/offline per actor).
+    pub presence_store: Option<Arc<PresenceStore>>,
+    /// Per-connection heartbeat tracker for idle detection.
+    pub heartbeat_tracker: Option<Arc<HeartbeatTracker>>,
 }
 
 /// Allow `SignedCookieJar` to extract the key from `AppState`.
