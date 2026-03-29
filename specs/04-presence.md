@@ -186,8 +186,6 @@ Authorization: (HTTP Signature — see below)
 
 - Response is a persistent SSE stream.
 - The remote IdP reconnects automatically on disconnect using `Last-Event-ID` + `retry:`.
-- Maximum 500 actors per stream connection.
-
 #### Authentication — HTTP Signatures
 
 The requesting IdP signs the request using its existing ActivityPub RSA key pair, identical to the scheme used for AP activity delivery.
@@ -295,6 +293,66 @@ struct PresenceStore {
 
 ---
 
+### Scaling strategy — tiered hybrid
+
+The baseline design (one persistent SSE connection per remote domain for all friends) works well at small-to-medium scale. As the number of remote friendships grows, the system transitions to a **tiered hybrid** model that splits presence and typing across two transport modes based on context:
+
+| Context | Transport | What it carries | Latency |
+|---|---|---|---|
+| Active conversation | SSE (1 connection per involved remote domain) | Typing + presence for that conversation's remote members only | Real-time |
+| Friends list sidebar | Batch poll every ~10s | Presence snapshot for all remote friends | ≤10s |
+| No conversation open, no sidebar visible | Nothing | — | — |
+
+#### Why this works
+
+- **Typing is already scoped.** The SSE stream only subscribes to `typing:<convId>` channels for conversations with active local participants (§ "Which typing channels does Alice's IdP subscribe to?"). No change needed — typing is already "tiered."
+- **Presence is the expensive part.** The domain-wide `presence:<domain>` channel streams all requested actors continuously, even for friends the user hasn't interacted with in weeks. Batch polling replaces this for the sidebar, where 10s staleness is imperceptible.
+- **The `PresenceStore` is transparent.** Whether state arrives via SSE or batch poll, the `DashMap` is updated the same way. Downstream consumers (`GET /api/presence`, WS fan-out) are unaffected.
+- **Connection count drops dramatically.** With no active cross-domain conversations open, an IdP maintains zero outbound SSE connections — compared to one per remote domain in the baseline.
+
+#### Batch presence endpoint (server-to-server)
+
+The existing `GET /api/presence` endpoint uses Bearer token auth (client-facing). For server-to-server batch polling, a separate endpoint uses HTTP Signatures:
+
+```
+POST /api/presence/batch
+Authorization: (HTTP Signature — same scheme as AP activity delivery)
+
+{ "actors": ["alice_xK9mP", "bob_aB3cD", ...] }
+```
+
+Response:
+
+```json
+{
+  "presence": [
+    { "actorUri": "https://idp.alice.com/users/alice_xK9mP", "state": "online" },
+    { "actorUri": "https://idp.alice.com/users/bob_aB3cD",   "state": "offline" }
+  ]
+}
+```
+
+State is read directly from the `PresenceStore`. No database access, no persistence. If the requesting IdP asks about an actor not in the store, `offline` is returned as the safe fallback.
+
+#### When to transition
+
+The baseline SSE-for-everything design is simpler and should be implemented first. The tiered hybrid becomes worthwhile when an IdP maintains persistent SSE connections to many remote domains where most friends are inactive. A reasonable threshold: switch to batch polling for a remote domain when fewer than 10% of the streamed actors are involved in an active conversation.
+
+#### SSE connection lifecycle under the tiered model
+
+Under the tiered model, the `RemotePresenceRegistry` changes behavior:
+
+- **Baseline**: one persistent SSE connection per remote domain, created on first friendship, kept alive indefinitely.
+- **Tiered**: SSE connections are opened on-demand when a user opens a conversation with a remote participant, and closed when no local user has an active conversation involving that remote domain. The batch poller runs independently on a fixed interval for all remote domains that have friends.
+
+```
+RemotePresenceRegistry:
+  batch_poll_domains: HashSet<domain>          -- polled every ~10s
+  active_sse: HashMap<domain, SSEConnection>   -- only for active conversations
+```
+
+---
+
 ### Summary — data flow
 
 ```
@@ -310,11 +368,17 @@ Client typing_start (rate-limited: 1/s)
   → WS worker: hub.send_to_user() → recipient only (never sender)
   → recipient clears indicator after 3s silence
 
-── Cross-instance presence ─────────────────────────────────────────
+── Cross-instance presence (active conversation) ──────────────────
 PUBLISH presence:idp.alice.com
   → SSE stream (event: presence) → idp.bob.com
   → PUBLISH presence:idp.bob.com
   → WS worker → all local friends of Alice on Bob's instance
+
+── Cross-instance presence (sidebar / batch poll) ─────────────────
+idp.bob.com → POST idp.alice.com/api/presence/batch (every ~10s)
+  ← { presence: [ { actorUri, state }, ... ] }
+  → update local PresenceStore
+  → WS worker → push presence_update to relevant local users
 
 ── Cross-instance typing ───────────────────────────────────────────
 PUBLISH typing:<convId>

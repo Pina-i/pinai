@@ -21,7 +21,8 @@ idp-config   = { path = "../config", package = "idp-config" }
 idp-db       = { path = "../db", package = "idp-db" }
 idp-storage  = { path = "../storage", package = "idp-storage" }
 dashmap      = { workspace = true }
-futures-util = { workspace = true }
+futures-util  = { workspace = true }
+tokio-stream  = { workspace = true }
 argon2    = "0.5"
 rand      = "0.8"
 base64ct  = { version = "1", features = ["alloc"] }

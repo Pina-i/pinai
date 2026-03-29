@@ -1,5 +1,14 @@
 use uuid::Uuid;
 
+/// A message received from a Redis pub-sub channel.
+#[derive(Debug, Clone)]
+pub struct PubSubMessage {
+    /// The channel name the message was received on.
+    pub channel: String,
+    /// The message payload (JSON string).
+    pub payload: String,
+}
+
 /// A durable event read from a user's stream.
 #[derive(Debug, Clone)]
 pub struct StreamEntry {

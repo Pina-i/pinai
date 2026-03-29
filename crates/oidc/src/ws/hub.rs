@@ -15,6 +15,13 @@ pub struct ConnectionHandle {
     hub: Arc<WsHub>,
 }
 
+impl ConnectionHandle {
+    /// The unique connection ID for this WebSocket connection.
+    pub fn conn_id(&self) -> Uuid {
+        self.conn_id
+    }
+}
+
 impl Drop for ConnectionHandle {
     fn drop(&mut self) {
         self.hub.remove(self.user_id, self.conn_id);
@@ -69,6 +76,14 @@ impl WsHub {
                 self.connections.remove(user_id);
             }
         }
+    }
+
+    /// Returns the number of active connections for a user.
+    pub fn connection_count(&self, user_id: &Uuid) -> usize {
+        self.connections
+            .get(user_id)
+            .map(|senders| senders.len())
+            .unwrap_or(0)
     }
 
     fn remove(&self, user_id: Uuid, conn_id: Uuid) {

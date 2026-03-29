@@ -152,3 +152,13 @@ pub async fn get_owners_with_friend(
     .await?;
     Ok(rows)
 }
+
+/// Get all distinct friend actor URIs from accepted friendships.
+/// Used to populate the remote presence registry on startup.
+pub async fn get_all_friend_actor_uris(pool: &PgPool) -> Result<Vec<String>, sqlx::Error> {
+    sqlx::query_scalar::<_, String>(
+        "SELECT DISTINCT friend_actor_uri FROM friendships WHERE status = 'accepted'",
+    )
+    .fetch_all(pool)
+    .await
+}

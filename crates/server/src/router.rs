@@ -29,6 +29,8 @@ use idp_oidc::{
     },
     login::post_login,
     logout::get_logout,
+    presence::handlers::{get_presence, post_presence_batch},
+    presence::sse::get_presence_stream,
     register::{post_register, post_register_and_login},
     token::post_token,
     userinfo::get_userinfo,
@@ -96,6 +98,11 @@ pub fn build(state: AppState) -> Router {
 
         // ── Avatar API (Bearer-auth) ────────────────────────────────────
         .route("/api/avatar", put(put_avatar).delete(delete_avatar))
+
+        // ── Presence API ────────────────────────────────────────────────────
+        .route("/api/presence", get(get_presence))
+        .route("/api/presence/stream", get(get_presence_stream))
+        .route("/api/presence/batch", post(post_presence_batch))
 
         // ── WebSocket ────────────────────────────────────────────────────────
         .route("/ws", get(ws_upgrade))

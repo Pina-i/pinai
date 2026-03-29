@@ -15,6 +15,9 @@ pub enum WsEvent {
     FriendProfileUpdated(ProfileUpdatePayload),
     MessageReactionAdded(ReactionPayload),
     MessageReactionRemoved(ReactionPayload),
+    PresenceUpdate(PresenceUpdatePayload),
+    Typing(TypingPayload),
+    HeartbeatAck(HeartbeatAckPayload),
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -67,16 +70,47 @@ pub struct ReactionPayload {
     pub emoji: String,
 }
 
+// ─── Presence payloads ───────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PresenceUpdatePayload {
+    pub actor_uri: String,
+    pub state: String,
+    pub timestamp: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TypingPayload {
+    pub actor_uri: String,
+    pub conversation_id: Uuid,
+    pub timestamp: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HeartbeatAckPayload {}
+
+// ─── Client-to-server messages ───────────────────────────────────────────────
+
 /// Client-to-server messages received over WebSocket.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", content = "data")]
 #[serde(rename_all = "snake_case")]
 pub enum WsClientMessage {
     SendDm(SendDmPayload),
+    Heartbeat,
+    TypingStart(TypingStartPayload),
 }
 
 #[derive(Debug, Deserialize)]
 pub struct SendDmPayload {
     pub recipient_address: String,
     pub content: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TypingStartPayload {
+    pub conversation_id: Uuid,
 }

@@ -6,6 +6,9 @@ use tracing::{info, warn};
 
 use idp_config::Config;
 use idp_db::run_migrations;
+use idp_oidc::presence::remote::RemotePresenceRegistry;
+use idp_oidc::presence::store::PresenceStore;
+use idp_oidc::presence::sweep::HeartbeatTracker;
 use idp_oidc::ws::WsHub;
 use idp_oidc::AppState;
 use jwt_utils::load_ed_keypair_from_pem;
@@ -94,17 +97,69 @@ async fn main() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("redis connection failed: {e}"))?;
     info!("redis broker connected");
 
+    // Build presence components
+    let presence_store = Arc::new(PresenceStore::new());
+    let heartbeat_tracker = Arc::new(HeartbeatTracker::new());
+    let remote_registry = Arc::new(RemotePresenceRegistry::new());
+
     // Build shared state
     let hub = Arc::new(WsHub::new());
+    let keypair = Arc::new(keypair);
+    let config = Arc::new(config);
+
     let state = AppState {
-        pool,
-        keypair: Arc::new(keypair),
-        config: Arc::new(config.clone()),
+        pool: pool.clone(),
+        keypair: Arc::clone(&keypair),
+        config: Arc::clone(&config),
         cookie_key,
         storage,
-        hub,
+        hub: Arc::clone(&hub),
         broker: Arc::new(broker),
+        presence_store: Some(Arc::clone(&presence_store)),
+        heartbeat_tracker: Some(Arc::clone(&heartbeat_tracker)),
     };
+
+    // Spawn presence background tasks
+    {
+        let store = Arc::clone(&presence_store);
+        let pool2 = pool.clone();
+        let hub2 = Arc::clone(&hub);
+        let redis_url = config.redis_url.clone();
+        let domain = config.domain.clone();
+        tokio::spawn(async move {
+            idp_oidc::presence::subscriber::run_presence_subscriber(
+                &redis_url, &domain, store, pool2, hub2,
+            )
+            .await;
+        });
+    }
+
+    {
+        let tracker = Arc::clone(&heartbeat_tracker);
+        let store = Arc::clone(&presence_store);
+        let broker2 = Arc::clone(&state.broker);
+        let domain = config.domain.clone();
+        tokio::spawn(async move {
+            idp_oidc::presence::sweep::run_heartbeat_sweep(tracker, store, broker2, domain).await;
+        });
+    }
+
+    {
+        let registry = Arc::clone(&remote_registry);
+        let store = Arc::clone(&presence_store);
+        let broker3 = Arc::clone(&state.broker);
+        let pool3 = pool.clone();
+        let keypair2 = Arc::clone(&keypair);
+        let config2 = Arc::clone(&config);
+        tokio::spawn(async move {
+            idp_oidc::presence::remote::run_batch_poller(
+                registry, store, broker3, pool3, keypair2, config2,
+            )
+            .await;
+        });
+    }
+
+    info!("presence system started");
 
     // Build the Axum router
     let app = router::build(state);

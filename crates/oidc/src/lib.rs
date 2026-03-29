@@ -6,6 +6,7 @@ pub mod error;
 pub mod federation;
 pub mod login;
 pub mod logout;
+pub mod presence;
 pub mod register;
 pub mod state;
 pub mod token;
