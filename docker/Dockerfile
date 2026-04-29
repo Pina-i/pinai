@@ -1,22 +1,25 @@
+# syntax=docker/dockerfile:1.7
 # Build stage
 FROM rust:bookworm AS builder
 
 WORKDIR /build
 
-# Copy workspace manifests
+# Copy the workspace. With cache mounts on the registry / git / target dirs
+# below, ordering tricks (manifests-first, then sources) are unnecessary —
+# Cargo's incremental compilation handles re-use across rebuilds.
 COPY Cargo.toml Cargo.lock* ./
-COPY crates/config/Cargo.toml   crates/config/Cargo.toml
-COPY crates/db/Cargo.toml       crates/db/Cargo.toml
-COPY crates/oidc/Cargo.toml     crates/oidc/Cargo.toml
-COPY crates/server/Cargo.toml   crates/server/Cargo.toml
-COPY crates/storage/Cargo.toml  crates/storage/Cargo.toml
-
-# Copy source
 COPY crates/ crates/
 COPY migrations/ migrations/
 
-# Build release binary
-RUN cargo build --release -p idp-server
+# Cargo registry/index, git checkouts (this is where the `core-libs` git
+# dependency lives), and the build's `target/` are all preserved across
+# Docker builds via BuildKit cache mounts. The compiled binary is copied
+# out into the image's layered filesystem before the cache is unmounted.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/build/target \
+    cargo build --release -p idp-server && \
+    cp target/release/idp-server /idp-server
 
 # Runtime stage
 FROM debian:bookworm-slim
@@ -25,7 +28,7 @@ RUN apt-get update && apt-get install -y libssl3 ca-certificates && rm -rf /var/
 
 WORKDIR /app
 
-COPY --from=builder /build/target/release/idp-server /app/idp-server
+COPY --from=builder /idp-server /app/idp-server
 
 EXPOSE 8080
 

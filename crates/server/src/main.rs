@@ -106,6 +106,14 @@ async fn main() -> anyhow::Result<()> {
     let hub = Arc::new(WsHub::new());
     let keypair = Arc::new(keypair);
     let config = Arc::new(config);
+    let broker_arc: Arc<dyn idp_broker::EventBroker> = Arc::new(broker);
+
+    // Wire SSE deps onto the registry so it can spawn outbound connections.
+    remote_registry.set_sse_deps(
+        Arc::clone(&keypair),
+        Arc::clone(&config),
+        Arc::clone(&broker_arc),
+    );
 
     let state = AppState {
         pool: pool.clone(),
@@ -114,9 +122,10 @@ async fn main() -> anyhow::Result<()> {
         cookie_key,
         storage,
         hub: Arc::clone(&hub),
-        broker: Arc::new(broker),
+        broker: Arc::clone(&broker_arc),
         presence_store: Some(Arc::clone(&presence_store)),
         heartbeat_tracker: Some(Arc::clone(&heartbeat_tracker)),
+        remote_registry: Some(Arc::clone(&remote_registry)),
     };
 
     // Spawn presence background tasks

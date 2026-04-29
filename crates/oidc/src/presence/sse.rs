@@ -10,7 +10,7 @@ use std::convert::Infallible;
 use std::time::Duration;
 
 use axum::{
-    extract::{Query, State},
+    extract::{RawQuery, State},
     http::HeaderMap,
     response::{
         sse::{Event, KeepAlive, Sse},
@@ -24,8 +24,8 @@ use uuid::Uuid;
 use crate::error::OidcError;
 use crate::AppState;
 
-use super::handlers::verify_http_signature;
-use super::types::{PresenceEvent, PresenceStreamQuery, TypingEvent};
+use super::handlers::{parse_actors_query, verify_http_signature};
+use super::types::{PresenceEvent, TypingEvent};
 
 /// `GET /api/presence/stream?actors[]=...`
 ///
@@ -35,12 +35,17 @@ use super::types::{PresenceEvent, PresenceStreamQuery, TypingEvent};
 pub async fn get_presence_stream(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Query(query): Query<PresenceStreamQuery>,
+    RawQuery(raw): RawQuery,
 ) -> Result<impl IntoResponse, OidcError> {
-    // Verify HTTP Signature
-    verify_http_signature(&state, &headers, "get", "/api/presence/stream").await?;
+    // Verify HTTP Signature against the raw query string so the signed
+    // `(request-target)` matches what the client sent.
+    let path = match raw.as_deref() {
+        Some(q) => format!("/api/presence/stream?{q}"),
+        None => "/api/presence/stream".to_string(),
+    };
+    verify_http_signature(&state, &headers, "get", &path).await?;
 
-    let actors: HashSet<String> = query.actors.into_iter().collect();
+    let actors: HashSet<String> = parse_actors_query(raw.as_deref()).into_iter().collect();
     tracing::Span::current().record("actor_count", actors.len());
 
     if actors.is_empty() {

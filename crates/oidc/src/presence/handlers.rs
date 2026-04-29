@@ -4,7 +4,7 @@
 //! - `POST /api/presence/batch` — HTTP Signature auth (server-to-server), returns presence snapshot.
 
 use axum::{
-    extract::{Query, State},
+    extract::{RawQuery, State},
     http::HeaderMap,
     Json,
 };
@@ -13,7 +13,47 @@ use crate::error::OidcError;
 use crate::federation::auth::require_auth;
 use crate::AppState;
 
-use super::types::{ActorPresence, PresenceBatchRequest, PresenceQuery, PresenceResponse};
+use super::types::{ActorPresence, PresenceBatchRequest, PresenceResponse};
+
+/// Parse repeated `actors[]=…` query params from a raw query string.
+/// `serde_urlencoded` (axum's default) collapses duplicate keys instead of
+/// building a `Vec`, so we decode by hand using the standard URL-encoded form.
+pub(super) fn parse_actors_query(raw: Option<&str>) -> Vec<String> {
+    let Some(raw) = raw else { return Vec::new() };
+    url::form_urlencoded::parse(raw.as_bytes())
+        .filter(|(k, _)| k == "actors[]")
+        .map(|(_, v)| v.into_owned())
+        .collect()
+}
+
+/// Normalise a value supplied via `actors[]` to a canonical actor URI so it
+/// can be used as a key into `PresenceStore` (which stores by `actor_uri`).
+///
+/// Accepts either:
+/// - a full URI (`http://idp.alice.com/users/alice_xK9mP`) — passed through, or
+/// - a federation address (`alice_xK9mP@idp.alice.com`) — reconstructed to a
+///   URL using `http` for `localhost` / `127.*` hosts and `https` otherwise.
+///
+/// The spec's documented client-facing form is the federation address, so we
+/// have to accept both shapes for the same identity.
+pub(super) fn normalize_actor_input(input: &str) -> String {
+    if input.starts_with("http://") || input.starts_with("https://") {
+        return input.to_string();
+    }
+    let mut parts = input.splitn(2, '@');
+    let Some(username) = parts.next() else {
+        return input.to_string();
+    };
+    let Some(domain) = parts.next() else {
+        return input.to_string();
+    };
+    let scheme = if domain.starts_with("localhost") || domain.starts_with("127.") {
+        "http"
+    } else {
+        "https"
+    };
+    format!("{scheme}://{domain}/users/{username}")
+}
 
 /// `GET /api/presence?actors[]=...`
 ///
@@ -23,7 +63,7 @@ use super::types::{ActorPresence, PresenceBatchRequest, PresenceQuery, PresenceR
 pub async fn get_presence(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Query(query): Query<PresenceQuery>,
+    RawQuery(raw): RawQuery,
 ) -> Result<Json<PresenceResponse>, OidcError> {
     // Require authenticated user
     let _user_id = require_auth(&state, &headers).await?;
@@ -33,14 +73,17 @@ pub async fn get_presence(
         .as_ref()
         .ok_or_else(|| OidcError::server_error("presence not available"))?;
 
-    tracing::Span::current().record("actor_count", query.actors.len());
+    let actors = parse_actors_query(raw.as_deref());
+    tracing::Span::current().record("actor_count", actors.len());
 
-    let presence: Vec<ActorPresence> = query
-        .actors
-        .iter()
-        .map(|uri| ActorPresence {
-            actor_uri: uri.clone(),
-            state: store.get(uri),
+    let presence: Vec<ActorPresence> = actors
+        .into_iter()
+        .map(|input| {
+            let actor_uri = normalize_actor_input(&input);
+            ActorPresence {
+                state: store.get(&actor_uri),
+                actor_uri,
+            }
         })
         .collect();
 
@@ -70,9 +113,12 @@ pub async fn post_presence_batch(
     let presence: Vec<ActorPresence> = body
         .actors
         .iter()
-        .map(|uri| ActorPresence {
-            actor_uri: uri.clone(),
-            state: store.get(uri),
+        .map(|input| {
+            let actor_uri = normalize_actor_input(input);
+            ActorPresence {
+                state: store.get(&actor_uri),
+                actor_uri,
+            }
         })
         .collect();
 

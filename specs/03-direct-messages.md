@@ -259,6 +259,10 @@ All DM API responses include resolved display names to avoid requiring clients t
 | `POST /api/dm` (response) | `conversation_id`, `kind`, `name`, `sender_display_name` | `conversation_id` created here if first message |
 | WS `new_dm` event | `conversation_id`, `kind`, `sender_actor_uri`, `sender_display_name` | Client uses `conversation_id` to route to the right conversation in its local state |
 
+### Optimistic-send reconciliation (`client_id`)
+
+When the client sends a DM over WebSocket (`send_dm`) it MAY include an opaque `client_id` correlation token. The server echoes that token back **only on the sender's own `new_dm`** event (never on the recipient's), so the client can swap its optimistic placeholder for the persisted message rather than appending a duplicate. Recipients never see another user's `client_id`.
+
 ---
 
 ## 7. Message reactions & replies

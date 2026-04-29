@@ -17,26 +17,68 @@ use dashmap::DashMap;
 use idp_broker::EventBroker;
 use idp_db::repos::friendships;
 use idp_db::PgPool;
+use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
 use tracing::{info, warn};
+use uuid::Uuid;
 
+use super::sse_client;
 use super::store::PresenceStore;
 use super::types::{PresenceBatchRequest, PresenceResponse};
 
 /// How often to batch-poll remote domains for sidebar presence.
 const BATCH_POLL_INTERVAL: Duration = Duration::from_secs(10);
 
+/// Per-domain SSE state. The connection is alive while at least one
+/// conversation has registered itself as a watcher.
+struct ActiveSse {
+    /// conversation_id → set of remote actor_uris that conversation cares about.
+    watchers: HashMap<Uuid, HashSet<String>>,
+    /// Background task running the SSE connection. Aborted on close/restart.
+    task: JoinHandle<()>,
+}
+
+/// Optional dependencies the SSE consumer needs to sign requests and
+/// republish events. Wired at startup via `set_sse_deps`.
+#[derive(Clone)]
+struct SseDeps {
+    keypair: Arc<jwt_utils::EdKeyPair>,
+    config: Arc<idp_config::Config>,
+    broker: Arc<dyn EventBroker>,
+}
+
 /// Manages outbound connections to remote IdP instances for presence.
 pub struct RemotePresenceRegistry {
     /// Domains to batch-poll (all remote domains with at least one friendship).
     /// Maps domain → set of actor_uris to poll.
     batch_poll_domains: DashMap<String, HashSet<String>>,
+    /// Active SSE connections for conversations currently watched by local users.
+    active_sse: Mutex<HashMap<String, ActiveSse>>,
+    /// Lazily-initialised deps for spawning SSE tasks.
+    sse_deps: std::sync::OnceLock<SseDeps>,
 }
 
 impl RemotePresenceRegistry {
     pub fn new() -> Self {
         Self {
             batch_poll_domains: DashMap::new(),
+            active_sse: Mutex::new(HashMap::new()),
+            sse_deps: std::sync::OnceLock::new(),
         }
+    }
+
+    /// Wire the dependencies the SSE consumer needs. Call once at startup.
+    pub fn set_sse_deps(
+        &self,
+        keypair: Arc<jwt_utils::EdKeyPair>,
+        config: Arc<idp_config::Config>,
+        broker: Arc<dyn EventBroker>,
+    ) {
+        let _ = self.sse_deps.set(SseDeps {
+            keypair,
+            config,
+            broker,
+        });
     }
 
     /// Register remote actors for batch polling.
@@ -70,6 +112,99 @@ impl RemotePresenceRegistry {
                 )
             })
             .collect()
+    }
+
+    /// Mark a conversation as actively watched by a local user. Ensures an
+    /// outbound SSE connection exists for every remote domain involved.
+    ///
+    /// `remote_actors_by_domain` lists the conversation's remote members
+    /// grouped by their domain — local members are excluded by the caller.
+    pub async fn watch_conversation(
+        self: &Arc<Self>,
+        conv_id: Uuid,
+        remote_actors_by_domain: HashMap<String, Vec<String>>,
+    ) {
+        let mut active = self.active_sse.lock().await;
+        for (domain, actors) in remote_actors_by_domain {
+            // Track this conversation's interest under this domain.
+            let entry = active.entry(domain.clone()).or_insert_with(|| ActiveSse {
+                watchers: HashMap::new(),
+                task: tokio::spawn(async {}),
+            });
+            entry
+                .watchers
+                .entry(conv_id)
+                .or_default()
+                .extend(actors.iter().cloned());
+
+            // Restart the SSE task with the union of all watcher actors.
+            self.respawn_sse(&mut active, &domain).await;
+        }
+    }
+
+    /// Drop a conversation's interest in remote presence/typing. Closes the
+    /// SSE connection for any domain that no longer has any watchers.
+    pub async fn unwatch_conversation(self: &Arc<Self>, conv_id: Uuid) {
+        let mut active = self.active_sse.lock().await;
+        let domains: Vec<String> = active.keys().cloned().collect();
+        for domain in domains {
+            let still_needed = if let Some(entry) = active.get_mut(&domain) {
+                entry.watchers.remove(&conv_id);
+                !entry.watchers.is_empty()
+            } else {
+                false
+            };
+
+            if still_needed {
+                self.respawn_sse(&mut active, &domain).await;
+            } else if let Some(entry) = active.remove(&domain) {
+                entry.task.abort();
+                info!(%domain, "SSE: closed (no remaining watchers)");
+            }
+        }
+    }
+
+    /// Replace the running SSE task for `domain` with a fresh one whose actor
+    /// list is the union of every watcher's actors. Caller holds the lock.
+    async fn respawn_sse(
+        self: &Arc<Self>,
+        active: &mut HashMap<String, ActiveSse>,
+        domain: &str,
+    ) {
+        let Some(entry) = active.get_mut(domain) else {
+            return;
+        };
+
+        let mut union: HashSet<String> = HashSet::new();
+        for actors in entry.watchers.values() {
+            for a in actors {
+                union.insert(a.clone());
+            }
+        }
+        let actor_uris: Vec<String> = union.into_iter().collect();
+
+        // Cancel previous task before spawning a new one.
+        entry.task.abort();
+
+        let Some(deps) = self.sse_deps.get().cloned() else {
+            warn!("SSE: deps not initialized; dropping watch");
+            return;
+        };
+        let domain_owned = domain.to_string();
+        info!(
+            domain = %domain_owned,
+            actor_count = actor_uris.len(),
+            watcher_count = entry.watchers.len(),
+            "SSE: (re)opening connection"
+        );
+        let task = tokio::spawn(sse_client::run_sse_connection(
+            domain_owned,
+            actor_uris,
+            deps.keypair,
+            deps.config,
+            deps.broker,
+        ));
+        entry.task = task;
     }
 }
 

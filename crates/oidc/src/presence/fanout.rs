@@ -60,12 +60,9 @@ pub async fn fanout_typing(event: &TypingEvent, pool: &PgPool, hub: &Arc<WsHub>)
     });
 
     for member in &members {
-        // Skip the sender — never echo typing back to the originator.
         if member.actor_uri == event.actor_uri {
             continue;
         }
-
-        // Resolve actor_uri to a local user UUID. Skip remote actors.
         if let Ok(Some(user)) = users::find_by_actor_uri(pool, &member.actor_uri).await {
             hub.send_to_user(&user.id, ws_event.clone());
         }

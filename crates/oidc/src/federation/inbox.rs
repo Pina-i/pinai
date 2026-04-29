@@ -510,6 +510,7 @@ async fn handle_create(
         reply_to_id,
         reply_to_content,
         reply_to_sender,
+        client_id: None,
     });
 
     // Publish to broker for durability
