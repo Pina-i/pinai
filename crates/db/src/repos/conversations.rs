@@ -109,13 +109,19 @@ pub async fn find_dm_between(
 
 /// Find or create a DM conversation between two actors.
 /// Returns (conversation_id, created) where `created` indicates whether a new
-/// conversation was created.
+/// conversation was created. Both members are upserted on every call —
+/// `add_member` is idempotent (`ON CONFLICT DO UPDATE`), so this safely
+/// recovers any conversation that ended up half-initialised by a prior
+/// failure between `create_conversation` and the second `add_member`.
 pub async fn get_or_create_dm(
     pool: &PgPool,
     actor_a: &str,
     actor_b: &str,
 ) -> Result<(Uuid, bool), sqlx::Error> {
     if let Some(conv_id) = find_dm_between(pool, actor_a, actor_b).await? {
+        // Re-affirm both members to repair half-initialised rows from old code paths.
+        add_member(pool, conv_id, actor_a).await?;
+        add_member(pool, conv_id, actor_b).await?;
         return Ok((conv_id, false));
     }
 
@@ -126,25 +132,40 @@ pub async fn get_or_create_dm(
 }
 
 /// Find or create a DM conversation using a specific UUID (federation).
+///
+/// Always ensures both `actor_a` and `actor_b` are present in
+/// `conversation_members` — even if the row already existed. This guards
+/// against partially-initialised conversations: a previous attempt that
+/// inserted the row but failed before adding both members would otherwise
+/// permanently look memberless to the fanout, which silently drops
+/// `Typing` / `Note` events for the conversation.
 pub async fn get_or_create_dm_with_id(
     pool: &PgPool,
     id: Uuid,
     actor_a: &str,
     actor_b: &str,
 ) -> Result<(Uuid, bool), sqlx::Error> {
+    // Try to short-circuit: if both actors are already members of the same DM,
+    // reuse it.
     if let Some(conv_id) = find_dm_between(pool, actor_a, actor_b).await? {
         return Ok((conv_id, false));
     }
 
-    // Check if this specific UUID already exists (another instance created it)
-    if let Some(_) = find_by_id(pool, id).await? {
-        return Ok((id, false));
-    }
+    // Either the conversation row exists with incomplete membership, or it
+    // doesn't exist at all. In the first case re-use the existing row, in
+    // the second create it under the supplied UUID.
+    let (conv_id, created) = if let Some(existing) = find_by_id(pool, id).await? {
+        (existing.id, false)
+    } else {
+        (create_conversation_with_id(pool, id, "dm", None).await?.id, true)
+    };
 
-    let conv = create_conversation_with_id(pool, id, "dm", None).await?;
-    add_member(pool, conv.id, actor_a).await?;
-    add_member(pool, conv.id, actor_b).await?;
-    Ok((conv.id, true))
+    // `add_member` upserts (ON CONFLICT DO UPDATE SET left_at = NULL), so
+    // calling it for an already-present member is harmless and re-instates a
+    // member that previously left.
+    add_member(pool, conv_id, actor_a).await?;
+    add_member(pool, conv_id, actor_b).await?;
+    Ok((conv_id, created))
 }
 
 /// Get active members of a conversation (excluding those who left).

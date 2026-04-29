@@ -2,6 +2,7 @@ pub mod fanout;
 pub mod handlers;
 pub mod remote;
 pub mod sse;
+pub mod sse_client;
 pub mod store;
 pub mod subscriber;
 pub mod sweep;

@@ -8,6 +8,7 @@ use idp_db::PgPool;
 use idp_storage::StorageClient;
 use jwt_utils::EdKeyPair;
 
+use crate::presence::remote::RemotePresenceRegistry;
 use crate::presence::store::PresenceStore;
 use crate::presence::sweep::HeartbeatTracker;
 use crate::ws::WsHub;
@@ -30,6 +31,8 @@ pub struct AppState {
     pub presence_store: Option<Arc<PresenceStore>>,
     /// Per-connection heartbeat tracker for idle detection.
     pub heartbeat_tracker: Option<Arc<HeartbeatTracker>>,
+    /// Outbound presence connections to remote IdPs (batch poll + per-domain SSE).
+    pub remote_registry: Option<Arc<RemotePresenceRegistry>>,
 }
 
 /// Allow `SignedCookieJar` to extract the key from `AppState`.

@@ -229,6 +229,12 @@ async fn receive_messages(
             WsClientMessage::SendDm(payload) => {
                 handle_send_dm(&state, user_id, payload).await;
             }
+            WsClientMessage::WatchConversation(payload) => {
+                handle_watch_conversation(&state, payload.conversation_id).await;
+            }
+            WsClientMessage::UnwatchConversation(payload) => {
+                handle_unwatch_conversation(&state, payload.conversation_id).await;
+            }
         }
     }
 
@@ -263,6 +269,67 @@ async fn handle_heartbeat(state: &AppState, user_id: Uuid, conn_id: Uuid, actor_
     state
         .hub
         .send_to_user(&user_id, WsEvent::HeartbeatAck(HeartbeatAckPayload {}));
+}
+
+/// Group remote conversation members by their domain.
+/// Members on the local instance are skipped.
+async fn remote_members_by_domain(
+    state: &AppState,
+    conversation_id: Uuid,
+) -> std::collections::HashMap<String, Vec<String>> {
+    let mut by_domain: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    let local_issuer = state.config.issuer();
+
+    let members = match idp_db::repos::conversations::get_members(&state.pool, conversation_id).await
+    {
+        Ok(m) => m,
+        Err(e) => {
+            warn!(%conversation_id, "failed to load members for watch: {e}");
+            return by_domain;
+        }
+    };
+
+    for member in members {
+        // Local members do not need an SSE — their presence/typing arrives via
+        // local Redis already.
+        if member.actor_uri.starts_with(&local_issuer) {
+            continue;
+        }
+        if let Some(host) = url::Url::parse(&member.actor_uri)
+            .ok()
+            .and_then(|u| match (u.host_str().map(|h| h.to_string()), u.port()) {
+                (Some(host), Some(port)) => Some(format!("{host}:{port}")),
+                (Some(host), None) => Some(host),
+                _ => None,
+            })
+        {
+            by_domain.entry(host).or_default().push(member.actor_uri);
+        }
+    }
+    by_domain
+}
+
+/// Handle watch_conversation: ensure outbound SSE connections to every remote
+/// domain involved in the conversation.
+async fn handle_watch_conversation(state: &AppState, conversation_id: Uuid) {
+    let Some(registry) = state.remote_registry.as_ref() else {
+        return;
+    };
+    let by_domain = remote_members_by_domain(state, conversation_id).await;
+    if by_domain.is_empty() {
+        return;
+    }
+    registry.watch_conversation(conversation_id, by_domain).await;
+}
+
+/// Handle unwatch_conversation: drop interest; closes outbound SSE for any
+/// domain that no longer has a watcher.
+async fn handle_unwatch_conversation(state: &AppState, conversation_id: Uuid) {
+    let Some(registry) = state.remote_registry.as_ref() else {
+        return;
+    };
+    registry.unwatch_conversation(conversation_id).await;
 }
 
 /// Handle a typing_start: rate-limit (1/s per user), then publish to Redis.
@@ -351,6 +418,7 @@ async fn handle_send_dm(
             username,
             domain,
             &payload.content,
+            payload.client_id.clone(),
         )
         .await;
     } else {
@@ -416,20 +484,35 @@ async fn handle_send_dm(
         let local_domain = &state.config.domain;
         let sender_display_name =
             Some(sender.display_name.clone().unwrap_or_else(|| sender.username.clone()));
-        let event = WsEvent::NewDm(DmPayload {
+        // Recipient never sees the sender's correlation token.
+        let recipient_payload = DmPayload {
             message_id: msg.id,
             conversation_id,
             kind: "dm".to_string(),
             sender_address: sender.federated_address(local_domain),
-            sender_display_name,
-            content: msg.content,
+            sender_display_name: sender_display_name.clone(),
+            content: msg.content.clone(),
             created_at: msg.created_at,
             reply_to_id: None,
             reply_to_content: None,
             reply_to_sender: None,
-        });
+            client_id: None,
+        };
+        let sender_payload = DmPayload {
+            client_id: payload.client_id.clone(),
+            ..recipient_payload.clone()
+        };
+        let recipient_event = WsEvent::NewDm(recipient_payload);
+        let sender_event = WsEvent::NewDm(sender_payload);
 
-        let event_json = match serde_json::to_string(&event) {
+        let recipient_json = match serde_json::to_string(&recipient_event) {
+            Ok(j) => j,
+            Err(e) => {
+                warn!(%sender_id, "failed to serialize dm event: {e}");
+                return;
+            }
+        };
+        let sender_json = match serde_json::to_string(&sender_event) {
             Ok(j) => j,
             Err(e) => {
                 warn!(%sender_id, "failed to serialize dm event: {e}");
@@ -438,18 +521,17 @@ async fn handle_send_dm(
         };
         let broker = state.broker.clone();
         let recipient_id = recipient.id;
-        let json_clone = event_json.clone();
         tokio::spawn(async move {
-            if let Err(e) = broker.publish(recipient_id, &json_clone).await {
+            if let Err(e) = broker.publish(recipient_id, &recipient_json).await {
                 warn!(%recipient_id, "broker publish failed: {e}");
             }
-            if let Err(e) = broker.publish(sender_id, &event_json).await {
+            if let Err(e) = broker.publish(sender_id, &sender_json).await {
                 warn!(%sender_id, "broker publish failed: {e}");
             }
         });
 
-        state.hub.send_to_user(&recipient.id, event.clone());
-        state.hub.send_to_user(&sender_id, event);
+        state.hub.send_to_user(&recipient.id, recipient_event);
+        state.hub.send_to_user(&sender_id, sender_event);
 
         info!(
             sender = %sender.federated_address(local_domain),
@@ -468,6 +550,7 @@ async fn handle_remote_dm(
     username: &str,
     domain: &str,
     content: &str,
+    client_id: Option<String>,
 ) {
     let issuer = state.config.issuer();
     let scheme = if issuer.starts_with("https") { "https" } else { "http" };
@@ -561,13 +644,25 @@ async fn handle_remote_dm(
         &recipient_actor_uri,
         note,
     );
-    let activity_value = match serde_json::to_value(&activity) {
+    let mut activity_value = match serde_json::to_value(&activity) {
         Ok(v) => v,
         Err(e) => {
             warn!("failed to serialize ap activity: {e}");
             return;
         }
     };
+
+    // Carry the conversation UUID through ActivityPub via `object.context`.
+    // Bob's inbox parses `body.object.context` to call `get_or_create_dm_with_id`,
+    // ensuring both sides keep the *same* conversation UUID for this DM. Without
+    // this, Bob's inbox falls back to creating a fresh UUID and the two
+    // instances permanently disagree on the conversation's identity.
+    if let Some(obj) = activity_value.get_mut("object").and_then(|o| o.as_object_mut()) {
+        obj.insert(
+            "context".to_string(),
+            serde_json::Value::String(conversation_id.to_string()),
+        );
+    }
 
     let state_clone = state.clone();
     let inbox = inbox_url.clone();
@@ -595,6 +690,7 @@ async fn handle_remote_dm(
         reply_to_id: None,
         reply_to_content: None,
         reply_to_sender: None,
+        client_id,
     });
     state.hub.send_to_user(&sender_id, event);
 

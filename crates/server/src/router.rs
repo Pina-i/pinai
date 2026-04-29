@@ -15,7 +15,7 @@ use idp_oidc::{
     avatar::{delete_avatar, put_avatar},
     discovery::{jwks, openid_configuration},
     federation::{
-        actor::get_actor,
+        actor::{get_actor, get_instance_actor},
         friendship::{
             accept_friendship, delete_friendship, get_friends, get_incoming_requests,
             post_friend_request, reject_friendship, search_users,
@@ -75,6 +75,7 @@ pub fn build(state: AppState) -> Router {
         .route("/logout", get(get_logout))
 
         // ── ActivityPub actor endpoints ───────────────────────────────────────
+        .route("/actor", get(get_instance_actor))
         .route("/users/{username}", get(get_actor))
         .route("/users/{username}/inbox", post(post_inbox))
         .route("/users/{username}/outbox", get(get_outbox))
