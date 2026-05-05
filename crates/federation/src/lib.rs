@@ -32,4 +32,5 @@ pub mod delivery;
 pub mod http_signature;
 pub mod inbox;
 pub mod outbox;
+pub mod profile;
 pub mod webfinger;

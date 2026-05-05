@@ -11,6 +11,7 @@ use serde::Serialize;
 use idp_db::repos::users;
 
 use idp_federation::auth::require_auth;
+use idp_federation::profile::propagate_profile_update;
 
 use crate::{AppState, OidcError};
 
@@ -63,10 +64,18 @@ pub async fn put_avatar(
         .map_err(|e| OidcError::server_error(e.to_string()))?;
 
     // Upload new avatar
-    let avatar_url = storage
+    let bare_url = storage
         .upload_avatar(user_id, body.to_vec(), content_type)
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?;
+
+    // Cache-bust: the storage key is stable (`<user_id>.<ext>`), so without a
+    // version param every consumer's browser would keep showing the cached
+    // bytes after a re-upload. The `?v` suffix propagates verbatim through
+    // the DB, the AP `Update{Person}` activity, peer `remote_actors` rows,
+    // and finally the `<img src>` — making each upload a fresh URL.
+    let version = time::OffsetDateTime::now_utc().unix_timestamp();
+    let avatar_url = format!("{bare_url}?v={version}");
 
     // Persist URL in database
     users::update_avatar_url(&state.pool, user_id, &avatar_url)
@@ -74,6 +83,13 @@ pub async fn put_avatar(
         .map_err(|e| OidcError::server_error(e.to_string()))?;
 
     tracing::info!(user_id = %user_id, "avatar updated");
+
+    // Fan the new profile out to local + remote friends. Spawned so the HTTP
+    // response isn't blocked on remote inbox POSTs.
+    let state_clone = state.clone();
+    tokio::spawn(async move {
+        propagate_profile_update(&state_clone, user_id).await;
+    });
 
     Ok((StatusCode::OK, Json(AvatarResponse { avatar_url })))
 }
@@ -103,6 +119,12 @@ pub async fn delete_avatar(
         .map_err(|e| OidcError::server_error(e.to_string()))?;
 
     tracing::info!(user_id = %user_id, "avatar deleted");
+
+    // Fan the cleared profile out to local + remote friends.
+    let state_clone = state.clone();
+    tokio::spawn(async move {
+        propagate_profile_update(&state_clone, user_id).await;
+    });
 
     Ok(StatusCode::NO_CONTENT)
 }

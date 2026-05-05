@@ -596,6 +596,8 @@ pub struct ConversationMemberInfo {
     pub actor_uri: String,
     #[serde(rename = "displayName")]
     pub display_name: Option<String>,
+    #[serde(rename = "avatarUrl")]
+    pub avatar_url: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
