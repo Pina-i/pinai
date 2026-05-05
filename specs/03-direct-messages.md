@@ -465,3 +465,108 @@ The `object.id` is the original `activity_uri` stored in `direct_messages.activi
 
 ---
 
+## 9. Attachments
+
+DMs may carry up to 5 file attachments per message (50 MiB each by default).
+Bytes live in a private `attachments` RustFS bucket; access is gated by
+short-lived URLs minted by the IdP. Local and federated paths use the same
+client-facing API; federation is server-mediated (option B from
+`docs/plans/2026-05-05-message-attachments-design.md`).
+
+### Schema
+
+```sql
+CREATE TABLE message_attachments (
+    id                    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    message_id            UUID REFERENCES direct_messages(id),
+    uploaded_by_actor_uri TEXT NOT NULL,
+    storage_key           TEXT NOT NULL UNIQUE,
+    mime_type             TEXT NOT NULL,
+    byte_size             BIGINT NOT NULL CHECK (byte_size > 0),
+    original_filename     TEXT NOT NULL,
+    -- Set for remote attachments — points at origin IdP's
+    -- /api/attachments/{id}/content endpoint.
+    remote_origin_url     TEXT,
+    created_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+```
+
+Lifecycle:
+- `message_id IS NULL` ⇒ orphan (uploaded but not yet attached); reaped by
+  background sweep after `attachment_orphan_ttl` (default 30 min).
+- `message_id IS NOT NULL` ⇒ linked; lifetime tied to its message. When the
+  message is hard-deleted (or future soft-deleted), the storage object is
+  deleted and the row removed.
+
+### API
+
+| Endpoint | Auth | Purpose |
+|---|---|---|
+| `POST /api/attachments` | Bearer | Upload up to 5 multipart files; returns orphan IDs. |
+| `POST /api/dm` | Bearer | New `attachment_ids: [Uuid]` field. Empty `content` is allowed iff `attachment_ids` is non-empty. |
+| `GET /api/dm/{conv_id}` | Bearer | Each message gains `attachments: [{ id, mime_type, byte_size, original_filename }]`. |
+| `GET /api/attachments/{id}` | Bearer | Returns `{ url, expires_at, mime_type, byte_size, original_filename }`. The `url` is a token-protected blob URL on this IdP. |
+| `GET /api/attachments/{id}/blob?token=...` | HMAC token | The actual fetch. Local: `302` to RustFS presigned URL. Remote: HTTP-Sig fetch from origin, streamed back. |
+| `GET /api/attachments/{id}/content` | HTTP Signature | Peer-IdP-facing source of truth; `302` to RustFS presigned URL. Membership-checked. |
+
+Blob URL TTL: `attachment_url_ttl` (default 1 hour). Browser caches the bytes
+once loaded; the URL only needs to live until first fetch. `<img onError>` /
+`<a onError>` should re-call `GET /api/attachments/{id}` to refresh on
+expiry.
+
+Headers on the blob response:
+- `X-Content-Type-Options: nosniff`
+- `Content-Disposition: attachment; filename="…"`
+- `Content-Type: <verified MIME>`
+
+### Federation wire format
+
+`Note.attachment` is a standard ActivityPub array of `Document` objects:
+
+```json
+"attachment": [
+  {
+    "type": "Document",
+    "mediaType": "application/pdf",
+    "url": "https://idp.alice.com/api/attachments/<uuid>/content",
+    "name": "report.pdf",
+    "size": 482012
+  }
+]
+```
+
+`url` points at the origin IdP's HTTP-Signature-protected `/content` endpoint.
+The recipient IdP persists a `message_attachments` row with `remote_origin_url`
+set to that URL — bytes are not fetched at inbox time, only on first read.
+
+### Validation
+
+- File count: ≤ `attachment_max_files_per_message` (default 5).
+- File size: ≤ `attachment_max_byte_size` (default 50 MiB).
+- Extension blocklist (extends built-in list of common executables).
+- MIME blocklist (extends built-in list).
+- Built-in lists cannot be removed via env — only extended (defense in depth).
+
+### Configuration
+
+```env
+ATTACHMENT_MAX_FILES_PER_MESSAGE=5
+ATTACHMENT_MAX_BYTE_SIZE=52428800
+ATTACHMENT_URL_TTL_SECS=3600
+ATTACHMENT_ORPHAN_TTL_SECS=1800
+ATTACHMENT_BLOCKED_EXTENSIONS=    # comma-separated, additive
+ATTACHMENT_BLOCKED_MIMES=          # comma-separated, additive
+```
+
+### Out of scope (deferred)
+
+- Caching of remote bytes (Bob's IdP re-fetches each time; ADR follow-up).
+- Edit/replace of attachments after delivery — attachments are immutable
+  post-`Create`.
+- Image thumbnails / preview generation.
+- Magic-byte file-type sniffing as a second validation layer.
+
+See `docs/plans/2026-05-05-message-attachments-design.md` for the full design.
+
+---
+

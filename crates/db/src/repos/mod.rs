@@ -1,3 +1,4 @@
+pub mod attachments;
 pub mod auth_codes;
 pub mod clients;
 pub mod conversation_reads;

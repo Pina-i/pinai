@@ -13,7 +13,10 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use idp_db::repos::{conversation_reads, conversations, messages, reactions, remote_actors, users};
+use idp_db::repos::{
+    attachments as attachments_repo, conversation_reads, conversations, messages, reactions,
+    remote_actors, users,
+};
 use idp_federation::actors::display_name_for_actor;
 use idp_federation::auth::require_auth;
 use idp_federation::delivery;
@@ -38,6 +41,11 @@ pub struct SendMessageRequest {
     pub content: String,
     /// Optional: reply to an existing message.
     pub reply_to_id: Option<Uuid>,
+    /// Optional: orphan attachment IDs returned by `POST /api/attachments`.
+    /// Caller must own each one (matching `uploaded_by_actor_uri`) and they
+    /// must still be unlinked.
+    #[serde(default)]
+    pub attachment_ids: Vec<Uuid>,
 }
 
 #[derive(Debug, Serialize)]
@@ -61,6 +69,7 @@ pub struct MessageResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reply_to_sender: Option<String>,
     pub reactions: Vec<ReactionGroup>,
+    pub attachments: Vec<crate::attachments::AttachmentMetadata>,
 }
 
 /// POST /api/dm
@@ -72,11 +81,20 @@ pub async fn send_message(
 ) -> Result<(StatusCode, Json<MessageResponse>), OidcError> {
     let sender_id = require_auth(&state, &headers).await?;
 
-    if body.content.is_empty() {
-        return Err(OidcError::invalid_request("Message content cannot be empty"));
+    // Either non-empty content OR at least one attachment is required.
+    if body.content.is_empty() && body.attachment_ids.is_empty() {
+        return Err(OidcError::invalid_request(
+            "Message must have content or at least one attachment",
+        ));
     }
     if body.content.len() > 4096 {
         return Err(OidcError::invalid_request("Message content too long (max 4096 chars)"));
+    }
+    if body.attachment_ids.len() > state.config.attachment_max_files_per_message {
+        return Err(OidcError::invalid_request(format!(
+            "too many attachments (max {} per message)",
+            state.config.attachment_max_files_per_message
+        )));
     }
 
     let sender = users::find_by_id(&state.pool, sender_id)
@@ -89,6 +107,23 @@ pub async fn send_message(
 
     let sender_display_name: Option<String> =
         Some(sender.display_name.clone().unwrap_or_else(|| sender.username.clone()));
+
+    // Pre-validate attachments BEFORE creating the message so a 400 here
+    // doesn't leave a content-less message in the DB.
+    if !body.attachment_ids.is_empty() {
+        let owned = attachments_repo::find_orphans_owned_by(
+            &state.pool,
+            &body.attachment_ids,
+            sender_actor_uri,
+        )
+        .await
+        .map_err(|e| OidcError::server_error(e.to_string()))?;
+        if owned.len() != body.attachment_ids.len() {
+            return Err(OidcError::invalid_request(
+                "one or more attachment IDs are missing, already linked, or not owned by sender",
+            ));
+        }
+    }
 
     // If this is a reply, validate the parent message exists.
     let mut reply_to_content: Option<String> = None;
@@ -178,6 +213,9 @@ pub async fn send_message(
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?;
 
+        let attachments_metadata =
+            link_message_attachments(&state, &body.attachment_ids, msg.id, sender_actor_uri).await?;
+
         // Build and deliver Create{Note} in background
         let note = if let Some(ref parent_uri) = parent_activity_uri {
             activitypub::Note::direct_reply(
@@ -201,7 +239,12 @@ pub async fn send_message(
             &recipient_actor_uri,
             note,
         );
-        if let Ok(activity_value) = serde_json::to_value(&activity) {
+        if let Ok(mut activity_value) = serde_json::to_value(&activity) {
+            crate::attachments::inject_attachments_into_ap_activity(
+                &mut activity_value,
+                &state.config.issuer(),
+                &attachments_metadata,
+            );
             let state_clone = state.clone();
             let sender_username = sender.username.clone();
             tokio::spawn(async move {
@@ -250,6 +293,7 @@ pub async fn send_message(
             reply_to_content,
             reply_to_sender,
             reactions: vec![],
+            attachments: attachments_metadata,
         })))
     } else {
         // ── Local delivery ────────────────────────────────────────────────────
@@ -284,6 +328,9 @@ pub async fn send_message(
         )
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?;
+
+        let attachments_metadata =
+            link_message_attachments(&state, &body.attachment_ids, msg.id, sender_actor_uri).await?;
 
         let event = WsEvent::NewDm(DmPayload {
             message_id: msg.id,
@@ -336,8 +383,54 @@ pub async fn send_message(
             reply_to_content,
             reply_to_sender,
             reactions: vec![],
+            attachments: attachments_metadata,
         })))
     }
+}
+
+/// Link the given orphan attachments to a message and return metadata for the
+/// response. Pre-validation of ownership/orphan status has already happened at
+/// the top of `send_message`; this is the side effect plus a fresh read for
+/// the response shape.
+///
+/// If the row count returned by the UPDATE doesn't match `attachment_ids.len()`
+/// (a race with a concurrent send by the same user), we log a warning and
+/// continue with whatever did link — the message itself is already created.
+async fn link_message_attachments(
+    state: &AppState,
+    attachment_ids: &[Uuid],
+    message_id: Uuid,
+    sender_actor_uri: &str,
+) -> Result<Vec<crate::attachments::AttachmentMetadata>, OidcError> {
+    if attachment_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let linked = attachments_repo::link_to_message(
+        &state.pool,
+        attachment_ids,
+        message_id,
+        sender_actor_uri,
+    )
+    .await
+    .map_err(|e| OidcError::server_error(e.to_string()))?;
+
+    if linked as usize != attachment_ids.len() {
+        tracing::warn!(
+            requested = attachment_ids.len(),
+            linked,
+            %message_id,
+            "fewer attachments linked than requested (likely race with concurrent send)"
+        );
+    }
+
+    let rows = attachments_repo::find_for_message(&state.pool, message_id)
+        .await
+        .map_err(|e| OidcError::server_error(e.to_string()))?;
+
+    Ok(rows
+        .iter()
+        .map(crate::attachments::AttachmentMetadata::from)
+        .collect())
 }
 
 // ─── Get conversation ─────────────────────────────────────────────────────────
@@ -422,6 +515,21 @@ pub async fn get_conversation(
             });
     }
 
+    // Batch-fetch attachments for all messages in this page.
+    let attachment_rows = attachments_repo::find_for_messages(&state.pool, &message_ids)
+        .await
+        .map_err(|e| OidcError::server_error(e.to_string()))?;
+    let mut attachments_map: HashMap<Uuid, Vec<crate::attachments::AttachmentMetadata>> =
+        HashMap::new();
+    for row in &attachment_rows {
+        if let Some(mid) = row.message_id {
+            attachments_map
+                .entry(mid)
+                .or_default()
+                .push(crate::attachments::AttachmentMetadata::from(row));
+        }
+    }
+
     // Collect unique actor URIs (senders + reply-to senders) and resolve display names in batch.
     let unique_actors: Vec<&str> = {
         let mut set = std::collections::HashSet::new();
@@ -447,6 +555,7 @@ pub async fn get_conversation(
                 display_names.get(uri).cloned().flatten().or_else(|| Some(uri.clone()))
             });
             let msg_reactions = reactions_map.remove(&m.id).unwrap_or_default();
+            let msg_attachments = attachments_map.remove(&m.id).unwrap_or_default();
             MessageResponse {
                 id: m.id,
                 conversation_id: m.conversation_id,
@@ -461,6 +570,7 @@ pub async fn get_conversation(
                 reply_to_content: m.reply_to_content,
                 reply_to_sender: reply_sender_display,
                 reactions: msg_reactions,
+                attachments: msg_attachments,
             }
         })
         .collect();
@@ -886,6 +996,15 @@ pub async fn edit_message(
 
     tracing::info!(message_id = %updated.id, "message edited");
 
+    // Edits don't change attachments — pull the existing ones for the response.
+    let attachments_metadata: Vec<crate::attachments::AttachmentMetadata> =
+        attachments_repo::find_for_message(&state.pool, updated.id)
+            .await
+            .map_err(|e| OidcError::server_error(e.to_string()))?
+            .iter()
+            .map(crate::attachments::AttachmentMetadata::from)
+            .collect();
+
     Ok(Json(MessageResponse {
         id: updated.id,
         conversation_id: updated.conversation_id,
@@ -900,5 +1019,6 @@ pub async fn edit_message(
         reply_to_content: None,
         reply_to_sender: None,
         reactions: vec![],
+        attachments: attachments_metadata,
     }))
 }

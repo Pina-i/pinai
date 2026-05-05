@@ -19,7 +19,9 @@ use axum::{
 use serde_json::Value;
 use uuid::Uuid;
 
-use idp_db::repos::{conversations, friendships, messages, reactions, remote_actors, users};
+use idp_db::repos::{
+    attachments, conversations, friendships, messages, reactions, remote_actors, users,
+};
 
 use idp_realtime::{DmPayload, EditedDmPayload, FriendshipPayload, ProfileUpdatePayload, ReactionPayload, WsEvent};
 
@@ -495,6 +497,11 @@ async fn handle_create(
     .await
     .map_err(|e| OidcError::server_error(e.to_string()))?;
 
+    // Parse and persist any `Note.attachment` entries. Invalid entries are
+    // skipped with a warning — we never reject the whole DM over a malformed
+    // attachment.
+    persist_inbound_attachments(state, msg.id, actor_url, obj.get("attachment")).await;
+
     // Look up the remote sender's display name from the actor cache.
     let sender_display_name = match remote_actors::find_by_actor_uri(&state.pool, actor_url).await {
         Ok(Some(ra)) => ra.display_name,
@@ -793,4 +800,108 @@ async fn resolve_remote_name(state: &AppState, actor_uri: &str) -> (String, Opti
         .and_then(|ra| ra.display_name);
     let username = actor_uri.rsplit('/').next().unwrap_or("unknown").to_string();
     (username, display_name)
+}
+
+/// Parse a `Note.attachment` array from an inbound `Create{Note}` and insert
+/// `message_attachments` rows for each valid `Document` entry.
+///
+/// Validation: type=="Document", url/mediaType/name/size present and well-typed,
+/// `size > 0` and `<= attachment_max_byte_size`, MIME not in the blocklist.
+/// Caps the count at `attachment_max_files_per_message` (extras silently
+/// ignored — the sender shouldn't have sent more, and we'd rather drop the
+/// excess than reject the message).
+///
+/// Failures on individual entries are logged at WARN; the message itself is
+/// already persisted and unaffected.
+async fn persist_inbound_attachments(
+    state: &AppState,
+    message_id: Uuid,
+    sender_actor_uri: &str,
+    attachment_value: Option<&Value>,
+) {
+    let arr = match attachment_value.and_then(|v| v.as_array()) {
+        Some(a) if !a.is_empty() => a,
+        _ => return,
+    };
+
+    let max = state.config.attachment_max_files_per_message;
+    let max_size = state.config.attachment_max_byte_size as i64;
+
+    for (i, entry) in arr.iter().take(max).enumerate() {
+        let obj = match entry.as_object() {
+            Some(o) => o,
+            None => {
+                tracing::warn!(idx = i, "inbound attachment entry not an object — skipping");
+                continue;
+            }
+        };
+
+        let entry_type = obj.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        if entry_type != "Document" {
+            tracing::warn!(idx = i, %entry_type, "inbound attachment not a Document — skipping");
+            continue;
+        }
+
+        let url = match obj.get("url").and_then(|v| v.as_str()) {
+            Some(u) if !u.is_empty() => u,
+            _ => {
+                tracing::warn!(idx = i, "inbound attachment missing url — skipping");
+                continue;
+            }
+        };
+        let mime = match obj.get("mediaType").and_then(|v| v.as_str()) {
+            Some(m) if !m.is_empty() => m,
+            _ => {
+                tracing::warn!(idx = i, "inbound attachment missing mediaType — skipping");
+                continue;
+            }
+        };
+        let filename = obj
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("attachment");
+        let byte_size = match obj.get("size").and_then(|v| v.as_i64()) {
+            Some(s) if s > 0 && s <= max_size => s,
+            Some(s) => {
+                tracing::warn!(
+                    idx = i, size = s, max = max_size,
+                    "inbound attachment size out of range — skipping"
+                );
+                continue;
+            }
+            None => {
+                tracing::warn!(idx = i, "inbound attachment missing size — skipping");
+                continue;
+            }
+        };
+
+        let mime_lower = mime.to_lowercase();
+        if state
+            .config
+            .attachment_blocked_mimes
+            .iter()
+            .any(|b| b == &mime_lower)
+        {
+            tracing::warn!(idx = i, %mime, "inbound attachment MIME blocklisted — skipping");
+            continue;
+        }
+
+        let id = Uuid::new_v4();
+        let storage_key = id.to_string();
+        if let Err(e) = attachments::insert_remote(
+            &state.pool,
+            id,
+            message_id,
+            sender_actor_uri,
+            &storage_key,
+            mime,
+            byte_size,
+            filename,
+            url,
+        )
+        .await
+        {
+            tracing::warn!(idx = i, "failed to persist inbound attachment: {e}");
+        }
+    }
 }

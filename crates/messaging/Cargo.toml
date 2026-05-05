@@ -11,9 +11,14 @@ tracing     = { workspace = true }
 uuid        = { workspace = true }
 time        = { workspace = true }
 sqlx        = { workspace = true }
-axum        = { workspace = true }
+axum        = { workspace = true, features = ["multipart"] }
 url         = "2"
 urlencoding = "2"
+hmac        = "0.12"
+sha2        = "0.10"
+reqwest     = { workspace = true, features = ["stream"] }
+http-signatures = { workspace = true }
+jwt-utils       = { workspace = true }
 
 activitypub = { workspace = true }
 
@@ -21,3 +26,5 @@ idp-db         = { path = "../db",         package = "idp-db" }
 idp-federation = { path = "../federation", package = "idp-federation" }
 idp-realtime   = { path = "../realtime",   package = "idp-realtime" }
 idp-state      = { path = "../state",      package = "idp-state" }
+idp-storage    = { path = "../storage",    package = "idp-storage" }
+idp-config     = { path = "../config",     package = "idp-config" }

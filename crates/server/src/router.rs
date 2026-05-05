@@ -1,4 +1,5 @@
 use axum::{
+    extract::DefaultBodyLimit,
     http::{HeaderValue, Method},
     routing::{delete, get, patch, post, put},
     Json, Router,
@@ -12,6 +13,7 @@ use tracing::Level;
 
 use idp_federation::{
     actor::{get_actor, get_instance_actor},
+    attachments::get_attachment_content,
     inbox::post_inbox,
     outbox::{
         get_followers as get_ap_followers, get_following as get_ap_following, get_outbox,
@@ -19,8 +21,10 @@ use idp_federation::{
     webfinger::get_webfinger,
 };
 use idp_messaging::{
-    add_reaction, edit_message, get_conversation, list_conversations, remove_reaction,
-    send_message,
+    add_reaction,
+    attachments::{get_attachment, upload_attachments},
+    blob::get_attachment_blob,
+    edit_message, get_conversation, list_conversations, remove_reaction, send_message,
 };
 use idp_social::{
     accept_friendship, delete_friendship, get_friends, get_incoming_requests,
@@ -48,6 +52,15 @@ pub fn build(state: AppState) -> Router {
         .iter()
         .filter_map(|o| o.parse::<HeaderValue>().ok())
         .collect();
+
+    // Body-size cap for the attachment-upload endpoint:
+    // (max files per request) * (max bytes per file) + 1 MiB headroom for
+    // multipart-boundary overhead.
+    let attachment_body_limit: usize = (state
+        .config
+        .attachment_max_files_per_message as u64
+        * state.config.attachment_max_byte_size
+        + 1024 * 1024) as usize;
 
     let cors = CorsLayer::new()
         .allow_origin(origins)
@@ -102,6 +115,19 @@ pub fn build(state: AppState) -> Router {
 
         // ── Avatar API (Bearer-auth) ────────────────────────────────────
         .route("/api/avatar", put(put_avatar).delete(delete_avatar))
+
+        // ── DM Attachments API ──────────────────────────────────────────
+        // Upload: per-route body limit overrides Axum's 2 MiB default.
+        .route(
+            "/api/attachments",
+            post(upload_attachments).layer(DefaultBodyLimit::max(attachment_body_limit)),
+        )
+        // Bearer auth — returns the token-protected blob URL.
+        .route("/api/attachments/{id}", get(get_attachment))
+        // Token auth (token in query string) — redirects to RustFS or proxies remote.
+        .route("/api/attachments/{id}/blob", get(get_attachment_blob))
+        // HTTP-Signature auth — peer-IdP-facing source of truth for local attachments.
+        .route("/api/attachments/{id}/content", get(get_attachment_content))
 
         // ── Presence API ────────────────────────────────────────────────────
         .route("/api/presence", get(get_presence))

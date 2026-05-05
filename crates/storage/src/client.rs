@@ -1,5 +1,7 @@
+use std::time::Duration;
+
 use aws_credential_types::Credentials;
-use aws_sdk_s3::{config::Region, primitives::ByteStream, Client};
+use aws_sdk_s3::{config::Region, presigning::PresigningConfig, primitives::ByteStream, Client};
 use uuid::Uuid;
 
 use crate::StorageError;
@@ -103,6 +105,83 @@ impl StorageClient {
         }
         tracing::info!(user_id = %user_id, "avatar deleted");
         Ok(())
+    }
+
+    // ── Attachments ─────────────────────────────────────────────────────
+
+    /// Upload an attachment to the (private) attachments bucket. The caller
+    /// chooses `storage_key` — typically the attachment row's UUID rendered
+    /// as a string. Bytes are stored with their declared `content_type`; the
+    /// real per-fetch content-type is overridden via the presigned-GET URL.
+    pub async fn upload_attachment(
+        &self,
+        storage_key: &str,
+        data: Vec<u8>,
+        content_type: &str,
+    ) -> Result<(), StorageError> {
+        self.client
+            .put_object()
+            .bucket(&self.bucket_attachments)
+            .key(storage_key)
+            .body(ByteStream::from(data))
+            .content_type(content_type)
+            .send()
+            .await
+            .map_err(|e| StorageError::UploadFailed(e.to_string()))?;
+
+        tracing::info!(key = %storage_key, "attachment uploaded");
+        Ok(())
+    }
+
+    /// Delete an attachment object. Idempotent — a missing key returns Ok(()).
+    pub async fn delete_attachment(&self, storage_key: &str) -> Result<(), StorageError> {
+        let _ = self
+            .client
+            .delete_object()
+            .bucket(&self.bucket_attachments)
+            .key(storage_key)
+            .send()
+            .await;
+
+        tracing::info!(key = %storage_key, "attachment deleted");
+        Ok(())
+    }
+
+    /// Generate a short-lived presigned GET URL for an attachment.
+    ///
+    /// The presigned URL embeds response-header overrides so RustFS serves
+    /// the bytes with the correct `Content-Type` and a
+    /// `Content-Disposition: attachment; filename="…"` header — turning every
+    /// download into a "save as" by default. The IdP layer adds
+    /// `X-Content-Type-Options: nosniff` on its own response envelope.
+    pub async fn presign_attachment_get(
+        &self,
+        storage_key: &str,
+        mime_type: &str,
+        original_filename: &str,
+        ttl: Duration,
+    ) -> Result<String, StorageError> {
+        let presigning = PresigningConfig::expires_in(ttl)
+            .map_err(|e| StorageError::S3(e.to_string()))?;
+
+        // Strip double-quotes that would break the header value; consumers
+        // never use this filename as a path, so further sanitization is
+        // unnecessary at this layer.
+        let safe_filename = original_filename.replace('"', "");
+        let disposition = format!(r#"attachment; filename="{safe_filename}""#);
+
+        let req = self
+            .client
+            .get_object()
+            .bucket(&self.bucket_attachments)
+            .key(storage_key)
+            .response_content_type(mime_type)
+            .response_content_disposition(&disposition)
+            .presigned(presigning)
+            .await
+            .map_err(|e| StorageError::S3(e.to_string()))?;
+
+        Ok(req.uri().to_string())
     }
 
     // ── Internal helpers ────────────────────────────────────────────────
