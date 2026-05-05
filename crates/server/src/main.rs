@@ -170,6 +170,21 @@ async fn main() -> anyhow::Result<()> {
 
     info!("presence system started");
 
+    // Spawn DM-attachment orphan-sweep background task.
+    {
+        let pool_for_sweep = pool.clone();
+        let storage_for_sweep = state.storage.clone();
+        let config_for_sweep = Arc::clone(&config);
+        tokio::spawn(async move {
+            idp_messaging::orphan_sweep::run_orphan_sweep(
+                pool_for_sweep,
+                storage_for_sweep,
+                config_for_sweep,
+            )
+            .await;
+        });
+    }
+
     // Build the Axum router
     let app = router::build(state);
 

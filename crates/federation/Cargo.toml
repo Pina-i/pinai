@@ -25,3 +25,4 @@ idp-config   = { path = "../config",   package = "idp-config" }
 idp-db       = { path = "../db",       package = "idp-db" }
 idp-realtime = { path = "../realtime", package = "idp-realtime" }
 idp-state    = { path = "../state",    package = "idp-state" }
+idp-storage  = { path = "../storage",  package = "idp-storage" }

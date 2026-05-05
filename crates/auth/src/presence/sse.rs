@@ -23,7 +23,9 @@ use uuid::Uuid;
 
 use crate::{AppState, OidcError};
 
-use super::handlers::{parse_actors_query, verify_http_signature};
+use idp_federation::http_signature::verify_http_signature;
+
+use super::handlers::parse_actors_query;
 use super::types::{PresenceEvent, TypingEvent};
 
 /// `GET /api/presence/stream?actors[]=...`
@@ -42,7 +44,7 @@ pub async fn get_presence_stream(
         Some(q) => format!("/api/presence/stream?{q}"),
         None => "/api/presence/stream".to_string(),
     };
-    verify_http_signature(&state, &headers, "get", &path).await?;
+    verify_http_signature(&headers, "get", &path).await?;
 
     let actors: HashSet<String> = parse_actors_query(raw.as_deref()).into_iter().collect();
     tracing::Span::current().record("actor_count", actors.len());

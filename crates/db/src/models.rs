@@ -160,3 +160,27 @@ pub struct MessageReaction {
     pub emoji: String,
     pub created_at: OffsetDateTime,
 }
+
+// ─── Attachment ───────────────────────────────────────────────────────────────
+
+/// An attachment on a direct message. Two phases:
+///
+/// - **Orphan** (`message_id IS NULL`) — uploaded but not yet linked to a message;
+///   reaped by the orphan-sweep task after the configured TTL.
+/// - **Linked** (`message_id IS NOT NULL`) — attached to a message, lifecycle
+///   tied to that message (hard-deleted when the message is soft-deleted).
+///
+/// For remote attachments received via federation, `remote_origin_url` is set
+/// and `storage_key` exists for uniformity but no object lives in this IdP's bucket.
+#[derive(Debug, Clone, sqlx::FromRow, Serialize)]
+pub struct Attachment {
+    pub id: Uuid,
+    pub message_id: Option<Uuid>,
+    pub uploaded_by_actor_uri: String,
+    pub storage_key: String,
+    pub mime_type: String,
+    pub byte_size: i64,
+    pub original_filename: String,
+    pub remote_origin_url: Option<String>,
+    pub created_at: OffsetDateTime,
+}

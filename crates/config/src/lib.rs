@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::time::Duration;
 
 /// Deployment environment. Controls scheme selection (http vs https) for the
 /// local issuer URL **and** for outbound calls to peer IdPs (federation
@@ -52,7 +53,42 @@ pub struct Config {
     pub storage_bucket_attachments: String,
     /// Externally-reachable base URL for building public avatar URLs.
     pub storage_public_url: Option<String>,
+
+    // ── DM attachments ────────────────────────────────────────────────────
+    /// Maximum number of attachments allowed in a single message.
+    pub attachment_max_files_per_message: usize,
+    /// Maximum byte size for a single attachment.
+    pub attachment_max_byte_size: u64,
+    /// TTL for client-facing presigned blob URLs.
+    pub attachment_url_ttl: Duration,
+    /// How long an unlinked (orphan) attachment lives before the sweep deletes it.
+    pub attachment_orphan_ttl: Duration,
+    /// File extensions that may not be uploaded. The user-provided env var
+    /// *extends* the built-in list — env values cannot remove built-in entries.
+    /// Comparisons are case-insensitive against the lowercased extension.
+    pub attachment_blocked_extensions: Vec<String>,
+    /// MIME types that may not be uploaded. The env var extends the built-in list.
+    pub attachment_blocked_mimes: Vec<String>,
 }
+
+/// Built-in extension blocklist. Extended (never replaced) by
+/// `ATTACHMENT_BLOCKED_EXTENSIONS`. Stored lowercased; comparison is
+/// lowercase-vs-lowercase.
+const BUILTIN_BLOCKED_EXTENSIONS: &[&str] = &[
+    "exe", "sh", "bat", "cmd", "com", "ps1", "vbs", "js", "wsf", "hta", "scr",
+    "pif", "lnk", "app", "dmg", "pkg", "msi", "msix", "deb", "rpm", "appimage",
+    "jar", "war", "dll", "so", "dylib",
+];
+
+/// Built-in MIME blocklist. Extended (never replaced) by `ATTACHMENT_BLOCKED_MIMES`.
+const BUILTIN_BLOCKED_MIMES: &[&str] = &[
+    "application/x-msdownload",
+    "application/x-msdos-program",
+    "application/x-executable",
+    "application/x-sh",
+    "application/x-mach-binary",
+    "application/vnd.microsoft.portable-executable",
+];
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -62,6 +98,8 @@ pub enum ConfigError {
     InvalidPort(String),
     #[error("Invalid IDP_ENV value '{0}' (expected 'development' or 'production')")]
     InvalidEnvironment(String),
+    #[error("Invalid attachment numeric value for {0}: {1}")]
+    InvalidAttachmentValue(&'static str, String),
 }
 
 impl Config {
@@ -104,6 +142,31 @@ impl Config {
             storage_bucket_attachments: std::env::var("STORAGE_BUCKET_ATTACHMENTS")
                 .unwrap_or_else(|_| "attachments".into()),
             storage_public_url: std::env::var("STORAGE_PUBLIC_URL").ok(),
+
+            attachment_max_files_per_message: parse_env_usize(
+                "ATTACHMENT_MAX_FILES_PER_MESSAGE",
+                5,
+            )?,
+            attachment_max_byte_size: parse_env_u64(
+                "ATTACHMENT_MAX_BYTE_SIZE",
+                50 * 1024 * 1024,
+            )?,
+            attachment_url_ttl: Duration::from_secs(parse_env_u64(
+                "ATTACHMENT_URL_TTL_SECS",
+                3600,
+            )?),
+            attachment_orphan_ttl: Duration::from_secs(parse_env_u64(
+                "ATTACHMENT_ORPHAN_TTL_SECS",
+                1800,
+            )?),
+            attachment_blocked_extensions: merge_blocklist(
+                BUILTIN_BLOCKED_EXTENSIONS,
+                std::env::var("ATTACHMENT_BLOCKED_EXTENSIONS").ok().as_deref(),
+            ),
+            attachment_blocked_mimes: merge_blocklist(
+                BUILTIN_BLOCKED_MIMES,
+                std::env::var("ATTACHMENT_BLOCKED_MIMES").ok().as_deref(),
+            ),
         })
     }
 
@@ -140,4 +203,38 @@ impl Config {
 
 fn require_env(key: &'static str) -> Result<String, ConfigError> {
     std::env::var(key).map_err(|_| ConfigError::MissingVar(key))
+}
+
+fn parse_env_usize(key: &'static str, default: usize) -> Result<usize, ConfigError> {
+    match std::env::var(key) {
+        Err(_) => Ok(default),
+        Ok(raw) => raw
+            .parse()
+            .map_err(|_| ConfigError::InvalidAttachmentValue(key, raw)),
+    }
+}
+
+fn parse_env_u64(key: &'static str, default: u64) -> Result<u64, ConfigError> {
+    match std::env::var(key) {
+        Err(_) => Ok(default),
+        Ok(raw) => raw
+            .parse()
+            .map_err(|_| ConfigError::InvalidAttachmentValue(key, raw)),
+    }
+}
+
+/// Merge a built-in blocklist with an optional user-supplied comma-separated
+/// list. Entries are lower-cased and deduplicated. The built-in list is always
+/// included — env values can only *add* to it.
+fn merge_blocklist(builtins: &[&str], env_value: Option<&str>) -> Vec<String> {
+    let mut out: Vec<String> = builtins.iter().map(|s| s.to_lowercase()).collect();
+    if let Some(raw) = env_value {
+        for item in raw.split(',') {
+            let trimmed = item.trim().to_lowercase();
+            if !trimmed.is_empty() && !out.contains(&trimmed) {
+                out.push(trimmed);
+            }
+        }
+    }
+    out
 }

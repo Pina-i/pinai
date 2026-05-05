@@ -123,6 +123,10 @@ db, broker, storage, config ──► (leaves)
 | `GET /api/dm` | List conversations (`kind`, `name`, `members[]`, `unread_count`, last message preview) |
 | `GET /api/dm/:conversation_id` | Conversation history (keyset cursor); marks as read on initial load |
 | `PATCH /api/dm/:conversation_id` | Edit a message / rename a group conversation |
+| `POST /api/attachments` | Upload up to 5 multipart files; returns orphan attachment IDs |
+| `GET /api/attachments/:id` | Returns a token-protected blob URL + metadata (Bearer auth) |
+| `GET /api/attachments/:id/blob` | The actual byte fetch — token-authed; redirects to RustFS (local) or proxies (remote) |
+| `GET /api/attachments/:id/content` | Inter-IdP source of truth for attachment bytes (HTTP-Signature auth) |
 | `GET /api/presence` | Current presence snapshot for a set of actors |
 | `GET /api/presence/stream` | Inter-IdP SSE stream for active conversations (authenticated via HTTP Signatures) |
 | `POST /api/presence/batch` | Inter-IdP batch presence poll for sidebar (authenticated via HTTP Signatures) |
