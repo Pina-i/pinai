@@ -1821,6 +1821,44 @@ dependencies = [
 ]
 
 [[package]]
+name = "idp-auth"
+version = "0.1.0"
+dependencies = [
+ "activitypub",
+ "argon2",
+ "axum",
+ "axum-extra",
+ "base64ct",
+ "common-types",
+ "dashmap",
+ "futures-util",
+ "http-signatures",
+ "idp-broker",
+ "idp-config",
+ "idp-db",
+ "idp-federation",
+ "idp-presence",
+ "idp-realtime",
+ "idp-state",
+ "idp-storage",
+ "jwt-utils",
+ "nanoid",
+ "rand 0.8.5",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror",
+ "time",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+ "url",
+ "urlencoding",
+ "uuid",
+]
+
+[[package]]
 name = "idp-broker"
 version = "0.1.0"
 dependencies = [
@@ -1859,36 +1897,81 @@ dependencies = [
 ]
 
 [[package]]
-name = "idp-oidc"
+name = "idp-federation"
 version = "0.1.0"
 dependencies = [
  "activitypub",
- "argon2",
  "axum",
- "axum-extra",
- "base64ct",
- "common-types",
- "dashmap",
- "futures-util",
  "http-signatures",
  "idp-broker",
  "idp-config",
  "idp-db",
- "idp-storage",
+ "idp-realtime",
+ "idp-state",
  "jwt-utils",
- "nanoid",
- "rand 0.8.5",
  "reqwest",
  "serde",
  "serde_json",
  "sqlx",
- "thiserror",
  "time",
  "tokio",
- "tokio-stream",
  "tracing",
  "url",
  "urlencoding",
+ "uuid",
+]
+
+[[package]]
+name = "idp-messaging"
+version = "0.1.0"
+dependencies = [
+ "activitypub",
+ "axum",
+ "idp-db",
+ "idp-federation",
+ "idp-realtime",
+ "idp-state",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "time",
+ "tokio",
+ "tracing",
+ "url",
+ "urlencoding",
+ "uuid",
+]
+
+[[package]]
+name = "idp-presence"
+version = "0.1.0"
+dependencies = [
+ "dashmap",
+ "http-signatures",
+ "idp-broker",
+ "idp-config",
+ "idp-db",
+ "idp-realtime",
+ "jwt-utils",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "time",
+ "tokio",
+ "tracing",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "idp-realtime"
+version = "0.1.0"
+dependencies = [
+ "dashmap",
+ "serde",
+ "time",
+ "tokio",
  "uuid",
 ]
 
@@ -1900,10 +1983,16 @@ dependencies = [
  "axum",
  "axum-extra",
  "dotenvy",
+ "idp-auth",
  "idp-broker",
  "idp-config",
  "idp-db",
- "idp-oidc",
+ "idp-federation",
+ "idp-messaging",
+ "idp-presence",
+ "idp-realtime",
+ "idp-social",
+ "idp-state",
  "idp-storage",
  "jwt-utils",
  "observability",
@@ -1912,6 +2001,41 @@ dependencies = [
  "sqlx",
  "tokio",
  "tower-http",
+ "tracing",
+]
+
+[[package]]
+name = "idp-social"
+version = "0.1.0"
+dependencies = [
+ "activitypub",
+ "axum",
+ "idp-db",
+ "idp-federation",
+ "idp-realtime",
+ "idp-state",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "urlencoding",
+ "uuid",
+]
+
+[[package]]
+name = "idp-state"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "axum-extra",
+ "idp-broker",
+ "idp-config",
+ "idp-db",
+ "idp-presence",
+ "idp-realtime",
+ "idp-storage",
+ "jwt-utils",
+ "serde",
  "tracing",
 ]
 

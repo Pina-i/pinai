@@ -1,11 +1,17 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/auth",
     "crates/broker",
     "crates/config",
     "crates/db",
-    "crates/oidc",
+    "crates/federation",
+    "crates/messaging",
+    "crates/presence",
+    "crates/realtime",
     "crates/server",
+    "crates/social",
+    "crates/state",
     "crates/storage",
 ]
 

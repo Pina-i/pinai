@@ -1,10 +1,30 @@
 use std::path::PathBuf;
 
+/// Deployment environment. Controls scheme selection (http vs https) for the
+/// local issuer URL **and** for outbound calls to peer IdPs (federation
+/// delivery, presence batch poll, presence SSE). Also drives the `Secure`
+/// cookie flag.
+///
+/// Set via `IDP_ENV=development|production`. Defaults to `Production` so
+/// forgetting to set it can't accidentally weaken security in a real deploy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Environment {
+    Development,
+    Production,
+}
+
+impl Environment {
+    pub fn is_dev(self) -> bool {
+        matches!(self, Self::Development)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub database_url: String,
     /// The domain this IdP is hosted on, e.g. "localhost:8080" or "idp.alice.com".
     pub domain: String,
+    pub environment: Environment,
     pub jwt_private_key_path: PathBuf,
     pub jwt_key_id: String,
     pub port: u16,
@@ -40,15 +60,24 @@ pub enum ConfigError {
     MissingVar(&'static str),
     #[error("Invalid port: {0}")]
     InvalidPort(String),
+    #[error("Invalid IDP_ENV value '{0}' (expected 'development' or 'production')")]
+    InvalidEnvironment(String),
 }
 
 impl Config {
     /// Load configuration from environment variables.
     /// Call `dotenvy::dotenv().ok()` before this in main.rs.
     pub fn from_env() -> Result<Self, ConfigError> {
+        let environment = match std::env::var("IDP_ENV").as_deref() {
+            Ok("development") | Ok("dev") => Environment::Development,
+            Ok("production") | Ok("prod") | Err(_) => Environment::Production,
+            Ok(other) => return Err(ConfigError::InvalidEnvironment(other.to_string())),
+        };
+
         Ok(Self {
             database_url: require_env("DATABASE_URL")?,
             domain: require_env("DOMAIN")?,
+            environment,
             jwt_private_key_path: PathBuf::from(require_env("JWT_PRIVATE_KEY_PATH")?),
             jwt_key_id: require_env("JWT_KEY_ID")?,
             port: std::env::var("PORT")
@@ -85,16 +114,27 @@ impl Config {
             && self.storage_secret_key.is_some()
     }
 
-    /// The OIDC issuer URL. Uses http:// for localhost/dev domains, https:// otherwise.
+    /// The OIDC issuer URL. Built from `domain` + the environment-derived scheme.
     pub fn issuer(&self) -> String {
-        let is_dev = self.domain.starts_with("localhost")
-            || self.domain.starts_with("127.")
-            || self.domain.starts_with("host.docker.internal");
-        if is_dev {
-            format!("http://{}", self.domain)
-        } else {
-            format!("https://{}", self.domain)
+        format!("{}://{}", self.scheme(), self.domain)
+    }
+
+    /// Wire scheme used by this IdP — `http` in development, `https` in
+    /// production. Single source of truth: used for the local issuer URL and
+    /// for every outbound inter-IdP call (federation delivery, presence batch
+    /// poll, presence SSE). Peers in the same network are assumed to use the
+    /// same scheme as us — there's no mixed-mode federation.
+    pub fn scheme(&self) -> &'static str {
+        match self.environment {
+            Environment::Development => "http",
+            Environment::Production => "https",
         }
+    }
+
+    /// Whether the cookie `Secure` attribute should be set. False in
+    /// development so the cookie works over plain HTTP, true in production.
+    pub fn secure_cookies(&self) -> bool {
+        self.environment == Environment::Production
     }
 }
 
