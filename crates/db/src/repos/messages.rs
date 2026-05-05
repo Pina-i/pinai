@@ -245,7 +245,8 @@ pub async fn list_conversations(
                 (SELECT JSON_AGG(
                     JSON_BUILD_OBJECT(
                         'actorUri',    cm_other.actor_uri,
-                        'displayName', COALESCE(u.display_name, ra.display_name)
+                        'displayName', COALESCE(u.display_name, ra.display_name),
+                        'avatarUrl',   COALESCE(u.avatar_url, ra.avatar_url)
                     )
                 )
                 FROM conversation_members cm_other

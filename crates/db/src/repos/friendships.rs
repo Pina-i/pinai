@@ -162,3 +162,34 @@ pub async fn get_all_friend_actor_uris(pool: &PgPool) -> Result<Vec<String>, sql
     .fetch_all(pool)
     .await
 }
+
+/// A remote friend's inbox — the only fields needed for outbound AP delivery.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct RemoteFriendInbox {
+    pub actor_uri: String,
+    pub inbox_url: Option<String>,
+}
+
+/// Distinct remote friends of an owner, with their cached inbox URLs.
+///
+/// "Remote" is encoded by the INNER JOIN on `remote_actors` — local friends
+/// have no row there. The `inbox_url` may be NULL if WebFinger never resolved
+/// it; the caller is expected to skip or refetch in that case.
+pub async fn list_remote_friends_with_inbox(
+    pool: &PgPool,
+    owner_user_id: Uuid,
+) -> Result<Vec<RemoteFriendInbox>, sqlx::Error> {
+    sqlx::query_as::<_, RemoteFriendInbox>(
+        r#"
+        SELECT DISTINCT f.friend_actor_uri AS actor_uri,
+                        ra.inbox_url       AS inbox_url
+        FROM friendships f
+        INNER JOIN remote_actors ra ON f.friend_actor_uri = ra.actor_uri
+        WHERE f.owner_user_id = $1
+          AND f.status = 'accepted'
+        "#,
+    )
+    .bind(owner_user_id)
+    .fetch_all(pool)
+    .await
+}
