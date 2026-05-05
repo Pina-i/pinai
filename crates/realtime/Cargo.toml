@@ -1,0 +1,11 @@
+[package]
+name    = "idp-realtime"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde   = { workspace = true }
+time    = { workspace = true }
+tokio   = { workspace = true }
+uuid    = { workspace = true }
+dashmap = { workspace = true }

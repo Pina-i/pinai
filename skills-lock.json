@@ -1,6 +1,12 @@
 {
   "version": 1,
   "skills": {
+    "domain-driven-design": {
+      "source": "sickn33/antigravity-awesome-skills",
+      "sourceType": "github",
+      "skillPath": "skills/domain-driven-design/SKILL.md",
+      "computedHash": "ceefaaaa48d99c70fd913367dcf0fe52ca995a038dfe559df2d8b78bc5a7d8e0"
+    },
     "rust-async-patterns": {
       "source": "wshobson/agents",
       "sourceType": "github",

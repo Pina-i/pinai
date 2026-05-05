@@ -10,23 +10,26 @@ use tower_http::{
 };
 use tracing::Level;
 
-use idp_oidc::{
+use idp_federation::{
+    actor::{get_actor, get_instance_actor},
+    inbox::post_inbox,
+    outbox::{
+        get_followers as get_ap_followers, get_following as get_ap_following, get_outbox,
+    },
+    webfinger::get_webfinger,
+};
+use idp_messaging::{
+    add_reaction, edit_message, get_conversation, list_conversations, remove_reaction,
+    send_message,
+};
+use idp_social::{
+    accept_friendship, delete_friendship, get_friends, get_incoming_requests,
+    post_friend_request, reject_friendship, search_users,
+};
+use idp_auth::{
     authorize::get_authorize,
     avatar::{delete_avatar, put_avatar},
     discovery::{jwks, openid_configuration},
-    federation::{
-        actor::{get_actor, get_instance_actor},
-        friendship::{
-            accept_friendship, delete_friendship, get_friends, get_incoming_requests,
-            post_friend_request, reject_friendship, search_users,
-        },
-        inbox::post_inbox,
-        messages::{add_reaction, edit_message, get_conversation, list_conversations, remove_reaction, send_message},
-        outbox::{
-            get_followers as get_ap_followers, get_following as get_ap_following, get_outbox,
-        },
-        webfinger::get_webfinger,
-    },
     login::post_login,
     logout::get_logout,
     presence::handlers::{get_presence, post_presence_batch},
@@ -35,8 +38,8 @@ use idp_oidc::{
     token::post_token,
     userinfo::get_userinfo,
     ws::ws_upgrade,
-    AppState,
 };
+use idp_state::AppState;
 
 pub fn build(state: AppState) -> Router {
     let origins: Vec<HeaderValue> = state

@@ -51,19 +51,33 @@ across all chat servers in the network.
 
 ```
 identity-provider/
-├── Cargo.toml              # workspace root (crates: config, db, oidc, server)
+├── Cargo.toml              # workspace root
 ├── crates/
-│   ├── server/             # main Axum application, entrypoint + router
-│   ├── oidc/               # OIDC/OAuth2 flows, JWT issuance, JWKS
-│   │   └── src/
-│   │       ├── federation/ # ActivityPub, WebFinger, inbox, friends, DMs (REST), delivery
-│   │       └── ws/         # WebSocket upgrade handler + hub + events + broker
+│   ├── server/             # main Axum application: entrypoint + router (wires every crate)
+│   ├── auth/               # OIDC/OAuth2 flows, JWT issuance, JWKS, registration, cookies,
+│   │   └── src/            #   avatar profile, login/logout. Hosts the residual presence
+│   │       ├── presence/   #   HTTP/SSE handlers and WS upgrade handler that still
+│   │       └── ws/         #   depend on AppState (transitional).
+│   ├── federation/         # ActivityPub: WebFinger, actor, inbox, outbox, delivery,
+│   │                       #   HTTP Signatures, Bearer-auth helper, actor-name lookup.
+│   ├── messaging/          # DM REST API (send/list/edit/react). Outbound delivery via
+│   │                       #   federation; inbound DMs persisted by federation::inbox.
+│   ├── social/             # Friend graph REST API (search/request/accept/list/unfriend).
+│   ├── presence/           # Presence + typing domain: store, sweep, fanout, subscriber,
+│   │                       #   inter-IdP SSE client, RemotePresenceRegistry.
+│   ├── realtime/           # WS connection registry (WsHub), typed WsEvent / WsClientMessage.
+│   │                       #   Pure transport — knows no domain logic.
+│   ├── state/              # Shared AppState + OidcError (integration seam consumed by
+│   │                       #   every domain crate; constructed in `server`).
+│   ├── broker/             # Redis pub-sub + Streams abstraction (EventBroker trait).
 │   ├── db/                 # SQLx models, migrations, repositories
 │   │   └── repos/          # auth_codes, clients, conversations, friendships,
-│   │                       # messages, reactions, remote_actors, users
+│   │                       #   messages, reactions, remote_actors, users
+│   ├── storage/            # S3-compatible (RustFS) object storage client
 │   └── config/             # Configuration loading, env vars
 ├── migrations/             # SQLx migrations (numbered, applied on startup)
 ├── specs/                  # Feature specifications (see routing table below)
+├── docs/adr/               # Architecture Decision Records (ADR-0001: bounded contexts)
 ├── docker/
 │   ├── Dockerfile
 │   └── docker-compose.yml
@@ -71,8 +85,23 @@ identity-provider/
 └── .env.example
 ```
 
-> There is no separate `federation/` or `messaging/` crate. All ActivityPub logic, WebSocket
-> handling, DMs, and friend graph live as modules inside the `oidc` crate.
+### Dependency direction (no cycles)
+
+```
+server  ──► auth, federation, messaging, social, presence, realtime, state
+auth    ──► state, federation, presence, realtime, db, storage, broker, config
+messaging  ──► state, federation, realtime, db
+social     ──► state, federation, realtime, db
+presence   ──► realtime, db, broker, config
+federation ──► state, db, broker, config, realtime
+realtime   ──► (no internal deps)
+state      ──► realtime, presence, db, broker, storage, config
+db, broker, storage, config ──► (leaves)
+```
+
+> Inbound federated DMs and friendship updates are currently persisted by
+> `federation::inbox` directly. ADR-0001 plans to route this dispatch through
+> the broker (Federation publishes typed events; messaging/social subscribe).
 
 ---
 

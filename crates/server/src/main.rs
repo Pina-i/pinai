@@ -6,11 +6,11 @@ use tracing::{info, warn};
 
 use idp_config::Config;
 use idp_db::run_migrations;
-use idp_oidc::presence::remote::RemotePresenceRegistry;
-use idp_oidc::presence::store::PresenceStore;
-use idp_oidc::presence::sweep::HeartbeatTracker;
-use idp_oidc::ws::WsHub;
-use idp_oidc::AppState;
+use idp_state::AppState;
+use idp_presence::remote::RemotePresenceRegistry;
+use idp_presence::store::PresenceStore;
+use idp_presence::sweep::HeartbeatTracker;
+use idp_realtime::WsHub;
 use jwt_utils::load_ed_keypair_from_pem;
 
 mod router;
@@ -136,7 +136,7 @@ async fn main() -> anyhow::Result<()> {
         let redis_url = config.redis_url.clone();
         let domain = config.domain.clone();
         tokio::spawn(async move {
-            idp_oidc::presence::subscriber::run_presence_subscriber(
+            idp_presence::subscriber::run_presence_subscriber(
                 &redis_url, &domain, store, pool2, hub2,
             )
             .await;
@@ -149,7 +149,7 @@ async fn main() -> anyhow::Result<()> {
         let broker2 = Arc::clone(&state.broker);
         let domain = config.domain.clone();
         tokio::spawn(async move {
-            idp_oidc::presence::sweep::run_heartbeat_sweep(tracker, store, broker2, domain).await;
+            idp_presence::sweep::run_heartbeat_sweep(tracker, store, broker2, domain).await;
         });
     }
 
@@ -161,7 +161,7 @@ async fn main() -> anyhow::Result<()> {
         let keypair2 = Arc::clone(&keypair);
         let config2 = Arc::clone(&config);
         tokio::spawn(async move {
-            idp_oidc::presence::remote::run_batch_poller(
+            idp_presence::remote::run_batch_poller(
                 registry, store, broker3, pool3, keypair2, config2,
             )
             .await;

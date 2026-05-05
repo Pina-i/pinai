@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo check *)",
+      "PowerShell(cargo check --workspace 2>&1)",
+      "Bash(Get-ChildItem -Path \"C:\\\\Users\\\\Kilian\\\\www\\\\pinai\\\\identity-provider\\\\crates\\\\oidc\\\\src\" -Recurse -File)",
+      "Bash(Select-Object -ExpandProperty FullName)",
+      "Bash(Sort-Object)",
+      "PowerShell(Move-Item \"C:\\\\Users\\\\Kilian\\\\www\\\\pinai\\\\identity-provider\\\\crates\\\\oidc\\\\src\\\\ws\\\\events.rs\" \"C:\\\\Users\\\\Kilian\\\\www\\\\pinai\\\\identity-provider\\\\crates\\\\realtime\\\\src\\\\events.rs\" -Force)",
+      "PowerShell(Move-Item \"C:\\\\Users\\\\Kilian\\\\www\\\\pinai\\\\identity-provider\\\\crates\\\\oidc\\\\src\\\\ws\\\\hub.rs\" \"C:\\\\Users\\\\Kilian\\\\www\\\\pinai\\\\identity-provider\\\\crates\\\\realtime\\\\src\\\\hub.rs\" -Force)",
+      "PowerShell($src = \"C:\\\\Users\\\\Kilian\\\\www\\\\pinai\\\\identity-provider\\\\crates\\\\oidc\\\\src\\\\presence\"; $dst = \"C:\\\\Users\\\\Kilian\\\\www\\\\pinai\\\\identity-provider\\\\crates\\\\presence\\\\src\"; foreach \\($f in @\\(\"types.rs\",\"store.rs\",\"sweep.rs\",\"fanout.rs\",\"subscriber.rs\",\"remote.rs\",\"sse_client.rs\"\\)\\) { Move-Item \"$src\\\\$f\" \"$dst\\\\$f\" -Force })",
+      "PowerShell(Move-Item \"C:\\\\Users\\\\Kilian\\\\www\\\\pinai\\\\identity-provider\\\\crates\\\\oidc\\\\src\\\\state.rs\" \"C:\\\\Users\\\\Kilian\\\\www\\\\pinai\\\\identity-provider\\\\crates\\\\state\\\\src\\\\state.rs\" -Force)",
+      "PowerShell(Move-Item \"C:\\\\Users\\\\Kilian\\\\www\\\\pinai\\\\identity-provider\\\\crates\\\\oidc\\\\src\\\\error.rs\" \"C:\\\\Users\\\\Kilian\\\\www\\\\pinai\\\\identity-provider\\\\crates\\\\state\\\\src\\\\error.rs\" -Force)",
+      "PowerShell($src = \"C:\\\\Users\\\\Kilian\\\\www\\\\pinai\\\\identity-provider\\\\crates\\\\oidc\\\\src\\\\federation\"; $dst = \"C:\\\\Users\\\\Kilian\\\\www\\\\pinai\\\\identity-provider\\\\crates\\\\federation\\\\src\"; foreach \\($f in @\\(\"actor.rs\",\"auth.rs\",\"delivery.rs\",\"friendship.rs\",\"inbox.rs\",\"messages.rs\",\"outbox.rs\",\"webfinger.rs\"\\)\\) { Move-Item \"$src\\\\$f\" \"$dst\\\\$f\" -Force }; Remove-Item \"$src\\\\mod.rs\" -Force; Remove-Item $src)",
+      "PowerShell(Move-Item \"C:\\\\Users\\\\Kilian\\\\www\\\\pinai\\\\identity-provider\\\\crates\\\\federation\\\\src\\\\messages.rs\" \"C:\\\\Users\\\\Kilian\\\\www\\\\pinai\\\\identity-provider\\\\crates\\\\messaging\\\\src\\\\handlers.rs\" -Force)",
+      "PowerShell(Move-Item \"C:\\\\Users\\\\Kilian\\\\www\\\\pinai\\\\identity-provider\\\\crates\\\\federation\\\\src\\\\friendship.rs\" \"C:\\\\Users\\\\Kilian\\\\www\\\\pinai\\\\identity-provider\\\\crates\\\\social\\\\src\\\\handlers.rs\" -Force)",
+      "PowerShell(Move-Item \"C:\\\\Users\\\\Kilian\\\\www\\\\pinai\\\\identity-provider\\\\crates\\\\oidc\" \"C:\\\\Users\\\\Kilian\\\\www\\\\pinai\\\\identity-provider\\\\crates\\\\auth\" -Force)",
+      "PowerShell(cargo build --workspace 2>&1)",
+      "Bash(git show *)",
+      "PowerShell(cargo clean -p idp-presence -p idp-auth -p idp-realtime -p idp-server -p idp-state 2>&1)"
+    ]
+  }
+}

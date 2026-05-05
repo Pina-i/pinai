@@ -1,0 +1,94 @@
+# Dev compose for Windows / Docker Desktop.
+#
+# Standalone (not an override of docker-compose.yml) because the network model
+# differs: Linux dev uses host networking; on Windows the IdP container can't
+# join the host network, so we expose ports + use host.docker.internal to
+# reach the other IdP instance (federation, presence batch poll, SSE).
+#
+#   docker compose -f docker/docker-compose-win.dev.yml \
+#                  --project-name pinai-alice up -d --build
+
+name: pinai-idp
+
+services:
+  postgres:
+    image: postgres:16
+    env_file: .env
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  rustfs:
+    image: rustfs/rustfs:latest
+    environment:
+      RUSTFS_ACCESS_KEY: ${STORAGE_ACCESS_KEY:-rustfsadmin}
+      RUSTFS_SECRET_KEY: ${STORAGE_SECRET_KEY:-rustfsadmin}
+    volumes:
+      - rustfs-data:/data
+      - rustfs-logs:/logs
+    ports:
+      - "${RUSTFS_PORT:-9000}:9000"
+      - "${RUSTFS_CONSOLE_PORT:-9001}:9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/health"]
+      interval: 5s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+
+  idp:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.dev
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      JWT_PRIVATE_KEY_PATH: /run/secrets/ed25519.pem
+      STORAGE_ENDPOINT: http://rustfs:9000
+      REDIS_URL: redis://redis:6379
+      # Use host.docker.internal so cross-IdP federation requests (WebFinger,
+      # inbox delivery, presence SSE/batch) exit the container, hit the Windows
+      # host, and reach the other IdP via its mapped port.
+      DOMAIN: host.docker.internal:${PORT:-8080}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "${PORT:-8080}:${PORT:-8080}"
+    volumes:
+      - ../keys:/run/secrets:ro
+    tty: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rustfs:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  redis-data:
+  rustfs-data:
+  rustfs-logs:
