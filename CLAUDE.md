@@ -115,18 +115,21 @@ db, broker, storage, config ──► (leaves)
 | `GET /authorize` | Authorization endpoint (PKCE flow) |
 | `POST /token` | Token exchange |
 | `GET /userinfo` | UserInfo endpoint |
+| `PATCH /api/profile` | Update display_name / pronouns / bio (Bearer-auth); fans out via `propagate_profile_update` |
+| `PUT /api/avatar` | Replace the user's avatar (raw image bytes; ≤2 MiB; jpeg/png/webp/gif). URL is cache-busted with `?v=<unix_secs>` |
+| `DELETE /api/avatar` | Clear the user's avatar |
 | `POST /register` | User self-registration |
 | `POST /users/:handle/inbox` | ActivityPub inbox (Follow/Accept/Create/Update/Like…) |
 | `GET /users/:handle` | ActivityPub actor profile (JSON-LD) |
 | `GET /ws?token=<jwt>` | WebSocket upgrade (DMs + presence + events) |
-| `POST /api/dm` | Send a DM (creates conversation if first message) |
-| `GET /api/dm` | List conversations (`kind`, `name`, `members[]`, `unread_count`, last message preview) |
+| `POST /api/dm` | Send a DM (creates conversation if first message; supports `attachment_ids`) |
+| `GET /api/dm` | List conversations (`kind`, `name`, `members[]` with `avatarUrl`, `unread_count`, last message preview) |
 | `GET /api/dm/:conversation_id` | Conversation history (keyset cursor); marks as read on initial load |
 | `PATCH /api/dm/:conversation_id` | Edit a message / rename a group conversation |
 | `POST /api/attachments` | Upload up to 5 multipart files; returns orphan attachment IDs |
 | `GET /api/attachments/:id` | Returns a token-protected blob URL + metadata (Bearer auth) |
-| `GET /api/attachments/:id/blob` | The actual byte fetch — token-authed; redirects to RustFS (local) or proxies (remote) |
-| `GET /api/attachments/:id/content` | Inter-IdP source of truth for attachment bytes (HTTP-Signature auth) |
+| `GET /api/attachments/:id/blob` | The actual byte fetch — token-authed; streams bytes through the IdP from the private object store (or from origin via HTTP-Sig for remote) |
+| `GET /api/attachments/:id/content` | Inter-IdP source of truth for attachment bytes (HTTP-Signature auth); streams through the IdP after a membership check |
 | `GET /api/presence` | Current presence snapshot for a set of actors |
 | `GET /api/presence/stream` | Inter-IdP SSE stream for active conversations (authenticated via HTTP Signatures) |
 | `POST /api/presence/batch` | Inter-IdP batch presence poll for sidebar (authenticated via HTTP Signatures) |
@@ -139,7 +142,7 @@ All detailed specifications live in `specs/`. **Read only the file(s) relevant t
 
 | File | Contents | Read when working on… |
 |---|---|---|
-| `specs/01-identity-federation.md` | `users`, `remote_actors`, `friendships` schema, real-time profile propagation, Redis broker strategy, `federation_queue` | Auth, user accounts, friend requests, profile updates, WebFinger, ActivityPub inbox/outbox, federation queue worker |
+| `specs/01-identity-federation.md` | `users`, `remote_actors`, `friendships` schema, real-time profile propagation, Redis broker strategy, federation delivery semantics | Auth, user accounts, friend requests, profile updates, WebFinger, ActivityPub inbox/outbox |
 | `specs/02-architecture-diagram.md` | Mermaid flowchart of the full system (C4-style) | Understanding the global picture, updating the diagram |
 | `specs/03-direct-messages.md` | `conversations`, `conversation_members`, `direct_messages` schema, DM delivery (local + federated), unread tracking, reactions, replies, message editing | Anything touching DMs, conversations, messages, reactions, replies, unread counts |
 | `specs/04-presence.md` | Presence states (online/away/offline), typing indicators, Redis pub-sub channels, inter-IdP SSE stream, heartbeat, `PresenceStore` | Online status, typing indicators, presence propagation, inter-IdP SSE |
@@ -165,8 +168,7 @@ All detailed specifications live in `specs/`. **Read only the file(s) relevant t
 - **Streams** → durable events (DMs, profile updates, friend requests). Must survive disconnect.
 
 ### Federation
-- **`federation_queue`** handles profile updates and non-time-critical AP activities with exponential backoff (30s → 5m → 30m → 6h → 24h).
-- **DM delivery** uses inline `tokio::spawn`, not `federation_queue`.
+- **Outbound AP delivery** is best-effort, inline `tokio::spawn` per remote inbox — no persistent outbox queue. Each activity owns its own reconciliation story (TTL re-fetch, idempotent retry, time-sensitive drop). See `specs/01 § Federation delivery semantics`.
 - **`remote_actors.inbox_url`** is cached on first WebFinger resolution. `remote_actors::upsert()` uses `COALESCE(EXCLUDED.inbox_url, remote_actors.inbox_url)` — never overwrite a cached value with `None`.
 - **HTTP Signatures** are mandatory on all incoming ActivityPub activities and on inter-IdP presence SSE auth. Reuses the AP RSA key pair — no separate key material.
 
@@ -179,15 +181,17 @@ All detailed specifications live in `specs/`. **Read only the file(s) relevant t
 ## Database schema — quick reference
 
 ```
-users                    — local accounts (actor_uri, inbox_url, display_name, username+NanoID)
-remote_actors            — cache of federated users (inbox_url, fetched_at TTL)
+users                    — local accounts (actor_uri, inbox_url, display_name, username+NanoID,
+                            avatar_url, pronouns ∈ {he, she, non-binary}, bio)
+remote_actors            — cache of federated users (inbox_url, avatar_url, fetched_at TTL)
 friendships              — friend graph (friend_actor_uri, friend_avatar_url, status)
-federation_queue         — durable AP outbox with backoff retry
 conversations            — anchor for every conversation (kind: dm|group, name)
 conversation_members     — participants (actor_uri, joined_at, left_at)
 direct_messages          — messages (conversation_id, sender_actor_uri, activity_uri, reply_to_id)
 conversation_reads       — last_read_at per user per conversation (unread tracking)
 message_reactions        — emoji reactions (message_id, reactor_actor_uri, emoji)
+message_attachments      — file attachments (message_id, storage_key, mime_type, byte_size,
+                            original_filename, remote_origin_url)
 ```
 
 ---
@@ -246,4 +250,5 @@ If a task touches multiple spec files (e.g. adding group conversations affects b
 2. Make changes consistently across all affected files.
 3. Check the quick-reference schema above for any table that needs updating.
 4. Note any impact on the architecture diagram (`specs/02-architecture-diagram.md`) — update it if new components or flows are introduced.
-5. If the workspace structure change or API endpoints are added/modified/deleted, change the according sections of this file consistently
+5. Update all the specs files that are affected by the change (if needed).
+6. If the workspace structure change or API endpoints are added/modified/deleted, change the according sections of this file consistently

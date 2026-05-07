@@ -38,6 +38,7 @@ use idp_auth::{
     logout::get_logout,
     presence::handlers::{get_presence, post_presence_batch},
     presence::sse::get_presence_stream,
+    profile::update_profile,
     register::{post_register, post_register_and_login},
     token::post_token,
     userinfo::get_userinfo,
@@ -115,6 +116,9 @@ pub fn build(state: AppState) -> Router {
 
         // ── Avatar API (Bearer-auth) ────────────────────────────────────
         .route("/api/avatar", put(put_avatar).delete(delete_avatar))
+
+        // ── Profile API (Bearer-auth) ───────────────────────────────────
+        .route("/api/profile", patch(update_profile))
 
         // ── DM Attachments API ──────────────────────────────────────────
         // Upload: per-route body limit overrides Axum's 2 MiB default.

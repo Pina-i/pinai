@@ -40,6 +40,17 @@ impl From<&Attachment> for AttachmentMetadata {
     }
 }
 
+impl From<&AttachmentMetadata> for idp_realtime::WsAttachment {
+    fn from(m: &AttachmentMetadata) -> Self {
+        Self {
+            id: m.id,
+            mime_type: m.mime_type.clone(),
+            byte_size: m.byte_size,
+            original_filename: m.original_filename.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct UploadAttachmentsResponse {
     pub attachments: Vec<AttachmentMetadata>,

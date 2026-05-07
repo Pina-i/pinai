@@ -17,11 +17,12 @@ Both are **ephemeral** — never persisted to PostgreSQL. Redis pub-sub is the s
 
 #### States
 
-| State | Meaning |
-|---|---|
-| `online` | User has at least one active WebSocket connection |
-| `away` | User is connected but has been idle for 10 minutes |
-| `offline` | User has no active WebSocket connections |
+| State | Meaning | Origin |
+|---|---|---|
+| `online` | User has at least one active WebSocket connection | Auto (connect, heartbeat from `away`) |
+| `away` | User is connected but idle | Auto (10 min no heartbeat) **or** user-chosen ("Idle") |
+| `offline` | User has no active WebSocket connections — or has manually picked "Invisible" | Auto (last connection closed) **or** user-chosen ("Invisible") |
+| `dnd` | "Do not disturb": peers see a red indicator; the user's own clients suppress local sound notifications | User-chosen only |
 
 #### Redis channel
 
@@ -40,7 +41,7 @@ Every WebSocket worker on the instance subscribes to this channel on startup. Fa
 ```json
 {
   "type": "presence",
-  "event": "online" | "away" | "offline",
+  "event": "online" | "away" | "offline" | "dnd",
   "actorUri": "https://idp.alice.com/users/alice_xK9mP",
   "timestamp": "2026-03-24T12:00:00Z"
 }
@@ -54,6 +55,34 @@ Every WebSocket worker on the instance subscribes to this channel on startup. Fa
 | Last WebSocket connection closed | `offline` |
 | No `heartbeat` received for 10 minutes | `away` |
 | `away` user sends any message or heartbeat | `online` |
+| Client sent `set_presence` (see below) | the chosen state |
+
+#### User-chosen state — `set_presence`
+
+The popover status switcher emits a client → server WS message:
+
+```json
+{ "type": "set_presence", "data": { "state": "online" | "away" | "offline" | "dnd" } }
+```
+
+The server validates the state and republishes via the same `presence:<domain>`
+channel as auto-determined transitions, so fan-out is identical.
+
+UI ↔ wire mapping (the client-side palette is broader than the wire enum):
+
+| Popover label | Wire state | Notes |
+|---|---|---|
+| Online | `online` | — |
+| Idle | `away` | Same wire state as the auto-idle transition |
+| Do not disturb | `dnd` | Friends see the red indicator; client locally mutes sound notifications |
+| Invisible | `offline` | Connection stays alive (DMs still arrive); peers see "offline" |
+
+> **Heartbeat × manual override.** The auto-sweep only flips `online → away`,
+> and the heartbeat handler only flips `away → online`. So `dnd` and
+> `offline` (Invisible) survive both sweeps until the user picks something
+> else. The exception is `away` set manually — a subsequent heartbeat will
+> bump it back to `online`. Tracking a sticky manual override per user
+> server-side is a known follow-up.
 
 #### Heartbeat
 
@@ -85,7 +114,7 @@ When the WebSocket worker receives a presence event from Redis:
 {
   "event": "presence_update",
   "actorUri": "https://idp.alice.com/users/alice_xK9mP",
-  "state": "online" | "away" | "offline",
+  "state": "online" | "away" | "offline" | "dnd",
   "timestamp": "2026-03-24T12:00:00Z"
 }
 ```

@@ -23,7 +23,7 @@ use idp_db::repos::{
     attachments, conversations, friendships, messages, reactions, remote_actors, users,
 };
 
-use idp_realtime::{DmPayload, EditedDmPayload, FriendshipPayload, ProfileUpdatePayload, ReactionPayload, WsEvent};
+use idp_realtime::{DmPayload, EditedDmPayload, FriendshipPayload, ProfileUpdatePayload, ReactionPayload, WsAttachment, WsEvent};
 
 use idp_state::{AppState, OidcError};
 
@@ -508,6 +508,22 @@ async fn handle_create(
         _ => None,
     };
 
+    // Re-read attachments for the message so the WS event carries them and
+    // the recipient's UI can render them in real time without a refetch.
+    let inbound_attachments: Vec<WsAttachment> = attachments::find_for_message(&state.pool, msg.id)
+        .await
+        .map(|rows| {
+            rows.iter()
+                .map(|a| WsAttachment {
+                    id: a.id,
+                    mime_type: a.mime_type.clone(),
+                    byte_size: a.byte_size,
+                    original_filename: a.original_filename.clone(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
     let event = WsEvent::NewDm(DmPayload {
         message_id: msg.id,
         conversation_id,
@@ -519,6 +535,7 @@ async fn handle_create(
         reply_to_id,
         reply_to_content,
         reply_to_sender,
+        attachments: inbound_attachments,
         client_id: None,
     });
 

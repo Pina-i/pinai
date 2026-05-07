@@ -131,6 +131,35 @@ pub async fn update_display_name(
     Ok(())
 }
 
+/// Update the human-editable profile fields in a single statement.
+/// Each `Option` represents the value to write — `None` clears the column.
+/// Returns the updated row.
+pub async fn update_profile(
+    pool: &PgPool,
+    user_id: Uuid,
+    display_name: Option<&str>,
+    pronouns: Option<&str>,
+    bio: Option<&str>,
+) -> Result<User, sqlx::Error> {
+    sqlx::query_as::<_, User>(
+        r#"
+        UPDATE users
+        SET display_name = $2,
+            pronouns     = $3,
+            bio          = $4,
+            updated_at   = now()
+        WHERE id = $1
+        RETURNING *
+        "#,
+    )
+    .bind(user_id)
+    .bind(display_name)
+    .bind(pronouns)
+    .bind(bio)
+    .fetch_one(pool)
+    .await
+}
+
 /// Search users by username prefix (case-insensitive), up to `limit` results.
 pub async fn search_by_username(
     pool: &PgPool,

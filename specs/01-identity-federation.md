@@ -14,14 +14,20 @@ CREATE TABLE users (
                                             -- used for federation: @alice_xK9mP@idp.alice.com
   display_name  TEXT NOT NULL,              -- set to user input at creation, e.g. "alice"
                                             -- freeform, no uniqueness constraint, shown in UI
-  avatar_url    TEXT,                       -- presigned URL pointing to RustFS/S3
+  avatar_url    TEXT,                       -- public RustFS URL with `?v=<unix_secs>` cache-bust
+                                            -- (avatars bucket is public-read; see § Avatar storage)
+  pronouns      TEXT,                       -- closed enum, see CHECK below
+  bio           TEXT,                       -- ≤ 190 chars, freeform; enforced server-side
   email         TEXT NOT NULL UNIQUE,       -- used by OIDC
   password_hash TEXT NOT NULL,
   actor_uri     TEXT NOT NULL UNIQUE,       -- e.g. "https://idp.alice.com/users/alice"
   inbox_url     TEXT NOT NULL,              -- e.g. "https://idp.alice.com/users/alice/inbox"
   outbox_url    TEXT NOT NULL,              -- e.g. "https://idp.alice.com/users/alice/outbox"
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-  updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+  CONSTRAINT users_pronouns_check
+    CHECK (pronouns IS NULL OR pronouns IN ('he', 'she', 'non-binary'))
 );
 
 -- Cache of remote users fetched via ActivityPub / WebFinger from other IdP instances
@@ -87,13 +93,47 @@ WHERE f.owner_user_id = $1     -- pass the caller's local user id
 
 ---
 
+## 1.5. Profile editing API
+
+The user's editable profile fields (`display_name`, `pronouns`, `bio`) and their
+avatar are exposed through two endpoints:
+
+| Endpoint | Body | Notes |
+|---|---|---|
+| `PATCH /api/profile` | `{ display_name, pronouns?, bio? }` | All three fields sent on every save. `display_name` required & ≤50 chars. `pronouns` ∈ {`he`,`she`,`non-binary`} or `null`. `bio` ≤190 chars; empty clears. Returns the updated `UserinfoResponse`. |
+| `PUT /api/avatar` | raw image bytes (`image/jpeg|png|webp|gif`, ≤2 MiB) | Replaces any prior avatar. Stored URL ends in `?v=<unix_secs>` to bypass browser cache on re-upload. |
+| `DELETE /api/avatar` | — | Clears the user's avatar. |
+
+After any successful change, `propagate_profile_update(user_id)` is invoked
+(see § 2). Pronouns and bio are **local-only today**; only `display_name` and
+`avatar_url` federate. Mastodon-style federation of `summary` (bio) and
+`attachment[].PropertyValue` (pronouns) is the planned upgrade path.
+
+### Avatar storage
+
+The avatars bucket is **public-read** (`s3:GetObject` for `Principal: *`),
+unlike the attachments bucket. The IdP stores the public URL directly on
+`users.avatar_url`:
+
+```
+{STORAGE_PUBLIC_URL}/avatars/{user_id}.{ext}?v={unix_secs}
+```
+
+The query param is appended at upload time. Storage keys are stable per user,
+so without `?v` the browser keeps the old bytes after a re-upload — the
+version param forces a fresh fetch and propagates verbatim through the AP
+`Update{Person}` activity to peer `remote_actors.avatar_url` and
+`friendships.friend_avatar_url`.
+
+---
+
 ## 2. Real-time profile propagation when a friend updates their profile
 
 Regardless of whether the friend is local or remote, the downstream propagation is always the same. The only difference is *how the update is triggered*.
 
 1. A profile update occurs:
    - **Local friend**: the Msg Backbone updates the `users` table directly and publishes an event to the message broker.
-   - **Remote friend**: Bob's IdP sends an ActivityPub `Update` activity to Alice's IdP via the federation queue (see section 3), which updates `remote_actors` and publishes an event to the broker.
+   - **Remote friend**: Bob's IdP sends an ActivityPub `Update` activity to Alice's IdP, which updates `remote_actors` and publishes an event to the broker.
 
 ```json
 {
@@ -147,36 +187,47 @@ Naively pushing events directly over WebSockets creates several problems:
 - Events are lost if the client is temporarily disconnected.
 - No catch-up mechanism on reconnect.
 - No fan-out to multiple devices (web + desktop).
-- ActivityPub delivery to unreachable remote IdPs has no retry mechanism.
 
-The solution is a **message broker** as the backbone for all durable event delivery. Given Redis is already in the stack for presence/pub-sub, **Redis Streams** is the pragmatic choice to avoid adding a new infrastructure dependency.
+The solution is a **message broker** as the backbone for durable client-event
+delivery. Given Redis is already in the stack for presence/pub-sub,
+**Redis Streams** is the pragmatic choice to avoid adding a new infrastructure
+dependency.
 
 ### Redis transport split
 
 | Channel | Type | Use case |
 |---|---|---|
 | Presence (online/offline/typing) | Redis pub-sub | Ephemeral — losing an event is acceptable |
-| DMs, profile updates, friend requests, ActivityPub outbox | Redis Streams | Durable — must be delivered at least once |
+| DMs, profile updates, friend requests | Redis Streams | Durable client-side — survives a recipient's disconnect |
 
-Redis pub-sub remains appropriate for presence events since they are high-frequency and inherently transient. Redis Streams handles everything that must survive a disconnect or a temporarily unreachable instance.
+Redis pub-sub remains appropriate for presence events since they are high-frequency and inherently transient. Redis Streams handles everything that must survive a recipient disconnect.
 
-### Federation outbox queue
+> The streams carry **client-facing events** so a reconnecting tab can catch
+> up. They are **not** the inter-IdP outbox — outbound ActivityPub delivery
+> is covered separately below.
 
-Bob's IdP must never fire-and-forget ActivityPub `Update` activities over HTTP. Instead, activities are written to a persistent outbox queue before delivery is attempted:
+### Federation delivery semantics
 
-```sql
-CREATE TABLE federation_queue (
-  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  activity     JSONB NOT NULL,
-  target_inbox TEXT NOT NULL,
-  attempts     INT NOT NULL DEFAULT 0,
-  next_attempt TIMESTAMPTZ NOT NULL DEFAULT now(),
-  delivered_at TIMESTAMPTZ,
-  created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-```
+Outbound ActivityPub activities are delivered **inline** via `tokio::spawn`
+per remote inbox — there is no persistent outbox queue. Every activity we
+emit is either time-sensitive (durable retry actively makes it worse) or
+idempotent and naturally self-healing through another mechanism:
 
-A background worker processes this queue with **exponential backoff** on failure (e.g. 30s → 5min → 30min → 6h → 24h -> never). If Alice's IdP is unreachable, the `remote_actors` cache on her instance simply stays stale until delivery eventually succeeds — which is acceptable for profile updates. As an additional safety net, a short TTL on `remote_actors.fetched_at` triggers a WebFinger re-fetch on expiry. After 24 hours, the queue entry is discarded.
+| Activity | Property | Recovery on delivery failure |
+|---|---|---|
+| `Create{Note}` (DM) | Time-sensitive | A 24h-late delivery is worthless; sender retries manually if needed (ADR-0001) |
+| `Update{Note}` (edit) | Time-sensitive | Same — recipients see the original until they can refetch |
+| `Like` / `Undo{Like}` (reaction) | Idempotent | Reconciles on next conversation fetch |
+| `Follow` / `Accept` / `Reject` / `Undo{Follow}` | Idempotent, low-frequency | User can re-trigger; relationships are bidirectional |
+| `Update{Person}` (profile) | Idempotent | Self-heals via `remote_actors.fetched_at` TTL re-fetch |
+
+Each activity type owns its own reconciliation story (TTL re-fetch, next
+user interaction, manual retry), so a missed delivery never produces a
+permanently inconsistent state. This avoids the failure modes a generic
+queue introduces (silent worker death, queue growth, attempt-counter
+overflow, mis-tuned backoff). If a future activity does require durable
+retry, that activity earns its own scoped queue at that point — rather
+than a one-size-fits-all outbox up front.
 
 ### Client reconnect & catch-up
 

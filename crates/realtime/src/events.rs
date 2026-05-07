@@ -20,6 +20,19 @@ pub enum WsEvent {
     HeartbeatAck(HeartbeatAckPayload),
 }
 
+/// Slim attachment projection carried on the wire alongside DM events.
+///
+/// Mirrors `messaging::AttachmentMetadata` so the realtime crate can stay
+/// dependency-free of `messaging`. The shape is intentionally identical to
+/// the REST response for client parsing parity.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WsAttachment {
+    pub id: Uuid,
+    pub mime_type: String,
+    pub byte_size: i64,
+    pub original_filename: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct DmPayload {
     pub message_id: Uuid,
@@ -36,6 +49,10 @@ pub struct DmPayload {
     pub reply_to_content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reply_to_sender: Option<String>,
+    /// Empty for messages without attachments; omit-on-empty would force the
+    /// client into `?? []` defensive code at every read site.
+    #[serde(default)]
+    pub attachments: Vec<WsAttachment>,
     /// Echoed back to the sender only, so the client can swap an optimistic
     /// message for the persisted one. Never set on payloads delivered to recipients.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -109,6 +126,14 @@ pub enum WsClientMessage {
     WatchConversation(WatchConversationPayload),
     /// User closed a conversation; release outbound SSE if no other watchers.
     UnwatchConversation(UnwatchConversationPayload),
+    /// User explicitly chose a presence state from the UI (online / away / dnd / offline).
+    SetPresence(SetPresencePayload),
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetPresencePayload {
+    /// Lower-case wire form: `"online" | "away" | "offline" | "dnd"`.
+    pub state: String,
 }
 
 #[derive(Debug, Deserialize)]

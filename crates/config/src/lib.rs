@@ -59,7 +59,7 @@ pub struct Config {
     pub attachment_max_files_per_message: usize,
     /// Maximum byte size for a single attachment.
     pub attachment_max_byte_size: u64,
-    /// TTL for client-facing presigned blob URLs.
+    /// TTL for the HMAC-signed `/blob` token returned by the metadata endpoint.
     pub attachment_url_ttl: Duration,
     /// How long an unlinked (orphan) attachment lives before the sweep deletes it.
     pub attachment_orphan_ttl: Duration,

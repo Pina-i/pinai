@@ -269,6 +269,7 @@ pub async fn send_message(
             reply_to_id: body.reply_to_id,
             reply_to_content: reply_to_content.clone(),
             reply_to_sender: reply_to_sender.clone(),
+            attachments: attachments_metadata.iter().map(Into::into).collect(),
             client_id: None,
         });
         state.hub.send_to_user(&sender_id, event);
@@ -343,6 +344,7 @@ pub async fn send_message(
             reply_to_id: body.reply_to_id,
             reply_to_content: reply_to_content.clone(),
             reply_to_sender: reply_to_sender.clone(),
+            attachments: attachments_metadata.iter().map(Into::into).collect(),
             client_id: None,
         });
 

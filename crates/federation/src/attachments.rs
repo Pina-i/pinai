@@ -8,15 +8,14 @@
 //!    not authoritative — `404`. (Peers should fetch directly from origin.)
 //! 4. Verify that one or more of the requesting peer's actors are members of
 //!    the conversation containing the linked message — `403` if not.
-//! 5. `302` redirect to a fresh RustFS presigned URL with response-header
-//!    overrides for MIME and `Content-Disposition: attachment`.
-
-use std::time::Duration;
+//! 5. Stream the bytes back from our local object store. The store stays on
+//!    the private network, the peer only ever talks to this endpoint.
 
 use axum::{
+    body::Body,
     extract::{Path, State},
-    http::{header, HeaderMap, HeaderValue},
-    response::{IntoResponse, Redirect, Response},
+    http::{header, HeaderMap, StatusCode},
+    response::Response,
 };
 use uuid::Uuid;
 
@@ -97,20 +96,26 @@ pub async fn get_attachment_content(
         .as_ref()
         .ok_or_else(|| OidcError::server_error("Object storage not configured"))?;
 
-    let presigned = storage
-        .presign_attachment_get(
-            &attachment.storage_key,
-            &attachment.mime_type,
-            &attachment.original_filename,
-            Duration::from_secs(300),
-        )
+    let (stream, content_length) = storage
+        .fetch_attachment_stream(&attachment.storage_key)
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?;
 
-    let mut response = Redirect::temporary(&presigned).into_response();
-    response.headers_mut().insert(
-        header::HeaderName::from_static("x-content-type-options"),
-        HeaderValue::from_static("nosniff"),
+    let disposition = format!(
+        r#"attachment; filename="{}""#,
+        attachment.original_filename.replace('"', "")
     );
-    Ok(response)
+
+    let body = Body::from_stream(stream);
+    let mut builder = Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, &attachment.mime_type)
+        .header(header::CONTENT_DISPOSITION, &disposition)
+        .header("x-content-type-options", "nosniff");
+    if let Some(len) = content_length.filter(|n| *n >= 0) {
+        builder = builder.header(header::CONTENT_LENGTH, len.to_string());
+    }
+    builder
+        .body(body)
+        .map_err(|e| OidcError::server_error(e.to_string()))
 }

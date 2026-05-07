@@ -3,18 +3,22 @@
 //!
 //! The metadata endpoint (`GET /api/attachments/{id}`) mints a short-lived
 //! HMAC token bound to `(user_id, attachment_id, expires_at)`. The browser
-//! follows the URL with that token; this handler validates it, then:
+//! follows the URL with that token; this handler validates it, then **streams
+//! the bytes through the IdP**:
 //!
-//! - **Local attachments** (`remote_origin_url IS NULL`): redirect (`302`) to
-//!   a fresh RustFS presigned URL. The bytes never pass through the IdP.
-//! - **Remote attachments**: handled in Phase 10. For Phase 3 we return `502`
-//!   to make it explicit that the federated read path isn't online yet.
+//! - **Local attachments** (`remote_origin_url IS NULL`): GET the bytes from
+//!   the local object store on the private network and stream them back.
+//! - **Remote attachments**: HTTP-Signature fetch from the origin IdP, stream
+//!   bytes back.
+//!
+//! In both cases the object store stays off the public network — the IdP's
+//! HMAC token is the only authorization layer the browser interacts with.
 
 use axum::{
     body::Body,
     extract::{Path, Query, State},
     http::{header, HeaderValue, StatusCode},
-    response::{IntoResponse, Redirect, Response},
+    response::Response,
 };
 use hmac::{Hmac, Mac};
 use serde::Deserialize;
@@ -136,34 +140,39 @@ pub async fn get_attachment_blob(
         .ok_or_else(|| OidcError::not_found("Attachment not found"))?;
 
     // Remote attachments: HTTP-Sig fetch from origin IdP, stream bytes back.
-    // The origin's RustFS endpoint is not exposed to our browser — that's the
-    // privacy contract of option B from the design.
     if let Some(remote_url) = attachment.remote_origin_url.clone() {
         return fetch_remote_and_stream(&state, &remote_url, &attachment).await;
     }
 
-    // Local: 302 to a fresh RustFS presigned URL. Bytes don't pass through us.
+    // Local: pull bytes off the object store on the private network and
+    // stream them through us. The browser never talks to RustFS directly.
     let storage = state
         .storage
         .as_ref()
         .ok_or_else(|| OidcError::server_error("Object storage not configured"))?;
 
-    let presigned = storage
-        .presign_attachment_get(
-            &attachment.storage_key,
-            &attachment.mime_type,
-            &attachment.original_filename,
-            Duration::from_secs(300),
-        )
+    let (stream, content_length) = storage
+        .fetch_attachment_stream(&attachment.storage_key)
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?;
 
-    let mut response = Redirect::temporary(&presigned).into_response();
-    response.headers_mut().insert(
-        header::HeaderName::from_static("x-content-type-options"),
-        HeaderValue::from_static("nosniff"),
+    let disposition = format!(
+        r#"attachment; filename="{}""#,
+        attachment.original_filename.replace('"', "")
     );
-    Ok(response)
+
+    let body = Body::from_stream(stream);
+    let mut builder = Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, &attachment.mime_type)
+        .header(header::CONTENT_DISPOSITION, &disposition)
+        .header("x-content-type-options", "nosniff");
+    if let Some(len) = content_length.filter(|n| *n >= 0) {
+        builder = builder.header(header::CONTENT_LENGTH, len.to_string());
+    }
+    builder
+        .body(body)
+        .map_err(|e| OidcError::server_error(e.to_string()))
 }
 
 /// Fetch a remote attachment via HTTP-Signature auth and stream the bytes

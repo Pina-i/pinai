@@ -10,5 +10,8 @@ aws-credential-types = "1"
 thiserror  = { workspace = true }
 tracing    = { workspace = true }
 tokio      = { workspace = true }
+tokio-util = { version = "0.7", features = ["io"] }
+bytes      = "1"
+futures-util = { workspace = true }
 uuid       = { workspace = true }
 serde_json = { workspace = true }

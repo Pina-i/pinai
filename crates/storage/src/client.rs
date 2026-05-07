@@ -1,7 +1,8 @@
-use std::time::Duration;
-
 use aws_credential_types::Credentials;
-use aws_sdk_s3::{config::Region, presigning::PresigningConfig, primitives::ByteStream, Client};
+use aws_sdk_s3::{config::Region, primitives::ByteStream, Client};
+use bytes::Bytes;
+use futures_util::stream::Stream;
+use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 
 use crate::StorageError;
@@ -112,7 +113,7 @@ impl StorageClient {
     /// Upload an attachment to the (private) attachments bucket. The caller
     /// chooses `storage_key` — typically the attachment row's UUID rendered
     /// as a string. Bytes are stored with their declared `content_type`; the
-    /// real per-fetch content-type is overridden via the presigned-GET URL.
+    /// IdP's `/blob` handler re-applies it on the way out when streaming.
     pub async fn upload_attachment(
         &self,
         storage_key: &str,
@@ -147,41 +148,35 @@ impl StorageClient {
         Ok(())
     }
 
-    /// Generate a short-lived presigned GET URL for an attachment.
-    ///
-    /// The presigned URL embeds response-header overrides so RustFS serves
-    /// the bytes with the correct `Content-Type` and a
-    /// `Content-Disposition: attachment; filename="…"` header — turning every
-    /// download into a "save as" by default. The IdP layer adds
-    /// `X-Content-Type-Options: nosniff` on its own response envelope.
-    pub async fn presign_attachment_get(
+    /// Stream an attachment's bytes back from the object store, alongside the
+    /// content-length the store reports. Used by the IdP's `/blob` handler to
+    /// proxy bytes to the browser — the object store stays on the private
+    /// network, the browser only ever talks to the IdP. Authorization is
+    /// enforced upstream by the IdP's HMAC token.
+    pub async fn fetch_attachment_stream(
         &self,
         storage_key: &str,
-        mime_type: &str,
-        original_filename: &str,
-        ttl: Duration,
-    ) -> Result<String, StorageError> {
-        let presigning = PresigningConfig::expires_in(ttl)
-            .map_err(|e| StorageError::S3(e.to_string()))?;
-
-        // Strip double-quotes that would break the header value; consumers
-        // never use this filename as a path, so further sanitization is
-        // unnecessary at this layer.
-        let safe_filename = original_filename.replace('"', "");
-        let disposition = format!(r#"attachment; filename="{safe_filename}""#);
-
-        let req = self
+    ) -> Result<
+        (
+            impl Stream<Item = std::io::Result<Bytes>> + Send + 'static,
+            Option<i64>,
+        ),
+        StorageError,
+    > {
+        let resp = self
             .client
             .get_object()
             .bucket(&self.bucket_attachments)
             .key(storage_key)
-            .response_content_type(mime_type)
-            .response_content_disposition(&disposition)
-            .presigned(presigning)
+            .send()
             .await
             .map_err(|e| StorageError::S3(e.to_string()))?;
 
-        Ok(req.uri().to_string())
+        let content_length = resp.content_length();
+        // ByteStream → AsyncRead → Stream<Result<Bytes>> so axum can adopt it
+        // as a response body without buffering the full payload in RAM.
+        let reader = resp.body.into_async_read();
+        Ok((ReaderStream::new(reader), content_length))
     }
 
     // ── Internal helpers ────────────────────────────────────────────────

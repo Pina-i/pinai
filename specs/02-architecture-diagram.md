@@ -26,7 +26,6 @@ flowchart TD
             USERS_A[("users\nactor_uri · inbox_url · outbox_url")]
             REMOTE_A[("remote_actors\ncache · inbox_url · fetched_at TTL")]
             FRIENDS_A[("friendships\nowner_user_id · friend_actor_uri\nfriend_avatar_url")]
-            FED_Q_A[("federation_queue\nactivity · target_inbox\nattempts · next_attempt")]
         end
 
         RUSTFS_A["🗄️ RustFS\nAvatars · Attachments"]
@@ -46,7 +45,6 @@ flowchart TD
             USERS_B[("users\nactor_uri · inbox_url · outbox_url")]
             REMOTE_B[("remote_actors\ncache · inbox_url · fetched_at TTL")]
             FRIENDS_B[("friendships\nowner_user_id · friend_actor_uri\nfriend_avatar_url")]
-            FED_Q_B[("federation_queue\nactivity · target_inbox\nattempts · next_attempt")]
         end
 
         RUSTFS_B["🗄️ RustFS\nAvatars · Attachments"]
@@ -68,7 +66,6 @@ flowchart TD
     MSG_A --> USERS_A
     MSG_A --> FRIENDS_A
     MSG_A --> REMOTE_A
-    MSG_A --> FED_Q_A
     MSG_A --> RUSTFS_A
 
     MSG_A -->|"publish durable event"| STREAMS_A
@@ -80,7 +77,6 @@ flowchart TD
     MSG_B --> USERS_B
     MSG_B --> FRIENDS_B
     MSG_B --> REMOTE_B
-    MSG_B --> FED_Q_B
     MSG_B --> RUSTFS_B
 
     MSG_B -->|"publish durable event"| STREAMS_B
@@ -89,11 +85,14 @@ flowchart TD
     PUBSUB_B  -->|"consume & push"| WS_B
 
     %% ── Federation (ActivityPub) ──────────────────────────────────────
-    FED_Q_B -->|"HTTP POST ActivityPub Update\nwith exponential backoff retry"| MSG_A
+    %% Outbound delivery is best-effort, inline tokio::spawn — no queue.
+    %% Recovery for missed deliveries is per-activity (TTL re-fetch, idempotent retry,
+    %% time-sensitive activities just drop). See specs/01 § Federation delivery semantics.
+    MSG_B -->|"HTTP POST ActivityPub activity\nbest-effort, inline tokio::spawn"| MSG_A
     MSG_A -->|"update remote_actors cache\n+ friendships.friend_avatar_url"| REMOTE_A
     MSG_A -->|"update remote_actors cache\n+ friendships.friend_avatar_url"| FRIENDS_A
 
-    FED_Q_A -->|"HTTP POST ActivityPub Update\nwith exponential backoff retry"| MSG_B
+    MSG_A -->|"HTTP POST ActivityPub activity\nbest-effort, inline tokio::spawn"| MSG_B
     MSG_B -->|"update remote_actors cache\n+ friendships.friend_avatar_url"| REMOTE_B
     MSG_B -->|"update remote_actors cache\n+ friendships.friend_avatar_url"| FRIENDS_B
 
@@ -111,9 +110,14 @@ flowchart TD
     class MSG_A,MSG_B backbone
     class WS_A,WS_B ws
     class PUBSUB_A,STREAMS_A,PUBSUB_B,STREAMS_B broker
-    class USERS_A,REMOTE_A,FRIENDS_A,FED_Q_A,USERS_B,REMOTE_B,FRIENDS_B,FED_Q_B db
+    class USERS_A,REMOTE_A,FRIENDS_A,USERS_B,REMOTE_B,FRIENDS_B db
     class RUSTFS_A,RUSTFS_B storage
 ```
+
+> **Note on attachment delivery.** The browser and remote peer IdPs never
+> talk to RustFS directly. `GET /api/attachments/{id}/blob` (browser, HMAC
+> token) and `GET /api/attachments/{id}/content` (peer, HTTP Signature)
+> stream bytes through the IdP from the private object store.
 
 ---
 

@@ -146,6 +146,27 @@ async fn handle_socket(
 }
 
 /// Publish a presence event to the local Redis pub-sub channel.
+/// Handle a user-chosen presence change (popover status switcher).
+///
+/// Heartbeat-driven `away` will still override this after 10 min of inactivity
+/// — tracking a sticky manual override is a follow-up.
+async fn handle_set_presence(state: &AppState, actor_uri: &str, raw: &str) {
+    if actor_uri.is_empty() {
+        return;
+    }
+    let next = match raw {
+        "online" => PresenceState::Online,
+        "away" => PresenceState::Away,
+        "offline" => PresenceState::Offline,
+        "dnd" => PresenceState::Dnd,
+        other => {
+            warn!(actor_uri = %actor_uri, %other, "ignoring unknown presence state");
+            return;
+        }
+    };
+    publish_presence(state, actor_uri, next).await;
+}
+
 async fn publish_presence(state: &AppState, actor_uri: &str, presence: PresenceState) {
     let channel = format!("presence:{}", state.config.domain);
     let event = PresenceEvent {
@@ -233,6 +254,9 @@ async fn receive_messages(
             }
             WsClientMessage::UnwatchConversation(payload) => {
                 handle_unwatch_conversation(&state, payload.conversation_id).await;
+            }
+            WsClientMessage::SetPresence(payload) => {
+                handle_set_presence(&state, &actor_uri, &payload.state).await;
             }
         }
     }
@@ -495,6 +519,9 @@ async fn handle_send_dm(
             reply_to_id: None,
             reply_to_content: None,
             reply_to_sender: None,
+            // WS `send_dm` doesn't carry attachment_ids; attachments only flow
+            // through the REST `POST /api/dm` path.
+            attachments: Vec::new(),
             client_id: None,
         };
         let sender_payload = DmPayload {
@@ -689,6 +716,7 @@ async fn handle_remote_dm(
         reply_to_id: None,
         reply_to_content: None,
         reply_to_sender: None,
+        attachments: Vec::new(),
         client_id,
     });
     state.hub.send_to_user(&sender_id, event);
