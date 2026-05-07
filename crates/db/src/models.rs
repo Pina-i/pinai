@@ -11,6 +11,9 @@ pub struct User {
     pub password_hash: String,
     pub display_name: Option<String>,
     pub avatar_url: Option<String>,
+    /// Stored as `'he' | 'she' | 'non-binary'` (DB-enforced via CHECK).
+    pub pronouns: Option<String>,
+    pub bio: Option<String>,
     pub actor_uri: Option<String>,
     pub inbox_url: Option<String>,
     pub outbox_url: Option<String>,

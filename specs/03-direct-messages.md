@@ -92,10 +92,10 @@ Bob's IdP ← receives HTTP POST to /users/bob/inbox
 > The `conversation_id` UUID is the stable key used for all conversation routing — the client
 > no longer needs to derive a conversation key from actor URIs.
 
-> **Note on `federation_queue`**: for DMs, ActivityPub delivery is done inline in a background
-> `tokio::spawn` task rather than via `federation_queue`. This is sufficient for the current
-> implementation. Profile updates and other non-time-critical activities still go through
-> `federation_queue` with exponential backoff.
+> **Note on outbound delivery**: ActivityPub delivery for DMs (and every
+> other activity type) runs in a background `tokio::spawn`, best-effort.
+> No persistent outbox queue — see `specs/01 § Federation delivery semantics`
+> for the rationale and the per-activity recovery story.
 
 ### Pagination — infinite scroll upward
 
@@ -185,7 +185,8 @@ SELECT
         JSON_AGG(
             JSON_BUILD_OBJECT(
                 'actorUri',    cm_other.actor_uri,
-                'displayName', COALESCE(u.display_name, ra.display_name)
+                'displayName', COALESCE(u.display_name, ra.display_name),
+                'avatarUrl',   COALESCE(u.avatar_url, ra.avatar_url)
             )
         ) FILTER (WHERE cm_other.actor_uri != $1),
         '[]'
@@ -254,10 +255,10 @@ All DM API responses include resolved display names to avoid requiring clients t
 
 | Endpoint | Fields returned | Notes |
 |---|---|---|
-| `GET /api/dm` | `conversation_id`, `kind`, `name`, `members[]` (actorUri + displayName, excluding caller), `last_message_preview`, `last_message_sender`, `last_message_at`, `unread_count` | Single query — see above. Client derives DM title from `members[0].displayName`; group title from `name` |
-| `GET /api/dm/:conversation_id` | messages with `sender_display_name` per row | Display name resolved from `users` or `remote_actors` |
-| `POST /api/dm` (response) | `conversation_id`, `kind`, `name`, `sender_display_name` | `conversation_id` created here if first message |
-| WS `new_dm` event | `conversation_id`, `kind`, `sender_actor_uri`, `sender_display_name` | Client uses `conversation_id` to route to the right conversation in its local state |
+| `GET /api/dm` | `conversation_id`, `kind`, `name`, `members[]` (`actorUri` + `displayName` + `avatarUrl`, excluding caller), `last_message_preview`, `last_message_sender`, `last_message_at`, `unread_count` | Single query — see above. Client derives DM title from `members[0].displayName`, avatar from `members[0].avatarUrl` |
+| `GET /api/dm/:conversation_id` | messages with `sender_display_name` + `attachments[]` per row | Display name resolved from `users` or `remote_actors`; attachments resolved from `message_attachments` |
+| `POST /api/dm` (response) | `conversation_id`, `kind`, `name`, `sender_display_name`, `attachments[]` | `conversation_id` created here if first message |
+| WS `new_dm` event | `conversation_id`, `kind`, `sender_actor_uri`, `sender_display_name`, `attachments[]` | Client uses `conversation_id` to route to the right conversation in its local state. The WS `send_dm` shortcut path doesn't carry `attachment_ids` — anything with attachments must use REST `POST /api/dm` |
 
 ### Optimistic-send reconciliation (`client_id`)
 
@@ -468,9 +469,11 @@ The `object.id` is the original `activity_uri` stored in `direct_messages.activi
 ## 9. Attachments
 
 DMs may carry up to 5 file attachments per message (50 MiB each by default).
-Bytes live in a private `attachments` RustFS bucket; access is gated by
-short-lived URLs minted by the IdP. Local and federated paths use the same
-client-facing API; federation is server-mediated (option B from
+Bytes live in a private `attachments` RustFS bucket that **never faces the
+public network** — every byte the browser or a peer IdP sees is proxied
+through this IdP. Authorization is the IdP's HMAC token (browser) or HTTP
+Signatures (peer). Local and federated paths use the same client-facing API;
+federation is server-mediated (option B from
 `docs/plans/2026-05-05-message-attachments-design.md`).
 
 ### Schema
@@ -506,8 +509,8 @@ Lifecycle:
 | `POST /api/dm` | Bearer | New `attachment_ids: [Uuid]` field. Empty `content` is allowed iff `attachment_ids` is non-empty. |
 | `GET /api/dm/{conv_id}` | Bearer | Each message gains `attachments: [{ id, mime_type, byte_size, original_filename }]`. |
 | `GET /api/attachments/{id}` | Bearer | Returns `{ url, expires_at, mime_type, byte_size, original_filename }`. The `url` is a token-protected blob URL on this IdP. |
-| `GET /api/attachments/{id}/blob?token=...` | HMAC token | The actual fetch. Local: `302` to RustFS presigned URL. Remote: HTTP-Sig fetch from origin, streamed back. |
-| `GET /api/attachments/{id}/content` | HTTP Signature | Peer-IdP-facing source of truth; `302` to RustFS presigned URL. Membership-checked. |
+| `GET /api/attachments/{id}/blob?token=...` | HMAC token | The actual fetch. Streams bytes through the IdP — local from the private object store, remote via an HTTP-Sig fetch to the origin. |
+| `GET /api/attachments/{id}/content` | HTTP Signature | Peer-IdP-facing source of truth. Streams bytes through the IdP after a membership check (peer must have an actor in the conversation). |
 
 Blob URL TTL: `attachment_url_ttl` (default 1 hour). Browser caches the bytes
 once loaded; the URL only needs to live until first fetch. `<img onError>` /
@@ -518,6 +521,13 @@ Headers on the blob response:
 - `X-Content-Type-Options: nosniff`
 - `Content-Disposition: attachment; filename="…"`
 - `Content-Type: <verified MIME>`
+- `Content-Length: <byte_size>` (when the object store reports a non-negative length)
+
+> **No presigned URLs cross the public network.** An earlier design used
+> `302` redirects to a presigned RustFS URL but that exposed the object
+> store to the browser, leaked URLs via browser history/network logs, and
+> bypassed the IdP's HMAC token as the actual authorization layer. The
+> store now stays on the private network in every path.
 
 ### Federation wire format
 

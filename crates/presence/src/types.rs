@@ -1,13 +1,20 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// Presence states: online, away, offline.
+/// Presence states.
+///
+/// `online`/`away`/`offline` are auto-determined from connection + heartbeat
+/// (see `04-presence.md`). `dnd` is a user-chosen "do not disturb" override
+/// — the connection stays alive, peers see the red indicator, and clients
+/// suppress local sound notifications. Invisible is not a wire state: clients
+/// that want to appear offline simply send `set_presence` with `offline`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PresenceState {
     Online,
     Away,
     Offline,
+    Dnd,
 }
 
 impl std::fmt::Display for PresenceState {
@@ -16,6 +23,7 @@ impl std::fmt::Display for PresenceState {
             Self::Online => write!(f, "online"),
             Self::Away => write!(f, "away"),
             Self::Offline => write!(f, "offline"),
+            Self::Dnd => write!(f, "dnd"),
         }
     }
 }

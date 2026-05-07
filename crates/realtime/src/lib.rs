@@ -9,6 +9,6 @@ pub mod hub;
 pub use events::{
     DmPayload, EditedDmPayload, FriendshipPayload, HeartbeatAckPayload, PresenceUpdatePayload,
     ProfileUpdatePayload, ReactionPayload, SendDmPayload, TypingPayload, TypingStartPayload,
-    UnwatchConversationPayload, WatchConversationPayload, WsClientMessage, WsEvent,
+    UnwatchConversationPayload, WatchConversationPayload, WsAttachment, WsClientMessage, WsEvent,
 };
 pub use hub::{ConnectionHandle, WsHub};

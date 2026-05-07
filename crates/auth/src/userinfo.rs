@@ -15,6 +15,8 @@ pub struct UserinfoResponse {
     pub display_name: Option<String>,
     pub address: String,
     pub avatar_url: Option<String>,
+    pub pronouns: Option<String>,
+    pub bio: Option<String>,
 }
 
 /// GET /userinfo
@@ -57,6 +59,8 @@ pub async fn get_userinfo(
         display_name: user.display_name,
         address,
         avatar_url: user.avatar_url,
+        pronouns: user.pronouns,
+        bio: user.bio,
     }))
 }
 

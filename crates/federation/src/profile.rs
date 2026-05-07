@@ -9,10 +9,10 @@
 //!   distinct remote inbox via the existing AP delivery path.
 //!
 //! Delivery is best-effort and inline (`tokio::spawn`). A missed delivery
-//! self-heals via the `remote_actors.fetched_at` TTL on the recipient side.
-//! When durability becomes a real concern, the inner `tokio::spawn` call can
-//! be swapped for a `federation_queue::enqueue(...)` without changes to the
-//! caller or the activity construction.
+//! self-heals via the `remote_actors.fetched_at` TTL on the recipient side
+//! — `Update{Person}` is idempotent, so re-running it after a TTL re-fetch
+//! produces the same end state. See `specs/01 § Federation delivery
+//! semantics` for the rationale behind not having a durable outbox.
 
 use activitypub::Activity;
 use idp_db::repos::{friendships, users};
