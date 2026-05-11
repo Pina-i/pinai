@@ -1,36 +1,38 @@
-//! REST API handlers for Direct Messages, reactions, and replies.
+//! REST API handlers for Direct Messages and replies.
+//!
+//! After Phase 3 every DM body on the wire is an opaque MLS ciphertext.
+//! Replies still carry a server-visible `reply_to_id` (used for thread
+//! routing and soft-delete cascade), but the preview text + sender
+//! display name move into the encrypted body and are reconstructed by
+//! the client from its decrypted MLS stream. Reactions are gone from
+//! this surface entirely — they're MLS application messages of
+//! `kind = "reaction"`, indistinguishable from text on the wire.
 //!
 //! All endpoints require a valid Bearer access token.
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     Json,
 };
+use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
 use idp_db::repos::{
-    attachments as attachments_repo, conversation_reads, conversations, messages, reactions,
-    remote_actors, users,
+    attachments as attachments_repo, conversation_reads, conversations, messages, remote_actors,
+    users,
 };
 use idp_federation::actors::display_name_for_actor;
 use idp_federation::auth::require_auth;
 use idp_federation::delivery;
-use idp_realtime::{DmPayload, EditedDmPayload, ReactionPayload, WsEvent};
+use idp_federation::mls as federation_mls;
+use idp_realtime::{DmPayload, EditedDmPayload, WsEvent};
 use idp_state::{AppState, OidcError};
-
-// ─── Reaction group (shared response type) ───────────────────────────────────
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ReactionGroup {
-    pub emoji: String,
-    pub count: i64,
-    pub reacted_by_me: bool,
-}
 
 // ─── Send a DM ────────────────────────────────────────────────────────────────
 
@@ -38,14 +40,22 @@ pub struct ReactionGroup {
 pub struct SendMessageRequest {
     /// Recipient's address, e.g. "@alice@idp.example.com" or "alice".
     pub recipient_address: String,
-    pub content: String,
-    /// Optional: reply to an existing message.
+    /// Pre-encrypted MLSMessage body, base64-encoded. Server never inspects.
+    pub mls_ciphertext: String,
+    /// Optional: reply to an existing message. The plaintext preview lives
+    /// inside the encrypted body; only the parent ID is server-visible.
     pub reply_to_id: Option<Uuid>,
     /// Optional: orphan attachment IDs returned by `POST /api/attachments`.
     /// Caller must own each one (matching `uploaded_by_actor_uri`) and they
     /// must still be unlinked.
     #[serde(default)]
     pub attachment_ids: Vec<Uuid>,
+    /// Phase 5b: client-supplied UUID for the conversation. Required
+    /// when the client just bootstrapped a new MLS group and needs the
+    /// server's `conversations.id` to match the MLS `group_id` it
+    /// already used. Omitted on subsequent sends — the server reuses
+    /// the existing conversation it finds via `find_dm_between`.
+    pub conversation_id: Option<Uuid>,
 }
 
 #[derive(Debug, Serialize)]
@@ -54,7 +64,9 @@ pub struct MessageResponse {
     pub conversation_id: Uuid,
     pub sender_actor_uri: String,
     pub sender_display_name: Option<String>,
-    pub content: String,
+    /// TLS-encoded MLSMessage, base64-encoded. Echoed back to the sender so
+    /// optimistic UI can swap directly without holding the original blob.
+    pub mls_ciphertext: String,
     pub activity_uri: String,
     pub federation_status: String,
     #[serde(with = "time::serde::rfc3339")]
@@ -64,12 +76,28 @@ pub struct MessageResponse {
     pub edited_at: Option<OffsetDateTime>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reply_to_id: Option<Uuid>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reply_to_content: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reply_to_sender: Option<String>,
-    pub reactions: Vec<ReactionGroup>,
     pub attachments: Vec<crate::attachments::AttachmentMetadata>,
+}
+
+/// Maximum size of an inbound MLS ciphertext blob — ~64 KiB after base64 is
+/// generous for application messages (typical text DMs are ~200 bytes;
+/// edits + reaction operations even smaller). Caps server-side abuse.
+const MAX_MLS_CIPHERTEXT_BYTES: usize = 64 * 1024;
+
+fn decode_mls_ciphertext(b64: &str) -> Result<Vec<u8>, OidcError> {
+    let bytes = B64
+        .decode(b64)
+        .map_err(|_| OidcError::invalid_request("`mls_ciphertext` is not valid base64"))?;
+    if bytes.is_empty() {
+        return Err(OidcError::invalid_request("`mls_ciphertext` is empty"));
+    }
+    if bytes.len() > MAX_MLS_CIPHERTEXT_BYTES {
+        return Err(OidcError::invalid_request(format!(
+            "`mls_ciphertext` exceeds {} bytes",
+            MAX_MLS_CIPHERTEXT_BYTES
+        )));
+    }
+    Ok(bytes)
 }
 
 /// POST /api/dm
@@ -81,21 +109,14 @@ pub async fn send_message(
 ) -> Result<(StatusCode, Json<MessageResponse>), OidcError> {
     let sender_id = require_auth(&state, &headers).await?;
 
-    // Either non-empty content OR at least one attachment is required.
-    if body.content.is_empty() && body.attachment_ids.is_empty() {
-        return Err(OidcError::invalid_request(
-            "Message must have content or at least one attachment",
-        ));
-    }
-    if body.content.len() > 4096 {
-        return Err(OidcError::invalid_request("Message content too long (max 4096 chars)"));
-    }
     if body.attachment_ids.len() > state.config.attachment_max_files_per_message {
         return Err(OidcError::invalid_request(format!(
             "too many attachments (max {} per message)",
             state.config.attachment_max_files_per_message
         )));
     }
+
+    let mls_ciphertext = decode_mls_ciphertext(&body.mls_ciphertext)?;
 
     let sender = users::find_by_id(&state.pool, sender_id)
         .await
@@ -125,18 +146,15 @@ pub async fn send_message(
         }
     }
 
-    // If this is a reply, validate the parent message exists.
-    let mut reply_to_content: Option<String> = None;
-    let mut reply_to_sender: Option<String> = None;
+    // Replies: the parent ID is server-visible for routing, but the preview
+    // text/sender lives in the encrypted body. Only validation here is that
+    // the parent message actually exists.
     let mut parent_activity_uri: Option<String> = None;
     if let Some(parent_id) = body.reply_to_id {
         let parent = messages::find_by_id(&state.pool, parent_id)
             .await
             .map_err(|e| OidcError::server_error(e.to_string()))?
             .ok_or_else(|| OidcError::not_found("Parent message not found"))?;
-        reply_to_content = Some(parent.content.clone());
-        reply_to_sender = display_name_for_actor(&state.pool, &parent.sender_actor_uri).await
-            .or_else(|| Some(parent.sender_actor_uri.clone()));
         parent_activity_uri = Some(parent.activity_uri.clone());
     }
 
@@ -193,20 +211,32 @@ pub async fn send_message(
                 }
             };
 
-        // Get or create the DM conversation.
-        let (conversation_id, _created) = conversations::get_or_create_dm(
-            &state.pool,
-            sender_actor_uri,
-            &recipient_actor_uri,
-        )
-        .await
+        // Get or create the DM conversation. When the client passes a
+        // pinned `conversation_id` (Phase 5b: the MLS `group_id` it
+        // just bootstrapped), use it; otherwise let the server pick
+        // one.
+        let (conversation_id, _created) = match body.conversation_id {
+            Some(client_id) => conversations::get_or_create_dm_with_id(
+                &state.pool,
+                client_id,
+                sender_actor_uri,
+                &recipient_actor_uri,
+            )
+            .await,
+            None => conversations::get_or_create_dm(
+                &state.pool,
+                sender_actor_uri,
+                &recipient_actor_uri,
+            )
+            .await,
+        }
         .map_err(|e| OidcError::server_error(e.to_string()))?;
 
         let msg = messages::create_message(
             &state.pool,
             conversation_id,
             sender_actor_uri,
-            &body.content,
+            &mls_ciphertext,
             &activity_uri,
             body.reply_to_id,
         )
@@ -216,59 +246,46 @@ pub async fn send_message(
         let attachments_metadata =
             link_message_attachments(&state, &body.attachment_ids, msg.id, sender_actor_uri).await?;
 
-        // Build and deliver Create{Note} in background
-        let note = if let Some(ref parent_uri) = parent_activity_uri {
-            activitypub::Note::direct_reply(
-                &activity_uri,
-                sender_actor_uri,
-                &recipient_actor_uri,
-                &body.content,
-                parent_uri,
-            )
-        } else {
-            activitypub::Note::direct(
-                &activity_uri,
-                sender_actor_uri,
-                &recipient_actor_uri,
-                &body.content,
-            )
-        };
-        let activity = activitypub::create_note_activity(
+        // Build the MLS-flavored Create{Note} envelope and deliver in the
+        // background. A missed delivery self-heals via the recipient's
+        // catch-up pull on reconnect, so no durable outbox is needed.
+        let mut activity = federation_mls::build_application_create_activity(
+            &activity_uri,
             &activity_uri,
             sender_actor_uri,
             &recipient_actor_uri,
-            note,
+            conversation_id,
+            &mls_ciphertext,
+            parent_activity_uri.as_deref(),
         );
-        if let Ok(mut activity_value) = serde_json::to_value(&activity) {
-            crate::attachments::inject_attachments_into_ap_activity(
-                &mut activity_value,
-                &state.config.issuer(),
-                &attachments_metadata,
-            );
-            let state_clone = state.clone();
-            let sender_username = sender.username.clone();
-            tokio::spawn(async move {
-                if let Err(e) =
-                    delivery::deliver_activity(&state_clone, &inbox_url, &activity_value, &sender_username)
-                        .await
-                {
-                    tracing::warn!(%inbox_url, "failed to deliver remote dm: {e:?}");
-                }
-            });
-        }
+        crate::attachments::inject_attachments_into_ap_activity(
+            &mut activity,
+            &state.config.issuer(),
+            &attachments_metadata,
+        );
+        let state_clone = state.clone();
+        let sender_username = sender.username.clone();
+        let inbox_for_task = inbox_url.clone();
+        tokio::spawn(async move {
+            if let Err(e) =
+                delivery::deliver_activity(&state_clone, &inbox_for_task, &activity, &sender_username)
+                    .await
+            {
+                tracing::warn!(%inbox_for_task, "failed to deliver remote dm: {e:?}");
+            }
+        });
 
-        // Echo to sender only
+        // Echo to sender only — recipient's IdP will push them their own copy
+        // when the inbox handler persists it on the other side.
         let event = WsEvent::NewDm(DmPayload {
             message_id: msg.id,
             conversation_id,
             kind: "dm".to_string(),
             sender_address: sender.federated_address(&local_domain),
             sender_display_name: sender_display_name.clone(),
-            content: msg.content.clone(),
+            mls_ciphertext: B64.encode(&msg.mls_ciphertext),
             created_at: msg.created_at,
             reply_to_id: body.reply_to_id,
-            reply_to_content: reply_to_content.clone(),
-            reply_to_sender: reply_to_sender.clone(),
             attachments: attachments_metadata.iter().map(Into::into).collect(),
             client_id: None,
         });
@@ -284,16 +301,13 @@ pub async fn send_message(
             id: msg.id,
             conversation_id,
             sender_actor_uri: msg.sender_actor_uri,
-            sender_display_name: sender_display_name.clone(),
-            content: msg.content,
+            sender_display_name,
+            mls_ciphertext: B64.encode(&msg.mls_ciphertext),
             activity_uri: msg.activity_uri,
             federation_status: msg.federation_status,
             created_at: msg.created_at,
             edited_at: msg.edited_at,
             reply_to_id: body.reply_to_id,
-            reply_to_content,
-            reply_to_sender,
-            reactions: vec![],
             attachments: attachments_metadata,
         })))
     } else {
@@ -310,20 +324,31 @@ pub async fn send_message(
         let recipient_actor_uri = recipient.actor_uri.as_deref()
             .ok_or_else(|| OidcError::server_error("Recipient has no actor_uri"))?;
 
-        // Get or create the DM conversation.
-        let (conversation_id, _created) = conversations::get_or_create_dm(
-            &state.pool,
-            sender_actor_uri,
-            recipient_actor_uri,
-        )
-        .await
+        // Get or create the DM conversation. When the client passes a
+        // pinned `conversation_id` (Phase 5b: the MLS `group_id` it
+        // just bootstrapped), use it; otherwise let the server pick.
+        let (conversation_id, _created) = match body.conversation_id {
+            Some(client_id) => conversations::get_or_create_dm_with_id(
+                &state.pool,
+                client_id,
+                sender_actor_uri,
+                recipient_actor_uri,
+            )
+            .await,
+            None => conversations::get_or_create_dm(
+                &state.pool,
+                sender_actor_uri,
+                recipient_actor_uri,
+            )
+            .await,
+        }
         .map_err(|e| OidcError::server_error(e.to_string()))?;
 
         let msg = messages::create_message(
             &state.pool,
             conversation_id,
             sender_actor_uri,
-            &body.content,
+            &mls_ciphertext,
             &activity_uri,
             body.reply_to_id,
         )
@@ -339,11 +364,9 @@ pub async fn send_message(
             kind: "dm".to_string(),
             sender_address: sender.federated_address(&local_domain),
             sender_display_name: sender_display_name.clone(),
-            content: msg.content.clone(),
+            mls_ciphertext: B64.encode(&msg.mls_ciphertext),
             created_at: msg.created_at,
             reply_to_id: body.reply_to_id,
-            reply_to_content: reply_to_content.clone(),
-            reply_to_sender: reply_to_sender.clone(),
             attachments: attachments_metadata.iter().map(Into::into).collect(),
             client_id: None,
         });
@@ -376,15 +399,12 @@ pub async fn send_message(
             conversation_id,
             sender_actor_uri: msg.sender_actor_uri,
             sender_display_name,
-            content: msg.content,
+            mls_ciphertext: B64.encode(&msg.mls_ciphertext),
             activity_uri: msg.activity_uri,
             federation_status: msg.federation_status,
             created_at: msg.created_at,
             edited_at: msg.edited_at,
             reply_to_id: body.reply_to_id,
-            reply_to_content,
-            reply_to_sender,
-            reactions: vec![],
             attachments: attachments_metadata,
         })))
     }
@@ -394,10 +414,6 @@ pub async fn send_message(
 /// response. Pre-validation of ownership/orphan status has already happened at
 /// the top of `send_message`; this is the side effect plus a fresh read for
 /// the response shape.
-///
-/// If the row count returned by the UPDATE doesn't match `attachment_ids.len()`
-/// (a race with a concurrent send by the same user), we log a warning and
-/// continue with whatever did link — the message itself is already created.
 async fn link_message_attachments(
     state: &AppState,
     attachment_ids: &[Uuid],
@@ -494,30 +510,8 @@ pub async fn get_conversation(
     }
     .map_err(|e| OidcError::server_error(e.to_string()))?;
 
-    // Batch-fetch reactions for all messages in this page.
-    let message_ids: Vec<Uuid> = msgs.iter().map(|m| m.id).collect();
-    let reaction_rows = reactions::get_reactions_for_messages(
-        &state.pool,
-        &message_ids,
-        caller_actor_uri,
-    )
-    .await
-    .map_err(|e| OidcError::server_error(e.to_string()))?;
-
-    // Group reactions by message_id.
-    let mut reactions_map: HashMap<Uuid, Vec<ReactionGroup>> = HashMap::new();
-    for row in reaction_rows {
-        reactions_map
-            .entry(row.message_id)
-            .or_default()
-            .push(ReactionGroup {
-                emoji: row.emoji,
-                count: row.count,
-                reacted_by_me: row.reacted_by_me,
-            });
-    }
-
     // Batch-fetch attachments for all messages in this page.
+    let message_ids: Vec<Uuid> = msgs.iter().map(|m| m.id).collect();
     let attachment_rows = attachments_repo::find_for_messages(&state.pool, &message_ids)
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?;
@@ -532,19 +526,17 @@ pub async fn get_conversation(
         }
     }
 
-    // Collect unique actor URIs (senders + reply-to senders) and resolve display names in batch.
-    let unique_actors: Vec<&str> = {
-        let mut set = std::collections::HashSet::new();
+    // Resolve display names for the senders only — replies' parent senders
+    // live in the encrypted body, so the server no longer joins them.
+    let unique_senders: Vec<&str> = {
+        let mut set = HashSet::new();
         for m in &msgs {
             set.insert(m.sender_actor_uri.as_str());
-            if let Some(ref rts) = m.reply_to_sender {
-                set.insert(rts.as_str());
-            }
         }
         set.into_iter().collect()
     };
     let mut display_names: HashMap<String, Option<String>> = HashMap::new();
-    for actor_uri in unique_actors {
+    for actor_uri in unique_senders {
         let dn = display_name_for_actor(&state.pool, actor_uri).await;
         display_names.insert(actor_uri.to_string(), dn);
     }
@@ -553,25 +545,18 @@ pub async fn get_conversation(
         .into_iter()
         .map(|m| {
             let sender_display = display_names.get(&m.sender_actor_uri).cloned().flatten();
-            let reply_sender_display = m.reply_to_sender.as_ref().and_then(|uri| {
-                display_names.get(uri).cloned().flatten().or_else(|| Some(uri.clone()))
-            });
-            let msg_reactions = reactions_map.remove(&m.id).unwrap_or_default();
             let msg_attachments = attachments_map.remove(&m.id).unwrap_or_default();
             MessageResponse {
                 id: m.id,
                 conversation_id: m.conversation_id,
                 sender_actor_uri: m.sender_actor_uri,
                 sender_display_name: sender_display,
-                content: m.content,
+                mls_ciphertext: B64.encode(&m.mls_ciphertext),
                 activity_uri: m.activity_uri,
                 federation_status: m.federation_status,
                 created_at: m.created_at,
                 edited_at: m.edited_at,
                 reply_to_id: m.reply_to_id,
-                reply_to_content: m.reply_to_content,
-                reply_to_sender: reply_sender_display,
-                reactions: msg_reactions,
                 attachments: msg_attachments,
             }
         })
@@ -602,13 +587,15 @@ pub struct ConversationMemberInfo {
     pub avatar_url: Option<String>,
 }
 
+/// Slim conversation row. Phase 3 dropped `last_message_preview` (the body
+/// is opaque ciphertext); the client computes its own preview from its
+/// decrypted MLS stream.
 #[derive(Debug, Serialize)]
 pub struct ConversationListItem {
     pub conversation_id: Uuid,
     pub kind: String,
     pub name: Option<String>,
     pub members: Vec<ConversationMemberInfo>,
-    pub last_message_preview: Option<String>,
     pub last_message_sender: Option<String>,
     pub unread_count: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -647,7 +634,6 @@ pub async fn list_conversations(
                 kind: s.kind,
                 name: s.name,
                 members,
-                last_message_preview: s.last_message_preview,
                 last_message_sender: s.last_message_sender,
                 unread_count: s.unread_count,
                 last_message_at: s.last_message_at,
@@ -658,243 +644,17 @@ pub async fn list_conversations(
     Ok(Json(items))
 }
 
-// ─── Add reaction ─────────────────────────────────────────────────────────────
-
-#[derive(Debug, Deserialize)]
-pub struct AddReactionRequest {
-    pub emoji: String,
-}
-
-/// POST /api/dm/:message_id/reactions
-#[tracing::instrument(skip_all, fields(message_id = %message_id))]
-pub async fn add_reaction(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(message_id): Path<Uuid>,
-    Json(body): Json<AddReactionRequest>,
-) -> Result<StatusCode, OidcError> {
-    let caller_id = require_auth(&state, &headers).await?;
-
-    if body.emoji.is_empty() {
-        return Err(OidcError::invalid_request("Emoji cannot be empty"));
-    }
-
-    let caller = users::find_by_id(&state.pool, caller_id)
-        .await
-        .map_err(|e| OidcError::server_error(e.to_string()))?
-        .ok_or_else(|| OidcError::server_error("Caller not found"))?;
-
-    let caller_actor_uri = caller.actor_uri.as_deref()
-        .ok_or_else(|| OidcError::server_error("Caller has no actor_uri"))?;
-
-    // Verify message exists and caller is a conversation member.
-    let msg = messages::find_by_id(&state.pool, message_id)
-        .await
-        .map_err(|e| OidcError::server_error(e.to_string()))?
-        .ok_or_else(|| OidcError::not_found("Message not found"))?;
-
-    let members = conversations::get_members(&state.pool, msg.conversation_id)
-        .await
-        .map_err(|e| OidcError::server_error(e.to_string()))?;
-
-    if !members.iter().any(|m| m.actor_uri == caller_actor_uri) {
-        return Err(OidcError::not_found("Message not found"));
-    }
-
-    reactions::add_reaction(&state.pool, message_id, caller_actor_uri, &body.emoji)
-        .await
-        .map_err(|e| OidcError::server_error(e.to_string()))?;
-
-    let event = WsEvent::MessageReactionAdded(ReactionPayload {
-        message_id,
-        reactor_actor_uri: caller_actor_uri.to_string(),
-        emoji: body.emoji.clone(),
-    });
-
-    // Notify all other members of the conversation.
-    let base = state.config.issuer();
-    for member in &members {
-        if member.actor_uri == caller_actor_uri {
-            continue;
-        }
-        if member.actor_uri.starts_with(&format!("{}/users/", base)) {
-            // Local member: push via WS + broker.
-            if let Ok(Some(other_user)) = users::find_by_actor_uri(&state.pool, &member.actor_uri).await {
-                state.hub.send_to_user(&other_user.id, event.clone());
-                if let Ok(json) = serde_json::to_string(&event) {
-                    let broker = state.broker.clone();
-                    let rid = other_user.id;
-                    tokio::spawn(async move {
-                        if let Err(e) = broker.publish(rid, &json).await {
-                            tracing::warn!(%rid, "broker publish failed: {e}");
-                        }
-                    });
-                }
-            }
-        } else {
-            // Remote member: deliver Like activity via ActivityPub.
-            let like_activity_uri = format!(
-                "{}/users/{}/activities/{}",
-                base,
-                caller.username,
-                Uuid::new_v4(),
-            );
-            let activity = activitypub::Activity::like(
-                &like_activity_uri,
-                caller_actor_uri,
-                &msg.activity_uri,
-                &body.emoji,
-            );
-            if let Ok(activity_value) = serde_json::to_value(&activity) {
-                if let Ok(Some(ra)) = remote_actors::find_by_actor_uri(&state.pool, &member.actor_uri).await {
-                    if let Some(inbox_url) = ra.inbox_url {
-                        let state_clone = state.clone();
-                        let sender_username = caller.username.clone();
-                        tokio::spawn(async move {
-                            if let Err(e) = delivery::deliver_activity(
-                                &state_clone, &inbox_url, &activity_value, &sender_username,
-                            ).await {
-                                tracing::warn!(%inbox_url, "failed to deliver Like activity: {e:?}");
-                            }
-                        });
-                    }
-                }
-            }
-        }
-    }
-
-    // Also push to the reactor themselves (for multi-device).
-    state.hub.send_to_user(&caller_id, event);
-
-    Ok(StatusCode::CREATED)
-}
-
-// ─── Remove reaction ──────────────────────────────────────────────────────────
-
-#[derive(Debug, Deserialize)]
-pub struct RemoveReactionQuery {
-    pub emoji: String,
-}
-
-/// DELETE /api/dm/:message_id/reactions?emoji=...
-#[tracing::instrument(skip_all, fields(message_id = %message_id))]
-pub async fn remove_reaction(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(message_id): Path<Uuid>,
-    Query(query): Query<RemoveReactionQuery>,
-) -> Result<StatusCode, OidcError> {
-    let caller_id = require_auth(&state, &headers).await?;
-
-    if query.emoji.is_empty() {
-        return Err(OidcError::invalid_request("Emoji cannot be empty"));
-    }
-
-    let caller = users::find_by_id(&state.pool, caller_id)
-        .await
-        .map_err(|e| OidcError::server_error(e.to_string()))?
-        .ok_or_else(|| OidcError::server_error("Caller not found"))?;
-
-    let caller_actor_uri = caller.actor_uri.as_deref()
-        .ok_or_else(|| OidcError::server_error("Caller has no actor_uri"))?;
-
-    // Verify message exists and caller is a conversation member.
-    let msg = messages::find_by_id(&state.pool, message_id)
-        .await
-        .map_err(|e| OidcError::server_error(e.to_string()))?
-        .ok_or_else(|| OidcError::not_found("Message not found"))?;
-
-    let members = conversations::get_members(&state.pool, msg.conversation_id)
-        .await
-        .map_err(|e| OidcError::server_error(e.to_string()))?;
-
-    if !members.iter().any(|m| m.actor_uri == caller_actor_uri) {
-        return Err(OidcError::not_found("Message not found"));
-    }
-
-    let deleted = reactions::remove_reaction(&state.pool, message_id, caller_actor_uri, &query.emoji)
-        .await
-        .map_err(|e| OidcError::server_error(e.to_string()))?;
-
-    if !deleted {
-        return Ok(StatusCode::NO_CONTENT);
-    }
-
-    let event = WsEvent::MessageReactionRemoved(ReactionPayload {
-        message_id,
-        reactor_actor_uri: caller_actor_uri.to_string(),
-        emoji: query.emoji.clone(),
-    });
-
-    let base = state.config.issuer();
-    for member in &members {
-        if member.actor_uri == caller_actor_uri {
-            continue;
-        }
-        if member.actor_uri.starts_with(&format!("{}/users/", base)) {
-            if let Ok(Some(other_user)) = users::find_by_actor_uri(&state.pool, &member.actor_uri).await {
-                state.hub.send_to_user(&other_user.id, event.clone());
-                if let Ok(json) = serde_json::to_string(&event) {
-                    let broker = state.broker.clone();
-                    let rid = other_user.id;
-                    tokio::spawn(async move {
-                        if let Err(e) = broker.publish(rid, &json).await {
-                            tracing::warn!(%rid, "broker publish failed: {e}");
-                        }
-                    });
-                }
-            }
-        } else {
-            // Remote: deliver Undo{Like} via ActivityPub.
-            let undo_activity_uri = format!(
-                "{}/users/{}/activities/{}",
-                base,
-                caller.username,
-                Uuid::new_v4(),
-            );
-            let like_value = serde_json::json!({
-                "type": "Like",
-                "actor": caller_actor_uri,
-                "object": msg.activity_uri,
-                "content": query.emoji,
-            });
-            let activity = activitypub::Activity::undo_like(
-                &undo_activity_uri,
-                caller_actor_uri,
-                like_value,
-            );
-            if let Ok(activity_value) = serde_json::to_value(&activity) {
-                if let Ok(Some(ra)) = remote_actors::find_by_actor_uri(&state.pool, &member.actor_uri).await {
-                    if let Some(inbox_url) = ra.inbox_url {
-                        let state_clone = state.clone();
-                        let sender_username = caller.username.clone();
-                        tokio::spawn(async move {
-                            if let Err(e) = delivery::deliver_activity(
-                                &state_clone, &inbox_url, &activity_value, &sender_username,
-                            ).await {
-                                tracing::warn!(%inbox_url, "failed to deliver Undo Like: {e:?}");
-                            }
-                        });
-                    }
-                }
-            }
-        }
-    }
-
-    state.hub.send_to_user(&caller_id, event);
-
-    Ok(StatusCode::NO_CONTENT)
-}
-
 // ─── Edit a message ───────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
 pub struct EditMessageRequest {
-    pub content: String,
+    /// Replacement MLSMessage body, base64-encoded. Server replaces the row's
+    /// ciphertext and stamps `edited_at` — opaque to what changed.
+    pub mls_ciphertext: String,
 }
 
-/// PATCH /api/dm/:message_id
-/// Edit the content of a message. Only the original sender can edit.
+/// PATCH /api/dm/:message_id/edit
+/// Replace the ciphertext of a message. Only the original sender can edit.
 #[tracing::instrument(skip_all, fields(message_id = %message_id))]
 pub async fn edit_message(
     State(state): State<AppState>,
@@ -904,12 +664,7 @@ pub async fn edit_message(
 ) -> Result<Json<MessageResponse>, OidcError> {
     let caller_id = require_auth(&state, &headers).await?;
 
-    if body.content.is_empty() {
-        return Err(OidcError::invalid_request("Message content cannot be empty"));
-    }
-    if body.content.len() > 4096 {
-        return Err(OidcError::invalid_request("Message content too long (max 4096 chars)"));
-    }
+    let new_mls_ciphertext = decode_mls_ciphertext(&body.mls_ciphertext)?;
 
     let caller = users::find_by_id(&state.pool, caller_id)
         .await
@@ -920,7 +675,7 @@ pub async fn edit_message(
         .ok_or_else(|| OidcError::server_error("Caller has no actor_uri"))?;
 
     // Update — the WHERE clause enforces sender ownership and non-deleted.
-    let updated = messages::edit_message(&state.pool, message_id, caller_actor_uri, &body.content)
+    let updated = messages::edit_message(&state.pool, message_id, caller_actor_uri, &new_mls_ciphertext)
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?
         .ok_or_else(|| OidcError::not_found("Message not found or you are not the sender"))?;
@@ -930,7 +685,7 @@ pub async fn edit_message(
 
     let event = WsEvent::MessageEdited(EditedDmPayload {
         message_id: updated.id,
-        new_content: updated.content.clone(),
+        new_mls_ciphertext: B64.encode(&updated.mls_ciphertext),
         edited_at,
     });
 
@@ -959,24 +714,23 @@ pub async fn edit_message(
                 }
             }
         } else {
-            // Remote recipient: deliver Update{Note} via ActivityPub.
+            // Remote recipient: deliver Update{Note} carrying the new MLS
+            // ciphertext. Same `mediaType: application/mls` envelope as
+            // Create{Note} so the receiving side's mediaType gate accepts it.
             let update_activity_uri = format!(
                 "{}/users/{}/activities/{}",
                 base,
                 caller.username,
                 Uuid::new_v4(),
             );
-            let activity = serde_json::json!({
-                "@context": "https://www.w3.org/ns/activitystreams",
-                "type": "Update",
-                "id": update_activity_uri,
-                "actor": caller_actor_uri,
-                "object": {
-                    "type": "Note",
-                    "id": updated.activity_uri,
-                    "content": updated.content,
-                }
-            });
+            let activity = federation_mls::build_application_update_activity(
+                &update_activity_uri,
+                &updated.activity_uri,
+                caller_actor_uri,
+                &member.actor_uri,
+                updated.conversation_id,
+                &new_mls_ciphertext,
+            );
             if let Ok(Some(ra)) = remote_actors::find_by_actor_uri(&state.pool, &member.actor_uri).await {
                 if let Some(inbox_url) = ra.inbox_url {
                     let state_clone = state.clone();
@@ -1014,15 +768,12 @@ pub async fn edit_message(
         conversation_id: updated.conversation_id,
         sender_actor_uri: updated.sender_actor_uri,
         sender_display_name,
-        content: updated.content,
+        mls_ciphertext: B64.encode(&updated.mls_ciphertext),
         activity_uri: updated.activity_uri,
         federation_status: updated.federation_status,
         created_at: updated.created_at,
         edited_at: Some(edited_at),
         reply_to_id: updated.reply_to_id,
-        reply_to_content: None,
-        reply_to_sender: None,
-        reactions: vec![],
         attachments: attachments_metadata,
     }))
 }

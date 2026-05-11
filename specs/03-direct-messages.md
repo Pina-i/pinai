@@ -2,6 +2,15 @@
 
 DMs live on the Msg Backbone (IdP layer). Since Alice and Bob can be on different instances, each IdP stores its own full copy of the conversation (Option 1 — mirrored). Each message is delivered via ActivityPub (`Create` activity wrapping a `Note` object) and persisted on both ends. `activity_uri` is the canonical ActivityPub object ID used to correlate federated copies across instances for edits and deletes.
 
+> **End-to-end encryption (Phase 3 onward).** Every message body is an
+> opaque MLS ciphertext on the wire and at rest — `direct_messages.content`
+> was dropped, and `mls_ciphertext BYTEA NOT NULL` took its place. Reactions
+> are no longer a server-side table; they're MLS application messages of
+> `kind = "reaction"` inside the encrypted body. Reply previews
+> (`reply_to_content`, `reply_to_sender`) likewise moved into the
+> encrypted body — `reply_to_id` stays plaintext for thread routing.
+> See [`05-e2ee.md`](./05-e2ee.md) for the protocol-level design.
+
 ### Schema
 
 Conversations are anchored by a stable UUID that never changes regardless of participant count. This is the single key used for message storage, typing channels, unread tracking, and federation.
@@ -33,14 +42,28 @@ CREATE TABLE conversation_members (
 CREATE INDEX idx_conv_members_actor
   ON conversation_members (actor_uri) WHERE left_at IS NULL;
 
--- Messages — keyed by conversation_id instead of sender/recipient pair
+-- Messages — keyed by conversation_id instead of sender/recipient pair.
+-- Body is opaque MLS ciphertext; the server never decrypts.
+--
+-- `id` is derived from the trailing UUID of `activity_uri`
+-- (`<issuer>/users/<username>/activities/<uuid>`), NOT freshly
+-- generated. This bridges row ids across IdPs in cross-server DMs:
+-- both the sender's IdP and the recipient's IdP see the same
+-- activity_uri, so both compute the same row id. Without this,
+-- payloads that reference a message by its server-side id (reactions'
+-- `target_message_id` inside the encrypted MLS body, edits' PATCH
+-- url, replies' `reply_to_id` as observed by the client) silently
+-- fail on the receiver because each IdP would have picked its own
+-- random UUID. `DEFAULT gen_random_uuid()` stays as a fallback for
+-- legacy / malformed URIs that fail the extraction.
 CREATE TABLE direct_messages (
   id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   conversation_id   UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
   sender_actor_uri  TEXT NOT NULL,
-  content           TEXT NOT NULL,
-  activity_uri      TEXT NOT NULL UNIQUE,     -- e.g. "https://idp.alice.com/activities/uuid"
+  mls_ciphertext    BYTEA NOT NULL,           -- TLS-encoded MLSMessage
+  activity_uri      TEXT NOT NULL UNIQUE,     -- e.g. "https://idp.alice.com/users/alice/activities/uuid"
                                               -- used to correlate federated copies for edits/deletes
+                                              -- AND as the source for `id` (see above)
   federation_status TEXT NOT NULL DEFAULT 'pending'
     CHECK (federation_status IN ('pending', 'delivered', 'failed')),
   reply_to_id       UUID REFERENCES direct_messages(id) ON DELETE SET NULL,
@@ -147,11 +170,14 @@ Computed inline in the `GET /api/dm` (list conversations) response via a SQL CTE
 
 ```sql
 -- $1 = caller actor_uri, $2 = caller user_id (local UUID)
+-- After Phase 3 there's no plaintext preview — message bodies are opaque
+-- ciphertext. The client maintains its own preview cache by replaying its
+-- decrypted MLS stream. We still expose `last_message_sender` (the
+-- sender_actor_uri of the most recent message) since that's plaintext.
 WITH ranked_messages AS (
     SELECT
         dm.conversation_id,
         dm.sender_actor_uri,
-        dm.content,
         dm.created_at,
         ROW_NUMBER() OVER (
             PARTITION BY dm.conversation_id
@@ -166,11 +192,6 @@ SELECT
     c.name,
     cm_self.conversation_id                     AS _check,
     MAX(rm.created_at)                          AS last_message_at,
-    -- last message preview (content truncated server-side to 100 chars)
-    (SELECT LEFT(rm2.content, 100)
-     FROM ranked_messages rm2
-     WHERE rm2.conversation_id = c.id AND rm2.rn = 1)
-                                                AS last_message_preview,
     (SELECT rm2.sender_actor_uri
      FROM ranked_messages rm2
      WHERE rm2.conversation_id = c.id AND rm2.rn = 1)
@@ -255,101 +276,61 @@ All DM API responses include resolved display names to avoid requiring clients t
 
 | Endpoint | Fields returned | Notes |
 |---|---|---|
-| `GET /api/dm` | `conversation_id`, `kind`, `name`, `members[]` (`actorUri` + `displayName` + `avatarUrl`, excluding caller), `last_message_preview`, `last_message_sender`, `last_message_at`, `unread_count` | Single query — see above. Client derives DM title from `members[0].displayName`, avatar from `members[0].avatarUrl` |
-| `GET /api/dm/:conversation_id` | messages with `sender_display_name` + `attachments[]` per row | Display name resolved from `users` or `remote_actors`; attachments resolved from `message_attachments` |
-| `POST /api/dm` (response) | `conversation_id`, `kind`, `name`, `sender_display_name`, `attachments[]` | `conversation_id` created here if first message |
-| WS `new_dm` event | `conversation_id`, `kind`, `sender_actor_uri`, `sender_display_name`, `attachments[]` | Client uses `conversation_id` to route to the right conversation in its local state. The WS `send_dm` shortcut path doesn't carry `attachment_ids` — anything with attachments must use REST `POST /api/dm` |
+| `GET /api/dm` | `conversation_id`, `kind`, `name`, `members[]` (`actorUri` + `displayName` + `avatarUrl`, excluding caller), `last_message_sender`, `last_message_at`, `unread_count` | Single query — see above. Client derives DM title from `members[0].displayName`, avatar from `members[0].avatarUrl`. Plaintext preview is gone with E2EE — client computes one from the decrypted MLS stream |
+| `GET /api/dm/:conversation_id` | messages with `sender_display_name`, `mls_ciphertext` (base64), `attachments[]` per row | Display name resolved from `users` or `remote_actors`; ciphertext is opaque; attachments resolved from `message_attachments` |
+| `POST /api/dm` | Bearer; body `{ recipient_address, mls_ciphertext: <base64>, reply_to_id?, attachment_ids[] }` | `mls_ciphertext` is mandatory; the server rejects 4xx without it |
+| WS `new_dm` event | `conversation_id`, `kind`, `sender_actor_uri`, `sender_display_name`, `mls_ciphertext` (base64), `attachments[]` | Client uses `conversation_id` to route, then decrypts `mls_ciphertext` to recover the application message. WS `send_dm` shortcut path doesn't carry `attachment_ids` — anything with attachments must use REST `POST /api/dm` |
 
 ### Optimistic-send reconciliation (`client_id`)
 
 When the client sends a DM over WebSocket (`send_dm`) it MAY include an opaque `client_id` correlation token. The server echoes that token back **only on the sender's own `new_dm`** event (never on the recipient's), so the client can swap its optimistic placeholder for the persisted message rather than appending a duplicate. Recipients never see another user's `client_id`.
 
+> **REST gap (Phase 6 follow-up)**: `POST /api/dm` doesn't accept `client_id` today, so the REST echo arrives with `client_id: None`. The client treats any `isOwn` echo without a `client_id` as a no-op (the REST response already reconciled the optimistic row to `"sent"`). For the "REST succeeded but the response was lost / network blip" edge, an `isOwn` echo can still heal a `"failed"` row forward to `"sent"` via `message_id`. True symmetry with the WS path needs `client_id` propagated through `POST /api/dm`.
+
+### Send status indicator (client-side)
+
+Clients render a small status icon next to each own-message timestamp, driven by an optional `status` field on the rendered `Message` model:
+
+| `status` | When | Render |
+|---|---|---|
+| `"sending"` | Optimistic push, network in flight | Clock icon |
+| `"sent"` | Server returned 201 / WS echo with matching `client_id` arrived | Check icon, auto-hides ~3 s after the transition |
+| `"failed"` | Caught error in encrypt / `POST /api/dm` / WS-send | Warning icon + retry icon-button |
+
+The status field is purely client-side state; nothing about it touches the server schema or wire format. Retry is session-scoped — the unsent payload (plaintext + attachment ids + reply target) lives in a `useRef` map on the conversation viewmodel, not in persisted storage. After a reload, `"failed"` rows still render their warning but the retry button is disabled (no payload to resend with).
+
 ---
 
-## 7. Message reactions & replies
+## 7. Replies & reactions
 
 ### Reactions
 
-Reactions are stored in a dedicated table linked to a message by its `id`. The `UNIQUE` constraint on `(message_id, reactor_actor_uri, emoji)` enforces that a user can only react once with the same emoji on the same message.
+Reactions are **MLS application messages** of `kind = "reaction"` inside the encrypted body — there is no server-side reaction state. Each client maintains its own reaction bar for a conversation by replaying its decrypted MLS stream and folding `{ target_message_id, emoji, op: "add"|"remove" }` operations.
 
-```sql
-CREATE TABLE message_reactions (
-  id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  message_id        UUID NOT NULL REFERENCES direct_messages(id) ON DELETE CASCADE,
-  reactor_actor_uri TEXT NOT NULL,       -- local or remote actor
-  emoji             TEXT NOT NULL,       -- e.g. "👍" or a custom emoji identifier
-  created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
-
-  UNIQUE (message_id, reactor_actor_uri, emoji)
-);
-```
-
-To render the reaction bar on a message, reactions are grouped by emoji with a count and a flag indicating whether the current user has reacted:
-
-```sql
-SELECT
-  emoji,
-  COUNT(*)                                    AS count,
-  bool_or(reactor_actor_uri = $1)             AS reacted_by_me
-FROM message_reactions
-WHERE message_id = $2
-GROUP BY emoji
-ORDER BY count DESC;
-```
-
-This produces the classic Discord-style reaction bar: `👍 3 · ❤️ 2` with the current user's reactions highlighted.
-
-#### Federation
-
-A reaction is federated as a `Like` activity pointing to the `activity_uri` of the target message:
-
-```json
-{
-  "@context": "https://www.w3.org/ns/activitystreams",
-  "type": "Like",
-  "actor": "https://idp.alice.com/users/alice_xK9mP",
-  "object": "https://idp.bob.com/activities/uuid",
-  "content": "👍"
-}
-```
-
-Removing a reaction is federated as an `Undo{Like}` activity.
-
----
+The `message_reactions` table was dropped in Phase 3. The `Like` / `Undo{Like}` AP handlers were removed from the inbox; peer IdPs that try to send a `Like` for an MLS-era message see it silently dropped with a warning.
 
 ### Replies
 
-Replies are messages that reference another message via a `reply_to_id` self-referential foreign key on `direct_messages` (already included in the schema defined in §5):
+Replies still reference the parent via the server-visible `reply_to_id` self-FK on `direct_messages`. The server uses it for thread routing and the soft-delete cascade rule (`ON DELETE SET NULL` — Discord-style "Original message was deleted").
+
+The **preview** (parent body excerpt + sender display name) is no longer fetched server-side — it would leak plaintext from the parent's encrypted body. Instead, the sender includes a `kind = "reply_meta"` application message piggy-backed on the reply itself: `{ target_message_id, preview_text, preview_sender }`. Recipients render the preview from the decrypted body.
 
 ```sql
-reply_to_id UUID REFERENCES direct_messages(id) ON DELETE SET NULL
-```
-
-`ON DELETE SET NULL` is intentional — if the parent message is deleted, the reply becomes a standalone message rather than disappearing with it. This matches the expected behavior: Discord shows "Original message was deleted" in this case.
-
-When fetching a conversation page, a single LEFT JOIN pulls the parent message preview inline — only one level deep, never recursive:
-
-```sql
--- $1 = conversation_id, $2 = cursor created_at, $3 = cursor id
-SELECT
-  dm.*,
-  parent.id                AS reply_to_id,
-  parent.content           AS reply_to_content,
-  parent.sender_actor_uri  AS reply_to_sender
-FROM direct_messages dm
-LEFT JOIN direct_messages parent ON dm.reply_to_id = parent.id
-WHERE dm.conversation_id = $1
-  AND dm.deleted_at IS NULL
-  AND (dm.created_at, dm.id) < ($2, $3)
-ORDER BY dm.created_at DESC, dm.id DESC
+-- The conversation history query no longer joins `parent.content` /
+-- `parent.sender_actor_uri`. `reply_to_id` flows through plaintext.
+SELECT * FROM direct_messages
+WHERE conversation_id = $1
+  AND deleted_at IS NULL
+  AND (created_at, id) < ($2, $3)
+ORDER BY created_at DESC, id DESC
 LIMIT 50;
 ```
 
-The conversation remains a **flat list** with inline reply previews — no recursive thread fetching. Threads (a sub-conversation branching off a message) are a separate product decision that would require a `thread_id` column and a `threads` table, deferred until needed.
+The conversation remains a **flat list** — no recursive thread fetching. Threads (a sub-conversation branching off a message) would require a separate `thread_id` column + table, deferred until needed.
 
 #### Federation
 
-A reply is federated as a `Create{Note}` activity where the `Note` object includes an `inReplyTo` field pointing to the parent's `activity_uri`:
+A reply is federated as a `Create{Note}` with the same MLS envelope as a regular DM, plus an `inReplyTo` field pointing to the parent's `activity_uri`:
 
 ```json
 {
@@ -358,49 +339,33 @@ A reply is federated as a `Create{Note}` activity where the `Note` object includ
   "actor": "https://idp.alice.com/users/alice_xK9mP",
   "object": {
     "type": "Note",
-    "id": "https://idp.alice.com/activities/uuid",
-    "inReplyTo": "https://idp.bob.com/activities/parent-uuid",
-    "content": "Hey, replying to your message!"
+    "id": "https://idp.alice.com/users/alice_xK9mP/activities/<uuid>",
+    "mediaType": "application/mls",
+    "mlsKind": "application",
+    "context": "<conversation_id>",
+    "inReplyTo": "https://idp.bob.com/users/bob_aB3cD/activities/parent-uuid",
+    "content": "<base64(MLSMessage carrying the reply text + reply_meta)>"
   }
 }
 ```
 
----
-
 ### Real-time delivery
 
-Both reactions and replies are delivered via the same broker → WebSocket pipeline as DMs. The WebSocket events are:
-
 ```json
-// New reaction
-{
-  "event": "message_reaction_added",
-  "messageId": "uuid",
-  "reactorActorUri": "https://idp.alice.com/users/alice_xK9mP",
-  "emoji": "👍"
-}
-
-// Reaction removed
-{
-  "event": "message_reaction_removed",
-  "messageId": "uuid",
-  "reactorActorUri": "https://idp.alice.com/users/alice_xK9mP",
-  "emoji": "👍"
-}
-
-// New reply (same shape as new_dm, with reply fields added)
+// new_dm — every DM, reply, reaction, edit goes through this same shape
 {
   "event": "new_dm",
   "messageId": "uuid",
+  "conversationId": "uuid",
   "senderActorUri": "https://idp.alice.com/users/alice_xK9mP",
   "senderDisplayName": "alice",
-  "content": "Hey, replying to your message!",
+  "mlsCiphertext": "<base64(MLSMessage)>",
   "replyToId": "parent-uuid",
-  "replyToContent": "Original message preview...",
-  "replyToSender": "https://idp.bob.com/users/bob_aB3cD",
   "createdAt": "2026-03-20T12:00:00Z"
 }
 ```
+
+Reactions are *invisible* on the wire — they look exactly like text DMs. The client decrypts and inspects the application-message `kind` to route the body into its reaction bar instead of its message list.
 
 ---
 
@@ -409,60 +374,63 @@ Both reactions and replies are delivered via the same broker → WebSocket pipel
 ### REST endpoint
 
 ```
-PATCH /api/dm/:message_id
+PATCH /api/dm/:message_id/edit
 Authorization: Bearer <access_token>
 Content-Type: application/json
 
-{ "content": "corrected text" }
+{ "mls_ciphertext": "<base64(new MLSMessage)>" }
 ```
 
 **Authorization**: only the original sender can edit. The `WHERE` clause enforces ownership atomically at the DB level — no separate fetch + check:
 
 ```sql
 UPDATE direct_messages
-SET content = $3, edited_at = now()
+SET mls_ciphertext = $3, edited_at = now()
 WHERE id         = $1
   AND sender_actor_uri = $2
   AND deleted_at IS NULL
 RETURNING *;
 ```
 
-Returns `404` if the message does not exist, is already deleted, or belongs to a different sender. Content must be 1–4096 characters.
+Returns `404` if the message does not exist, is already deleted, or belongs to a different sender. The new content lives entirely inside the new `mls_ciphertext` blob; the server stamps `edited_at` for ordering but stays opaque to what changed.
 
 ### Real-time delivery
 
-After a successful update the server pushes a `message_edited` WebSocket event to both parties:
+After a successful update the server pushes a `message_edited` WS event to both parties:
 
 ```json
 {
   "event": "message_edited",
   "messageId": "uuid",
-  "newContent": "corrected text",
+  "newMlsCiphertext": "<base64(new MLSMessage)>",
   "editedAt": "2026-03-20T12:05:00Z"
 }
 ```
 
 - **Local recipient**: pushed via `hub.send_to_user()` + published to Redis Streams for catch-up.
 - **Sender (multi-device)**: echoed via `hub.send_to_user()`.
-- **Remote recipient**: an `Update{Note}` ActivityPub activity is delivered to the recipient's IdP inbox in a background `tokio::spawn`. The remote IdP applies the edit via `edit_message_by_activity_uri` (matches by `activity_uri` instead of `id`) and then pushes `message_edited` to the remote recipient over their local WS.
+- **Remote recipient**: an `Update{Note}` ActivityPub activity carrying the new ciphertext is delivered to the recipient's IdP inbox in a background `tokio::spawn`. The remote IdP applies the edit via `edit_message_by_activity_uri` (matches by `activity_uri` instead of `id`) and then pushes `message_edited` to the remote recipient over their local WS.
 
-### Federation — `Update{Note}`
+### Federation — `Update{Note}` (MLS)
 
 ```json
 {
   "@context": "https://www.w3.org/ns/activitystreams",
   "type": "Update",
-  "id": "https://idp.alice.com/users/alice_xK9mP/activities/uuid",
+  "id": "https://idp.alice.com/users/alice_xK9mP/activities/<uuid>",
   "actor": "https://idp.alice.com/users/alice_xK9mP",
   "object": {
     "type": "Note",
-    "id": "https://idp.alice.com/activities/original-uuid",
-    "content": "corrected text"
+    "id": "https://idp.alice.com/users/alice_xK9mP/activities/original-uuid",
+    "mediaType": "application/mls",
+    "mlsKind": "edit",
+    "context": "<conversation_id>",
+    "content": "<base64(new MLSMessage)>"
   }
 }
 ```
 
-The `object.id` is the original `activity_uri` stored in `direct_messages.activity_uri`, which is the stable cross-instance identifier used to correlate the two mirrored copies of the message.
+The `object.id` is the original `activity_uri` stored in `direct_messages.activity_uri`, which is the stable cross-instance identifier used to correlate the two mirrored copies of the message. The receiving inbox rejects any `Update{Note}` without `mediaType: application/mls` — peers must run an MLS-capable build.
 
 ---
 
@@ -493,6 +461,19 @@ CREATE TABLE message_attachments (
     created_at            TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 ```
+
+> **Cross-IdP id bridging**: `id` is shared across IdPs the same way
+> `direct_messages.id` is. On a **local** upload the client supplies the
+> UUID up front via the `attachment_id` multipart form field (it's also
+> the AAD bound to the AES-GCM ciphertext, so it has to exist before
+> the encrypt). On a **remote** ingress (`federation::inbox::persist_inbound_attachments`)
+> the receiver extracts the same UUID from the activity's `attachment.url`
+> field of shape `<issuer>/api/attachments/<uuid>/content` and uses it
+> as the local row id. Both IdPs therefore agree on `message_attachments.id`,
+> which is what `AttachmentBlobKey.id` (carried in the encrypted MLS
+> body) references — without this bridging the receiver's
+> `attachmentKeys[a.id]` lookup misses and images render as a "FILE"
+> tile because the decrypted MIME never reaches the renderer.
 
 Lifecycle:
 - `message_id IS NULL` ⇒ orphan (uploaded but not yet attached); reaped by

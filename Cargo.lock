@@ -1829,6 +1829,7 @@ dependencies = [
  "argon2",
  "axum",
  "axum-extra",
+ "base64",
  "base64ct",
  "common-types",
  "dashmap",
@@ -1898,11 +1899,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "idp-e2ee"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "base64",
+ "dashmap",
+ "idp-config",
+ "idp-db",
+ "idp-federation",
+ "idp-realtime",
+ "idp-state",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "time",
+ "tokio",
+ "tracing",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "idp-federation"
 version = "0.1.0"
 dependencies = [
  "activitypub",
  "axum",
+ "base64",
  "http-signatures",
  "idp-broker",
  "idp-config",
@@ -1929,6 +1953,7 @@ version = "0.1.0"
 dependencies = [
  "activitypub",
  "axum",
+ "base64",
  "hmac",
  "http-signatures",
  "idp-config",
@@ -1996,6 +2021,7 @@ dependencies = [
  "idp-broker",
  "idp-config",
  "idp-db",
+ "idp-e2ee",
  "idp-federation",
  "idp-messaging",
  "idp-presence",

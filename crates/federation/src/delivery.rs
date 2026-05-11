@@ -166,3 +166,85 @@ pub async fn deliver_activity(
     debug!(%inbox_url, "activity delivered successfully");
     Ok(())
 }
+
+/// Generic HTTP-Signature signed JSON POST to a peer IdP. Used for
+/// federated key-directory lookups (Phase 5d.1: `POST /api/keys/packages/claim`
+/// to a remote IdP) — the same Cavage-spec signing path
+/// [`deliver_activity`] uses, but with a JSON content type and a
+/// strongly-typed response.
+///
+/// `sender_username` is the local user on whose behalf we're making
+/// the request; it goes into the signature's `keyId`. The receiving
+/// peer's HTTP-Sig verifier resolves that user's actor doc to find
+/// the public key, so the signed request authenticates as them.
+pub async fn signed_post_json<R>(
+    state: &AppState,
+    target_url: &str,
+    body: &serde_json::Value,
+    sender_username: &str,
+) -> Result<R, OidcError>
+where
+    R: serde::de::DeserializeOwned,
+{
+    let body_bytes = serde_json::to_vec(body)
+        .map_err(|e| OidcError::server_error(format!("body serialize failed: {e}")))?;
+
+    let url: url::Url = target_url
+        .parse()
+        .map_err(|e| OidcError::server_error(format!("invalid target URL: {e}")))?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| OidcError::server_error("target URL missing host"))?;
+    let host_with_port = match url.port() {
+        Some(port) => format!("{}:{}", host, port),
+        None => host.to_string(),
+    };
+    let path_and_query = match url.query() {
+        Some(q) => format!("{}?{}", url.path(), q),
+        None => url.path().to_string(),
+    };
+
+    let date = http_date_now();
+    let digest = sha256_digest(&body_bytes);
+    let key_id = format!(
+        "{}/users/{}#main-key",
+        state.config.issuer(),
+        sender_username
+    );
+
+    let signature = sign_request(SignParams {
+        method: "post",
+        path: &path_and_query,
+        host: &host_with_port,
+        date: &date,
+        digest: Some(&digest),
+        key_id: &key_id,
+        signing_key: &state.keypair.signing_key,
+    })
+    .map_err(|e| OidcError::server_error(format!("HTTP Signature failed: {e}")))?;
+
+    let resp = reqwest::Client::new()
+        .post(target_url)
+        .header("Content-Type", "application/json")
+        .header("Date", &date)
+        .header("Digest", &digest)
+        .header("Host", &host_with_port)
+        .header("Signature", &signature)
+        .body(body_bytes)
+        .send()
+        .await
+        .map_err(|e| OidcError::server_error(format!("federated POST failed: {e}")))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        warn!(%target_url, %status, %text, "remote IdP rejected signed POST");
+        return Err(OidcError::server_error(format!(
+            "Remote IdP returned {status}: {text}"
+        )));
+    }
+
+    resp.json::<R>()
+        .await
+        .map_err(|e| OidcError::server_error(format!("response decode failed: {e}")))
+}

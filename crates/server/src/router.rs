@@ -21,10 +21,9 @@ use idp_federation::{
     webfinger::get_webfinger,
 };
 use idp_messaging::{
-    add_reaction,
     attachments::{get_attachment, upload_attachments},
     blob::get_attachment_blob,
-    edit_message, get_conversation, list_conversations, remove_reaction, send_message,
+    edit_message, get_conversation, list_conversations, send_message,
 };
 use idp_social::{
     accept_friendship, delete_friendship, get_friends, get_incoming_requests,
@@ -43,6 +42,11 @@ use idp_auth::{
     token::post_token,
     userinfo::get_userinfo,
     ws::ws_upgrade,
+};
+use idp_e2ee::{
+    delete_recovery, get_commits_since, get_identity, get_packages_status, get_recovery,
+    get_welcomes, post_commit, post_identity, post_packages, post_packages_claim, post_welcome,
+    put_recovery,
 };
 use idp_state::AppState;
 
@@ -109,16 +113,43 @@ pub fn build(state: AppState) -> Router {
         .route("/api/friends", get(get_friends))
 
         // ── Direct Messages REST API (Bearer-auth) ────────────────────────────
+        // Reactions are gone — they're MLS application messages of
+        // `kind = "reaction"`, indistinguishable from text on the wire and
+        // computed client-side from the decrypted MLS stream (Phase 3).
         .route("/api/dm", post(send_message).get(list_conversations))
         .route("/api/dm/{conversation_id}", get(get_conversation))
         .route("/api/dm/{message_id}/edit", patch(edit_message))
-        .route("/api/dm/{message_id}/reactions", post(add_reaction).delete(remove_reaction))
 
         // ── Avatar API (Bearer-auth) ────────────────────────────────────
         .route("/api/avatar", put(put_avatar).delete(delete_avatar))
 
         // ── Profile API (Bearer-auth) ───────────────────────────────────
         .route("/api/profile", patch(update_profile))
+
+        // ── E2EE key directory ──────────────────────────────────────────
+        // Identity: POST is Bearer (own); GET accepts Bearer (local user
+        // first-contact pin) or HTTP-Sig (peer IdP fetching to add a member).
+        .route("/api/keys/identity", post(post_identity))
+        .route("/api/keys/identity/{actor_uri}", get(get_identity))
+        // KeyPackages: POST + status are Bearer (own device);
+        // claim accepts Bearer (local cross-add) or HTTP-Sig (peer cross-add).
+        .route("/api/keys/packages", post(post_packages))
+        .route("/api/keys/packages/claim", post(post_packages_claim))
+        .route("/api/keys/packages/status", get(get_packages_status))
+        // Recovery Key: opt-in passphrase-wrapped MSK backup (Bearer only).
+        .route(
+            "/api/keys/recovery",
+            put(put_recovery).get(get_recovery).delete(delete_recovery),
+        )
+
+        // ── MLS Delivery Service (Bearer-auth) ──────────────────────────
+        // Commits: ordered append per group with `409` on epoch race;
+        // catch-up via `?since=<epoch>`. Welcomes: per-device atomic claim.
+        .route(
+            "/api/mls/groups/{conversation_id}/commits",
+            post(post_commit).get(get_commits_since),
+        )
+        .route("/api/mls/welcomes", get(get_welcomes).post(post_welcome))
 
         // ── DM Attachments API ──────────────────────────────────────────
         // Upload: per-route body limit overrides Axum's 2 MiB default.
