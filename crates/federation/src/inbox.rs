@@ -6,28 +6,28 @@
 //!   - Accept{Follow} → marks a friendship as accepted
 //!   - Reject{Follow} → deletes the friendship row
 //!   - Undo{Follow}   → deletes the friendship
-//!   - Undo{Like}     → removes a message reaction
-//!   - Create{Note}   → stores a direct message (supports inReplyTo)
+//!   - Create{Note}   → MLS-only after Phase 3: routes to `mls::handle_inbound_mls_note`
+//!     (any Note without `mediaType: application/mls` is rejected)
+//!   - Update{Note}   → MLS-only edit: replaces the row's `mls_ciphertext`
 //!   - Update{Person} → updates remote_actors cache + propagates profile changes
-//!   - Like           → adds a message reaction
+//!
+//! `Like` / `Undo{Like}` are gone — reactions are now MLS application
+//! messages of `kind = "reaction"` inside the encrypted body.
 
 use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
     Json,
 };
+use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use serde_json::Value;
 use uuid::Uuid;
 
-use idp_db::repos::{
-    attachments, conversations, friendships, messages, reactions, remote_actors, users,
-};
+use idp_db::repos::{attachments, friendships, messages, remote_actors, users};
 
-use idp_realtime::{DmPayload, EditedDmPayload, FriendshipPayload, ProfileUpdatePayload, ReactionPayload, WsAttachment, WsEvent};
+use idp_realtime::{EditedDmPayload, FriendshipPayload, ProfileUpdatePayload, WsEvent};
 
 use idp_state::{AppState, OidcError};
-
-use crate::actors::display_name_for_actor;
 
 /// POST /users/:slug/inbox
 #[tracing::instrument(skip_all, fields(slug = %slug))]
@@ -63,7 +63,6 @@ pub async fn post_inbox(
         "Undo" => handle_undo(&state, &body, &recipient).await?,
         "Create" => handle_create(&state, &body, &recipient).await?,
         "Update" => handle_update(&state, &body, &recipient).await?,
-        "Like" => handle_like(&state, &body, &recipient).await?,
         other => {
             tracing::warn!(activity_type = %other, "unhandled activity type in inbox");
         }
@@ -309,7 +308,6 @@ async fn handle_undo(
 
     match obj_type {
         "Follow" => handle_undo_follow(state, body, recipient).await,
-        "Like" => handle_undo_like(state, body, recipient).await,
         _ => Ok(()),
     }
 }
@@ -352,59 +350,7 @@ async fn handle_undo_follow(
     Ok(())
 }
 
-/// Handle Undo{Like} — remove a reaction from a remote actor.
-async fn handle_undo_like(
-    state: &AppState,
-    body: &Value,
-    recipient: &idp_db::models::User,
-) -> Result<(), OidcError> {
-    let actor_url = body
-        .get("actor")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-
-    let inner = match body.get("object") {
-        Some(o) if !o.is_string() => o,
-        _ => return Ok(()),
-    };
-
-    let target_uri = inner
-        .get("object")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-
-    let emoji = inner
-        .get("content")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-
-    if target_uri.is_empty() || emoji.is_empty() {
-        return Ok(());
-    }
-
-    let msg = match messages::find_by_activity_uri(&state.pool, target_uri).await {
-        Ok(Some(m)) => m,
-        _ => return Ok(()),
-    };
-
-    let deleted = reactions::remove_reaction(&state.pool, msg.id, actor_url, emoji)
-        .await
-        .map_err(|e| OidcError::server_error(e.to_string()))?;
-
-    if deleted {
-        let event = WsEvent::MessageReactionRemoved(ReactionPayload {
-            message_id: msg.id,
-            reactor_actor_uri: actor_url.to_string(),
-            emoji: emoji.to_string(),
-        });
-        state.hub.send_to_user(&recipient.id, event);
-    }
-
-    tracing::info!(actor = %actor_url, message = %msg.id, emoji = %emoji, "reaction removed via AP Undo(Like)");
-    Ok(())
-}
-
-// ─── Create{Note} (Direct Message) ──────────────────────────────────────────
+// ─── Create{Note} — MLS-only after Phase 3 ──────────────────────────────────
 
 async fn handle_create(
     state: &AppState,
@@ -425,139 +371,25 @@ async fn handle_create(
         return Ok(());
     }
 
-    let content = obj
-        .get("content")
-        .and_then(|c| c.as_str())
-        .unwrap_or("")
-        .to_string();
-
-    let actor_url = body.get("actor").and_then(|v| v.as_str()).unwrap_or("");
-
-    let recipient_actor_uri = recipient.actor_uri.as_deref()
-        .ok_or_else(|| OidcError::server_error("Recipient has no actor_uri"))?;
-
-    // activity_uri is the AP activity ID; fall back to the note ID if the activity wrapper has no id
-    let activity_uri = body
-        .get("id")
-        .and_then(|v| v.as_str())
-        .or_else(|| obj.get("id").and_then(|v| v.as_str()))
-        .ok_or_else(|| OidcError::invalid_request("Create activity missing id"))?;
-
-    // Resolve inReplyTo: look up the parent message by its activity_uri to get
-    // the local DB id for the reply_to_id FK.
-    let in_reply_to_uri = obj.get("inReplyTo").and_then(|v| v.as_str());
-    let mut reply_to_id: Option<Uuid> = None;
-    let mut reply_to_content: Option<String> = None;
-    let mut reply_to_sender: Option<String> = None;
-    if let Some(parent_uri) = in_reply_to_uri {
-        if let Ok(Some(parent)) = messages::find_by_activity_uri(&state.pool, parent_uri).await {
-            reply_to_id = Some(parent.id);
-            reply_to_content = Some(parent.content);
-            // Resolve to display name instead of raw actor_uri.
-            reply_to_sender = display_name_for_actor(&state.pool, &parent.sender_actor_uri).await
-                .or_else(|| Some(parent.sender_actor_uri));
-        }
+    // After Phase 3 every DM-bearing Note must be MLS-flavoured. Reject
+    // anything else — peers running pre-MLS builds can't interop.
+    let media_type = obj
+        .get("mediaType")
+        .and_then(|m| m.as_str())
+        .unwrap_or("");
+    if media_type != "application/mls" {
+        tracing::warn!(
+            recipient = %recipient.username,
+            %media_type,
+            "rejecting Create{{Note}} without `mediaType: application/mls` — peer must run an MLS-capable build"
+        );
+        return Ok(());
     }
 
-    // Get or create the DM conversation between sender and recipient.
-    // If the AP activity includes a context field with a UUID, use that as the conversation ID.
-    let context_uuid = body
-        .get("object")
-        .and_then(|o| o.get("context"))
-        .and_then(|c| c.as_str())
-        .and_then(|s| s.parse::<Uuid>().ok());
-
-    let (conversation_id, _created) = if let Some(ctx_id) = context_uuid {
-        conversations::get_or_create_dm_with_id(
-            &state.pool,
-            ctx_id,
-            actor_url,
-            recipient_actor_uri,
-        )
-        .await
-        .map_err(|e| OidcError::server_error(e.to_string()))?
-    } else {
-        conversations::get_or_create_dm(
-            &state.pool,
-            actor_url,
-            recipient_actor_uri,
-        )
-        .await
-        .map_err(|e| OidcError::server_error(e.to_string()))?
-    };
-
-    let msg = messages::create_message(
-        &state.pool,
-        conversation_id,
-        actor_url,
-        &content,
-        activity_uri,
-        reply_to_id,
-    )
-    .await
-    .map_err(|e| OidcError::server_error(e.to_string()))?;
-
-    // Parse and persist any `Note.attachment` entries. Invalid entries are
-    // skipped with a warning — we never reject the whole DM over a malformed
-    // attachment.
-    persist_inbound_attachments(state, msg.id, actor_url, obj.get("attachment")).await;
-
-    // Look up the remote sender's display name from the actor cache.
-    let sender_display_name = match remote_actors::find_by_actor_uri(&state.pool, actor_url).await {
-        Ok(Some(ra)) => ra.display_name,
-        _ => None,
-    };
-
-    // Re-read attachments for the message so the WS event carries them and
-    // the recipient's UI can render them in real time without a refetch.
-    let inbound_attachments: Vec<WsAttachment> = attachments::find_for_message(&state.pool, msg.id)
-        .await
-        .map(|rows| {
-            rows.iter()
-                .map(|a| WsAttachment {
-                    id: a.id,
-                    mime_type: a.mime_type.clone(),
-                    byte_size: a.byte_size,
-                    original_filename: a.original_filename.clone(),
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let event = WsEvent::NewDm(DmPayload {
-        message_id: msg.id,
-        conversation_id,
-        kind: "dm".to_string(),
-        sender_address: actor_url.to_string(),
-        sender_display_name,
-        content: msg.content,
-        created_at: msg.created_at,
-        reply_to_id,
-        reply_to_content,
-        reply_to_sender,
-        attachments: inbound_attachments,
-        client_id: None,
-    });
-
-    // Publish to broker for durability
-    if let Ok(json) = serde_json::to_string(&event) {
-        let broker = state.broker.clone();
-        let rid = recipient.id;
-        let json_clone = json.clone();
-        tokio::spawn(async move {
-            if let Err(e) = broker.publish(rid, &json_clone).await {
-                tracing::warn!(%rid, "broker publish failed: {e}");
-            }
-        });
-    }
-
-    state.hub.send_to_user(&recipient.id, event);
-
-    tracing::info!(sender = %actor_url, recipient = %recipient.username, "DM stored via AP inbox");
-    Ok(())
+    crate::mls::handle_inbound_mls_note(state, body, obj, recipient).await
 }
 
-// ─── Update{Note} — Federated message edit ──────────────────────────────────
+// ─── Update{Note} — Federated MLS edit ──────────────────────────────────────
 
 async fn handle_update_note(
     state: &AppState,
@@ -567,25 +399,48 @@ async fn handle_update_note(
 ) -> Result<(), OidcError> {
     let actor_url = body.get("actor").and_then(|v| v.as_str()).unwrap_or("");
 
+    // Same MLS-only gate as Create{Note}: a peer running a pre-MLS build
+    // can't produce an Update we can apply, since the row's body is opaque
+    // ciphertext now.
+    let media_type = obj
+        .get("mediaType")
+        .and_then(|m| m.as_str())
+        .unwrap_or("");
+    if media_type != "application/mls" {
+        tracing::warn!(
+            %media_type,
+            "rejecting Update{{Note}} without `mediaType: application/mls`"
+        );
+        return Ok(());
+    }
+
     let activity_uri = obj
         .get("id")
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
-    let new_content = obj
+    let new_b64 = obj
         .get("content")
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
-    if activity_uri.is_empty() || new_content.is_empty() {
+    if activity_uri.is_empty() || new_b64.is_empty() {
         return Ok(());
     }
+
+    let new_mls_ciphertext = match B64.decode(new_b64) {
+        Ok(b) if !b.is_empty() => b,
+        _ => {
+            tracing::warn!(%activity_uri, "Update{{Note}} content is not valid non-empty base64");
+            return Ok(());
+        }
+    };
 
     let updated = match messages::edit_message_by_activity_uri(
         &state.pool,
         activity_uri,
         actor_url,
-        new_content,
+        &new_mls_ciphertext,
     )
     .await
     {
@@ -604,7 +459,7 @@ async fn handle_update_note(
 
     let event = WsEvent::MessageEdited(EditedDmPayload {
         message_id: updated.id,
-        new_content: updated.content,
+        new_mls_ciphertext: B64.encode(&updated.mls_ciphertext),
         edited_at,
     });
 
@@ -623,7 +478,7 @@ async fn handle_update_note(
     tracing::info!(
         actor = %actor_url,
         message = %updated.id,
-        "message edited via AP Update{{Note}}"
+        "message edited via AP Update{{Note}} (MLS)"
     );
     Ok(())
 }
@@ -704,61 +559,6 @@ async fn handle_update(
     Ok(())
 }
 
-// ─── Like (reaction) ─────────────────────────────────────────────────────────
-
-/// Handle a `Like` activity: add a reaction to a message.
-/// The `object` field is the activity_uri of the target message, and `content`
-/// carries the emoji.
-async fn handle_like(
-    state: &AppState,
-    body: &Value,
-    recipient: &idp_db::models::User,
-) -> Result<(), OidcError> {
-    let actor_url = body
-        .get("actor")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-
-    let target_uri = body
-        .get("object")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-
-    let emoji = body
-        .get("content")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-
-    if target_uri.is_empty() || emoji.is_empty() {
-        tracing::warn!("Like activity missing object or content (emoji)");
-        return Ok(());
-    }
-
-    // Look up the target message by its activity_uri.
-    let msg = match messages::find_by_activity_uri(&state.pool, target_uri).await {
-        Ok(Some(m)) => m,
-        Ok(None) => {
-            tracing::warn!(%target_uri, "Like target message not found");
-            return Ok(());
-        }
-        Err(e) => return Err(OidcError::server_error(e.to_string())),
-    };
-
-    reactions::add_reaction(&state.pool, msg.id, actor_url, emoji)
-        .await
-        .map_err(|e| OidcError::server_error(e.to_string()))?;
-
-    let event = WsEvent::MessageReactionAdded(ReactionPayload {
-        message_id: msg.id,
-        reactor_actor_uri: actor_url.to_string(),
-        emoji: emoji.to_string(),
-    });
-    state.hub.send_to_user(&recipient.id, event);
-
-    tracing::info!(actor = %actor_url, message = %msg.id, emoji = %emoji, "reaction added via AP Like");
-    Ok(())
-}
-
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 /// Try to resolve a local actor URL (e.g. `https://base/users/alice-Ab3Kp`) to a User.
@@ -830,7 +630,7 @@ async fn resolve_remote_name(state: &AppState, actor_uri: &str) -> (String, Opti
 ///
 /// Failures on individual entries are logged at WARN; the message itself is
 /// already persisted and unaffected.
-async fn persist_inbound_attachments(
+pub(crate) async fn persist_inbound_attachments(
     state: &AppState,
     message_id: Uuid,
     sender_actor_uri: &str,
@@ -903,7 +703,18 @@ async fn persist_inbound_attachments(
             continue;
         }
 
-        let id = Uuid::new_v4();
+        // Use the sender's attachment UUID (embedded in the
+        // `<issuer>/api/attachments/<uuid>/content` URL) as the row id
+        // on this IdP too. The client puts the per-attachment AES key
+        // + nonce in the encrypted MLS body keyed by that same UUID
+        // (it's the `AttachmentBlobKey.id`), so if we picked a fresh
+        // random UUID here the recipient's `attachmentKeys[a.id]`
+        // lookup would always miss → realMime falls back to the
+        // server-visible placeholder `"application/octet-stream"` →
+        // images/GIFs render as a "FILE" tile instead of an image.
+        // Falls back to a fresh UUID only if the URL doesn't carry
+        // one in the expected shape.
+        let id = extract_attachment_uuid(url).unwrap_or_else(Uuid::new_v4);
         let storage_key = id.to_string();
         if let Err(e) = attachments::insert_remote(
             &state.pool,
@@ -921,4 +732,15 @@ async fn persist_inbound_attachments(
             tracing::warn!(idx = i, "failed to persist inbound attachment: {e}");
         }
     }
+}
+
+/// Pull the trailing UUID out of an attachment URL of shape
+/// `<issuer>/api/attachments/<uuid>/content`. Used to bridge attachment
+/// row ids across IdPs so the recipient's `AttachmentBlobKey.id` (set
+/// by the sender, embedded in the encrypted MLS body) matches the
+/// wire-shape `Attachment.id` returned by the recipient's REST surface.
+fn extract_attachment_uuid(url: &str) -> Option<Uuid> {
+    let trimmed = url.strip_suffix("/content").unwrap_or(url);
+    let last_segment = trimmed.rsplit('/').next()?;
+    Uuid::parse_str(last_segment).ok()
 }

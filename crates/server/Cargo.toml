@@ -26,6 +26,7 @@ idp-auth       = { path = "../auth",       package = "idp-auth" }
 idp-broker     = { path = "../broker",     package = "idp-broker" }
 idp-config     = { path = "../config",     package = "idp-config" }
 idp-db         = { path = "../db",         package = "idp-db" }
+idp-e2ee       = { path = "../e2ee",       package = "idp-e2ee" }
 idp-federation = { path = "../federation", package = "idp-federation" }
 idp-messaging  = { path = "../messaging",  package = "idp-messaging" }
 idp-presence   = { path = "../presence",   package = "idp-presence" }

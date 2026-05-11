@@ -16,10 +16,12 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 use uuid::Uuid;
 
+use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use idp_db::repos::{conversations, messages, remote_actors, users};
 use jwt_utils::validate_access_token;
 
 use idp_federation::delivery;
+use idp_federation::mls as federation_mls;
 use idp_presence::types::{PresenceEvent, PresenceState, TypingEvent};
 
 use crate::AppState;
@@ -393,16 +395,27 @@ async fn handle_typing_start(
     }
 }
 
+/// 64 KiB ceiling on incoming MLS ciphertexts to bound abuse over WS.
+/// Mirrors the REST path's cap.
+const MAX_MLS_CIPHERTEXT_BYTES: usize = 64 * 1024;
+
 /// Process a SendDm client-to-server message.
 async fn handle_send_dm(
     state: &AppState,
     sender_id: Uuid,
     payload: idp_realtime::SendDmPayload,
 ) {
-    if payload.content.is_empty() || payload.content.len() > 4096 {
-        warn!(%sender_id, "invalid dm content length");
-        return;
-    }
+    let mls_ciphertext = match B64.decode(&payload.mls_ciphertext) {
+        Ok(b) if !b.is_empty() && b.len() <= MAX_MLS_CIPHERTEXT_BYTES => b,
+        Ok(b) => {
+            warn!(%sender_id, len = b.len(), "invalid mls_ciphertext length");
+            return;
+        }
+        Err(_) => {
+            warn!(%sender_id, "invalid mls_ciphertext base64");
+            return;
+        }
+    };
 
     let sender = match users::find_by_id(&state.pool, sender_id).await {
         Ok(Some(u)) => u,
@@ -440,7 +453,7 @@ async fn handle_send_dm(
             sender_actor_uri,
             username,
             domain,
-            &payload.content,
+            &mls_ciphertext,
             payload.client_id.clone(),
         )
         .await;
@@ -491,7 +504,7 @@ async fn handle_send_dm(
             &state.pool,
             conversation_id,
             sender_actor_uri,
-            &payload.content,
+            &mls_ciphertext,
             &activity_uri,
             None,
         )
@@ -514,11 +527,9 @@ async fn handle_send_dm(
             kind: "dm".to_string(),
             sender_address: sender.federated_address(local_domain),
             sender_display_name: sender_display_name.clone(),
-            content: msg.content.clone(),
+            mls_ciphertext: B64.encode(&msg.mls_ciphertext),
             created_at: msg.created_at,
             reply_to_id: None,
-            reply_to_content: None,
-            reply_to_sender: None,
             // WS `send_dm` doesn't carry attachment_ids; attachments only flow
             // through the REST `POST /api/dm` path.
             attachments: Vec::new(),
@@ -575,7 +586,7 @@ async fn handle_remote_dm(
     sender_actor_uri: &str,
     username: &str,
     domain: &str,
-    content: &str,
+    mls_ciphertext: &[u8],
     client_id: Option<String>,
 ) {
     let issuer = state.config.issuer();
@@ -645,7 +656,7 @@ async fn handle_remote_dm(
         &state.pool,
         conversation_id,
         sender_actor_uri,
-        content,
+        mls_ciphertext,
         &activity_uri,
         None,
     )
@@ -658,37 +669,18 @@ async fn handle_remote_dm(
         }
     };
 
-    let note = activitypub::Note::direct(
+    // Build the MLS-flavored Create{Note} envelope. The conversation UUID
+    // travels in the Note's `context` field so the recipient's inbox keeps
+    // the same conversation_id on both sides.
+    let activity_value = federation_mls::build_application_create_activity(
+        &activity_uri,
         &activity_uri,
         sender_actor_uri,
         &recipient_actor_uri,
-        content,
+        conversation_id,
+        mls_ciphertext,
+        None,
     );
-    let activity = activitypub::create_note_activity(
-        &activity_uri,
-        sender_actor_uri,
-        &recipient_actor_uri,
-        note,
-    );
-    let mut activity_value = match serde_json::to_value(&activity) {
-        Ok(v) => v,
-        Err(e) => {
-            warn!("failed to serialize ap activity: {e}");
-            return;
-        }
-    };
-
-    // Carry the conversation UUID through ActivityPub via `object.context`.
-    // Bob's inbox parses `body.object.context` to call `get_or_create_dm_with_id`,
-    // ensuring both sides keep the *same* conversation UUID for this DM. Without
-    // this, Bob's inbox falls back to creating a fresh UUID and the two
-    // instances permanently disagree on the conversation's identity.
-    if let Some(obj) = activity_value.get_mut("object").and_then(|o| o.as_object_mut()) {
-        obj.insert(
-            "context".to_string(),
-            serde_json::Value::String(conversation_id.to_string()),
-        );
-    }
 
     let state_clone = state.clone();
     let inbox = inbox_url.clone();
@@ -711,11 +703,9 @@ async fn handle_remote_dm(
         kind: "dm".to_string(),
         sender_address: sender.federated_address(local_domain),
         sender_display_name,
-        content: msg.content,
+        mls_ciphertext: B64.encode(&msg.mls_ciphertext),
         created_at: msg.created_at,
         reply_to_id: None,
-        reply_to_content: None,
-        reply_to_sender: None,
         attachments: Vec::new(),
         client_id,
     });

@@ -97,12 +97,39 @@ pub async fn upload_attachments(
     }
 
     let mut parsed: Vec<ParsedPart> = Vec::new();
+    // Phase 5c.4: optional client-supplied UUID per request. The
+    // E2EE attachment-encryption flow needs the id BEFORE upload (it
+    // becomes the AAD bound to the ciphertext). We accept exactly
+    // one `attachment_id` field per request and pair it with the
+    // single file part the client sends. Multi-file uploads with
+    // client-supplied ids would need a binding scheme we don't have
+    // a reason to implement yet.
+    let mut client_attachment_id: Option<Uuid> = None;
 
     while let Some(field) = multipart
         .next_field()
         .await
         .map_err(|e| OidcError::invalid_request(format!("multipart error: {e}")))?
     {
+        let field_name = field.name().unwrap_or("").to_string();
+
+        if field_name == "attachment_id" {
+            if client_attachment_id.is_some() {
+                return Err(OidcError::invalid_request(
+                    "duplicate `attachment_id` form field",
+                ));
+            }
+            let raw = field
+                .text()
+                .await
+                .map_err(|e| OidcError::invalid_request(format!("multipart read error: {e}")))?;
+            let id: Uuid = raw
+                .parse()
+                .map_err(|_| OidcError::invalid_request("`attachment_id` is not a UUID"))?;
+            client_attachment_id = Some(id);
+            continue;
+        }
+
         if parsed.len() >= max_files {
             return Err(OidcError::invalid_request(format!(
                 "too many files (max {max_files} per request)"
@@ -172,6 +199,18 @@ pub async fn upload_attachments(
 
     if parsed.is_empty() {
         return Err(OidcError::invalid_request("no files in upload"));
+    }
+
+    // Apply the client-supplied id to the single file part. Multi-
+    // file uploads with a single id would need an explicit pairing
+    // scheme; reject them rather than guess.
+    if let Some(client_id) = client_attachment_id {
+        if parsed.len() != 1 {
+            return Err(OidcError::invalid_request(
+                "`attachment_id` requires exactly one file in the request",
+            ));
+        }
+        parsed[0].id = client_id;
     }
 
     // ── Upload + insert ──────────────────────────────────────────────────────

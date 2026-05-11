@@ -2,32 +2,74 @@ use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use crate::models::{DirectMessage, DirectMessageWithReply};
+use crate::models::DirectMessage;
 
-/// Create a new direct message in a conversation.
-/// `federation_status` defaults to 'pending' in the database.
+/// Create a new direct message in a conversation. The body is an opaque MLS
+/// ciphertext — the server never decrypts it. `federation_status` defaults
+/// to `'pending'` in the database.
+///
+/// The row's `id` is derived from the trailing UUID of `activity_uri` (shape:
+/// `<issuer>/users/<username>/activities/<uuid>`). This is critical for
+/// cross-IdP DMs: without it, the sender's IdP and the recipient's IdP each
+/// pick their own random UUID for the same logical message, and any
+/// encrypted-body reference to it (reactions' `target_message_id`, edits,
+/// replies handed off by the client UI) silently fails to match on the
+/// receiver. Both IdPs see the same `activity_uri`, so deriving the row id
+/// from it gives them a shared identifier. Falls back to a fresh random
+/// UUID only if extraction fails — shouldn't happen for activity URIs we
+/// build, but keeps the call resilient to legacy / malformed input.
 pub async fn create_message(
     pool: &PgPool,
     conversation_id: Uuid,
     sender_actor_uri: &str,
-    content: &str,
+    mls_ciphertext: &[u8],
     activity_uri: &str,
     reply_to_id: Option<Uuid>,
 ) -> Result<DirectMessage, sqlx::Error> {
-    sqlx::query_as::<_, DirectMessage>(
-        r#"
-        INSERT INTO direct_messages (conversation_id, sender_actor_uri, content, activity_uri, reply_to_id)
-        VALUES ($1, $2, $3, $4, $5)
-        RETURNING *
-        "#,
-    )
-    .bind(conversation_id)
-    .bind(sender_actor_uri)
-    .bind(content)
-    .bind(activity_uri)
-    .bind(reply_to_id)
-    .fetch_one(pool)
-    .await
+    if let Some(id) = extract_activity_uuid(activity_uri) {
+        sqlx::query_as::<_, DirectMessage>(
+            r#"
+            INSERT INTO direct_messages
+                (id, conversation_id, sender_actor_uri, mls_ciphertext, activity_uri, reply_to_id)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            RETURNING *
+            "#,
+        )
+        .bind(id)
+        .bind(conversation_id)
+        .bind(sender_actor_uri)
+        .bind(mls_ciphertext)
+        .bind(activity_uri)
+        .bind(reply_to_id)
+        .fetch_one(pool)
+        .await
+    } else {
+        sqlx::query_as::<_, DirectMessage>(
+            r#"
+            INSERT INTO direct_messages
+                (conversation_id, sender_actor_uri, mls_ciphertext, activity_uri, reply_to_id)
+            VALUES ($1, $2, $3, $4, $5)
+            RETURNING *
+            "#,
+        )
+        .bind(conversation_id)
+        .bind(sender_actor_uri)
+        .bind(mls_ciphertext)
+        .bind(activity_uri)
+        .bind(reply_to_id)
+        .fetch_one(pool)
+        .await
+    }
+}
+
+/// Pull the trailing UUID out of an `activity_uri` of shape
+/// `<issuer>/users/<username>/activities/<uuid>`. Used to bridge message
+/// row ids across IdPs in cross-server DMs.
+fn extract_activity_uuid(activity_uri: &str) -> Option<Uuid> {
+    activity_uri
+        .rsplit('/')
+        .next()
+        .and_then(|seg| Uuid::parse_str(seg).ok())
 }
 
 /// Find a message by its primary key.
@@ -56,26 +98,22 @@ pub async fn find_by_activity_uri(
     .await
 }
 
-/// Fetch the initial page of a conversation (most recent messages, newest first)
-/// with inline reply previews via LEFT JOIN on the parent message.
+/// Fetch the initial page of a conversation (most recent messages, newest
+/// first). After Phase 3 there's no server-side reply preview — `reply_to_id`
+/// is server-visible for routing, but the preview text/sender lives inside
+/// the encrypted body and the client reconstructs it from its decrypted
+/// MLS stream.
 pub async fn get_conversation(
     pool: &PgPool,
     conversation_id: Uuid,
     limit: i64,
-) -> Result<Vec<DirectMessageWithReply>, sqlx::Error> {
-    sqlx::query_as::<_, DirectMessageWithReply>(
+) -> Result<Vec<DirectMessage>, sqlx::Error> {
+    sqlx::query_as::<_, DirectMessage>(
         r#"
-        SELECT
-            dm.id, dm.conversation_id, dm.sender_actor_uri, dm.content,
-            dm.activity_uri, dm.federation_status, dm.created_at, dm.edited_at,
-            dm.deleted_at, dm.reply_to_id,
-            parent.content           AS reply_to_content,
-            parent.sender_actor_uri  AS reply_to_sender
-        FROM direct_messages dm
-        LEFT JOIN direct_messages parent ON dm.reply_to_id = parent.id
-        WHERE dm.conversation_id = $1
-          AND dm.deleted_at IS NULL
-        ORDER BY dm.created_at DESC, dm.id DESC
+        SELECT * FROM direct_messages
+        WHERE conversation_id = $1
+          AND deleted_at IS NULL
+        ORDER BY created_at DESC, id DESC
         LIMIT $2
         "#,
     )
@@ -85,29 +123,22 @@ pub async fn get_conversation(
     .await
 }
 
-/// Fetch older messages before the given cursor `(created_at, id)` for keyset pagination,
-/// with inline reply previews.
+/// Fetch older messages before the given cursor `(created_at, id)` for keyset
+/// pagination.
 pub async fn get_conversation_before(
     pool: &PgPool,
     conversation_id: Uuid,
     cursor_created_at: OffsetDateTime,
     cursor_id: Uuid,
     limit: i64,
-) -> Result<Vec<DirectMessageWithReply>, sqlx::Error> {
-    sqlx::query_as::<_, DirectMessageWithReply>(
+) -> Result<Vec<DirectMessage>, sqlx::Error> {
+    sqlx::query_as::<_, DirectMessage>(
         r#"
-        SELECT
-            dm.id, dm.conversation_id, dm.sender_actor_uri, dm.content,
-            dm.activity_uri, dm.federation_status, dm.created_at, dm.edited_at,
-            dm.deleted_at, dm.reply_to_id,
-            parent.content           AS reply_to_content,
-            parent.sender_actor_uri  AS reply_to_sender
-        FROM direct_messages dm
-        LEFT JOIN direct_messages parent ON dm.reply_to_id = parent.id
-        WHERE dm.conversation_id = $1
-          AND dm.deleted_at IS NULL
-          AND (dm.created_at, dm.id) < ($2, $3)
-        ORDER BY dm.created_at DESC, dm.id DESC
+        SELECT * FROM direct_messages
+        WHERE conversation_id = $1
+          AND deleted_at IS NULL
+          AND (created_at, id) < ($2, $3)
+        ORDER BY created_at DESC, id DESC
         LIMIT $4
         "#,
     )
@@ -119,18 +150,23 @@ pub async fn get_conversation_before(
     .await
 }
 
-/// Edit the content of a message. Only the original sender can edit.
-/// Returns the updated message, or `None` if not found / caller is not the sender.
+/// Replace the ciphertext of a message and stamp `edited_at`. Only the
+/// original sender can edit. Returns the updated message, or `None` if not
+/// found / caller is not the sender.
+///
+/// The new content lives entirely inside the new `mls_ciphertext` blob —
+/// the server stamps `edited_at` for ordering but stays opaque to what
+/// changed.
 pub async fn edit_message(
     pool: &PgPool,
     id: Uuid,
     sender_actor_uri: &str,
-    new_content: &str,
+    new_mls_ciphertext: &[u8],
 ) -> Result<Option<DirectMessage>, sqlx::Error> {
     sqlx::query_as::<_, DirectMessage>(
         r#"
         UPDATE direct_messages
-        SET content = $3, edited_at = now()
+        SET mls_ciphertext = $3, edited_at = now()
         WHERE id = $1
           AND sender_actor_uri = $2
           AND deleted_at IS NULL
@@ -139,23 +175,23 @@ pub async fn edit_message(
     )
     .bind(id)
     .bind(sender_actor_uri)
-    .bind(new_content)
+    .bind(new_mls_ciphertext)
     .fetch_optional(pool)
     .await
 }
 
-/// Update the content of a message matched by activity_uri (used for federated edits).
-/// Returns whether a row was updated.
+/// Update the ciphertext of a message matched by `activity_uri` (used for
+/// federated edits). Returns the row when found.
 pub async fn edit_message_by_activity_uri(
     pool: &PgPool,
     activity_uri: &str,
     sender_actor_uri: &str,
-    new_content: &str,
+    new_mls_ciphertext: &[u8],
 ) -> Result<Option<DirectMessage>, sqlx::Error> {
     sqlx::query_as::<_, DirectMessage>(
         r#"
         UPDATE direct_messages
-        SET content = $3, edited_at = now()
+        SET mls_ciphertext = $3, edited_at = now()
         WHERE activity_uri = $1
           AND sender_actor_uri = $2
           AND deleted_at IS NULL
@@ -164,7 +200,7 @@ pub async fn edit_message_by_activity_uri(
     )
     .bind(activity_uri)
     .bind(sender_actor_uri)
-    .bind(new_content)
+    .bind(new_mls_ciphertext)
     .fetch_optional(pool)
     .await
 }
@@ -189,14 +225,18 @@ pub async fn update_federation_status(
     Ok(())
 }
 
-/// Summary row for the conversation list — returned by the enriched CTE query.
+/// Summary row for the conversation list. Phase 3 dropped the plaintext
+/// `last_message_preview` since the body is opaque ciphertext. The client
+/// reconstructs a preview from its decrypted MLS stream.
+///
+/// `last_message_sender` stays — it's just `direct_messages.sender_actor_uri`,
+/// which is server-visible by design.
 #[derive(Debug, sqlx::FromRow)]
 pub struct ConversationSummary {
     pub conversation_id: Uuid,
     pub kind: String,
     pub name: Option<String>,
     pub last_message_at: Option<OffsetDateTime>,
-    pub last_message_preview: Option<String>,
     pub last_message_sender: Option<String>,
     pub unread_count: i64,
     pub members: serde_json::Value,
@@ -214,7 +254,6 @@ pub async fn list_conversations(
             SELECT
                 dm.conversation_id,
                 dm.sender_actor_uri,
-                dm.content,
                 dm.created_at,
                 ROW_NUMBER() OVER (
                     PARTITION BY dm.conversation_id
@@ -228,10 +267,6 @@ pub async fn list_conversations(
             c.kind,
             c.name,
             MAX(rm.created_at)                          AS last_message_at,
-            (SELECT LEFT(rm2.content, 100)
-             FROM ranked_messages rm2
-             WHERE rm2.conversation_id = c.id AND rm2.rn = 1)
-                                                        AS last_message_preview,
             (SELECT rm2.sender_actor_uri
              FROM ranked_messages rm2
              WHERE rm2.conversation_id = c.id AND rm2.rn = 1)

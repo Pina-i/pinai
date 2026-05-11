@@ -60,8 +60,11 @@ identity-provider/
 │   │       └── ws/         #   depend on AppState (transitional).
 │   ├── federation/         # ActivityPub: WebFinger, actor, inbox, outbox, delivery,
 │   │                       #   HTTP Signatures, Bearer-auth helper, actor-name lookup.
-│   ├── messaging/          # DM REST API (send/list/edit/react). Outbound delivery via
-│   │                       #   federation; inbound DMs persisted by federation::inbox.
+│   ├── messaging/          # DM REST API (send/list/edit). Outbound delivery via
+│   │                       #   federation; inbound MLS application messages persisted by
+│   │                       #   `federation::mls::handle_inbound_mls_note`. Reactions
+│   │                       #   left this crate in Phase 3 — they're MLS application
+│   │                       #   messages now and never appear on the wire as such.
 │   ├── social/             # Friend graph REST API (search/request/accept/list/unfriend).
 │   ├── presence/           # Presence + typing domain: store, sweep, fanout, subscriber,
 │   │                       #   inter-IdP SSE client, RemotePresenceRegistry.
@@ -72,7 +75,15 @@ identity-provider/
 │   ├── broker/             # Redis pub-sub + Streams abstraction (EventBroker trait).
 │   ├── db/                 # SQLx models, migrations, repositories
 │   │   └── repos/          # auth_codes, clients, conversations, friendships,
-│   │                       #   messages, reactions, remote_actors, users
+│   │                       #   key_packages, messages, mls_commits, mls_welcomes,
+│   │                       #   recovery_blobs, remote_actors, user_identity_keys, users
+│   │                       #   (reactions repo dropped in Phase 3)
+│   ├── e2ee/               # MLS key directory + Delivery Service: identity /
+│   │                       #   KeyPackages / Recovery Key, plus per-conversation
+│   │                       #   commit log + welcome dispatch (REST endpoints).
+│   │                       #   AP inbound dispatch on `mediaType: application/mls`
+│   │                       #   lives in `federation::mls` to keep the inbox the
+│   │                       #   single owner of incoming AP envelopes.
 │   ├── storage/            # S3-compatible (RustFS) object storage client
 │   └── config/             # Configuration loading, env vars
 ├── migrations/             # SQLx migrations (numbered, applied on startup)
@@ -88,8 +99,9 @@ identity-provider/
 ### Dependency direction (no cycles)
 
 ```
-server  ──► auth, federation, messaging, social, presence, realtime, state
+server  ──► auth, e2ee, federation, messaging, social, presence, realtime, state
 auth    ──► state, federation, presence, realtime, db, storage, broker, config
+e2ee    ──► state, federation, db, config
 messaging  ──► state, federation, realtime, db
 social     ──► state, federation, realtime, db
 presence   ──► realtime, db, broker, config
@@ -119,13 +131,13 @@ db, broker, storage, config ──► (leaves)
 | `PUT /api/avatar` | Replace the user's avatar (raw image bytes; ≤2 MiB; jpeg/png/webp/gif). URL is cache-busted with `?v=<unix_secs>` |
 | `DELETE /api/avatar` | Clear the user's avatar |
 | `POST /register` | User self-registration |
-| `POST /users/:handle/inbox` | ActivityPub inbox (Follow/Accept/Create/Update/Like…) |
+| `POST /users/:handle/inbox` | ActivityPub inbox (Follow/Accept/Create{Note,MLS}/Update{Note,MLS}/MLS commits+welcomes) |
 | `GET /users/:handle` | ActivityPub actor profile (JSON-LD) |
 | `GET /ws?token=<jwt>` | WebSocket upgrade (DMs + presence + events) |
-| `POST /api/dm` | Send a DM (creates conversation if first message; supports `attachment_ids`) |
-| `GET /api/dm` | List conversations (`kind`, `name`, `members[]` with `avatarUrl`, `unread_count`, last message preview) |
-| `GET /api/dm/:conversation_id` | Conversation history (keyset cursor); marks as read on initial load |
-| `PATCH /api/dm/:conversation_id` | Edit a message / rename a group conversation |
+| `POST /api/dm` | Send a DM. Body carries `mls_ciphertext` (base64, mandatory after Phase 3); creates conversation if first message; supports `attachment_ids` and `reply_to_id` |
+| `GET /api/dm` | List conversations (`kind`, `name`, `members[]` with `avatarUrl`, `unread_count`, `last_message_at`, `last_message_sender`). No plaintext preview — clients compute it from the decrypted MLS stream |
+| `GET /api/dm/:conversation_id` | Conversation history (keyset cursor) — every row carries `mls_ciphertext`; marks as read on initial load |
+| `PATCH /api/dm/:message_id/edit` | Replace the row's `mls_ciphertext` and stamp `edited_at`; sender-only |
 | `POST /api/attachments` | Upload up to 5 multipart files; returns orphan attachment IDs |
 | `GET /api/attachments/:id` | Returns a token-protected blob URL + metadata (Bearer auth) |
 | `GET /api/attachments/:id/blob` | The actual byte fetch — token-authed; streams bytes through the IdP from the private object store (or from origin via HTTP-Sig for remote) |
@@ -133,6 +145,18 @@ db, broker, storage, config ──► (leaves)
 | `GET /api/presence` | Current presence snapshot for a set of actors |
 | `GET /api/presence/stream` | Inter-IdP SSE stream for active conversations (authenticated via HTTP Signatures) |
 | `POST /api/presence/batch` | Inter-IdP batch presence poll for sidebar (authenticated via HTTP Signatures) |
+| `POST /api/keys/identity` | Publish/rotate the caller's MLS identity-key triple (MSK / SSK / USK) |
+| `GET /api/keys/identity/:actor_uri` | Fetch a user's MLS identity public keys (Bearer for local user, HTTP-Sig for peer IdP) |
+| `POST /api/keys/packages` | Upload a batch of KeyPackages for one of the caller's devices (cap + lifetime enforced) |
+| `POST /api/keys/packages/claim` | Atomically reserve one KeyPackage for `actor_uri`. `device_id` is optional after Phase 5b — when omitted, the server picks any device with spare KPs and returns the chosen `device_id`. After Phase 5d, Bearer-auth requests for a remote `actor_uri` are proxied to the target's IdP via HTTP-Sig (the local user's bearer becomes the local IdP's signed request to the peer). (Bearer or HTTP-Sig; rate-limited; peer requests rejected for remote targets to prevent proxy chains.) |
+| `GET /api/keys/packages/status` | Per-device available KeyPackage counts + `needs_refill` flag |
+| `PUT /api/keys/recovery` | Set or replace the opt-in passphrase-wrapped MSK backup |
+| `GET /api/keys/recovery` | Fetch the wrapped MSK + Argon2id params for offline decryption |
+| `DELETE /api/keys/recovery` | Opt out of Recovery Key |
+| `POST /api/mls/groups/:conversation_id/commits` | Append an MLS Commit at the next epoch (Bearer; member-gated). Returns `409` with the winning commit on epoch race. **First-message bootstrap**: if no `conversation_members` rows exist yet and the proposed `epoch ≤ 1`, lazy-creates the conversation as a DM with the proposer as the sole initial member. `epoch > 1` against a missing conversation still 404s. |
+| `GET /api/mls/groups/:conversation_id/commits?since=:epoch` | Catch-up: every commit `> since` in epoch order, paginated (Bearer; member-gated) |
+| `GET /api/mls/welcomes?device_id=:uuid` | Atomically claim every pending Welcome targeted at the calling device (Bearer; per-device to keep multi-device users from racing each other) |
+| `POST /api/mls/welcomes` | Hand a Welcome bundle to the sender's IdP for delivery (Bearer-auth as the sender). Body: `{ recipient_actor_uri, recipient_device_id, conversation_id, welcome_blob }`. Server routes off `recipient_actor_uri`: **local** → insert into `mls_welcomes` + `MlsWelcomeReady` WS push, also adds the recipient to `conversation_members`; **remote** → signed AP `Create{Note}` (`mlsKind: welcome`) to the recipient IdP's inbox, also adds the recipient to the local `conversation_members`. The client never branches on local-vs-remote — it always hands the welcome to its own IdP. |
 
 ---
 
@@ -146,6 +170,7 @@ All detailed specifications live in `specs/`. **Read only the file(s) relevant t
 | `specs/02-architecture-diagram.md` | Mermaid flowchart of the full system (C4-style) | Understanding the global picture, updating the diagram |
 | `specs/03-direct-messages.md` | `conversations`, `conversation_members`, `direct_messages` schema, DM delivery (local + federated), unread tracking, reactions, replies, message editing | Anything touching DMs, conversations, messages, reactions, replies, unread counts |
 | `specs/04-presence.md` | Presence states (online/away/offline), typing indicators, Redis pub-sub channels, inter-IdP SSE stream, heartbeat, `PresenceStore` | Online status, typing indicators, presence propagation, inter-IdP SSE |
+| `specs/05-e2ee.md` | MLS-based E2EE: trust model (user-controlled MSK / SSK / USK / Recovery Key), key directory tables + endpoints, group lifecycle on top of `conversation_members`, MLSCiphertext wire format, encrypted attachments, multi-device pairing, account recovery | Anything touching message content, identity keys, KeyPackages, group commits/welcomes, encrypted attachments, device pairing |
 
 ---
 
@@ -162,6 +187,7 @@ All detailed specifications live in `specs/`. **Read only the file(s) relevant t
 - Never derive a conversation key from actor URIs.
 - The UUID is generated by the first-message sender and shared via the ActivityPub `context` field.
 - `kind = 'dm'` | `'group'`. DM titles are derived client-side from `members[0].display_name`. Group titles use the stored `name` column (defaults to comma-joined member display names at creation, editable via `PATCH`).
+- **Cross-IdP row-id bridging**: `direct_messages.id` and `message_attachments.id` are NOT freshly generated — they're derived from the trailing UUID of the message's `activity_uri` (`<issuer>/users/<username>/activities/<uuid>`) and the attachment's URL (`<issuer>/api/attachments/<uuid>/content`) respectively. Both IdPs in a cross-server DM see the same activity URLs, so both compute the same row ids. Without this, anything that references a message or attachment by id from inside the encrypted MLS body (reactions' `target_message_id`, `AttachmentBlobKey.id`, edits, replies) silently fails on the receiver. New repo writes MUST preserve this — `repos::messages::create_message` and `repos::attachments::insert_remote` already do the extraction; future writers must too. `DEFAULT gen_random_uuid()` stays as a fallback only for legacy / malformed URIs.
 
 ### Redis
 - **pub-sub** → ephemeral events (presence states, typing indicators). Loss is acceptable.
@@ -187,11 +213,19 @@ remote_actors            — cache of federated users (inbox_url, avatar_url, fe
 friendships              — friend graph (friend_actor_uri, friend_avatar_url, status)
 conversations            — anchor for every conversation (kind: dm|group, name)
 conversation_members     — participants (actor_uri, joined_at, left_at)
-direct_messages          — messages (conversation_id, sender_actor_uri, activity_uri, reply_to_id)
+direct_messages          — messages (conversation_id, sender_actor_uri, mls_ciphertext, activity_uri,
+                            reply_to_id) — body is opaque MLS ciphertext after Phase 3
 conversation_reads       — last_read_at per user per conversation (unread tracking)
-message_reactions        — emoji reactions (message_id, reactor_actor_uri, emoji)
 message_attachments      — file attachments (message_id, storage_key, mime_type, byte_size,
                             original_filename, remote_origin_url)
+                            Reactions table was dropped in Phase 3 — reactions are MLS
+                            application messages of `kind = "reaction"` inside the encrypted
+                            body, computed client-side from the decrypted stream
+user_identity_keys       — public-only MLS identity (msk/ssk/usk + signatures)
+key_packages             — single-use MLS KeyPackages (per-device stash, expires_at, consumed_at)
+recovery_blobs           — opt-in passphrase-wrapped MSK + Argon2id params (server can't decrypt)
+mls_commits              — per-conversation MLS commit log (UNIQUE(conversation_id, epoch))
+mls_welcomes             — outbound queue for offline device adds (recipient_user_id + device_id)
 ```
 
 ---

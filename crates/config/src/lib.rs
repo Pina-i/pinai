@@ -69,6 +69,17 @@ pub struct Config {
     pub attachment_blocked_extensions: Vec<String>,
     /// MIME types that may not be uploaded. The env var extends the built-in list.
     pub attachment_blocked_mimes: Vec<String>,
+
+    // ── E2EE: MLS key directory ───────────────────────────────────────────
+    /// Maximum unconsumed KeyPackages a single device may hold on the server.
+    /// Uploads that would push the count past this are rejected.
+    pub e2ee_keypackage_cap_per_device: usize,
+    /// `GET /api/keys/packages/status` flags `needs_refill = true` when a
+    /// device's available count drops to this threshold or below.
+    pub e2ee_keypackage_refill_threshold: usize,
+    /// Maximum lifetime accepted on a freshly uploaded KeyPackage. Server
+    /// validates `expires_at - created_at ≤ this` on `POST /api/keys/packages`.
+    pub e2ee_keypackage_lifetime: Duration,
 }
 
 /// Built-in extension blocklist. Extended (never replaced) by
@@ -167,6 +178,19 @@ impl Config {
                 BUILTIN_BLOCKED_MIMES,
                 std::env::var("ATTACHMENT_BLOCKED_MIMES").ok().as_deref(),
             ),
+
+            e2ee_keypackage_cap_per_device: parse_env_usize(
+                "E2EE_KEYPACKAGE_CAP_PER_DEVICE",
+                100,
+            )?,
+            e2ee_keypackage_refill_threshold: parse_env_usize(
+                "E2EE_KEYPACKAGE_REFILL_THRESHOLD",
+                20,
+            )?,
+            e2ee_keypackage_lifetime: Duration::from_secs(parse_env_u64(
+                "E2EE_KEYPACKAGE_LIFETIME_SECS",
+                30 * 24 * 60 * 60,
+            )?),
         })
     }
 

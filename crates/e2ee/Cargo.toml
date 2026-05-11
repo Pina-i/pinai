@@ -1,0 +1,23 @@
+[package]
+name    = "idp-e2ee"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+tokio       = { workspace = true }
+tracing     = { workspace = true }
+uuid        = { workspace = true }
+time        = { workspace = true }
+sqlx        = { workspace = true }
+axum        = { workspace = true }
+dashmap     = { workspace = true }
+base64      = "0.22"
+url         = "2"
+
+idp-config     = { path = "../config",     package = "idp-config" }
+idp-db         = { path = "../db",         package = "idp-db" }
+idp-federation = { path = "../federation", package = "idp-federation" }
+idp-realtime   = { path = "../realtime",   package = "idp-realtime" }
+idp-state      = { path = "../state",      package = "idp-state" }
