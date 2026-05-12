@@ -85,6 +85,15 @@ pub struct FriendshipPayload {
     pub actor_uri: String,
     pub username: String,
     pub display_name: Option<String>,
+    /// DM conversation id for the friendship. Set on `FriendAccepted`
+    /// (the accepter's IdP creates the DM in the same transaction as
+    /// `set_status('accepted')` and surfaces the id here so the
+    /// receiving client can route to the conversation immediately).
+    /// `None` on `FriendRequest` (no DM until accepted) and
+    /// `FriendRemoved` (the conversation row stays, but the event
+    /// doesn't need to mention it).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conversation_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize)]

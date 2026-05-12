@@ -23,7 +23,7 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use serde_json::Value;
 use uuid::Uuid;
 
-use idp_db::repos::{attachments, friendships, messages, remote_actors, users};
+use idp_db::repos::{attachments, conversations, friendships, messages, remote_actors, users};
 
 use idp_realtime::{EditedDmPayload, FriendshipPayload, ProfileUpdatePayload, WsEvent};
 
@@ -119,15 +119,32 @@ async fn handle_follow(
             .await
             .map_err(|e| OidcError::server_error(e.to_string()))?;
 
-        // Push real-time notification to inbox owner.
-        let payload = FriendshipPayload {
+        // Auto-accept local-to-local — create the DM conversation
+        // immediately, same shape as `accept_friendship`.
+        let (conversation_id, _created) = conversations::get_or_create_dm(
+            &state.pool,
+            recipient_actor_uri,
+            follower_uri,
+        )
+        .await
+        .map_err(|e| OidcError::server_error(e.to_string()))?;
+
+        // Push real-time notification to inbox owner. Only `FriendAccepted`
+        // carries the conversation_id — the preceding `FriendRequest` keeps
+        // the no-conversation-yet semantics consistent across paths.
+        let request_payload = FriendshipPayload {
             friendship_id: f2.id,
             actor_uri: follower_uri.to_string(),
             username: follower.username.clone(),
             display_name: follower.display_name.clone(),
+            conversation_id: None,
         };
-        state.hub.send_to_user(&recipient.id, WsEvent::FriendRequest(payload.clone()));
-        state.hub.send_to_user(&recipient.id, WsEvent::FriendAccepted(payload));
+        let accepted_payload = FriendshipPayload {
+            conversation_id: Some(conversation_id),
+            ..request_payload.clone()
+        };
+        state.hub.send_to_user(&recipient.id, WsEvent::FriendRequest(request_payload));
+        state.hub.send_to_user(&recipient.id, WsEvent::FriendAccepted(accepted_payload));
 
         tracing::info!(
             follower = %follower.username,
@@ -163,7 +180,8 @@ async fn handle_follow(
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?;
 
-        // Notify inbox owner of pending friend request.
+        // Notify inbox owner of pending friend request. No conversation
+        // yet — created on accept.
         state.hub.send_to_user(
             &recipient.id,
             WsEvent::FriendRequest(FriendshipPayload {
@@ -171,6 +189,7 @@ async fn handle_follow(
                 actor_uri: actor_url.to_string(),
                 username: remote_username.clone(),
                 display_name,
+                conversation_id: None,
             }),
         );
 
@@ -187,6 +206,17 @@ async fn handle_accept(state: &AppState, body: &Value) -> Result<(), OidcError> 
         .get("actor")
         .and_then(|v| v.as_str())
         .unwrap_or("");
+
+    // Pina'i extension: the accepter's IdP minted the DM conversation
+    // alongside `set_status('accepted')` and surfaces its id here so
+    // both sides agree on `conversations.id`. Missing → fall back to
+    // `get_or_create_dm` (pre-refactor peer) which is a safe
+    // degradation: the two IdPs end up with different ids, exactly
+    // matching the existing pre-refactor state.
+    let advertised_conv_id = body
+        .get("conversationId")
+        .and_then(|v| v.as_str())
+        .and_then(|s| Uuid::parse_str(s).ok());
 
     // Find the local user who sent the follow by looking at the object's actor.
     let follow_actor = body
@@ -210,15 +240,23 @@ async fn handle_accept(state: &AppState, body: &Value) -> Result<(), OidcError> 
                     .await
                     .map_err(|e| OidcError::server_error(e.to_string()))?;
 
+                let conversation_id = create_local_dm_for_accept(
+                    state,
+                    advertised_conv_id,
+                    local_actor_uri,
+                    accepter_uri,
+                ).await?;
+
                 let (username, display_name) = resolve_remote_name(state, accepter_uri).await;
                 state.hub.send_to_user(&local_user.id, WsEvent::FriendAccepted(FriendshipPayload {
                     friendship_id: friendship.id,
                     actor_uri: accepter_uri.to_string(),
                     username,
                     display_name,
+                    conversation_id: Some(conversation_id),
                 }));
 
-                tracing::info!(user = %local_user.username, accepter = %accepter_uri, "friend request accepted via AP");
+                tracing::info!(user = %local_user.username, accepter = %accepter_uri, %conversation_id, "friend request accepted via AP");
                 return Ok(());
             }
         }
@@ -243,20 +281,62 @@ async fn handle_accept(state: &AppState, body: &Value) -> Result<(), OidcError> 
                     .await
                     .map_err(|e| OidcError::server_error(e.to_string()))?;
 
+                let owner_uri = match owner.actor_uri.as_deref() {
+                    Some(u) => u,
+                    None => continue,
+                };
+                let conversation_id = create_local_dm_for_accept(
+                    state,
+                    advertised_conv_id,
+                    owner_uri,
+                    accepter_uri,
+                ).await?;
+
                 let (username, display_name) = resolve_remote_name(state, accepter_uri).await;
                 state.hub.send_to_user(&owner.id, WsEvent::FriendAccepted(FriendshipPayload {
                     friendship_id: friendship.id,
                     actor_uri: accepter_uri.to_string(),
                     username,
                     display_name,
+                    conversation_id: Some(conversation_id),
                 }));
 
-                tracing::info!(friendship_id = %friendship.id, "friend accepted via AP (fallback)");
+                tracing::info!(friendship_id = %friendship.id, %conversation_id, "friend accepted via AP (fallback)");
             }
         }
     }
 
     Ok(())
+}
+
+/// Materialise the local DM row for a friendship that just got accepted via AP.
+/// If the accepter advertised a `conversationId` we honour it (so both sides
+/// agree on the row id); otherwise fall back to `get_or_create_dm` for
+/// safe degradation against pre-refactor peers.
+async fn create_local_dm_for_accept(
+    state: &AppState,
+    advertised: Option<Uuid>,
+    owner_uri: &str,
+    accepter_uri: &str,
+) -> Result<Uuid, OidcError> {
+    let result = match advertised {
+        Some(id) => conversations::get_or_create_dm_with_id(
+            &state.pool,
+            id,
+            owner_uri,
+            accepter_uri,
+        )
+        .await,
+        None => conversations::get_or_create_dm(
+            &state.pool,
+            owner_uri,
+            accepter_uri,
+        )
+        .await,
+    };
+    let (conv_id, _created) = result
+        .map_err(|e| OidcError::server_error(e.to_string()))?;
+    Ok(conv_id)
 }
 
 // ─── Reject ──────────────────────────────────────────────────────────────────
@@ -285,6 +365,7 @@ async fn handle_reject(state: &AppState, body: &Value) -> Result<(), OidcError> 
             actor_uri: rejecter_uri.to_string(),
             username: String::new(),
             display_name: None,
+            conversation_id: None,
         }));
 
         tracing::info!(friendship_id = %friendship.id, "friend request rejected via AP");
@@ -344,6 +425,7 @@ async fn handle_undo_follow(
         actor_uri: actor_url.to_string(),
         username,
         display_name,
+        conversation_id: None,
     }));
 
     tracing::info!(actor = %actor_url, recipient = %recipient.username, "unfriended via AP Undo");
