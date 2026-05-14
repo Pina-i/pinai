@@ -575,6 +575,46 @@ pub async fn get_conversation(
     Ok(Json(responses))
 }
 
+// ─── Mark conversation as read ────────────────────────────────────────────────
+
+/// POST /api/dm/:conversation_id/read
+///
+/// Bumps the caller's `conversation_reads.last_read_at` to NOW. Used by the
+/// client when the user is actively viewing a conversation and a new
+/// message arrives — without it, the server would still report
+/// `unread_count > 0` on the next `GET /api/dm` refresh and the sidebar
+/// badge would re-appear once the user navigates away.
+///
+/// Idempotent. Membership-gated.
+#[tracing::instrument(skip_all, fields(conversation_id = %conversation_id))]
+pub async fn mark_read(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(conversation_id): Path<Uuid>,
+) -> Result<StatusCode, OidcError> {
+    let caller_id = require_auth(&state, &headers).await?;
+
+    let caller = users::find_by_id(&state.pool, caller_id)
+        .await
+        .map_err(|e| OidcError::server_error(e.to_string()))?
+        .ok_or_else(|| OidcError::server_error("Caller not found"))?;
+    let caller_actor_uri = caller.actor_uri.as_deref()
+        .ok_or_else(|| OidcError::server_error("Caller has no actor_uri"))?;
+
+    let members = conversations::get_members(&state.pool, conversation_id)
+        .await
+        .map_err(|e| OidcError::server_error(e.to_string()))?;
+    if !members.iter().any(|m| m.actor_uri == caller_actor_uri) {
+        return Err(OidcError::not_found("Conversation not found"));
+    }
+
+    conversation_reads::mark_read(&state.pool, caller_id, conversation_id)
+        .await
+        .map_err(|e| OidcError::server_error(e.to_string()))?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
 // ─── List conversations ───────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize)]

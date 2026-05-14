@@ -256,6 +256,11 @@ async fn handle_accept(state: &AppState, body: &Value) -> Result<(), OidcError> 
                     conversation_id: Some(conversation_id),
                 }));
 
+                // Wire the new remote friend into batch presence polling.
+                if let Some(registry) = &state.remote_registry {
+                    registry.register_friend(accepter_uri, &state.config.issuer());
+                }
+
                 tracing::info!(user = %local_user.username, accepter = %accepter_uri, %conversation_id, "friend request accepted via AP");
                 return Ok(());
             }
@@ -300,6 +305,11 @@ async fn handle_accept(state: &AppState, body: &Value) -> Result<(), OidcError> 
                     display_name,
                     conversation_id: Some(conversation_id),
                 }));
+
+                // Wire the new remote friend into batch presence polling.
+                if let Some(registry) = &state.remote_registry {
+                    registry.register_friend(accepter_uri, &state.config.issuer());
+                }
 
                 tracing::info!(friendship_id = %friendship.id, %conversation_id, "friend accepted via AP (fallback)");
             }
@@ -368,6 +378,12 @@ async fn handle_reject(state: &AppState, body: &Value) -> Result<(), OidcError> 
             conversation_id: None,
         }));
 
+        // Drop from batch presence polling — we no longer have a
+        // friendship to track for this remote actor.
+        if let Some(registry) = &state.remote_registry {
+            registry.unregister_friend(rejecter_uri, &state.config.issuer());
+        }
+
         tracing::info!(friendship_id = %friendship.id, "friend request rejected via AP");
     }
 
@@ -427,6 +443,12 @@ async fn handle_undo_follow(
         display_name,
         conversation_id: None,
     }));
+
+    // Drop from batch presence polling — we no longer have a
+    // friendship to track for this remote actor.
+    if let Some(registry) = &state.remote_registry {
+        registry.unregister_friend(actor_url, &state.config.issuer());
+    }
 
     tracing::info!(actor = %actor_url, recipient = %recipient.username, "unfriended via AP Undo");
     Ok(())
