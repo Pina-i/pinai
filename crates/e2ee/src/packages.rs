@@ -104,6 +104,18 @@ pub async fn post_packages(
         decoded.push(bytes);
     }
 
+    // Phase 7 — deferred: server-side DRK signature validation on each leaf
+    // credential. Doing this on the server requires parsing the TLS-encoded
+    // openmls KeyPackage to extract the BasicCredential identity field,
+    // which means pulling openmls into the server crate (currently
+    // client-only via openmls-wasm). Skipped for now — peer clients verify
+    // the IdP→DRK→leaf chain in `attestation-chain.adapter.ts` when a
+    // foreign leaf surfaces in their MLS state, which is the security-
+    // critical path. A malicious local client could upload a KP with a
+    // forged leaf signature, but only their own KPs would be affected
+    // (peers would reject them at consume-time). Add server-side validation
+    // when openmls is needed for other reasons. See plan Task 1.11.
+
     let pending: Vec<key_packages::PendingPackage<'_>> = decoded
         .iter()
         .zip(body.packages.iter())
