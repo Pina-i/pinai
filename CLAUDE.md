@@ -76,9 +76,10 @@ identity-provider/
 │   ├── db/                 # SQLx models, migrations, repositories
 │   │   └── repos/          # auth_codes, clients, conversations, friendships,
 │   │                       #   key_packages, messages, mls_commits, mls_welcomes,
-│   │                       #   recovery_blobs, remote_actors, user_devices,
-│   │                       #   user_identity_keys, users
-│   │                       #   (reactions repo dropped in Phase 3)
+│   │                       #   history_messages, history_salt, remote_actors,
+│   │                       #   user_devices, users
+│   │                       #   (reactions repo dropped in Phase 3; user_identity_keys
+│   │                       #   + recovery_blobs dropped in Phase 7)
 │   ├── e2ee/               # MLS key directory + Delivery Service: identity /
 │   │                       #   KeyPackages / Recovery Key, plus per-conversation
 │   │                       #   commit log + welcome dispatch (REST endpoints).
@@ -146,16 +147,17 @@ db, broker, storage, config ──► (leaves)
 | `GET /api/presence` | Current presence snapshot for a set of actors |
 | `GET /api/presence/stream` | Inter-IdP SSE stream for active conversations (authenticated via HTTP Signatures) |
 | `POST /api/presence/batch` | Inter-IdP batch presence poll for sidebar (authenticated via HTTP Signatures) |
-| `POST /api/keys/identity` | Publish/rotate the caller's MLS identity-key triple (MSK / SSK / USK) |
-| `GET /api/keys/identity/:actor_uri` | Fetch a user's MLS identity public keys (Bearer for local user, HTTP-Sig for peer IdP) |
+| `POST /api/keys/devices` | Phase 7 — register/renew/rotate this device's IdP-attested DRK (Bearer-auth). Idempotent on `(device_id, drk_public_key)`. New row → first-time mint + `DeviceJoined` WS event; same DRK → fresh `expires_at`; new DRK → rotation. Returns the signature, kid, expiries, and the canonical bytes the IdP signed so the client can re-verify locally. |
 | `POST /api/keys/packages` | Upload a batch of KeyPackages for one of the caller's devices (cap + lifetime enforced) |
 | `POST /api/keys/packages/claim` | Atomically reserve one KeyPackage for `actor_uri`. `device_id` is optional after Phase 5b — when omitted, the server picks any device with spare KPs and returns the chosen `device_id`. After Phase 5d, Bearer-auth requests for a remote `actor_uri` are proxied to the target's IdP via HTTP-Sig (the local user's bearer becomes the local IdP's signed request to the peer). (Bearer or HTTP-Sig; rate-limited; peer requests rejected for remote targets to prevent proxy chains.) |
 | `GET /api/keys/packages/status` | Per-device available KeyPackage counts + `needs_refill` flag |
-| `PUT /api/keys/recovery` | Set or replace the opt-in passphrase-wrapped MSK backup |
-| `GET /api/keys/recovery` | Fetch the wrapped MSK + Argon2id params for offline decryption |
-| `DELETE /api/keys/recovery` | Opt out of Recovery Key |
-| `GET /api/keys/devices` | List the caller's devices (Bearer-auth) — `device_id`, `display_name`, `kind`, `paired_at`, `last_seen_at`, `revoked_at`. Backs the Phase 6b Settings → Devices view. |
-| `POST /api/keys/devices/:device_id/revoke` | Mark the targeted device revoked (Bearer-auth) — the directory-level flag that complements MLS Remove commits. |
+| `GET /api/keys/devices` | List the caller's devices (Bearer-auth) — `device_id`, `display_name`, `kind`, `paired_at`, `last_seen_at`, `revoked_at`, `attestation_expires_at` (Phase 7 — when the device's DRK attestation expires, for renewal scheduling). |
+| `POST /api/keys/devices/:device_id/revoke` | Mark the targeted device revoked (Bearer-auth) — directory-level flag complementing MLS Remove commits. |
+| `POST /api/history/messages` | Phase 7 — batch upload of encrypted plaintext archive entries (cap 50). Membership-checked against `conversation_members`; idempotent upsert on `(user_id, id)`. |
+| `GET /api/history/messages?after_id=&after_created_at=&limit=` | Phase 7 — keyset-paginated download of the user's encrypted archive `(created_at DESC, id DESC)`. |
+| `DELETE /api/history/messages` | Phase 7 — wipe the user's archive (Settings → Clear). |
+| `GET /api/history/salt` | Phase 7 — return the per-user salt for Argon2id HAK derivation, or 404 when unset. |
+| `POST /api/history/salt` | Phase 7 — idempotent set-once. Multi-device race-safe via `COALESCE` — loser receives the winning device's salt. |
 | `POST /api/mls/groups/:conversation_id/commits` | Append an MLS Commit at the next epoch (Bearer; member-gated). Returns `409` with the winning commit on epoch race. **First-message bootstrap**: if no `conversation_members` rows exist yet and the proposed `epoch ≤ 1`, lazy-creates the conversation as a DM with the proposer as the sole initial member. `epoch > 1` against a missing conversation still 404s. |
 | `GET /api/mls/groups/:conversation_id/commits?since=:epoch` | Catch-up: every commit `> since` in epoch order, paginated (Bearer; member-gated) |
 | `GET /api/mls/welcomes?device_id=:uuid` | Atomically claim every pending Welcome targeted at the calling device (Bearer; per-device to keep multi-device users from racing each other) |
@@ -224,16 +226,29 @@ message_attachments      — file attachments (message_id, storage_key, mime_typ
                             Reactions table was dropped in Phase 3 — reactions are MLS
                             application messages of `kind = "reaction"` inside the encrypted
                             body, computed client-side from the decrypted stream
-user_identity_keys       — public-only MLS identity (msk/ssk/usk + signatures)
 key_packages             — single-use MLS KeyPackages (per-device stash, expires_at, consumed_at)
-recovery_blobs           — opt-in passphrase-wrapped MSK + Argon2id params (server can't decrypt)
-user_devices             — per-device metadata for the Phase 6b Settings → Devices view
-                            (display_name, kind, paired_at, last_seen_at, revoked_at).
+user_devices             — per-device metadata + Phase 7 IdP-attested DRK columns:
+                            base fields (display_name, kind, paired_at, last_seen_at, revoked_at)
+                            attestation fields (drk_public_key, attestation_signature,
+                            attestation_kid, attestation_issued_at, attestation_expires_at).
                             Upserted on every `POST /api/keys/packages` (display_name + kind
-                            parsed from User-Agent on first publish; last_seen_at refreshed
-                            on every subsequent publish).
+                            parsed from User-Agent on first publish); attestation columns set
+                            by `POST /api/keys/devices` (Phase 7).
+users.history_archive_salt
+                            — Phase 7 per-user random salt for Argon2id HAK derivation.
+                            Set once via idempotent `POST /api/history/salt`; never
+                            overwritten.
+history_messages         — Phase 7 server-side encrypted plaintext archive
+                            (user_id, id, conversation_id, ciphertext, nonce, client_message_id,
+                            created_at). Primary key `(user_id, id)` for idempotent upserts.
+                            Server stores opaque ciphertexts; clients derive HAK from the
+                            user's passphrase + salt and encrypt every decrypted plaintext.
 mls_commits              — per-conversation MLS commit log (UNIQUE(conversation_id, epoch))
 mls_welcomes             — outbound queue for offline device adds (recipient_user_id + device_id)
+
+Dropped in Phase 7: `user_identity_keys` (user-level MSK/SSK/USK trust → per-device
+IdP-attested DRK) and `recovery_blobs` (passphrase-wrapped MSK → encrypted plaintext
+archive under HAK). See `docs/plans/2026-05-14-per-device-identity-design.md`.
 ```
 
 ---
