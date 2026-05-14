@@ -28,6 +28,10 @@ pub enum WsEvent {
     /// Welcome bundle waiting for one of the recipient's devices. Clients
     /// fetch+consume the actual blob via `GET /api/mls/welcomes`.
     MlsWelcomeReady(MlsWelcomeReadyPayload),
+    /// Phase 7 — a new device of the recipient's account just registered.
+    /// Other devices receive this event and run the multi-device fanout
+    /// (add the new device's leaf to every group they're in).
+    DeviceJoined(DeviceJoinedPayload),
 }
 
 /// Slim attachment projection carried on the wire alongside DM events.
@@ -149,6 +153,16 @@ pub struct MlsCommitPayload {
 pub struct MlsWelcomeReadyPayload {
     pub conversation_id: Uuid,
     pub recipient_device_id: Uuid,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceJoinedPayload {
+    pub actor_uri: String,
+    pub device_id: Uuid,
+    /// Standard-base64-encoded Ed25519 public key (32 bytes raw). Receiving
+    /// devices use it to look up the new device when targeting MLS Add commits.
+    pub drk_public_key: String,
 }
 
 // ─── Client-to-server messages ───────────────────────────────────────────────
