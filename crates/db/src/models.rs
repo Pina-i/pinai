@@ -183,4 +183,11 @@ pub struct UserDevice {
     pub paired_at: OffsetDateTime,
     pub last_seen_at: OffsetDateTime,
     pub revoked_at: Option<OffsetDateTime>,
+    // Phase 7 — per-device IdP attestation. NULL until the device hits
+    // `POST /api/keys/devices` for first-time registration.
+    pub drk_public_key: Option<Vec<u8>>,
+    pub attestation_signature: Option<Vec<u8>>,
+    pub attestation_kid: Option<String>,
+    pub attestation_issued_at: Option<OffsetDateTime>,
+    pub attestation_expires_at: Option<OffsetDateTime>,
 }

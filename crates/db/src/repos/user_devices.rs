@@ -6,6 +6,7 @@
 //! (a second call is a no-op).
 
 use sqlx::PgPool;
+use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::models::UserDevice;
@@ -51,7 +52,9 @@ pub async fn list_user_devices(
     sqlx::query_as::<_, UserDevice>(
         r#"
         SELECT device_id, user_id, display_name, kind,
-               paired_at, last_seen_at, revoked_at
+               paired_at, last_seen_at, revoked_at,
+               drk_public_key, attestation_signature, attestation_kid,
+               attestation_issued_at, attestation_expires_at
         FROM user_devices
         WHERE user_id = $1
         ORDER BY (revoked_at IS NOT NULL), last_seen_at DESC
@@ -59,6 +62,62 @@ pub async fn list_user_devices(
     )
     .bind(user_id)
     .fetch_all(pool)
+    .await
+}
+
+/// Phase 7 — persist the IdP attestation for a device. Called from the
+/// `POST /api/keys/devices` handler after the canonical attestation bytes
+/// have been signed.
+pub async fn set_attestation(
+    pool: &PgPool,
+    device_id: Uuid,
+    drk_public_key: &[u8],
+    attestation_signature: &[u8],
+    attestation_kid: &str,
+    issued_at: OffsetDateTime,
+    expires_at: OffsetDateTime,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        UPDATE user_devices
+        SET drk_public_key         = $2,
+            attestation_signature  = $3,
+            attestation_kid        = $4,
+            attestation_issued_at  = $5,
+            attestation_expires_at = $6
+        WHERE device_id = $1
+        "#,
+    )
+    .bind(device_id)
+    .bind(drk_public_key)
+    .bind(attestation_signature)
+    .bind(attestation_kid)
+    .bind(issued_at)
+    .bind(expires_at)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Phase 7 — fetch a device row including its attestation columns. Used by
+/// KeyPackage upload to look up the DRK for leaf-signature validation, and
+/// by the register-device handler to detect renewal vs. rotation modes.
+pub async fn find_with_attestation(
+    pool: &PgPool,
+    device_id: Uuid,
+) -> Result<Option<UserDevice>, sqlx::Error> {
+    sqlx::query_as::<_, UserDevice>(
+        r#"
+        SELECT device_id, user_id, display_name, kind,
+               paired_at, last_seen_at, revoked_at,
+               drk_public_key, attestation_signature, attestation_kid,
+               attestation_issued_at, attestation_expires_at
+        FROM user_devices
+        WHERE device_id = $1
+        "#,
+    )
+    .bind(device_id)
+    .fetch_optional(pool)
     .await
 }
 
