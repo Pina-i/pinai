@@ -26,9 +26,14 @@ pub mod attestation;
 pub mod auth;
 pub mod devices;
 pub mod ds;
+pub mod history;
 pub mod packages;
 pub mod rate_limit;
 
 pub use devices::{get_devices, register_device, revoke_device};
 pub use ds::{get_commits_since, get_welcomes, post_commit, post_welcome};
+pub use history::{
+    delete_all as delete_history, get_page as get_history_page, get_salt as get_history_salt,
+    post_batch as post_history_batch, post_salt as post_history_salt,
+};
 pub use packages::{get_packages_status, post_packages, post_packages_claim};

@@ -45,7 +45,8 @@ use idp_auth::{
     ws::ws_upgrade,
 };
 use idp_e2ee::{
-    get_commits_since, get_devices, get_packages_status, get_welcomes, post_commit,
+    delete_history, get_commits_since, get_devices, get_history_page, get_history_salt,
+    get_packages_status, get_welcomes, post_commit, post_history_batch, post_history_salt,
     post_packages, post_packages_claim, post_welcome, register_device, revoke_device,
 };
 use idp_state::AppState;
@@ -150,6 +151,18 @@ pub fn build(state: AppState) -> Router {
         // attestation; revoke is the directory-level flag.
         .route("/api/keys/devices", get(get_devices).post(register_device))
         .route("/api/keys/devices/{device_id}/revoke", post(revoke_device))
+
+        // ── History backup (Phase 7) — opt-out encrypted plaintext archive ─
+        // POST batch upload, GET keyset-paginated download, DELETE wipe;
+        // GET/POST the per-user salt for Argon2id HAK derivation.
+        .route(
+            "/api/history/messages",
+            post(post_history_batch).get(get_history_page).delete(delete_history),
+        )
+        .route(
+            "/api/history/salt",
+            get(get_history_salt).post(post_history_salt),
+        )
 
         // ── MLS Delivery Service (Bearer-auth) ──────────────────────────
         // Commits: ordered append per group with `409` on epoch race;
