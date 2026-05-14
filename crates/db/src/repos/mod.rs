@@ -4,6 +4,8 @@ pub mod clients;
 pub mod conversation_reads;
 pub mod conversations;
 pub mod friendships;
+pub mod history_messages;
+pub mod history_salt;
 pub mod key_packages;
 pub mod messages;
 pub mod mls_commits;
