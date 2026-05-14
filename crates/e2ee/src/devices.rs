@@ -214,14 +214,32 @@ pub async fn register_device(
     ))
 }
 
-/// Stub — Task 1.9 replaces this with a real WS hub broadcast.
+/// Broadcast a `DeviceJoined` event to every other live session of the
+/// same user. The receiving devices run the multi-device fanout to add
+/// the new device's leaf to every MLS group they're in.
 async fn emit_device_joined(
-    _state: &AppState,
-    _actor_uri: &str,
-    _device_id: Uuid,
-    _drk_pub: &[u8],
+    state: &AppState,
+    actor_uri: &str,
+    device_id: Uuid,
+    drk_pub: &[u8],
 ) {
-    // Intentional no-op until Task 1.9 wires the DeviceJoined WsServerEvent.
+    let user = match users::find_by_actor_uri(&state.pool, actor_uri).await {
+        Ok(Some(u)) => u,
+        Ok(None) => {
+            warn!(actor = %actor_uri, "DeviceJoined emit: no user for actor_uri");
+            return;
+        }
+        Err(e) => {
+            warn!(actor = %actor_uri, error = %e, "DeviceJoined emit: user lookup failed");
+            return;
+        }
+    };
+    let event = idp_realtime::WsEvent::DeviceJoined(idp_realtime::DeviceJoinedPayload {
+        actor_uri: actor_uri.to_string(),
+        device_id,
+        drk_public_key: Base64::encode_string(drk_pub),
+    });
+    state.hub.send_to_user(&user.id, event);
 }
 
 /// `POST /api/keys/devices/:device_id/revoke` (Bearer)
