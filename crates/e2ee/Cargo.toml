@@ -14,7 +14,13 @@ sqlx        = { workspace = true }
 axum        = { workspace = true }
 dashmap     = { workspace = true }
 base64      = "0.22"
+base64ct    = { version = "1", features = ["alloc"] }
+ed25519-dalek = { version = "2" }
+rand        = "0.8"
 url         = "2"
+
+[dev-dependencies]
+rand        = "0.8"
 
 idp-config     = { path = "../config",     package = "idp-config" }
 idp-db         = { path = "../db",         package = "idp-db" }
