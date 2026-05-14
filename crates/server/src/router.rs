@@ -5,8 +5,9 @@ use axum::{
     Json, Router,
 };
 use serde_json::json;
+use axum::http::HeaderName;
 use tower_http::{
-    cors::{AllowHeaders, CorsLayer},
+    cors::CorsLayer,
     trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer},
 };
 use tracing::Level;
@@ -23,7 +24,7 @@ use idp_federation::{
 use idp_messaging::{
     attachments::{get_attachment, upload_attachments},
     blob::get_attachment_blob,
-    edit_message, get_conversation, list_conversations, send_message,
+    edit_message, get_conversation, list_conversations, mark_read, send_message,
 };
 use idp_social::{
     accept_friendship, delete_friendship, get_friends, get_incoming_requests,
@@ -44,9 +45,9 @@ use idp_auth::{
     ws::ws_upgrade,
 };
 use idp_e2ee::{
-    delete_recovery, get_commits_since, get_identity, get_packages_status, get_recovery,
-    get_welcomes, post_commit, post_identity, post_packages, post_packages_claim, post_welcome,
-    put_recovery,
+    delete_recovery, get_commits_since, get_devices, get_identity, get_packages_status,
+    get_recovery, get_welcomes, post_commit, post_identity, post_packages, post_packages_claim,
+    post_welcome, put_recovery, revoke_device,
 };
 use idp_state::AppState;
 
@@ -67,10 +68,20 @@ pub fn build(state: AppState) -> Router {
         * state.config.attachment_max_byte_size
         + 1024 * 1024) as usize;
 
+    // Explicit header allowlist — Firefox/Gecko treats `Access-Control-Allow-Headers: *`
+    // as not covering `Authorization`, so the wildcard would silently drop our
+    // Bearer-auth on every cross-origin request. Listing the headers we
+    // actually send (and the ones browsers' fetch preflight asks about) is
+    // both more correct and warning-free.
     let cors = CorsLayer::new()
         .allow_origin(origins)
         .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE, Method::PATCH, Method::OPTIONS])
-        .allow_headers(AllowHeaders::any())
+        .allow_headers([
+            HeaderName::from_static("authorization"),
+            HeaderName::from_static("content-type"),
+            HeaderName::from_static("accept"),
+            HeaderName::from_static("x-requested-with"),
+        ])
         .allow_credentials(false);
 
     // HTTP request/response tracing — one span per request with method, path, status, latency.
@@ -118,6 +129,7 @@ pub fn build(state: AppState) -> Router {
         // computed client-side from the decrypted MLS stream (Phase 3).
         .route("/api/dm", post(send_message).get(list_conversations))
         .route("/api/dm/{conversation_id}", get(get_conversation))
+        .route("/api/dm/{conversation_id}/read", post(mark_read))
         .route("/api/dm/{message_id}/edit", patch(edit_message))
 
         // ── Avatar API (Bearer-auth) ────────────────────────────────────
@@ -141,6 +153,9 @@ pub fn build(state: AppState) -> Router {
             "/api/keys/recovery",
             put(put_recovery).get(get_recovery).delete(delete_recovery),
         )
+        // Devices (Phase 6b): per-device metadata + per-device revoke.
+        .route("/api/keys/devices", get(get_devices))
+        .route("/api/keys/devices/{device_id}/revoke", post(revoke_device))
 
         // ── MLS Delivery Service (Bearer-auth) ──────────────────────────
         // Commits: ordered append per group with `409` on epoch race;

@@ -296,6 +296,13 @@ pub async fn delete_friendship(
         }
     }
 
+    // Drop the friend from batch presence polling. Best-effort — if
+    // they were never registered (e.g. local friend), `unregister_friend`
+    // short-circuits via the `starts_with(local_issuer)` guard.
+    if let Some(registry) = &state.remote_registry {
+        registry.unregister_friend(&friend_actor_uri, &state.config.issuer());
+    }
+
     tracing::info!(caller = %caller_id, friend = %friend_actor_uri, "unfriended");
     Ok(StatusCode::NO_CONTENT)
 }
@@ -442,6 +449,14 @@ pub async fn accept_friendship(
                 "AP Accept delivered to remote IdP"
             );
         }
+    }
+
+    // Register the friend for batch presence polling so their online
+    // state appears in this IdP's local presence store within one poll
+    // interval. No-op for local friends — their presence flows through
+    // the local WS hub already.
+    if let Some(registry) = &state.remote_registry {
+        registry.register_friend(&friendship.friend_actor_uri, &state.config.issuer());
     }
 
     tracing::info!(friendship_id = %friendship_id, %conversation_id, "friend request accepted");

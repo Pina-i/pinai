@@ -76,7 +76,8 @@ identity-provider/
 │   ├── db/                 # SQLx models, migrations, repositories
 │   │   └── repos/          # auth_codes, clients, conversations, friendships,
 │   │                       #   key_packages, messages, mls_commits, mls_welcomes,
-│   │                       #   recovery_blobs, remote_actors, user_identity_keys, users
+│   │                       #   recovery_blobs, remote_actors, user_devices,
+│   │                       #   user_identity_keys, users
 │   │                       #   (reactions repo dropped in Phase 3)
 │   ├── e2ee/               # MLS key directory + Delivery Service: identity /
 │   │                       #   KeyPackages / Recovery Key, plus per-conversation
@@ -153,6 +154,8 @@ db, broker, storage, config ──► (leaves)
 | `PUT /api/keys/recovery` | Set or replace the opt-in passphrase-wrapped MSK backup |
 | `GET /api/keys/recovery` | Fetch the wrapped MSK + Argon2id params for offline decryption |
 | `DELETE /api/keys/recovery` | Opt out of Recovery Key |
+| `GET /api/keys/devices` | List the caller's devices (Bearer-auth) — `device_id`, `display_name`, `kind`, `paired_at`, `last_seen_at`, `revoked_at`. Backs the Phase 6b Settings → Devices view. |
+| `POST /api/keys/devices/:device_id/revoke` | Mark the targeted device revoked (Bearer-auth) — the directory-level flag that complements MLS Remove commits. |
 | `POST /api/mls/groups/:conversation_id/commits` | Append an MLS Commit at the next epoch (Bearer; member-gated). Returns `409` with the winning commit on epoch race. **First-message bootstrap**: if no `conversation_members` rows exist yet and the proposed `epoch ≤ 1`, lazy-creates the conversation as a DM with the proposer as the sole initial member. `epoch > 1` against a missing conversation still 404s. |
 | `GET /api/mls/groups/:conversation_id/commits?since=:epoch` | Catch-up: every commit `> since` in epoch order, paginated (Bearer; member-gated) |
 | `GET /api/mls/welcomes?device_id=:uuid` | Atomically claim every pending Welcome targeted at the calling device (Bearer; per-device to keep multi-device users from racing each other) |
@@ -224,6 +227,11 @@ message_attachments      — file attachments (message_id, storage_key, mime_typ
 user_identity_keys       — public-only MLS identity (msk/ssk/usk + signatures)
 key_packages             — single-use MLS KeyPackages (per-device stash, expires_at, consumed_at)
 recovery_blobs           — opt-in passphrase-wrapped MSK + Argon2id params (server can't decrypt)
+user_devices             — per-device metadata for the Phase 6b Settings → Devices view
+                            (display_name, kind, paired_at, last_seen_at, revoked_at).
+                            Upserted on every `POST /api/keys/packages` (display_name + kind
+                            parsed from User-Agent on first publish; last_seen_at refreshed
+                            on every subsequent publish).
 mls_commits              — per-conversation MLS commit log (UNIQUE(conversation_id, epoch))
 mls_welcomes             — outbound queue for offline device adds (recipient_user_id + device_id)
 ```

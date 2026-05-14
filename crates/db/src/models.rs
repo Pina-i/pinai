@@ -163,3 +163,24 @@ pub struct Attachment {
     pub remote_origin_url: Option<String>,
     pub created_at: OffsetDateTime,
 }
+
+// ─── User device (Phase 6b) ───────────────────────────────────────────────────
+
+/// Per-device metadata for the Settings → Devices view. One row per
+/// `device_id` UUID the user has ever published a KeyPackage from. The
+/// `display_name` + `kind` are auto-detected from the User-Agent header
+/// at first publish; `last_seen_at` is touched on every subsequent
+/// KP publish from that device. `revoked_at` is set by the Devices UI's
+/// per-device "Sign out" action and is the directory-level flag —
+/// actual exclusion from MLS groups happens client-side via Remove commits.
+#[derive(Debug, Clone, sqlx::FromRow, Serialize)]
+pub struct UserDevice {
+    pub device_id: Uuid,
+    pub user_id: Uuid,
+    pub display_name: String,
+    /// `'laptop' | 'phone' | 'tablet' | 'unknown'` — DB-CHECK enforced.
+    pub kind: String,
+    pub paired_at: OffsetDateTime,
+    pub last_seen_at: OffsetDateTime,
+    pub revoked_at: Option<OffsetDateTime>,
+}

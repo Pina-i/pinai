@@ -12,7 +12,7 @@ pub mod handlers;
 pub mod orphan_sweep;
 
 pub use handlers::{
-    edit_message, get_conversation, list_conversations, send_message, ConversationListItem,
-    ConversationMemberInfo, ConversationQuery, EditMessageRequest, MessageResponse,
-    SendMessageRequest,
+    edit_message, get_conversation, list_conversations, mark_read, send_message,
+    ConversationListItem, ConversationMemberInfo, ConversationQuery, EditMessageRequest,
+    MessageResponse, SendMessageRequest,
 };

@@ -101,6 +101,34 @@ impl RemotePresenceRegistry {
         }
     }
 
+    /// Register a newly-accepted friend's actor URI for batch polling
+    /// if it points at a remote domain. Local actors are a no-op —
+    /// their presence is already in this IdP's local store via the WS
+    /// `set_presence` path. Without this, a freshly-accepted remote
+    /// friend stays "Offline" in the local snapshot until the next
+    /// IdP restart (where `populate_registry_from_db` would pick them
+    /// up on startup).
+    pub fn register_friend(&self, actor_uri: &str, local_issuer: &str) {
+        if actor_uri.starts_with(local_issuer) {
+            return;
+        }
+        if let Some(domain) = extract_domain_from_actor_uri(actor_uri) {
+            self.register_for_batch_poll(&domain, vec![actor_uri.to_string()]);
+        }
+    }
+
+    /// Inverse of `register_friend`: drop a removed friend from batch
+    /// polling so we don't keep hitting the remote IdP for someone we
+    /// no longer have a relationship with.
+    pub fn unregister_friend(&self, actor_uri: &str, local_issuer: &str) {
+        if actor_uri.starts_with(local_issuer) {
+            return;
+        }
+        if let Some(domain) = extract_domain_from_actor_uri(actor_uri) {
+            self.unregister_from_batch_poll(&domain, actor_uri);
+        }
+    }
+
     /// Get all domains and their actor sets for batch polling.
     pub fn batch_poll_snapshot(&self) -> HashMap<String, Vec<String>> {
         self.batch_poll_domains

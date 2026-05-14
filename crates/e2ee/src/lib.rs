@@ -23,12 +23,14 @@
 //! See `specs/05-e2ee.md` for the protocol-level design.
 
 pub mod auth;
+pub mod devices;
 pub mod ds;
 pub mod identity;
 pub mod packages;
 pub mod rate_limit;
 pub mod recovery;
 
+pub use devices::{get_devices, revoke_device};
 pub use ds::{get_commits_since, get_welcomes, post_commit, post_welcome};
 pub use identity::{get_identity, post_identity};
 pub use packages::{get_packages_status, post_packages, post_packages_claim};

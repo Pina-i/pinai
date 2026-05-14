@@ -15,12 +15,13 @@ use time::OffsetDateTime;
 use tracing::{instrument, warn};
 use uuid::Uuid;
 
-use idp_db::repos::{key_packages, users};
+use idp_db::repos::{key_packages, user_devices, users};
 use idp_federation::auth::require_auth;
 use idp_federation::delivery as federation_delivery;
 use idp_state::{AppState, OidcError};
 
 use crate::auth::{require_user_or_peer, Requester};
+use crate::devices::parse_user_agent;
 use crate::rate_limit::try_consume;
 
 // ── POST /api/keys/packages ──────────────────────────────────────────────────
@@ -115,6 +116,27 @@ pub async fn post_packages(
     let inserted = key_packages::insert_batch(&state.pool, user_id, body.device_id, &pending)
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?;
+
+    // Phase 6b: materialise the device row for the Settings → Devices
+    // view. `upsert_device` inserts on first publish (using the UA-
+    // derived name + kind) and just bumps `last_seen_at` on every
+    // subsequent call. Failures here are non-fatal — the KeyPackages
+    // are already stored; the user can't see this row in the UI but
+    // every functional path still works.
+    let ua = headers
+        .get(axum::http::header::USER_AGENT)
+        .and_then(|v| v.to_str().ok());
+    let (display_name, kind) = parse_user_agent(ua);
+    if let Err(e) =
+        user_devices::upsert_device(&state.pool, user_id, body.device_id, &display_name, kind)
+            .await
+    {
+        warn!(
+            user_id = %user_id,
+            device_id = %body.device_id,
+            "user_devices upsert failed (non-fatal): {e}"
+        );
+    }
 
     let available_after = available + inserted.len() as i64;
     tracing::info!(
