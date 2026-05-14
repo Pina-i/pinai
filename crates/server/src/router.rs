@@ -45,9 +45,8 @@ use idp_auth::{
     ws::ws_upgrade,
 };
 use idp_e2ee::{
-    delete_recovery, get_commits_since, get_devices, get_identity, get_packages_status,
-    get_recovery, get_welcomes, post_commit, post_identity, post_packages, post_packages_claim,
-    post_welcome, put_recovery, revoke_device,
+    get_commits_since, get_devices, get_packages_status, get_welcomes, post_commit,
+    post_packages, post_packages_claim, post_welcome, revoke_device,
 };
 use idp_state::AppState;
 
@@ -139,21 +138,15 @@ pub fn build(state: AppState) -> Router {
         .route("/api/profile", patch(update_profile))
 
         // ── E2EE key directory ──────────────────────────────────────────
-        // Identity: POST is Bearer (own); GET accepts Bearer (local user
-        // first-contact pin) or HTTP-Sig (peer IdP fetching to add a member).
-        .route("/api/keys/identity", post(post_identity))
-        .route("/api/keys/identity/{actor_uri}", get(get_identity))
         // KeyPackages: POST + status are Bearer (own device);
         // claim accepts Bearer (local cross-add) or HTTP-Sig (peer cross-add).
+        // Each KP's embedded leaf credential carries a DRK signature that the
+        // server validates against the device's registered DRK (see Task 1.11).
         .route("/api/keys/packages", post(post_packages))
         .route("/api/keys/packages/claim", post(post_packages_claim))
         .route("/api/keys/packages/status", get(get_packages_status))
-        // Recovery Key: opt-in passphrase-wrapped MSK backup (Bearer only).
-        .route(
-            "/api/keys/recovery",
-            put(put_recovery).get(get_recovery).delete(delete_recovery),
-        )
-        // Devices (Phase 6b): per-device metadata + per-device revoke.
+        // Devices (Phase 6b + Phase 7): per-device metadata + IdP attestation
+        // (POST /api/keys/devices added in Task 1.7) + per-device revoke.
         .route("/api/keys/devices", get(get_devices))
         .route("/api/keys/devices/{device_id}/revoke", post(revoke_device))
 
