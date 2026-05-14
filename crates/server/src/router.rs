@@ -46,7 +46,7 @@ use idp_auth::{
 };
 use idp_e2ee::{
     get_commits_since, get_devices, get_packages_status, get_welcomes, post_commit,
-    post_packages, post_packages_claim, post_welcome, revoke_device,
+    post_packages, post_packages_claim, post_welcome, register_device, revoke_device,
 };
 use idp_state::AppState;
 
@@ -145,9 +145,10 @@ pub fn build(state: AppState) -> Router {
         .route("/api/keys/packages", post(post_packages))
         .route("/api/keys/packages/claim", post(post_packages_claim))
         .route("/api/keys/packages/status", get(get_packages_status))
-        // Devices (Phase 6b + Phase 7): per-device metadata + IdP attestation
-        // (POST /api/keys/devices added in Task 1.7) + per-device revoke.
-        .route("/api/keys/devices", get(get_devices))
+        // Devices (Phase 6b + Phase 7): per-device metadata + IdP attestation.
+        // GET lists rows; POST is Phase 7 register/renew/rotate the DRK
+        // attestation; revoke is the directory-level flag.
+        .route("/api/keys/devices", get(get_devices).post(register_device))
         .route("/api/keys/devices/{device_id}/revoke", post(revoke_device))
 
         // ── MLS Delivery Service (Bearer-auth) ──────────────────────────

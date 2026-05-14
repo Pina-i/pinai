@@ -29,6 +29,6 @@ pub mod ds;
 pub mod packages;
 pub mod rate_limit;
 
-pub use devices::{get_devices, revoke_device};
+pub use devices::{get_devices, register_device, revoke_device};
 pub use ds::{get_commits_since, get_welcomes, post_commit, post_welcome};
 pub use packages::{get_packages_status, post_packages, post_packages_claim};

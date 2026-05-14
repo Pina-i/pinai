@@ -11,14 +11,20 @@ use axum::{
     http::{HeaderMap, StatusCode},
     Json,
 };
-use serde::Serialize;
-use time::OffsetDateTime;
-use tracing::instrument;
+use base64ct::{Base64, Encoding as _};
+use serde::{Deserialize, Serialize};
+use time::{format_description::well_known::Rfc3339, Duration, OffsetDateTime};
+use tracing::{info, instrument, warn};
 use uuid::Uuid;
 
-use idp_db::repos::user_devices;
+use idp_db::repos::{user_devices, users};
 use idp_federation::auth::require_auth;
 use idp_state::{AppState, OidcError};
+
+use crate::attestation::{canonical_attestation_bytes, sign_attestation};
+
+/// Phase 7 — IdP-attested DRK lifetime. Renews silently at 30-day window.
+const ATTESTATION_TTL_DAYS: i64 = 365;
 
 #[derive(Debug, Serialize)]
 pub struct DeviceListEntry {
@@ -31,6 +37,31 @@ pub struct DeviceListEntry {
     pub last_seen_at: OffsetDateTime,
     #[serde(with = "time::serde::rfc3339::option")]
     pub revoked_at: Option<OffsetDateTime>,
+    /// Phase 7 — when the IdP-signed DRK attestation expires. None for rows
+    /// that haven't yet completed `POST /api/keys/devices` registration.
+    #[serde(with = "time::serde::rfc3339::option")]
+    pub attestation_expires_at: Option<OffsetDateTime>,
+}
+
+/// `POST /api/keys/devices` request body — Phase 7.
+#[derive(Debug, Deserialize)]
+pub struct RegisterDeviceRequest {
+    pub device_id: Uuid,
+    /// Standard-base64-encoded Ed25519 public key (32 bytes raw).
+    pub drk_public_key: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RegisterDeviceResponse {
+    /// Standard-base64-encoded Ed25519 signature (64 bytes raw).
+    pub signature: String,
+    /// IdP JWKS `kid` of the signing key, for verification.
+    pub kid: String,
+    pub issued_at: String,    // RFC3339
+    pub expires_at: String,   // RFC3339
+    /// Standard-base64-encoded canonical bytes the IdP signed — returned so the
+    /// client can re-verify locally before persisting.
+    pub signed_message: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -62,9 +93,135 @@ pub async fn get_devices(
             paired_at: r.paired_at,
             last_seen_at: r.last_seen_at,
             revoked_at: r.revoked_at,
+            attestation_expires_at: r.attestation_expires_at,
         })
         .collect();
     Ok(Json(DeviceListResponse { devices }))
+}
+
+/// `POST /api/keys/devices` (Bearer) — Phase 7.
+///
+/// Idempotent on `(device_id, drk_public_key)`. Three modes:
+/// - **First-time registration**: new row → mint attestation, emit `DeviceJoined`.
+/// - **Renewal**: same row + same DRK → re-mint with fresh `expires_at`.
+/// - **Rotation**: same row + different DRK → overwrite DRK, log WARN. The
+///   client must re-publish KeyPackages — any in-flight KPs signed by the
+///   old DRK will fail leaf-signature validation on subsequent uploads.
+///
+/// Response carries the canonical bytes the IdP signed so the client can
+/// re-verify locally before persisting.
+#[instrument(skip_all, fields(device_id = %body.device_id))]
+pub async fn register_device(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<RegisterDeviceRequest>,
+) -> Result<(StatusCode, Json<RegisterDeviceResponse>), OidcError> {
+    let user_id = require_auth(&state, &headers).await?;
+
+    let drk_pub = Base64::decode_vec(&body.drk_public_key)
+        .map_err(|_| OidcError::invalid_request("drk_public_key must be base64"))?;
+    if drk_pub.len() != 32 {
+        return Err(OidcError::invalid_request("drk_public_key must be 32 bytes (Ed25519)"));
+    }
+
+    let user = users::find_by_id(&state.pool, user_id)
+        .await
+        .map_err(|e| OidcError::server_error(e.to_string()))?
+        .ok_or_else(|| OidcError::server_error("authenticated user vanished"))?;
+    let actor_uri = user
+        .actor_uri
+        .clone()
+        .ok_or_else(|| OidcError::server_error("user has no actor_uri"))?;
+
+    // Look up the existing device row (created by Phase 6b's KP-publish hook,
+    // or absent for a brand-new device that hasn't published yet).
+    let existing = user_devices::find_with_attestation(&state.pool, body.device_id)
+        .await
+        .map_err(|e| OidcError::server_error(e.to_string()))?;
+
+    let is_first_time = existing.as_ref().map(|d| d.drk_public_key.is_none()).unwrap_or(true);
+    let is_rotation = match &existing {
+        Some(d) => d
+            .drk_public_key
+            .as_deref()
+            .map(|p| p != drk_pub.as_slice())
+            .unwrap_or(false),
+        None => false,
+    };
+
+    // Materialise the user_devices row when the device hits this endpoint
+    // before its first KeyPackage publish (Phase 6b's KP hook usually creates
+    // it on first publish, but Phase 7's flow may register before publishing).
+    if existing.is_none() {
+        user_devices::upsert_device(
+            &state.pool,
+            user_id,
+            body.device_id,
+            "Web client",
+            "unknown",
+        )
+        .await
+        .map_err(|e| OidcError::server_error(e.to_string()))?;
+    }
+
+    if is_rotation {
+        warn!(
+            actor = %actor_uri,
+            device = %body.device_id,
+            "DRK rotation — in-flight KeyPackages signed by the old DRK become invalid",
+        );
+    }
+
+    let issued_at = OffsetDateTime::now_utc();
+    let expires_at = issued_at + Duration::days(ATTESTATION_TTL_DAYS);
+    let kid = state.config.jwt_key_id.clone();
+
+    let canonical = canonical_attestation_bytes(&actor_uri, &body.device_id, &drk_pub, expires_at, &kid);
+    let signature = sign_attestation(&state.keypair.signing_key, &canonical);
+    let sig_bytes: [u8; 64] = signature.to_bytes();
+
+    user_devices::set_attestation(
+        &state.pool,
+        body.device_id,
+        &drk_pub,
+        &sig_bytes,
+        &kid,
+        issued_at,
+        expires_at,
+    )
+    .await
+    .map_err(|e| OidcError::server_error(e.to_string()))?;
+
+    if is_first_time {
+        info!(actor = %actor_uri, device = %body.device_id, "first-time device attestation minted");
+        // WS DeviceJoined emit — implemented in Task 1.9.
+        emit_device_joined(&state, &actor_uri, body.device_id, &drk_pub).await;
+    }
+
+    Ok((
+        StatusCode::CREATED,
+        Json(RegisterDeviceResponse {
+            signature: Base64::encode_string(&sig_bytes),
+            kid,
+            issued_at: issued_at
+                .format(&Rfc3339)
+                .expect("RFC3339 format never fails"),
+            expires_at: expires_at
+                .format(&Rfc3339)
+                .expect("RFC3339 format never fails"),
+            signed_message: Base64::encode_string(&canonical),
+        }),
+    ))
+}
+
+/// Stub — Task 1.9 replaces this with a real WS hub broadcast.
+async fn emit_device_joined(
+    _state: &AppState,
+    _actor_uri: &str,
+    _device_id: Uuid,
+    _drk_pub: &[u8],
+) {
+    // Intentional no-op until Task 1.9 wires the DeviceJoined WsServerEvent.
 }
 
 /// `POST /api/keys/devices/:device_id/revoke` (Bearer)
