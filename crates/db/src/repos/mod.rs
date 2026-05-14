@@ -8,8 +8,6 @@ pub mod key_packages;
 pub mod messages;
 pub mod mls_commits;
 pub mod mls_welcomes;
-pub mod recovery_blobs;
 pub mod remote_actors;
 pub mod user_devices;
-pub mod user_identity_keys;
 pub mod users;
