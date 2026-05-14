@@ -22,6 +22,7 @@
 //!
 //! See `specs/05-e2ee.md` for the protocol-level design.
 
+pub mod attestation;
 pub mod auth;
 pub mod devices;
 pub mod ds;
