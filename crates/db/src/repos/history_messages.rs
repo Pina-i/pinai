@@ -1,12 +1,6 @@
-//! `history_messages` repo — server-side encrypted plaintext archive for
-//! the Phase 7 history-backup engine (Layer B).
-//!
-//! The server stores opaque ciphertexts only. The client encrypts decrypted
-//! MLS application-message plaintext under the History Archive Key
-//! (Argon2id-derived from the user's 24-word passphrase) and batch-uploads.
-//! Primary key `(user_id, id)` makes the upsert idempotent — first decryptor
-//! of a given message wins; subsequent uploads from the user's other devices
-//! no-op via `ON CONFLICT DO NOTHING`.
+//! Server-opaque archive of HAK-encrypted plaintext. PK `(user_id, id)` —
+//! the first decryptor wins, subsequent uploads from the user's other
+//! devices no-op via `ON CONFLICT DO NOTHING`.
 
 use sqlx::PgPool;
 use time::OffsetDateTime;
@@ -62,8 +56,7 @@ pub async fn insert_batch(
     Ok(inserted)
 }
 
-/// Keyset pagination ordered by `(created_at DESC, id DESC)`. Pass `None` for
-/// the first page; on subsequent pages, pass the last row's `(created_at, id)`.
+/// Keyset pagination over `(created_at DESC, id DESC)`.
 pub async fn page(
     pool: &PgPool,
     user_id: Uuid,

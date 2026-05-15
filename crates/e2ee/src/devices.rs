@@ -1,10 +1,6 @@
-//! Per-device metadata for the Settings → Devices view (Phase 6b).
-//!
-//! Holds the User-Agent parser and the two device-management
-//! endpoints (`GET /api/keys/devices`, `POST /api/keys/devices/:id/revoke`).
-//! The KP-publish handler in `crates/e2ee/src/packages.rs` calls into
-//! `parse_user_agent` + `user_devices::upsert_device` so a row is
-//! materialised on the first KeyPackage publish per device.
+//! Per-device metadata for Settings → Devices, plus DRK-attestation
+//! register/renew/rotate. UA parser materialises rows on first KP publish
+//! from `crates/e2ee/src/packages.rs`.
 
 use axum::{
     extract::{Path, State},
@@ -23,7 +19,7 @@ use idp_state::{AppState, OidcError};
 
 use crate::attestation::{canonical_attestation_bytes, sign_attestation};
 
-/// Phase 7 — IdP-attested DRK lifetime. Renews silently at 30-day window.
+/// DRK attestation lifetime. Clients renew silently within 30 days of expiry.
 const ATTESTATION_TTL_DAYS: i64 = 365;
 
 #[derive(Debug, Serialize)]
@@ -37,13 +33,11 @@ pub struct DeviceListEntry {
     pub last_seen_at: OffsetDateTime,
     #[serde(with = "time::serde::rfc3339::option")]
     pub revoked_at: Option<OffsetDateTime>,
-    /// Phase 7 — when the IdP-signed DRK attestation expires. None for rows
-    /// that haven't yet completed `POST /api/keys/devices` registration.
+    /// `None` until the device completes `POST /api/keys/devices`.
     #[serde(with = "time::serde::rfc3339::option")]
     pub attestation_expires_at: Option<OffsetDateTime>,
 }
 
-/// `POST /api/keys/devices` request body — Phase 7.
 #[derive(Debug, Deserialize)]
 pub struct RegisterDeviceRequest {
     pub device_id: Uuid,
@@ -99,17 +93,10 @@ pub async fn get_devices(
     Ok(Json(DeviceListResponse { devices }))
 }
 
-/// `POST /api/keys/devices` (Bearer) — Phase 7.
-///
-/// Idempotent on `(device_id, drk_public_key)`. Three modes:
-/// - **First-time registration**: new row → mint attestation, emit `DeviceJoined`.
-/// - **Renewal**: same row + same DRK → re-mint with fresh `expires_at`.
-/// - **Rotation**: same row + different DRK → overwrite DRK, log WARN. The
-///   client must re-publish KeyPackages — any in-flight KPs signed by the
-///   old DRK will fail leaf-signature validation on subsequent uploads.
-///
-/// Response carries the canonical bytes the IdP signed so the client can
-/// re-verify locally before persisting.
+/// `POST /api/keys/devices` (Bearer). Idempotent on `(device_id, drk_public_key)`.
+/// New row → mint attestation, emit `DeviceJoined`. Same DRK → renewal. New DRK
+/// → rotation; in-flight KeyPackages signed by the old DRK become invalid.
+/// Returns the canonical signed bytes so the client can locally re-verify.
 #[instrument(skip_all, fields(device_id = %body.device_id))]
 pub async fn register_device(
     State(state): State<AppState>,
@@ -133,8 +120,7 @@ pub async fn register_device(
         .clone()
         .ok_or_else(|| OidcError::server_error("user has no actor_uri"))?;
 
-    // Look up the existing device row (created by Phase 6b's KP-publish hook,
-    // or absent for a brand-new device that hasn't published yet).
+    // The row exists if the device already published KPs; absent for register-first flows.
     let existing = user_devices::find_with_attestation(&state.pool, body.device_id)
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?;
@@ -149,9 +135,7 @@ pub async fn register_device(
         None => false,
     };
 
-    // Materialise the user_devices row when the device hits this endpoint
-    // before its first KeyPackage publish (Phase 6b's KP hook usually creates
-    // it on first publish, but Phase 7's flow may register before publishing).
+    // Create the row when register-device runs before the first KP publish.
     if existing.is_none() {
         user_devices::upsert_device(
             &state.pool,
@@ -194,7 +178,6 @@ pub async fn register_device(
 
     if is_first_time {
         info!(actor = %actor_uri, device = %body.device_id, "first-time device attestation minted");
-        // WS DeviceJoined emit — implemented in Task 1.9.
         emit_device_joined(&state, &actor_uri, body.device_id, &drk_pub).await;
     }
 
@@ -214,9 +197,7 @@ pub async fn register_device(
     ))
 }
 
-/// Broadcast a `DeviceJoined` event to every other live session of the
-/// same user. The receiving devices run the multi-device fanout to add
-/// the new device's leaf to every MLS group they're in.
+/// Notify the user's other live sessions so they fan out MLS Add commits.
 async fn emit_device_joined(
     state: &AppState,
     actor_uri: &str,

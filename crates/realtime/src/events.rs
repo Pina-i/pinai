@@ -28,9 +28,8 @@ pub enum WsEvent {
     /// Welcome bundle waiting for one of the recipient's devices. Clients
     /// fetch+consume the actual blob via `GET /api/mls/welcomes`.
     MlsWelcomeReady(MlsWelcomeReadyPayload),
-    /// Phase 7 — a new device of the recipient's account just registered.
-    /// Other devices receive this event and run the multi-device fanout
-    /// (add the new device's leaf to every group they're in).
+    /// A new device of the recipient's account just registered. Other live
+    /// sessions add its leaf to every group they're in.
     DeviceJoined(DeviceJoinedPayload),
 }
 

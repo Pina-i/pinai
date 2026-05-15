@@ -165,7 +165,7 @@ db, broker, storage, config ──► (leaves)
 
 ---
 
-## Spec files
+## Spec files **IMPORTANT**
 
 All detailed specifications live in `specs/`. **Read only the file(s) relevant to your task.**
 
@@ -176,6 +176,10 @@ All detailed specifications live in `specs/`. **Read only the file(s) relevant t
 | `specs/03-direct-messages.md` | `conversations`, `conversation_members`, `direct_messages` schema, DM delivery (local + federated), unread tracking, reactions, replies, message editing | Anything touching DMs, conversations, messages, reactions, replies, unread counts |
 | `specs/04-presence.md` | Presence states (online/away/offline), typing indicators, Redis pub-sub channels, inter-IdP SSE stream, heartbeat, `PresenceStore` | Online status, typing indicators, presence propagation, inter-IdP SSE |
 | `specs/05-e2ee.md` | MLS-based E2EE: trust model (user-controlled MSK / SSK / USK / Recovery Key), key directory tables + endpoints, group lifecycle on top of `conversation_members`, MLSCiphertext wire format, encrypted attachments, multi-device pairing, account recovery | Anything touching message content, identity keys, KeyPackages, group commits/welcomes, encrypted attachments, device pairing |
+
+## Spec file modifications **IMPORTANT**
+
+If specs file needs to be updated or created due to code modifications, feature implementation or deletion, ect... make the change accordingly taking care of explaining the globals principles and the different elements, then explain the different usecase scenarios. Use mermaid graph when possible.
 
 ---
 

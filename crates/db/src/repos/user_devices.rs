@@ -1,9 +1,6 @@
-//! `user_devices` repo — per-device metadata for the Settings → Devices view.
-//!
-//! Phase 6b. Inserted on first `POST /api/keys/packages` per
-//! `(user_id, device_id)`, `last_seen_at` touched on every subsequent
-//! publish. `mark_revoked` flips `revoked_at = now()` and is idempotent
-//! (a second call is a no-op).
+//! Per-device metadata for Settings → Devices. Inserted on first KP
+//! publish per `(user_id, device_id)`; `last_seen_at` bumped on later
+//! publishes. `mark_revoked` is idempotent.
 
 use sqlx::PgPool;
 use time::OffsetDateTime;
@@ -65,9 +62,7 @@ pub async fn list_user_devices(
     .await
 }
 
-/// Phase 7 — persist the IdP attestation for a device. Called from the
-/// `POST /api/keys/devices` handler after the canonical attestation bytes
-/// have been signed.
+/// Persist the IdP-signed DRK attestation for a device.
 pub async fn set_attestation(
     pool: &PgPool,
     device_id: Uuid,
@@ -99,9 +94,7 @@ pub async fn set_attestation(
     Ok(())
 }
 
-/// Phase 7 — fetch a device row including its attestation columns. Used by
-/// KeyPackage upload to look up the DRK for leaf-signature validation, and
-/// by the register-device handler to detect renewal vs. rotation modes.
+/// Fetch a device row including its attestation columns.
 pub async fn find_with_attestation(
     pool: &PgPool,
     device_id: Uuid,
