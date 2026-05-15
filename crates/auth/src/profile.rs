@@ -111,12 +111,17 @@ pub async fn update_profile(
     });
 
     let address = updated.federated_address(&state.config.domain);
+    let actor_uri = updated
+        .actor_uri
+        .clone()
+        .unwrap_or_else(|| format!("{}/users/{}", state.config.issuer(), updated.username));
     Ok(Json(UserinfoResponse {
         sub: updated.id.to_string(),
         email: updated.email,
         preferred_username: updated.username,
         display_name: updated.display_name,
         address,
+        actor_uri,
         avatar_url: updated.avatar_url,
         pronouns: updated.pronouns,
         bio: updated.bio,

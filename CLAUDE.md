@@ -180,6 +180,7 @@ All detailed specifications live in `specs/`. **Read only the file(s) relevant t
 ## Spec file modifications **IMPORTANT**
 
 If specs file needs to be updated or created due to code modifications, feature implementation or deletion, ect... make the change accordingly taking care of explaining the globals principles and the different elements, then explain the different usecase scenarios. Use mermaid graph when possible.
+Don't mention any "phase" development or what is currently being worked on. The specs should always reflect the final, stable state of the feature.
 
 ---
 

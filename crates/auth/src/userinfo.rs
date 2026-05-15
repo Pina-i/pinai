@@ -14,6 +14,11 @@ pub struct UserinfoResponse {
     pub preferred_username: String,
     pub display_name: Option<String>,
     pub address: String,
+    /// Canonical ActivityPub actor URI — `<issuer>/users/<username>`.
+    /// Exposed so clients never derive it from the URL they used to
+    /// reach the IdP (which can differ from the configured DOMAIN and
+    /// silently disagree with the server's `is_local` checks).
+    pub actor_uri: String,
     pub avatar_url: Option<String>,
     pub pronouns: Option<String>,
     pub bio: Option<String>,
@@ -52,12 +57,20 @@ pub async fn get_userinfo(
     tracing::debug!(user_id = %user_id, username = %user.username, "userinfo returned");
 
     let address = user.federated_address(&state.config.domain);
+    // `users.actor_uri` is populated at registration in
+    // `auth::register`; the fallback covers legacy rows from before
+    // that field existed.
+    let actor_uri = user
+        .actor_uri
+        .clone()
+        .unwrap_or_else(|| format!("{}/users/{}", state.config.issuer(), user.username));
     Ok(Json(UserinfoResponse {
         sub: user.id.to_string(),
         email: user.email,
         preferred_username: user.username,
         display_name: user.display_name,
         address,
+        actor_uri,
         avatar_url: user.avatar_url,
         pronouns: user.pronouns,
         bio: user.bio,
