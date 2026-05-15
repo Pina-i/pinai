@@ -146,15 +146,11 @@ pub fn build(state: AppState) -> Router {
         .route("/api/keys/packages", post(post_packages))
         .route("/api/keys/packages/claim", post(post_packages_claim))
         .route("/api/keys/packages/status", get(get_packages_status))
-        // Devices (Phase 6b + Phase 7): per-device metadata + IdP attestation.
-        // GET lists rows; POST is Phase 7 register/renew/rotate the DRK
-        // attestation; revoke is the directory-level flag.
+        // Devices — list, register/renew/rotate DRK, revoke.
         .route("/api/keys/devices", get(get_devices).post(register_device))
         .route("/api/keys/devices/{device_id}/revoke", post(revoke_device))
 
-        // ── History backup (Phase 7) — opt-out encrypted plaintext archive ─
-        // POST batch upload, GET keyset-paginated download, DELETE wipe;
-        // GET/POST the per-user salt for Argon2id HAK derivation.
+        // ── History backup ─────────────────────────────────────────────
         .route(
             "/api/history/messages",
             post(post_history_batch).get(get_history_page).delete(delete_history),

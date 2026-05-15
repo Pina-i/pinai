@@ -1,15 +1,10 @@
-//! `users.history_archive_salt` repo — per-user random salt for Argon2id
-//! derivation of the History Archive Key (Phase 7, Layer B).
-//!
-//! Set-once semantics: the first device to register a salt wins; subsequent
-//! POSTs from the user's other devices receive the same salt back (idempotent).
+//! Per-user salt for Argon2id derivation of the History Archive Key.
+//! Set-once: first device wins, subsequent POSTs receive that salt back.
 
 use sqlx::PgPool;
 use uuid::Uuid;
 
-/// Idempotent: store the salt only if currently NULL. Returns whatever is in
-/// the column afterwards. Used by multiple devices racing — the loser gets
-/// back the winning device's salt.
+/// `COALESCE`-based set-once. Returns whatever's now stored.
 pub async fn set_if_unset(
     pool: &PgPool,
     user_id: Uuid,

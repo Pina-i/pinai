@@ -104,17 +104,9 @@ pub async fn post_packages(
         decoded.push(bytes);
     }
 
-    // Phase 7 — deferred: server-side DRK signature validation on each leaf
-    // credential. Doing this on the server requires parsing the TLS-encoded
-    // openmls KeyPackage to extract the BasicCredential identity field,
-    // which means pulling openmls into the server crate (currently
-    // client-only via openmls-wasm). Skipped for now — peer clients verify
-    // the IdP→DRK→leaf chain in `attestation-chain.adapter.ts` when a
-    // foreign leaf surfaces in their MLS state, which is the security-
-    // critical path. A malicious local client could upload a KP with a
-    // forged leaf signature, but only their own KPs would be affected
-    // (peers would reject them at consume-time). Add server-side validation
-    // when openmls is needed for other reasons. See plan Task 1.11.
+    // Server-side DRK signature validation is deferred; peer clients verify
+    // the IdP→DRK→leaf chain when foreign leaves surface in MLS state. Adding
+    // it here would require pulling openmls into the server crate.
 
     let pending: Vec<key_packages::PendingPackage<'_>> = decoded
         .iter()
@@ -129,12 +121,9 @@ pub async fn post_packages(
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?;
 
-    // Phase 6b: materialise the device row for the Settings → Devices
-    // view. `upsert_device` inserts on first publish (using the UA-
-    // derived name + kind) and just bumps `last_seen_at` on every
-    // subsequent call. Failures here are non-fatal — the KeyPackages
-    // are already stored; the user can't see this row in the UI but
-    // every functional path still works.
+    // Materialise the user_devices row for Settings → Devices. First publish
+    // sets display_name + kind from UA; later calls just bump last_seen_at.
+    // Failure here is non-fatal — KPs already stored, row will catch up next publish.
     let ua = headers
         .get(axum::http::header::USER_AGENT)
         .and_then(|v| v.to_str().ok());

@@ -1,16 +1,6 @@
-//! `/api/history/*` — encrypted plaintext archive for the Phase 7
-//! history-backup engine (Layer B).
-//!
-//! The server stores opaque ciphertexts only. Clients derive a History Archive
-//! Key client-side via Argon2id(passphrase, salt) and encrypt every decrypted
-//! MLS application-message plaintext under that key before uploading.
-//!
-//! Endpoints (all Bearer-auth):
-//! - `POST /api/history/messages` — batch upload (cap 50) with membership check
-//! - `GET  /api/history/messages` — keyset-paginated download
-//! - `DELETE /api/history/messages` — wipe the user's archive
-//! - `GET  /api/history/salt` — fetch the per-user salt (404 when unset)
-//! - `POST /api/history/salt` — idempotent set-once (returns the stored value)
+//! `/api/history/*` — encrypted plaintext archive. Server stores opaque
+//! ciphertexts; clients derive HAK = Argon2id(passphrase, salt) and
+//! encrypt every decrypted plaintext before upload.
 
 use axum::{
     extract::{Query, State},
@@ -71,9 +61,7 @@ pub async fn post_batch(
         )));
     }
 
-    // Membership check — every conversation_id must be one the caller is
-    // (or was) a member of. We compare against the user's actor_uri since
-    // conversation_members is keyed by actor_uri, not user_id.
+    // Membership is keyed by actor_uri in conversation_members.
     let user = users::find_by_id(&state.pool, user_id)
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?
@@ -89,8 +77,7 @@ pub async fn post_batch(
         ));
     }
 
-    // Decode + validate once up front so a malformed entry rejects the whole
-    // batch before any DB write.
+    // Validate every entry before any DB write — partial batches are worse than rejection.
     let mut decoded: Vec<(Uuid, Uuid, Vec<u8>, Vec<u8>, Option<String>)> =
         Vec::with_capacity(body.entries.len());
     for e in body.entries {
@@ -285,10 +272,7 @@ pub async fn post_salt(
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
-/// Returns the subset of `conversation_ids` that `actor_uri` is or was a
-/// member of (i.e. a `conversation_members` row exists, regardless of
-/// `left_at`). Used by `post_batch` to authorise uploads against any
-/// conversation the caller has historical access to.
+/// Subset of `conversation_ids` the actor is or was a member of.
 async fn member_of_conversations(
     pool: &PgPool,
     actor_uri: &str,

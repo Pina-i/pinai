@@ -1,32 +1,15 @@
-//! Ed25519 attestation signing for the per-device identity refactor.
-//!
-//! The IdP signs `(actor_uri, device_id, drk_pub, expires_at, kid)` once per
-//! device on first registration (and on every renewal). Peer clients fetch
-//! the IdP's JWKS, verify this signature, then trust the Device Root Key
-//! contained in the attestation.
-//!
-//! See `docs/plans/2026-05-14-per-device-identity-design.md` § 3 for the
-//! wire format.
+//! Ed25519 attestation signing. The IdP signs
+//! `(actor_uri, device_id, drk_pub, expires_at, kid)`; peer clients verify
+//! against the issuer's JWKS. See `specs/05-e2ee.md` for the wire format.
 
 use base64ct::{Base64, Encoding as _};
 use ed25519_dalek::{Signature, Signer, SigningKey};
 use time::{format_description::well_known::Rfc3339, OffsetDateTime};
 use uuid::Uuid;
 
-/// Build the canonical signed-message bytes for an IdP device attestation.
-///
-/// **Format (UTF-8):**
-/// ```text
-/// IDP-ATTEST-v1\n
-/// <actor_uri>\n
-/// <device_id>\n
-/// <base64(drk_pub)>\n
-/// <iso8601(expires_at)>\n
-/// <kid>
-/// ```
-///
-/// Domain-separation tag `IDP-ATTEST-v1` keeps an attestation signature
-/// from ever validating as some other Ed25519 use of the same key.
+/// Canonical signed-message bytes for an IdP device attestation. The
+/// `IDP-ATTEST-v1` tag prevents the signature from validating in any other
+/// context using the same key.
 pub fn canonical_attestation_bytes(
     actor_uri: &str,
     device_id: &Uuid,
@@ -69,10 +52,7 @@ mod tests {
         SigningKey::from_bytes(&bytes)
     }
 
-    /// Golden-vector test for canonical byte ordering. If a future
-    /// refactor reorders the fields or changes the separators, this
-    /// test breaks loudly — that's a wire-format break and needs a
-    /// version bump.
+    /// Wire-format golden vector — a break here means bumping the version tag.
     #[test]
     fn canonical_bytes_are_stable() {
         let actor = "https://idp.alice.com/users/alice_xK9mP";
