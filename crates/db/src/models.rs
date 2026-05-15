@@ -183,7 +183,7 @@ pub struct UserDevice {
     pub paired_at: OffsetDateTime,
     pub last_seen_at: OffsetDateTime,
     pub revoked_at: Option<OffsetDateTime>,
-    // IdP-attested DRK. NULL until first `POST /api/keys/devices`.
+    // IdP-attested Device Root Key. NULL until first `POST /api/keys/devices`.
     pub drk_public_key: Option<Vec<u8>>,
     pub attestation_signature: Option<Vec<u8>>,
     pub attestation_kid: Option<String>,

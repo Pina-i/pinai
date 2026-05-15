@@ -1,6 +1,6 @@
-//! Server-opaque archive of HAK-encrypted plaintext. PK `(user_id, id)` —
-//! the first decryptor wins, subsequent uploads from the user's other
-//! devices no-op via `ON CONFLICT DO NOTHING`.
+//! Server-opaque archive of plaintext encrypted under the History Archive Key.
+//! PK `(user_id, id)` — first decryptor wins; subsequent uploads from the
+//! user's other devices no-op via `ON CONFLICT DO NOTHING`.
 
 use sqlx::PgPool;
 use time::OffsetDateTime;

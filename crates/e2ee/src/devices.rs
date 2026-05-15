@@ -1,6 +1,6 @@
-//! Per-device metadata for Settings → Devices, plus DRK-attestation
-//! register/renew/rotate. UA parser materialises rows on first KP publish
-//! from `crates/e2ee/src/packages.rs`.
+//! Per-device metadata for Settings → Devices, plus Device Root Key
+//! attestation register/renew/rotate. UA parser materialises rows on the
+//! first KeyPackage publish from `crates/e2ee/src/packages.rs`.
 
 use axum::{
     extract::{Path, State},
@@ -19,7 +19,7 @@ use idp_state::{AppState, OidcError};
 
 use crate::attestation::{canonical_attestation_bytes, sign_attestation};
 
-/// DRK attestation lifetime. Clients renew silently within 30 days of expiry.
+/// Device Root Key attestation lifetime. Clients renew silently within 30 days of expiry.
 const ATTESTATION_TTL_DAYS: i64 = 365;
 
 #[derive(Debug, Serialize)]
@@ -94,9 +94,10 @@ pub async fn get_devices(
 }
 
 /// `POST /api/keys/devices` (Bearer). Idempotent on `(device_id, drk_public_key)`.
-/// New row → mint attestation, emit `DeviceJoined`. Same DRK → renewal. New DRK
-/// → rotation; in-flight KeyPackages signed by the old DRK become invalid.
-/// Returns the canonical signed bytes so the client can locally re-verify.
+/// New row → mint attestation, emit `DeviceJoined`. Same Device Root Key →
+/// renewal. New Device Root Key → rotation; in-flight KeyPackages signed by
+/// the old key become invalid. Returns the canonical signed bytes so the
+/// client can locally re-verify.
 #[instrument(skip_all, fields(device_id = %body.device_id))]
 pub async fn register_device(
     State(state): State<AppState>,
@@ -152,7 +153,7 @@ pub async fn register_device(
         warn!(
             actor = %actor_uri,
             device = %body.device_id,
-            "DRK rotation — in-flight KeyPackages signed by the old DRK become invalid",
+            "Device Root Key rotation — in-flight KeyPackages signed by the old key become invalid",
         );
     }
 

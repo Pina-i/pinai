@@ -1,6 +1,7 @@
 //! `/api/history/*` — encrypted plaintext archive. Server stores opaque
-//! ciphertexts; clients derive HAK = Argon2id(passphrase, salt) and
-//! encrypt every decrypted plaintext before upload.
+//! ciphertexts; clients derive the History Archive Key via
+//! Argon2id(passphrase, salt) and encrypt every decrypted plaintext
+//! before upload.
 
 use axum::{
     extract::{Query, State},

@@ -104,9 +104,9 @@ pub async fn post_packages(
         decoded.push(bytes);
     }
 
-    // Server-side DRK signature validation is deferred; peer clients verify
-    // the IdP→DRK→leaf chain when foreign leaves surface in MLS state. Adding
-    // it here would require pulling openmls into the server crate.
+    // Server-side leaf signature validation is deferred — peer clients verify
+    // the IdP → Device Root Key → leaf chain when foreign leaves surface in
+    // MLS state. Adding it here would require pulling openmls into the server crate.
 
     let pending: Vec<key_packages::PendingPackage<'_>> = decoded
         .iter()
