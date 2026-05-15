@@ -62,7 +62,7 @@ pub async fn list_user_devices(
     .await
 }
 
-/// Persist the IdP-signed DRK attestation for a device.
+/// Persist the IdP-signed Device Root Key attestation for a device.
 pub async fn set_attestation(
     pool: &PgPool,
     device_id: Uuid,

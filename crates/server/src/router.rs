@@ -141,12 +141,10 @@ pub fn build(state: AppState) -> Router {
         // ── E2EE key directory ──────────────────────────────────────────
         // KeyPackages: POST + status are Bearer (own device);
         // claim accepts Bearer (local cross-add) or HTTP-Sig (peer cross-add).
-        // Each KP's embedded leaf credential carries a DRK signature that the
-        // server validates against the device's registered DRK (see Task 1.11).
         .route("/api/keys/packages", post(post_packages))
         .route("/api/keys/packages/claim", post(post_packages_claim))
         .route("/api/keys/packages/status", get(get_packages_status))
-        // Devices — list, register/renew/rotate DRK, revoke.
+        // Devices — list, register/renew/rotate Device Root Key, revoke.
         .route("/api/keys/devices", get(get_devices).post(register_device))
         .route("/api/keys/devices/{device_id}/revoke", post(revoke_device))
 
