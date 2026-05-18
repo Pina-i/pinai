@@ -30,6 +30,7 @@ tokio-stream  = { workspace = true }
 argon2    = "0.5"
 rand      = "0.8"
 base64ct  = { version = "1", features = ["alloc"] }
+base64    = "0.22"
 activitypub     = { workspace = true }
 http-signatures = { workspace = true }
 reqwest         = { workspace = true }

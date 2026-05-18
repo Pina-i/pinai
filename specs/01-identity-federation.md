@@ -91,6 +91,15 @@ WHERE f.owner_user_id = $1     -- pass the caller's local user id
   AND f.status = 'accepted';
 ```
 
+### Friendship-accept also creates the DM conversation
+
+When a friendship transitions to `accepted` (via `POST /api/friends/:id/accept`, local auto-accept in `friend_request_local`, the local-to-local Follow path in `federation::inbox::handle_follow`, or `handle_accept` for cross-IdP), the accepter's IdP creates the DM conversation in the same logical transaction. The new id flows out two ways:
+
+- **Locally**: the WS `friend_accepted` payload carries it on `FriendshipPayload.conversation_id` (`Option<Uuid>`, absent on `friend_request`/`friend_removed`). Web clients invalidate the `dm-conversations` query on this event so `localDmConvos` populates with the new row immediately.
+- **Cross-IdP**: the outbound AP `Accept{Follow}` activity carries it in a non-standard `conversationId` field on the activity body (a sibling of `id`/`type`/`actor`/`object`). The peer IdP's `handle_accept` reads it and calls `conversations::get_or_create_dm_with_id` so both sides persist the row under the same UUID. A pre-refactor peer omits the field; the receiver falls back to `get_or_create_dm`, ending up with a divergent id — exactly matching the pre-refactor state. This is a safe degradation.
+
+The migration `20260512000001_backfill_friendship_conversations.sql` retroactively creates a DM for every accepted friendship that doesn't yet have one (deduplicated by ordering the actor pair lexicographically so the two friendship rows don't each get their own conversation).
+
 ---
 
 ## 1.5. Profile editing API

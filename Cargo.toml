@@ -5,6 +5,7 @@ members = [
     "crates/broker",
     "crates/config",
     "crates/db",
+    "crates/e2ee",
     "crates/federation",
     "crates/messaging",
     "crates/presence",

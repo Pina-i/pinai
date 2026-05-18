@@ -3,6 +3,11 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 /// Server-to-client events pushed over WebSocket.
+///
+/// Phase 3 dropped `MessageReactionAdded` / `MessageReactionRemoved` —
+/// reactions are now MLS application messages of `kind = "reaction"`,
+/// indistinguishable from text on the wire and reconstructed by clients
+/// from their decrypted stream.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", content = "data")]
 #[serde(rename_all = "snake_case")]
@@ -13,11 +18,19 @@ pub enum WsEvent {
     FriendAccepted(FriendshipPayload),
     FriendRemoved(FriendshipPayload),
     FriendProfileUpdated(ProfileUpdatePayload),
-    MessageReactionAdded(ReactionPayload),
-    MessageReactionRemoved(ReactionPayload),
     PresenceUpdate(PresenceUpdatePayload),
     Typing(TypingPayload),
     HeartbeatAck(HeartbeatAckPayload),
+    /// New MLS commit landed for a conversation the recipient is in.
+    /// Clients pull missing commits via REST when this event arrives ahead
+    /// of their cached epoch.
+    MlsCommit(MlsCommitPayload),
+    /// Welcome bundle waiting for one of the recipient's devices. Clients
+    /// fetch+consume the actual blob via `GET /api/mls/welcomes`.
+    MlsWelcomeReady(MlsWelcomeReadyPayload),
+    /// A new device of the recipient's account just registered. Other live
+    /// sessions add its leaf to every group they're in.
+    DeviceJoined(DeviceJoinedPayload),
 }
 
 /// Slim attachment projection carried on the wire alongside DM events.
@@ -40,15 +53,16 @@ pub struct DmPayload {
     pub kind: String,
     pub sender_address: String,
     pub sender_display_name: Option<String>,
-    pub content: String,
+    /// TLS-encoded MLSMessage body, base64-encoded over the wire. Server
+    /// never inspects; client decrypts to recover the application message.
+    pub mls_ciphertext: String,
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
+    /// Server-visible parent-message ID for thread routing. The reply
+    /// preview (text, sender display) lives inside the encrypted body and
+    /// is reconstructed client-side from the decrypted stream.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reply_to_id: Option<Uuid>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reply_to_content: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reply_to_sender: Option<String>,
     /// Empty for messages without attachments; omit-on-empty would force the
     /// client into `?? []` defensive code at every read site.
     #[serde(default)]
@@ -62,7 +76,8 @@ pub struct DmPayload {
 #[derive(Debug, Clone, Serialize)]
 pub struct EditedDmPayload {
     pub message_id: Uuid,
-    pub new_content: String,
+    /// Replacement TLS-encoded MLSMessage, base64-encoded.
+    pub new_mls_ciphertext: String,
     #[serde(with = "time::serde::rfc3339")]
     pub edited_at: OffsetDateTime,
 }
@@ -73,6 +88,15 @@ pub struct FriendshipPayload {
     pub actor_uri: String,
     pub username: String,
     pub display_name: Option<String>,
+    /// DM conversation id for the friendship. Set on `FriendAccepted`
+    /// (the accepter's IdP creates the DM in the same transaction as
+    /// `set_status('accepted')` and surfaces the id here so the
+    /// receiving client can route to the conversation immediately).
+    /// `None` on `FriendRequest` (no DM until accepted) and
+    /// `FriendRemoved` (the conversation row stays, but the event
+    /// doesn't need to mention it).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conversation_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -81,14 +105,6 @@ pub struct ProfileUpdatePayload {
     pub actor_uri: String,
     pub display_name: Option<String>,
     pub avatar_url: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ReactionPayload {
-    pub message_id: Uuid,
-    pub reactor_actor_uri: String,
-    pub emoji: String,
 }
 
 // ─── Presence payloads ───────────────────────────────────────────────────────
@@ -111,6 +127,42 @@ pub struct TypingPayload {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct HeartbeatAckPayload {}
+
+// ─── MLS Delivery Service payloads ───────────────────────────────────────────
+//
+// Both payloads carry the blob inline as base64 so a client whose local MLS
+// state is current can apply commits without a follow-up REST round-trip.
+// Welcomes are larger, but we still ship them inline — the alternative
+// "ready" notification would force a REST fetch on every welcome event.
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MlsCommitPayload {
+    pub conversation_id: Uuid,
+    pub epoch: i64,
+    pub proposer_actor_uri: String,
+    /// TLS-encoded MLS Commit message, base64-encoded.
+    pub commit_blob: String,
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: OffsetDateTime,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MlsWelcomeReadyPayload {
+    pub conversation_id: Uuid,
+    pub recipient_device_id: Uuid,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceJoinedPayload {
+    pub actor_uri: String,
+    pub device_id: Uuid,
+    /// Standard-base64-encoded Ed25519 public key (32 bytes raw). Receiving
+    /// devices use it to look up the new device when targeting MLS Add commits.
+    pub drk_public_key: String,
+}
 
 // ─── Client-to-server messages ───────────────────────────────────────────────
 
@@ -139,7 +191,8 @@ pub struct SetPresencePayload {
 #[derive(Debug, Deserialize)]
 pub struct SendDmPayload {
     pub recipient_address: String,
-    pub content: String,
+    /// Pre-encrypted MLSMessage body, base64-encoded. Server never inspects.
+    pub mls_ciphertext: String,
     /// Optional sender-side correlation token. Echoed back to the sender on the
     /// resulting `new_dm` event so the client can reconcile its optimistic message.
     #[serde(default)]

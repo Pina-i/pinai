@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use activitypub::Activity;
-use idp_db::repos::{friendships, remote_actors, users};
+use idp_db::repos::{conversations, friendships, remote_actors, users};
 use idp_federation::auth::require_auth;
 use idp_federation::delivery;
 use idp_realtime::{FriendshipPayload, WsEvent};
@@ -147,15 +147,32 @@ async fn friend_request_local(
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?;
 
-    // Notify target via WebSocket.
-    let payload = FriendshipPayload {
+    // Auto-accept means the DM conversation should exist immediately for
+    // both sides, matching the `accept_friendship` flow.
+    let (conversation_id, _created) = conversations::get_or_create_dm(
+        &state.pool,
+        caller_actor_uri,
+        target_actor_uri,
+    )
+    .await
+    .map_err(|e| OidcError::server_error(e.to_string()))?;
+
+    // Notify target via WebSocket. `FriendRequest` doesn't carry the
+    // conversation id (no DM yet from the requester's POV in the generic
+    // flow), but the immediate `FriendAccepted` does.
+    let request_payload = FriendshipPayload {
         friendship_id: reciprocal.id,
         actor_uri: caller_actor_uri.to_string(),
         username: caller.username.clone(),
         display_name: caller.display_name.clone(),
+        conversation_id: None,
     };
-    state.hub.send_to_user(&target.id, WsEvent::FriendRequest(payload.clone()));
-    state.hub.send_to_user(&target.id, WsEvent::FriendAccepted(payload));
+    let accepted_payload = FriendshipPayload {
+        conversation_id: Some(conversation_id),
+        ..request_payload.clone()
+    };
+    state.hub.send_to_user(&target.id, WsEvent::FriendRequest(request_payload));
+    state.hub.send_to_user(&target.id, WsEvent::FriendAccepted(accepted_payload));
 
     tracing::info!(caller = %caller_id, target = %target.id, "friend request sent + accepted (local)");
 
@@ -274,8 +291,16 @@ pub async fn delete_friendship(
                 actor_uri: caller.actor_uri.unwrap_or_default(),
                 username: caller.username,
                 display_name: caller.display_name,
+                conversation_id: None,
             }));
         }
+    }
+
+    // Drop the friend from batch presence polling. Best-effort — if
+    // they were never registered (e.g. local friend), `unregister_friend`
+    // short-circuits via the `starts_with(local_issuer)` guard.
+    if let Some(registry) = &state.remote_registry {
+        registry.unregister_friend(&friend_actor_uri, &state.config.issuer());
     }
 
     tracing::info!(caller = %caller_id, friend = %friend_actor_uri, "unfriended");
@@ -355,6 +380,20 @@ pub async fn accept_friendship(
     let caller_actor_uri = caller.actor_uri.as_deref()
         .ok_or_else(|| OidcError::server_error("Caller has no actor_uri"))?;
 
+    // Create the DM conversation in the same logical transaction as
+    // the friendship-accept. The conversation_id decided here is the
+    // one both clients will use forever — no more per-first-message
+    // UUID minting on the client side. Cross-IdP: we surface it in
+    // the outbound AP `Accept{Follow}` envelope so the peer's IdP
+    // creates its row with the same id.
+    let (conversation_id, _created) = conversations::get_or_create_dm(
+        &state.pool,
+        caller_actor_uri,
+        &friendship.friend_actor_uri,
+    )
+    .await
+    .map_err(|e| OidcError::server_error(e.to_string()))?;
+
     // Notify the requester.
     if let Some(friend_user) = users::find_by_actor_uri(&state.pool, &friendship.friend_actor_uri)
         .await
@@ -366,6 +405,7 @@ pub async fn accept_friendship(
             actor_uri: caller_actor_uri.to_string(),
             username: caller.username.clone(),
             display_name: caller.display_name.clone(),
+            conversation_id: Some(conversation_id),
         }));
     } else {
         // Remote friend — deliver an AP Accept so their IdP updates the friendship.
@@ -386,19 +426,40 @@ pub async fn accept_friendship(
                 .map_err(|e| OidcError::server_error(e.to_string()))?;
             let accept = Activity::accept(&accept_id, caller_actor_uri, follow_value);
 
-            let activity_json = serde_json::to_value(&accept)
+            let mut activity_json = serde_json::to_value(&accept)
                 .map_err(|e| OidcError::server_error(e.to_string()))?;
+            // Custom field: the conversation_id we just created locally.
+            // Peer IdP reads this in `handle_accept` and creates the
+            // corresponding row with the same id, so both sides agree
+            // on `conversations.id` from the first moment the DM
+            // exists. Non-standard JSON-LD but harmless to outside
+            // implementations — they ignore unknown fields.
+            if let Some(obj) = activity_json.as_object_mut() {
+                obj.insert(
+                    "conversationId".to_string(),
+                    serde_json::Value::String(conversation_id.to_string()),
+                );
+            }
 
             delivery::deliver_activity(&state, &inbox_url, &activity_json, &caller.username).await?;
 
             tracing::info!(
                 friend = %friendship.friend_actor_uri,
+                %conversation_id,
                 "AP Accept delivered to remote IdP"
             );
         }
     }
 
-    tracing::info!(friendship_id = %friendship_id, "friend request accepted");
+    // Register the friend for batch presence polling so their online
+    // state appears in this IdP's local presence store within one poll
+    // interval. No-op for local friends — their presence flows through
+    // the local WS hub already.
+    if let Some(registry) = &state.remote_registry {
+        registry.register_friend(&friendship.friend_actor_uri, &state.config.issuer());
+    }
+
+    tracing::info!(friendship_id = %friendship_id, %conversation_id, "friend request accepted");
     Ok(StatusCode::NO_CONTENT)
 }
 

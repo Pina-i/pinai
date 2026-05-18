@@ -16,6 +16,7 @@ url         = "2"
 urlencoding = "2"
 hmac        = "0.12"
 sha2        = "0.10"
+base64      = "0.22"
 reqwest     = { workspace = true, features = ["stream"] }
 http-signatures = { workspace = true }
 jwt-utils       = { workspace = true }

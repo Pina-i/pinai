@@ -5,8 +5,9 @@ use axum::{
     Json, Router,
 };
 use serde_json::json;
+use axum::http::HeaderName;
 use tower_http::{
-    cors::{AllowHeaders, CorsLayer},
+    cors::CorsLayer,
     trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer},
 };
 use tracing::Level;
@@ -21,10 +22,9 @@ use idp_federation::{
     webfinger::get_webfinger,
 };
 use idp_messaging::{
-    add_reaction,
     attachments::{get_attachment, upload_attachments},
     blob::get_attachment_blob,
-    edit_message, get_conversation, list_conversations, remove_reaction, send_message,
+    edit_message, get_conversation, list_conversations, mark_read, send_message,
 };
 use idp_social::{
     accept_friendship, delete_friendship, get_friends, get_incoming_requests,
@@ -43,6 +43,11 @@ use idp_auth::{
     token::post_token,
     userinfo::get_userinfo,
     ws::ws_upgrade,
+};
+use idp_e2ee::{
+    delete_history, get_commits_since, get_devices, get_history_page, get_history_salt,
+    get_packages_status, get_welcomes, post_commit, post_history_batch, post_history_salt,
+    post_packages, post_packages_claim, post_welcome, register_device, revoke_device,
 };
 use idp_state::AppState;
 
@@ -63,10 +68,20 @@ pub fn build(state: AppState) -> Router {
         * state.config.attachment_max_byte_size
         + 1024 * 1024) as usize;
 
+    // Explicit header allowlist — Firefox/Gecko treats `Access-Control-Allow-Headers: *`
+    // as not covering `Authorization`, so the wildcard would silently drop our
+    // Bearer-auth on every cross-origin request. Listing the headers we
+    // actually send (and the ones browsers' fetch preflight asks about) is
+    // both more correct and warning-free.
     let cors = CorsLayer::new()
         .allow_origin(origins)
         .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE, Method::PATCH, Method::OPTIONS])
-        .allow_headers(AllowHeaders::any())
+        .allow_headers([
+            HeaderName::from_static("authorization"),
+            HeaderName::from_static("content-type"),
+            HeaderName::from_static("accept"),
+            HeaderName::from_static("x-requested-with"),
+        ])
         .allow_credentials(false);
 
     // HTTP request/response tracing — one span per request with method, path, status, latency.
@@ -109,16 +124,48 @@ pub fn build(state: AppState) -> Router {
         .route("/api/friends", get(get_friends))
 
         // ── Direct Messages REST API (Bearer-auth) ────────────────────────────
+        // Reactions are gone — they're MLS application messages of
+        // `kind = "reaction"`, indistinguishable from text on the wire and
+        // computed client-side from the decrypted MLS stream (Phase 3).
         .route("/api/dm", post(send_message).get(list_conversations))
         .route("/api/dm/{conversation_id}", get(get_conversation))
+        .route("/api/dm/{conversation_id}/read", post(mark_read))
         .route("/api/dm/{message_id}/edit", patch(edit_message))
-        .route("/api/dm/{message_id}/reactions", post(add_reaction).delete(remove_reaction))
 
         // ── Avatar API (Bearer-auth) ────────────────────────────────────
         .route("/api/avatar", put(put_avatar).delete(delete_avatar))
 
         // ── Profile API (Bearer-auth) ───────────────────────────────────
         .route("/api/profile", patch(update_profile))
+
+        // ── E2EE key directory ──────────────────────────────────────────
+        // KeyPackages: POST + status are Bearer (own device);
+        // claim accepts Bearer (local cross-add) or HTTP-Sig (peer cross-add).
+        .route("/api/keys/packages", post(post_packages))
+        .route("/api/keys/packages/claim", post(post_packages_claim))
+        .route("/api/keys/packages/status", get(get_packages_status))
+        // Devices — list, register/renew/rotate Device Root Key, revoke.
+        .route("/api/keys/devices", get(get_devices).post(register_device))
+        .route("/api/keys/devices/{device_id}/revoke", post(revoke_device))
+
+        // ── History backup ─────────────────────────────────────────────
+        .route(
+            "/api/history/messages",
+            post(post_history_batch).get(get_history_page).delete(delete_history),
+        )
+        .route(
+            "/api/history/salt",
+            get(get_history_salt).post(post_history_salt),
+        )
+
+        // ── MLS Delivery Service (Bearer-auth) ──────────────────────────
+        // Commits: ordered append per group with `409` on epoch race;
+        // catch-up via `?since=<epoch>`. Welcomes: per-device atomic claim.
+        .route(
+            "/api/mls/groups/{conversation_id}/commits",
+            post(post_commit).get(get_commits_since),
+        )
+        .route("/api/mls/welcomes", get(get_welcomes).post(post_welcome))
 
         // ── DM Attachments API ──────────────────────────────────────────
         // Upload: per-route body limit overrides Axum's 2 MiB default.

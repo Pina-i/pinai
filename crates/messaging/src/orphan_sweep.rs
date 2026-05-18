@@ -1,5 +1,13 @@
-//! Background task that reaps orphan attachments — rows whose `message_id` is
-//! still NULL after `attachment_orphan_ttl`.
+//! Background task that reaps three kinds of stale rows on the same cadence:
+//!
+//! - **Orphan attachments** — rows whose `message_id` is still `NULL` after
+//!   `attachment_orphan_ttl` (ie. uploaded but never linked to a message).
+//! - **Stale `key_packages`** — rows past their `expires_at`, or rows
+//!   `consumed_at > 1 day` ago (the consumed grace window protects against
+//!   late retries that re-fetch a just-claimed bundle).
+//! - **Stale `mls_welcomes`** — same `consumed_at > 1 day` grace window so
+//!   a client with a flaky connection that re-fetches mid-read sees an
+//!   empty list rather than receiving the same bundle twice.
 //!
 //! Mirrors the lifecycle of presence's `run_heartbeat_sweep`:
 //! a single long-running task spawned from `server::main`, sleeping between
@@ -43,17 +51,33 @@ pub async fn run_orphan_sweep(
 
         match idp_db::repos::attachments::find_orphans_older_than(&pool, cutoff).await {
             Ok(rows) => {
-                if rows.is_empty() {
-                    continue;
-                }
-                tracing::info!(count = rows.len(), "reaping orphan attachments");
-                for row in &rows {
-                    delete_attachment_with_object(&pool, storage.as_ref(), row).await;
+                if !rows.is_empty() {
+                    tracing::info!(count = rows.len(), "reaping orphan attachments");
+                    for row in &rows {
+                        delete_attachment_with_object(&pool, storage.as_ref(), row).await;
+                    }
                 }
             }
             Err(e) => {
-                tracing::warn!("orphan sweep query failed: {e}");
+                tracing::warn!("orphan attachment sweep query failed: {e}");
             }
+        }
+
+        // Garbage-collect expired / long-consumed KeyPackages. Independent
+        // pass — failures here don't block the attachment cleanup above.
+        match idp_db::repos::key_packages::delete_old(&pool).await {
+            Ok(0) => {}
+            Ok(n) => tracing::info!(count = n, "reaped stale key_packages rows"),
+            Err(e) => tracing::warn!("key_packages sweep failed: {e}"),
+        }
+
+        // Garbage-collect long-consumed MLS welcomes. Same grace window as
+        // KeyPackages so a flaky-connection re-fetch can't be told "here's
+        // your Welcome again".
+        match idp_db::repos::mls_welcomes::delete_old(&pool).await {
+            Ok(0) => {}
+            Ok(n) => tracing::info!(count = n, "reaped stale mls_welcomes rows"),
+            Err(e) => tracing::warn!("mls_welcomes sweep failed: {e}"),
         }
     }
 }

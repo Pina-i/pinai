@@ -31,6 +31,7 @@ pub mod auth;
 pub mod delivery;
 pub mod http_signature;
 pub mod inbox;
+pub mod mls;
 pub mod outbox;
 pub mod profile;
 pub mod webfinger;
