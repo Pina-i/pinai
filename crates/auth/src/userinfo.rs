@@ -11,6 +11,8 @@ use crate::{AppState, OidcError};
 pub struct UserinfoResponse {
     pub sub: String,
     pub email: String,
+    pub email_verified: bool,
+    pub totp_enabled: bool,
     pub preferred_username: String,
     pub display_name: Option<String>,
     pub address: String,
@@ -67,6 +69,8 @@ pub async fn get_userinfo(
     Ok(Json(UserinfoResponse {
         sub: user.id.to_string(),
         email: user.email,
+        email_verified: user.email_verified_at.is_some(),
+        totp_enabled: user.totp_enabled,
         preferred_username: user.username,
         display_name: user.display_name,
         address,

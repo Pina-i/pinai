@@ -58,6 +58,16 @@ services:
       retries: 10
       start_period: 30s
 
+  mailpit:
+    image: axllent/mailpit:latest
+    restart: unless-stopped
+    ports:
+      - "${MAILPIT_SMTP_PORT:-1025}:1025"
+      - "${MAILPIT_UI_PORT:-8025}:8025"
+    environment:
+      MP_SMTP_AUTH_ACCEPT_ANY: "true"
+      MP_SMTP_AUTH_ALLOW_INSECURE: "true"
+
   idp:
     build:
       context: ..
@@ -68,6 +78,10 @@ services:
       JWT_PRIVATE_KEY_PATH: /run/secrets/ed25519.pem
       STORAGE_ENDPOINT: http://rustfs:9000
       REDIS_URL: redis://redis:6379
+      # Container reaches Mailpit by service name on its internal port — the
+      # host-mapped port is for the developer's browser, not the container.
+      SMTP_HOST: mailpit
+      SMTP_PORT: "1025"
       # Use host.docker.internal so cross-IdP federation requests (WebFinger,
       # inbox delivery, presence SSE/batch) exit the container, hit the Windows
       # host, and reach the other IdP via its mapped port.

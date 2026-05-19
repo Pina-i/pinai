@@ -664,6 +664,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "349a06037c7bf932dd7e7d1f653678b2038b9ad46a74102f1fc7bd7872678cce"
 
 [[package]]
+name = "base32"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "022dfe9eb35f19ebbcb51e0b40a5ab759f46ad60cadf7297e0bd085afb50e076"
+
+[[package]]
 name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -805,6 +811,12 @@ name = "const-oid"
 version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2459377285ad874054d797f3ccebf984978aa39129f6eafde5cdc8315b612f8"
+
+[[package]]
+name = "constant_time_eq"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7c74b8349d32d297c9134b8c88677813a227df8f779daa29bfc29c183fe3dca6"
 
 [[package]]
 name = "cookie"
@@ -1118,6 +1130,22 @@ dependencies = [
  "subtle",
  "zeroize",
 ]
+
+[[package]]
+name = "email-encoding"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9298e6504d9b9e780ed3f7dfd43a61be8cd0e09eb07f7706a945b0072b6670b6"
+dependencies = [
+ "base64",
+ "memchr",
+]
+
+[[package]]
+name = "email_address"
+version = "0.2.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e079f19b08ca6239f47f8ba8509c11cf3ea30095831f7fed61441475edd8c449"
 
 [[package]]
 name = "encoding_rs"
@@ -1834,22 +1862,27 @@ dependencies = [
  "common-types",
  "dashmap",
  "futures-util",
+ "hmac",
  "http-signatures",
  "idp-broker",
  "idp-config",
  "idp-db",
+ "idp-email",
  "idp-federation",
  "idp-presence",
  "idp-realtime",
  "idp-state",
  "idp-storage",
+ "idp-totp",
  "jwt-utils",
  "nanoid",
  "rand 0.8.5",
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "sqlx",
+ "subtle",
  "thiserror",
  "time",
  "tokio",
@@ -1880,6 +1913,7 @@ name = "idp-config"
 version = "0.1.0"
 dependencies = [
  "dotenvy",
+ "hex",
  "thiserror",
 ]
 
@@ -1921,6 +1955,17 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "idp-email"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "lettre",
+ "thiserror",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -2025,6 +2070,7 @@ dependencies = [
  "idp-config",
  "idp-db",
  "idp-e2ee",
+ "idp-email",
  "idp-federation",
  "idp-messaging",
  "idp-presence",
@@ -2069,6 +2115,7 @@ dependencies = [
  "idp-broker",
  "idp-config",
  "idp-db",
+ "idp-email",
  "idp-presence",
  "idp-realtime",
  "idp-storage",
@@ -2092,6 +2139,19 @@ dependencies = [
  "tokio-util",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "idp-totp"
+version = "0.1.0"
+dependencies = [
+ "base32",
+ "hmac",
+ "rand 0.8.5",
+ "sha2",
+ "subtle",
+ "thiserror",
+ "totp-rs",
 ]
 
 [[package]]
@@ -2203,6 +2263,33 @@ name = "leb128fmt"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
+
+[[package]]
+name = "lettre"
+version = "0.11.22"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0da65617f6cb926332d039cb578aad56178da86e128db6a1b09f4c94fa5b3349"
+dependencies = [
+ "async-trait",
+ "base64",
+ "email-encoding",
+ "email_address",
+ "fastrand",
+ "futures-io",
+ "futures-util",
+ "httpdate",
+ "idna",
+ "mime",
+ "nom",
+ "percent-encoding",
+ "quoted_printable",
+ "rustls 0.23.37",
+ "socket2 0.6.2",
+ "tokio",
+ "tokio-rustls 0.26.4",
+ "url",
+ "webpki-roots",
+]
 
 [[package]]
 name = "libc"
@@ -2363,6 +2450,15 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "tempfile",
+]
+
+[[package]]
+name = "nom"
+version = "8.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "df9761775871bdef83bee530e60050f7e54b1105350d6884eb0fb4f46c2f9405"
+dependencies = [
+ "memchr",
 ]
 
 [[package]]
@@ -2685,6 +2781,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "quoted_printable"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "478e0585659a122aa407eb7e3c0e1fa51b1d8a870038bd29f0cf4a8551eea972"
+
+[[package]]
 name = "r-efi"
 version = "5.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2957,7 +3059,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "758025cb5fccfd3bc2fd74708fd4682be41d99e5dff73c377c0646c6012c73a4"
 dependencies = [
  "aws-lc-rs",
+ "log",
  "once_cell",
+ "ring",
  "rustls-pki-types",
  "rustls-webpki 0.103.9",
  "subtle",
@@ -3766,6 +3870,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "totp-rs"
+version = "5.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a2b36a9dd327e9f401320a2cb4572cc76ff43742bcfc3291f871691050f140ba"
+dependencies = [
+ "base32",
+ "constant_time_eq",
+ "hmac",
+ "sha1",
+ "sha2",
+ "url",
+ "urlencoding",
+]
+
+[[package]]
 name = "tower"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4174,6 +4293,15 @@ checksum = "854ba17bb104abfb26ba36da9729addc7ce7f06f5c0f90f3c391f8461cca21f9"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "webpki-roots"
+version = "1.0.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "52f5ee44c96cf55f1b349600768e3ece3a8f26010c05265ab73f945bb1a2eb9d"
+dependencies = [
+ "rustls-pki-types",
 ]
 
 [[package]]

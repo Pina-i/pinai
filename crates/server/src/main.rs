@@ -6,6 +6,7 @@ use tracing::{info, warn};
 
 use idp_config::Config;
 use idp_db::run_migrations;
+use idp_email::{EmailConfig, EmailSender, LettreSmtpSender};
 use idp_state::AppState;
 use idp_presence::remote::RemotePresenceRegistry;
 use idp_presence::store::PresenceStore;
@@ -115,6 +116,28 @@ async fn main() -> anyhow::Result<()> {
         Arc::clone(&broker_arc),
     );
 
+    // Outbound email transport. Builds the transport eagerly but the first TCP
+    // connection happens on the first `send_signup_otp` call, so the IdP boots
+    // even when Mailpit isn't reachable yet.
+    let email_sender: Arc<dyn EmailSender> = {
+        let cfg = EmailConfig {
+            host: config.smtp_host.clone(),
+            port: config.smtp_port,
+            username: config.smtp_username.clone(),
+            password: config.smtp_password.clone(),
+            from: config.smtp_from.clone(),
+            starttls: config.smtp_starttls,
+            issuer_host: config.domain.clone(),
+        };
+        Arc::new(
+            LettreSmtpSender::from_config(cfg)
+                .map_err(|e| anyhow::anyhow!("email sender init failed: {e}"))?,
+        )
+    };
+    info!(host = %config.smtp_host, port = config.smtp_port, "email sender ready");
+
+    let email_otp_pepper = Arc::new(config.email_otp_pepper.clone());
+
     let state = AppState {
         pool: pool.clone(),
         keypair: Arc::clone(&keypair),
@@ -126,6 +149,8 @@ async fn main() -> anyhow::Result<()> {
         presence_store: Some(Arc::clone(&presence_store)),
         heartbeat_tracker: Some(Arc::clone(&heartbeat_tracker)),
         remote_registry: Some(Arc::clone(&remote_registry)),
+        email: Arc::clone(&email_sender),
+        email_otp_pepper: Arc::clone(&email_otp_pepper),
     };
 
     // Spawn presence background tasks
@@ -169,6 +194,14 @@ async fn main() -> anyhow::Result<()> {
     }
 
     info!("presence system started");
+
+    // Spawn signup-verification reaper (expired OTPs + abandoned accounts).
+    {
+        let pool_for_reaper = pool.clone();
+        tokio::spawn(async move {
+            idp_auth::signup_reaper::run_signup_reaper(pool_for_reaper).await;
+        });
+    }
 
     // Spawn DM-attachment orphan-sweep background task.
     {

@@ -8,16 +8,19 @@ use axum::{
     response::{IntoResponse, Redirect, Response},
     Form, Json,
 };
-use base64ct::{Base64UrlUnpadded, Encoding};
-use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use time::{Duration, OffsetDateTime};
+use uuid::Uuid;
 
-use idp_db::repos::{auth_codes, clients, users};
-
-use crate::{
-    cookies::{build_session_cookie, urlencoded},
-    AppState, OidcError,
+use idp_db::{
+    models::User,
+    repos::{clients, email_verification_codes, users},
 };
+
+use crate::{cookies::urlencoded, email_otp, AppState, OidcError};
+
+/// 10-minute OTP lifetime — matches OIDC auth-code TTL.
+pub const SIGNUP_OTP_TTL_SECS: i64 = 600;
 
 #[derive(Debug, Deserialize)]
 pub struct RegisterRequest {
@@ -33,26 +36,35 @@ pub struct RegisterResponse {
     pub display_name: String,
     pub address: String,
     pub email: String,
+    pub email_verified: bool,
+    /// Identifier the client must echo back to `POST /verify-email-and-login`.
+    pub pending_user_id: String,
 }
 
-/// POST /register — create a new user account.
+/// POST /register — create a new user account and dispatch the signup OTP.
+/// Returns 201 with `email_verified: false`; no session is established until
+/// the caller completes verification via `/verify-email-and-login`.
 #[tracing::instrument(skip_all, fields(username = %body.username, email = %body.email))]
 pub async fn post_register(
     State(state): State<AppState>,
     Json(body): Json<RegisterRequest>,
 ) -> Result<(StatusCode, Json<RegisterResponse>), OidcError> {
-    // 1. Basic validation
     if body.username.is_empty() || body.email.is_empty() || body.password.is_empty() {
-        return Err(OidcError::invalid_request("username, email, and password are required"));
+        return Err(OidcError::invalid_request(
+            "username, email, and password are required",
+        ));
     }
     if body.username.len() < 3 {
-        return Err(OidcError::invalid_request("username must be at least 3 characters"));
+        return Err(OidcError::invalid_request(
+            "username must be at least 3 characters",
+        ));
     }
     if body.password.len() < 8 {
-        return Err(OidcError::invalid_request("password must be at least 8 characters"));
+        return Err(OidcError::invalid_request(
+            "password must be at least 8 characters",
+        ));
     }
 
-    // 2. Check for existing email
     if users::find_by_email(&state.pool, &body.email)
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?
@@ -61,93 +73,128 @@ pub async fn post_register(
         return Err(OidcError::invalid_request("Email already registered"));
     }
 
-    // 3. Hash password with Argon2id (secure params: m=65536, t=3, p=4)
-    let salt = SaltString::generate(&mut OsRng);
-    let argon2 = Argon2::new(
-        argon2::Algorithm::Argon2id,
-        argon2::Version::V0x13,
-        argon2::Params::new(65536, 3, 4, None)
-            .map_err(|_| OidcError::server_error("Failed to build Argon2 params"))?,
-    );
-    let password_hash = argon2
-        .hash_password(body.password.as_bytes(), &salt)
-        .map_err(|_| OidcError::server_error("Failed to hash password"))?
-        .to_string();
+    let user = create_user_record(&state, &body.username, &body.email, &body.password).await?;
 
-    // 4. Generate username (user input + NanoID suffix) and derive federation URIs
-    let display_name = &body.username;
-    let username = format!("{}_{}", display_name, nanoid::nanoid!(5));
-    let user_id = uuid::Uuid::new_v4();
-    let base = state.config.issuer();
-    let actor_uri = format!("{}/users/{}", base, username);
-    let inbox_url = format!("{}/users/{}/inbox", base, username);
-    let outbox_url = format!("{}/users/{}/outbox", base, username);
-
-    let user = users::create_user_with_id(
-        &state.pool,
-        user_id,
-        &username,
-        display_name,
-        &body.email,
-        &password_hash,
-        &actor_uri,
-        &inbox_url,
-        &outbox_url,
-    )
-    .await
-    .map_err(|e| OidcError::server_error(e.to_string()))?;
+    issue_signup_otp(&state, &user).await?;
 
     let address = user.federated_address(&state.config.domain);
-    tracing::info!(user_id = %user.id, address = %address, "user registered");
+    tracing::info!(
+        user_id = %user.id,
+        address = %address,
+        "user registered (pending email verification)"
+    );
 
     Ok((
         StatusCode::CREATED,
         Json(RegisterResponse {
             id: user.id.to_string(),
+            pending_user_id: user.id.to_string(),
             address,
-            username: user.username,
-            display_name: user.display_name.unwrap_or_default(),
-            email: user.email,
+            username: user.username.clone(),
+            display_name: user.display_name.clone().unwrap_or_default(),
+            email: user.email.clone(),
+            email_verified: false,
         }),
     ))
 }
 
-/// POST /register-and-login — register and immediately start an OIDC flow.
-/// Same as /register but also goes through the login flow (for the login page register tab).
+/// POST /register-and-login — register and immediately redirect to the
+/// email-verification page. OIDC params are carried through the redirect so
+/// the subsequent `/verify-email-and-login` POST can issue the auth code
+/// without the client re-driving the flow.
 #[tracing::instrument(skip_all, fields(username = %form.username, client_id = %form.client_id))]
 pub async fn post_register_and_login(
     State(state): State<AppState>,
-    jar: axum_extra::extract::cookie::SignedCookieJar,
     Form(form): Form<RegisterAndLoginForm>,
 ) -> Result<Response, OidcError> {
-    // 1. Basic validation — redirect back on user-facing errors
     if form.username.len() < 3 {
-        return Ok(register_error_redirect(&state.config.frontend_url, &form, "Username must be at least 3 characters"));
+        return Ok(register_error_redirect(
+            &state.config.frontend_url,
+            &form,
+            "Username must be at least 3 characters",
+        ));
     }
     if form.password.len() < 8 {
-        return Ok(register_error_redirect(&state.config.frontend_url, &form, "Password must be at least 8 characters"));
+        return Ok(register_error_redirect(
+            &state.config.frontend_url,
+            &form,
+            "Password must be at least 8 characters",
+        ));
     }
 
-    // 2. Check email uniqueness
     if users::find_by_email(&state.pool, &form.email)
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?
         .is_some()
     {
-        return Ok(register_error_redirect(&state.config.frontend_url, &form, "Email already registered"));
+        return Ok(register_error_redirect(
+            &state.config.frontend_url,
+            &form,
+            "Email already registered",
+        ));
     }
 
-    // 3. Validate client + redirect_uri
+    // Validate client + redirect_uri up front so we don't waste an OTP send
+    // on a request the verify step would reject anyway.
     let client = clients::find_client_by_id(&state.pool, &form.client_id)
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?
         .ok_or_else(|| OidcError::invalid_client("Unknown client_id"))?;
-
     if !client.redirect_uris.contains(&form.redirect_uri) {
         return Err(OidcError::invalid_request("redirect_uri is not registered"));
     }
 
-    // 4. Hash password
+    let user = create_user_record(&state, &form.username, &form.email, &form.password).await?;
+
+    issue_signup_otp(&state, &user).await?;
+
+    tracing::info!(
+        user_id = %user.id,
+        "user registered (register-and-login, awaiting verification)"
+    );
+
+    Ok(Redirect::to(&verify_email_redirect_url(
+        &state.config.frontend_url,
+        user.id,
+        &user.email,
+        &form,
+    ))
+    .into_response())
+}
+
+/// Generate, persist, and email a 6-digit OTP for the given user.
+pub async fn issue_signup_otp(state: &AppState, user: &User) -> Result<(), OidcError> {
+    let code = email_otp::generate_numeric_otp(email_otp::OTP_LEN);
+    let code_hash = email_otp::hash(&code, &state.email_otp_pepper);
+    let expires_at = OffsetDateTime::now_utc() + Duration::seconds(SIGNUP_OTP_TTL_SECS);
+
+    email_verification_codes::insert(&state.pool, user.id, &code_hash, expires_at)
+        .await
+        .map_err(|e| OidcError::server_error(e.to_string()))?;
+
+    let display_name = user
+        .display_name
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&user.username);
+
+    state
+        .email
+        .send_signup_otp(&user.email, display_name, &code)
+        .await
+        .map_err(|e| OidcError::server_error(format!("email send failed: {e}")))?;
+
+    tracing::info!(user_id = %user.id, ttl_secs = SIGNUP_OTP_TTL_SECS, "signup OTP dispatched");
+    Ok(())
+}
+
+/// Argon2id-hash the password and insert the user row with federation URIs.
+async fn create_user_record(
+    state: &AppState,
+    raw_username: &str,
+    email: &str,
+    password: &str,
+) -> Result<User, OidcError> {
     let salt = SaltString::generate(&mut OsRng);
     let argon2 = Argon2::new(
         argon2::Algorithm::Argon2id,
@@ -156,69 +203,64 @@ pub async fn post_register_and_login(
             .map_err(|_| OidcError::server_error("Failed to build Argon2 params"))?,
     );
     let password_hash = argon2
-        .hash_password(form.password.as_bytes(), &salt)
+        .hash_password(password.as_bytes(), &salt)
         .map_err(|_| OidcError::server_error("Failed to hash password"))?
         .to_string();
 
-    // 5. Generate username (user input + NanoID suffix) and derive federation URIs
-    let display_name = &form.username;
+    let display_name = raw_username;
     let username = format!("{}_{}", display_name, nanoid::nanoid!(5));
-    let user_id = uuid::Uuid::new_v4();
+    let user_id = Uuid::new_v4();
     let base = state.config.issuer();
     let actor_uri = format!("{}/users/{}", base, username);
     let inbox_url = format!("{}/users/{}/inbox", base, username);
     let outbox_url = format!("{}/users/{}/outbox", base, username);
 
-    let user = users::create_user_with_id(
+    users::create_user_with_id(
         &state.pool,
         user_id,
         &username,
         display_name,
-        &form.email,
+        email,
         &password_hash,
         &actor_uri,
         &inbox_url,
         &outbox_url,
     )
     .await
-    .map_err(|e| OidcError::server_error(e.to_string()))?;
-
-    tracing::info!(user_id = %user.id, username = %user.username, "user registered (register-and-login)");
-    tracing::debug!(user_id = %user.id, "issuing auth code for new user");
-
-    // 6. Issue auth code
-    let mut code_bytes = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut code_bytes);
-    let code = Base64UrlUnpadded::encode_string(&code_bytes);
-
-    auth_codes::create_code(
-        &state.pool,
-        &code,
-        &form.client_id,
-        user.id,
-        &form.redirect_uri,
-        &form.code_challenge,
-        &form.code_challenge_method,
-        &form.scope,
-        form.nonce.as_deref(),
-    )
-    .await
-    .map_err(|e| OidcError::server_error(e.to_string()))?;
-
-    // 7. Set the session cookie
-    let updated_jar = jar.add(build_session_cookie(user.id, state.config.secure_cookies()));
-
-    let redirect_url = format!(
-        "{}?code={}&state={}",
-        form.redirect_uri,
-        urlencoded(&code),
-        urlencoded(&form.state),
-    );
-    Ok((updated_jar, Redirect::to(&redirect_url)).into_response())
+    .map_err(|e| OidcError::server_error(e.to_string()))
 }
 
-/// Build a redirect back to the web-client login page (register tab) with an error message.
-fn register_error_redirect(frontend_url: &str, form: &RegisterAndLoginForm, error: &str) -> Response {
+/// Redirect URL to the web-client's `/verify-email` page, carrying the
+/// pending user id, email, and every OIDC param needed to resume the flow.
+fn verify_email_redirect_url(
+    frontend_url: &str,
+    pending_user_id: Uuid,
+    pending_email: &str,
+    form: &RegisterAndLoginForm,
+) -> String {
+    let mut query = format!(
+        "pending_user_id={}&pending_email={}&client_id={}&redirect_uri={}&scope={}&state={}&code_challenge={}&code_challenge_method={}",
+        urlencoded(&pending_user_id.to_string()),
+        urlencoded(pending_email),
+        urlencoded(&form.client_id),
+        urlencoded(&form.redirect_uri),
+        urlencoded(&form.scope),
+        urlencoded(&form.state),
+        urlencoded(&form.code_challenge),
+        urlencoded(&form.code_challenge_method),
+    );
+    if let Some(n) = &form.nonce {
+        query.push_str(&format!("&nonce={}", urlencoded(n)));
+    }
+    format!("{}/verify-email?{}", frontend_url, query)
+}
+
+/// Redirect back to the web-client login page (register tab) with an error.
+fn register_error_redirect(
+    frontend_url: &str,
+    form: &RegisterAndLoginForm,
+    error: &str,
+) -> Response {
     let mut query = format!(
         "tab=register&client_id={}&redirect_uri={}&scope={}&state={}&code_challenge={}&code_challenge_method={}&error={}",
         urlencoded(&form.client_id),

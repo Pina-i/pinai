@@ -1,0 +1,83 @@
+//! Test-only EmailSender that records what would have been sent.
+//!
+//! Gated behind the `test-utils` feature so production binaries never link it.
+
+use std::sync::{Arc, Mutex};
+
+use async_trait::async_trait;
+
+use crate::{EmailError, EmailSender};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SentEmail {
+    pub kind: &'static str,
+    pub to: String,
+    pub display_name: String,
+    pub code: String,
+}
+
+#[derive(Default, Clone)]
+pub struct InMemoryEmailSender {
+    sent: Arc<Mutex<Vec<SentEmail>>>,
+}
+
+impl InMemoryEmailSender {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Take everything sent so far and clear the buffer. Useful for asserting
+    /// one specific email landed without bleed from a previous test.
+    pub fn take_sent(&self) -> Vec<SentEmail> {
+        std::mem::take(&mut *self.sent.lock().expect("InMemoryEmailSender mutex poisoned"))
+    }
+
+    pub fn peek_sent(&self) -> Vec<SentEmail> {
+        self.sent
+            .lock()
+            .expect("InMemoryEmailSender mutex poisoned")
+            .clone()
+    }
+}
+
+#[async_trait]
+impl EmailSender for InMemoryEmailSender {
+    async fn send_signup_otp(
+        &self,
+        to: &str,
+        display_name: &str,
+        code: &str,
+    ) -> Result<(), EmailError> {
+        self.sent
+            .lock()
+            .expect("InMemoryEmailSender mutex poisoned")
+            .push(SentEmail {
+                kind: "signup_otp",
+                to: to.to_string(),
+                display_name: display_name.to_string(),
+                code: code.to_string(),
+            });
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn records_send_and_drains_on_take() {
+        let s = InMemoryEmailSender::new();
+        s.send_signup_otp("alice@example.com", "Alice", "111111").await.unwrap();
+        s.send_signup_otp("bob@example.com", "Bob", "222222").await.unwrap();
+
+        let drained = s.take_sent();
+        assert_eq!(drained.len(), 2);
+        assert_eq!(drained[0].to, "alice@example.com");
+        assert_eq!(drained[0].code, "111111");
+        assert_eq!(drained[1].code, "222222");
+
+        // Buffer should be empty after take.
+        assert!(s.peek_sent().is_empty());
+    }
+}

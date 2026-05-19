@@ -23,12 +23,31 @@ CREATE TABLE users (
   actor_uri     TEXT NOT NULL UNIQUE,       -- e.g. "https://idp.alice.com/users/alice"
   inbox_url     TEXT NOT NULL,              -- e.g. "https://idp.alice.com/users/alice/inbox"
   outbox_url    TEXT NOT NULL,              -- e.g. "https://idp.alice.com/users/alice/outbox"
+  email_verified_at TIMESTAMPTZ,            -- NULL until the signup OTP is consumed;
+                                            -- /login refuses to issue a session while NULL
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
 
   CONSTRAINT users_pronouns_check
     CHECK (pronouns IS NULL OR pronouns IN ('he', 'she', 'non-binary'))
 );
+
+-- Signup confirmation OTPs (6-digit numeric, peppered HMAC-SHA256).
+-- At most one *unconsumed* row per user at any moment; resend consumes the
+-- previous row in the same transaction. Reaper drops consumed/expired rows
+-- older than 24 h.
+CREATE TABLE email_verification_codes (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  code_hash   BYTEA NOT NULL,            -- HMAC-SHA256(EMAIL_OTP_PEPPER, code)
+  expires_at  TIMESTAMPTZ NOT NULL,      -- now() + 10 minutes
+  consumed_at TIMESTAMPTZ,               -- set on successful verify OR resend invalidation
+  attempts    INTEGER NOT NULL DEFAULT 0, -- max 5 before lockout (resend required)
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_evc_user_unconsumed
+    ON email_verification_codes(user_id)
+ WHERE consumed_at IS NULL;
 
 -- Cache of remote users fetched via ActivityPub / WebFinger from other IdP instances
 CREATE TABLE remote_actors (
@@ -99,6 +118,166 @@ When a friendship transitions to `accepted` (via `POST /api/friends/:id/accept`,
 - **Cross-IdP**: the outbound AP `Accept{Follow}` activity carries it in a non-standard `conversationId` field on the activity body (a sibling of `id`/`type`/`actor`/`object`). The peer IdP's `handle_accept` reads it and calls `conversations::get_or_create_dm_with_id` so both sides persist the row under the same UUID. A pre-refactor peer omits the field; the receiver falls back to `get_or_create_dm`, ending up with a divergent id — exactly matching the pre-refactor state. This is a safe degradation.
 
 The migration `20260512000001_backfill_friendship_conversations.sql` retroactively creates a DM for every accepted friendship that doesn't yet have one (deduplicated by ordering the actor pair lexicographically so the two friendship rows don't each get their own conversation).
+
+---
+
+## 1.4. Sign-up email verification
+
+Every new account must prove ownership of its email address before a session
+cookie or access token is issued. Federation, friend graph, and DMs are all
+inaccessible to an unverified user.
+
+### Flow
+
+```
+┌──────────────┐  ① POST /register-and-login (form)
+│  Web client  │ ────────────────────────────────────►  IdP creates user (email_verified_at = NULL),
+│ (verify page)│                                        inserts email_verification_codes row,
+│              │                                        SMTPs the 6-digit code to the address.
+│              │  ② 302 → /verify-email?pending_user_id=…&pending_email=…&{oidc params}
+│              │ ◄────────────────────────────────────
+│              │  ③ POST /verify-email-and-login (form)
+│              │ ────────────────────────────────────►  IdP verifies code, flips
+│              │                                        email_verified_at, issues auth code,
+│              │                                        sets session cookie, 302 → redirect_uri
+│              │  ④ 302 → redirect_uri?code=…&state=…
+│              │ ◄────────────────────────────────────
+└──────────────┘
+```
+
+### Endpoints
+
+| Endpoint | Body | Result |
+|---|---|---|
+| `POST /register-and-login` | username, email, password + OIDC params | Creates the user with `email_verified_at = NULL`, dispatches OTP, redirects to `frontend_url/verify-email`. **No session is issued.** |
+| `POST /verify-email-and-login` | `pending_user_id`, `pending_email`, `code` + OIDC params | Consumes the code, sets `email_verified_at = now()`, issues an OIDC auth code + session cookie, redirects to `redirect_uri`. Recoverable failures (wrong code, expired) redirect back to `/verify-email` with `error=…`. |
+| `POST /verify-email/resend` | `pending_user_id` | Issues a fresh OTP; rate-limited to 5 codes per user per 10-min window. `204` on success, `410` if already verified, `429` if rate-limited. |
+| `POST /login` (existing) | email, password + OIDC params | If credentials are valid but `email_verified_at IS NULL`, dispatches a fresh OTP and redirects to `/verify-email` instead of issuing a session. |
+
+### OTP rules
+
+- **Length.** 6 numeric digits. Drawn from `OsRng` with rejection sampling so each digit is uniform `0..=9` (no modulo bias).
+- **Lifetime.** 10 minutes (`SIGNUP_OTP_TTL_SECS = 600`).
+- **Storage.** `code_hash = HMAC-SHA256(EMAIL_OTP_PEPPER, code)`. The pepper is a ≥ 32-byte hex env var; startup fails if unset or shorter. A leaked DB without the pepper is not brute-forceable offline.
+- **Attempts.** 5 per code row before lockout — the user must resend.
+- **Single-use.** `consume_and_verify_user` atomically marks the row `consumed_at = now()` *and* sets `email_verified_at` in one transaction. A race losing thread sees `flipped = false` and is told the code was already used.
+- **Resend invalidation.** Inserting a new code consumes the previous unconsumed row in the same transaction, so only the latest code can succeed.
+
+### Reaper
+
+`run_signup_reaper` (spawned from `server::main`) wakes every hour and:
+1. Deletes `email_verification_codes` rows that are consumed-or-expired *and* older than 24 hours.
+2. Deletes `users` rows where `email_verified_at IS NULL` *and* `created_at` is older than 7 days. Abandoned signups free the email + username so they can be re-registered.
+
+### Dev SMTP
+
+Mailpit ships in `docker/docker-compose.yml` (`MP_SMTP_AUTH_ACCEPT_ANY=true`, `MP_SMTP_AUTH_ALLOW_INSECURE=true`). Web UI on `MAILPIT_UI_PORT` (Alice 8027, Bob 8028) lets a developer click through to the rendered email and copy the code. Production points `SMTP_HOST`/`SMTP_PORT` at a real relay; set `SMTP_STARTTLS=true` for TLS-enabled relays. `POST /dev/send-test-email` is mounted only when `IDP_ENV=development` and fires a hard-coded `123456` code to verify the SMTP path.
+
+### `/userinfo`
+
+Returns `email_verified: boolean` derived from `email_verified_at IS NOT NULL` so clients can show / hide flow-gates without an extra round trip.
+
+---
+
+## 1.4b. TOTP two-factor authentication
+
+Per-login second factor backed by an authenticator app (RFC 6238, SHA-1, 6
+digits, 30-second window). Recovery codes substitute when a user loses access
+to their device.
+
+### Data model additions
+
+```sql
+ALTER TABLE users
+    ADD COLUMN totp_secret  BYTEA,
+    ADD COLUMN totp_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+
+-- Mid-enrollment secret. Discarded once verify succeeds (copied to users.totp_secret).
+CREATE TABLE pending_totp_enrollments (
+    user_id    UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    secret     BYTEA NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- "You passed password, now show me the second factor" tickets.
+CREATE TABLE pending_totp_logins (
+    id                    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id               UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    client_id             TEXT NOT NULL,
+    redirect_uri          TEXT NOT NULL,
+    scope                 TEXT NOT NULL,
+    oauth_state           TEXT NOT NULL,
+    code_challenge        TEXT NOT NULL,
+    code_challenge_method TEXT NOT NULL,
+    nonce                 TEXT,
+    expires_at            TIMESTAMPTZ NOT NULL,   -- now() + 5 minutes
+    consumed_at           TIMESTAMPTZ,
+    attempts              INTEGER NOT NULL DEFAULT 0,
+    created_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- 10 single-use codes per user. HMAC-SHA256(EMAIL_OTP_PEPPER, plaintext) — same
+-- pepper as signup OTPs (one secret to manage).
+CREATE TABLE recovery_codes (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    code_hash   BYTEA NOT NULL,
+    consumed_at TIMESTAMPTZ,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+```
+
+### Login flow
+
+```
+POST /login (email + password) ──► verify creds + email_verified_at
+                                  │
+                                  ├─ user.totp_enabled = false
+                                  │     → issue auth code + session cookie + 302 redirect_uri  (existing flow)
+                                  │
+                                  └─ user.totp_enabled = true
+                                        → create pending_totp_logins row carrying OIDC params
+                                        → 302 to frontend_url/login/totp?ticket=<uuid>
+                                                                  │
+                                                                  ▼
+                              POST /login/totp (ticket + code | recovery_code)
+                                        → verify code via idp_totp::verify_code(secret, code)  -or-
+                                          ct-compare recovery_code against unconsumed rows + consume
+                                        → consume ticket + issue auth code + session cookie
+                                        → 302 redirect_uri?code=…&state=…
+```
+
+Failures (wrong code, ticket expired, ticket already consumed) all redirect
+back to `/login/totp?ticket=…&error=…` so the form re-renders inline. After 5
+failed attempts the user is bounced to `/login` with a "sign in again" notice
+— the password step must be re-cleared, not just the second factor.
+
+### Enrollment / disable / regenerate endpoints
+
+| Endpoint | Auth | Body | Result |
+|---|---|---|---|
+| `POST /api/totp/enroll` | Bearer | — | Generates a fresh 20-byte secret, stores it in `pending_totp_enrollments`, returns `{ secret_base32, provisioning_url }`. The provisioning URL is the `otpauth://totp/...` string the client renders as a QR. |
+| `POST /api/totp/enroll/verify` | Bearer | `{ code }` | Verifies the first authenticator code against the pending secret. On success: commits the secret to `users.totp_secret`, deletes the pending row, generates 10 recovery codes, returns them in `{ recovery_codes: [...] }` — shown once and never re-served. |
+| `POST /api/totp/disable` | Bearer | `{ code }` | Requires a current TOTP code (passive sessions can't disarm). Clears `totp_secret`, sets `totp_enabled = false`, deletes all recovery codes. |
+| `POST /api/totp/recovery-codes/regenerate` | Bearer | `{ code }` | Requires a current TOTP code. Atomically replaces all of the user's recovery codes and returns the fresh set. |
+
+### Constants
+
+- **TOTP digits / step / skew**: 6 / 30 s / ±1 step (allows ±30 s clock drift). Matches Google Authenticator / Authy / 1Password.
+- **Secret length**: 20 bytes (RFC 4226).
+- **Login ticket TTL**: 5 minutes; max 5 attempts per ticket.
+- **Recovery codes**: 10 per user, 10 chars from a Crockford-style alphabet (no `0`, `1`, `I`, `L`, `O`, `U`), formatted `XXXXX-XXXXX`. Normalization on input strips dashes + whitespace and uppercases — `abcde-12345` and `ABCDE12345` are equivalent.
+- **Pepper**: recovery code hashes reuse `EMAIL_OTP_PEPPER` — one secret to manage.
+
+### `/userinfo`
+
+Returns `totp_enabled: boolean` so the web client knows whether to render the
+"Enable 2FA" pane vs. the "Disable / Generate new recovery codes" pane.
+
+### Reaper
+
+`run_signup_reaper` (already running) now also drops consumed/expired
+`pending_totp_logins` rows older than 24 h via the same hourly cadence.
 
 ---
 

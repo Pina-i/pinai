@@ -55,9 +55,13 @@ identity-provider/
 ├── crates/
 │   ├── server/             # main Axum application: entrypoint + router (wires every crate)
 │   ├── auth/               # OIDC/OAuth2 flows, JWT issuance, JWKS, registration, cookies,
-│   │   └── src/            #   avatar profile, login/logout. Hosts the residual presence
-│   │       ├── presence/   #   HTTP/SSE handlers and WS upgrade handler that still
-│   │       └── ws/         #   depend on AppState (transitional).
+│   │   └── src/            #   avatar profile, login/logout, signup OTP + reaper. Hosts
+│   │       ├── presence/   #   the residual presence HTTP/SSE handlers and WS upgrade
+│   │       └── ws/         #   handler that still depend on AppState.
+│   ├── email/              # Outbound SMTP (lettre). `EmailSender` trait + LettreSmtpSender +
+│   │                       #   InMemoryEmailSender (test-utils). One method per template kind.
+│   ├── totp/               # Pure TOTP + recovery-code primitives (RFC 6238, no DB / no HTTP).
+│   │                       #   Used by auth's enrollment + login challenge (Phase 3).
 │   ├── federation/         # ActivityPub: WebFinger, actor, inbox, outbox, delivery,
 │   │                       #   HTTP Signatures, Bearer-auth helper, actor-name lookup.
 │   ├── messaging/          # DM REST API (send/list/edit). Outbound delivery via
@@ -74,10 +78,11 @@ identity-provider/
 │   │                       #   every domain crate; constructed in `server`).
 │   ├── broker/             # Redis pub-sub + Streams abstraction (EventBroker trait).
 │   ├── db/                 # SQLx models, migrations, repositories
-│   │   └── repos/          # auth_codes, clients, conversations, friendships,
-│   │                       #   key_packages, messages, mls_commits, mls_welcomes,
-│   │                       #   history_messages, history_salt, remote_actors,
-│   │                       #   user_devices, users
+│   │   └── repos/          # auth_codes, clients, conversations, email_verification_codes,
+│   │                       #   friendships, key_packages, messages, mls_commits,
+│   │                       #   mls_welcomes, history_messages, history_salt,
+│   │                       #   pending_totp_enrollments, pending_totp_logins,
+│   │                       #   recovery_codes, remote_actors, user_devices, users
 │   │                       #   (reactions repo dropped in Phase 3; user_identity_keys
 │   │                       #   + recovery_blobs dropped in Phase 7)
 │   ├── e2ee/               # MLS key directory + Delivery Service: identity /
@@ -132,7 +137,15 @@ db, broker, storage, config ──► (leaves)
 | `PATCH /api/profile` | Update display_name / pronouns / bio (Bearer-auth); fans out via `propagate_profile_update` |
 | `PUT /api/avatar` | Replace the user's avatar (raw image bytes; ≤2 MiB; jpeg/png/webp/gif). URL is cache-busted with `?v=<unix_secs>` |
 | `DELETE /api/avatar` | Clear the user's avatar |
-| `POST /register` | User self-registration |
+| `POST /register` | User self-registration — dispatches signup OTP, no session |
+| `POST /register-and-login` | Form submit from web client; same as `/register` plus carries OIDC params through to the verify page |
+| `POST /verify-email-and-login` | Consume signup OTP, mark `email_verified_at`, issue auth code + session, redirect to OIDC `redirect_uri` |
+| `POST /verify-email/resend` | Re-issue a signup OTP for an unverified user (rate-limited: 5 per 10 min) |
+| `POST /login/totp` | Consume TOTP-challenge ticket (or recovery code), issue auth code + session, redirect to `redirect_uri`. Failures redirect back with `?error=...`. |
+| `POST /api/totp/enroll` | Bearer auth. Start TOTP enrollment — returns `{ secret_base32, provisioning_url }` |
+| `POST /api/totp/enroll/verify` | Bearer auth. Verify first code, commit secret, return 10 one-time recovery codes |
+| `POST /api/totp/disable` | Bearer auth + current TOTP code. Clears secret + recovery codes |
+| `POST /api/totp/recovery-codes/regenerate` | Bearer auth + current TOTP code. Replaces the user's 10 recovery codes |
 | `POST /users/:handle/inbox` | ActivityPub inbox (Follow/Accept/Create{Note,MLS}/Update{Note,MLS}/MLS commits+welcomes) |
 | `GET /users/:handle` | ActivityPub actor profile (JSON-LD) |
 | `GET /ws?token=<jwt>` | WebSocket upgrade (DMs + presence + events) |
@@ -218,7 +231,12 @@ Don't mention any "phase" development or what is currently being worked on. The 
 
 ```
 users                    — local accounts (actor_uri, inbox_url, display_name, username+NanoID,
-                            avatar_url, pronouns ∈ {he, she, non-binary}, bio)
+                            avatar_url, pronouns ∈ {he, she, non-binary}, bio, email_verified_at,
+                            totp_secret, totp_enabled)
+email_verification_codes — signup OTPs (peppered HMAC, 10-min expiry, 5-attempt limit)
+pending_totp_enrollments — in-flight 2FA secret awaiting first-code verify
+pending_totp_logins      — short-lived "passed password, need TOTP" tickets carrying OIDC params
+recovery_codes           — 10 per user, single-use, peppered HMAC
 remote_actors            — cache of federated users (inbox_url, avatar_url, fetched_at TTL)
 friendships              — friend graph (friend_actor_uri, friend_avatar_url, status)
 conversations            — anchor for every conversation (kind: dm|group, name)

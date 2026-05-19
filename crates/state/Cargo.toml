@@ -12,6 +12,7 @@ jwt-utils  = { workspace = true }
 idp-broker   = { path = "../broker",   package = "idp-broker" }
 idp-config   = { path = "../config",   package = "idp-config" }
 idp-db       = { path = "../db",       package = "idp-db" }
+idp-email    = { path = "../email",    package = "idp-email" }
 idp-presence = { path = "../presence", package = "idp-presence" }
 idp-realtime = { path = "../realtime", package = "idp-realtime" }
 idp-storage  = { path = "../storage",  package = "idp-storage" }

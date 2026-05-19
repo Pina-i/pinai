@@ -31,6 +31,11 @@ argon2    = "0.5"
 rand      = "0.8"
 base64ct  = { version = "1", features = ["alloc"] }
 base64    = "0.22"
+hmac      = { workspace = true }
+sha2      = { workspace = true }
+subtle    = { workspace = true }
+idp-email = { path = "../email", package = "idp-email" }
+idp-totp  = { path = "../totp",  package = "idp-totp" }
 activitypub     = { workspace = true }
 http-signatures = { workspace = true }
 reqwest         = { workspace = true }

@@ -5,6 +5,7 @@ use axum_extra::extract::cookie::Key;
 use idp_broker::EventBroker;
 use idp_config::Config;
 use idp_db::PgPool;
+use idp_email::EmailSender;
 use idp_storage::StorageClient;
 use jwt_utils::EdKeyPair;
 
@@ -33,6 +34,10 @@ pub struct AppState {
     pub heartbeat_tracker: Option<Arc<HeartbeatTracker>>,
     /// Outbound presence connections to remote IdPs (batch poll + per-domain SSE).
     pub remote_registry: Option<Arc<RemotePresenceRegistry>>,
+    /// Outbound email transport (signup OTPs, future password resets).
+    pub email: Arc<dyn EmailSender>,
+    /// HMAC pepper for email OTP code hashes. Never logged or stored.
+    pub email_otp_pepper: Arc<Vec<u8>>,
 }
 
 /// Allow `SignedCookieJar` to extract the key from `AppState`.

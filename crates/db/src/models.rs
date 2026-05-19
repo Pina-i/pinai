@@ -17,6 +17,10 @@ pub struct User {
     pub actor_uri: Option<String>,
     pub inbox_url: Option<String>,
     pub outbox_url: Option<String>,
+    pub email_verified_at: Option<OffsetDateTime>,
+    #[serde(skip_serializing)]
+    pub totp_secret: Option<Vec<u8>>,
+    pub totp_enabled: bool,
     pub created_at: OffsetDateTime,
     pub updated_at: OffsetDateTime,
 }
@@ -61,6 +65,59 @@ pub struct UserInfo {
     pub sub: String,
     pub email: String,
     pub preferred_username: String,
+}
+
+// ─── EmailVerificationCode ────────────────────────────────────────────────────
+
+/// Signup confirmation OTP row. Plaintext code is never stored — only its
+/// peppered HMAC-SHA256. Single-use; resending invalidates the prior row in
+/// the same transaction.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct EmailVerificationCode {
+    pub id: Uuid,
+    pub user_id: Uuid,
+    pub code_hash: Vec<u8>,
+    pub expires_at: OffsetDateTime,
+    pub consumed_at: Option<OffsetDateTime>,
+    pub attempts: i32,
+    pub created_at: OffsetDateTime,
+}
+
+// ─── TOTP 2FA: enrollment / login tickets / recovery codes ───────────────────
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct PendingTotpEnrollment {
+    pub user_id: Uuid,
+    pub secret: Vec<u8>,
+    pub created_at: OffsetDateTime,
+}
+
+/// "Password was correct, now show me a TOTP / recovery code" ticket.
+/// Carries the OIDC params server-side so the URL only exposes an opaque id.
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct PendingTotpLogin {
+    pub id: Uuid,
+    pub user_id: Uuid,
+    pub client_id: String,
+    pub redirect_uri: String,
+    pub scope: String,
+    pub oauth_state: String,
+    pub code_challenge: String,
+    pub code_challenge_method: String,
+    pub nonce: Option<String>,
+    pub expires_at: OffsetDateTime,
+    pub consumed_at: Option<OffsetDateTime>,
+    pub attempts: i32,
+    pub created_at: OffsetDateTime,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct RecoveryCode {
+    pub id: Uuid,
+    pub user_id: Uuid,
+    pub code_hash: Vec<u8>,
+    pub consumed_at: Option<OffsetDateTime>,
+    pub created_at: OffsetDateTime,
 }
 
 // ─── RemoteActor ─────────────────────────────────────────────────────────────

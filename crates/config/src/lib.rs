@@ -80,6 +80,18 @@ pub struct Config {
     /// Maximum lifetime accepted on a freshly uploaded KeyPackage. Server
     /// validates `expires_at - created_at ≤ this` on `POST /api/keys/packages`.
     pub e2ee_keypackage_lifetime: Duration,
+
+    // ── Outbound email (SMTP — Mailpit in dev, real relay in prod) ───────
+    pub smtp_host: String,
+    pub smtp_port: u16,
+    pub smtp_username: String,
+    pub smtp_password: String,
+    /// RFC 5322 `From` header (e.g. `Pīna'i <no-reply@idp.alice.com>`).
+    pub smtp_from: String,
+    pub smtp_starttls: bool,
+    /// HMAC pepper for email OTP code hashes. Required — startup fails if unset.
+    /// Same value also peppers TOTP recovery codes (one secret to manage).
+    pub email_otp_pepper: Vec<u8>,
 }
 
 /// Built-in extension blocklist. Extended (never replaced) by
@@ -111,6 +123,8 @@ pub enum ConfigError {
     InvalidEnvironment(String),
     #[error("Invalid attachment numeric value for {0}: {1}")]
     InvalidAttachmentValue(&'static str, String),
+    #[error("Invalid {0}: {1}")]
+    InvalidValue(&'static str, String),
 }
 
 impl Config {
@@ -191,6 +205,21 @@ impl Config {
                 "E2EE_KEYPACKAGE_LIFETIME_SECS",
                 30 * 24 * 60 * 60,
             )?),
+
+            smtp_host: std::env::var("SMTP_HOST").unwrap_or_else(|_| "mailpit".into()),
+            smtp_port: std::env::var("SMTP_PORT")
+                .unwrap_or_else(|_| "1025".into())
+                .parse::<u16>()
+                .map_err(|e| ConfigError::InvalidPort(e.to_string()))?,
+            smtp_username: std::env::var("SMTP_USERNAME").unwrap_or_default(),
+            smtp_password: std::env::var("SMTP_PASSWORD").unwrap_or_default(),
+            smtp_from: std::env::var("SMTP_FROM")
+                .unwrap_or_else(|_| "Pīna'i <no-reply@localhost>".into()),
+            smtp_starttls: std::env::var("SMTP_STARTTLS")
+                .ok()
+                .map(|v| matches!(v.to_lowercase().as_str(), "true" | "1" | "yes"))
+                .unwrap_or(false),
+            email_otp_pepper: parse_email_otp_pepper()?,
         })
     }
 
@@ -245,6 +274,22 @@ fn parse_env_u64(key: &'static str, default: u64) -> Result<u64, ConfigError> {
             .parse()
             .map_err(|_| ConfigError::InvalidAttachmentValue(key, raw)),
     }
+}
+
+/// Hex-decoded ≥ 32-byte HMAC pepper. Required at startup so an operator can't
+/// silently run with a missing or weak value.
+fn parse_email_otp_pepper() -> Result<Vec<u8>, ConfigError> {
+    let raw = std::env::var("EMAIL_OTP_PEPPER")
+        .map_err(|_| ConfigError::MissingVar("EMAIL_OTP_PEPPER"))?;
+    let bytes = hex::decode(raw.trim())
+        .map_err(|e| ConfigError::InvalidValue("EMAIL_OTP_PEPPER", e.to_string()))?;
+    if bytes.len() < 32 {
+        return Err(ConfigError::InvalidValue(
+            "EMAIL_OTP_PEPPER",
+            format!("must be at least 32 bytes; got {}", bytes.len()),
+        ));
+    }
+    Ok(bytes)
 }
 
 /// Merge a built-in blocklist with an optional user-supplied comma-separated

@@ -33,6 +33,7 @@ use idp_social::{
 use idp_auth::{
     authorize::get_authorize,
     avatar::{delete_avatar, put_avatar},
+    dev::post_send_test_email,
     discovery::{jwks, openid_configuration},
     login::post_login,
     logout::get_logout,
@@ -41,7 +42,13 @@ use idp_auth::{
     profile::update_profile,
     register::{post_register, post_register_and_login},
     token::post_token,
+    totp::{
+        post_disable as post_totp_disable, post_enroll as post_totp_enroll,
+        post_enroll_verify as post_totp_enroll_verify, post_login_totp,
+        post_regenerate_recovery_codes as post_totp_regenerate_recovery_codes,
+    },
     userinfo::get_userinfo,
+    verify_email::{post_resend_verification, post_verify_email_and_login},
     ws::ws_upgrade,
 };
 use idp_e2ee::{
@@ -89,7 +96,9 @@ pub fn build(state: AppState) -> Router {
         .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
         .on_response(DefaultOnResponse::new().level(Level::INFO));
 
-    Router::new()
+    let is_dev = state.config.environment.is_dev();
+
+    let router = Router::new()
         // ── Well-known (OIDC + WebFinger) ────────────────────────────────────
         .route("/.well-known/openid-configuration", get(openid_configuration))
         .route("/.well-known/jwks.json", get(jwks))
@@ -104,6 +113,13 @@ pub fn build(state: AppState) -> Router {
         // ── User management ───────────────────────────────────────────────────
         .route("/register", post(post_register))
         .route("/register-and-login", post(post_register_and_login))
+        .route("/verify-email-and-login", post(post_verify_email_and_login))
+        .route("/verify-email/resend", post(post_resend_verification))
+        .route("/login/totp", post(post_login_totp))
+        .route("/api/totp/enroll", post(post_totp_enroll))
+        .route("/api/totp/enroll/verify", post(post_totp_enroll_verify))
+        .route("/api/totp/disable", post(post_totp_disable))
+        .route("/api/totp/recovery-codes/regenerate", post(post_totp_regenerate_recovery_codes))
         .route("/logout", get(get_logout))
 
         // ── ActivityPub actor endpoints ───────────────────────────────────────
@@ -189,8 +205,16 @@ pub fn build(state: AppState) -> Router {
         .route("/ws", get(ws_upgrade))
 
         // ── Health check ──────────────────────────────────────────────────────
-        .route("/health", get(|| async { Json(json!({ "ok": true })) }))
+        .route("/health", get(|| async { Json(json!({ "ok": true })) }));
 
+    // Dev-only routes — never registered in production.
+    let router = if is_dev {
+        router.route("/dev/send-test-email", post(post_send_test_email))
+    } else {
+        router
+    };
+
+    router
         .with_state(state)
         .layer(cors)
         .layer(trace_layer)

@@ -118,6 +118,8 @@ pub async fn update_profile(
     Ok(Json(UserinfoResponse {
         sub: updated.id.to_string(),
         email: updated.email,
+        email_verified: updated.email_verified_at.is_some(),
+        totp_enabled: updated.totp_enabled,
         preferred_username: updated.username,
         display_name: updated.display_name,
         address,

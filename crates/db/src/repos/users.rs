@@ -160,6 +160,45 @@ pub async fn update_profile(
     .await
 }
 
+/// Commit a verified TOTP secret to the user row and flip `totp_enabled = true`.
+pub async fn set_totp_secret_and_enable(
+    pool: &PgPool,
+    user_id: Uuid,
+    secret: &[u8],
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        UPDATE users
+           SET totp_secret  = $2,
+               totp_enabled = TRUE,
+               updated_at   = now()
+         WHERE id = $1
+        "#,
+    )
+    .bind(user_id)
+    .bind(secret)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Clear TOTP state — used by `POST /api/totp/disable` and during recovery.
+pub async fn disable_totp(pool: &PgPool, user_id: Uuid) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        UPDATE users
+           SET totp_secret  = NULL,
+               totp_enabled = FALSE,
+               updated_at   = now()
+         WHERE id = $1
+        "#,
+    )
+    .bind(user_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// Search users by username prefix (case-insensitive), up to `limit` results.
 pub async fn search_by_username(
     pool: &PgPool,

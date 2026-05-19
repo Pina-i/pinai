@@ -8,13 +8,19 @@ use axum_extra::extract::cookie::SignedCookieJar;
 use base64ct::{Base64UrlUnpadded, Encoding};
 use rand::RngCore;
 use serde::Deserialize;
+use time::{Duration, OffsetDateTime};
 
-use idp_db::repos::{auth_codes, users};
+use idp_db::repos::{auth_codes, pending_totp_logins, users};
 
 use crate::{
     cookies::{build_session_cookie, urlencoded},
+    register::issue_signup_otp,
     AppState, OidcError,
 };
+
+/// TOTP-challenge ticket TTL — short enough that a stolen ticket can't
+/// linger, long enough for a user to dig out their phone.
+pub const TOTP_CHALLENGE_TTL_SECS: i64 = 300;
 
 /// Form fields submitted by the login form (POST /login).
 #[derive(Debug, Deserialize)]
@@ -67,6 +73,57 @@ pub async fn post_login(
         return Ok(login_error_redirect(&state.config.frontend_url, &form, "Invalid request"));
     }
 
+    // 3b. Hard gate on email verification — credentials are correct, but the
+    // account hasn't proved ownership of its inbox. Dispatch a fresh OTP and
+    // bounce to /verify-email so the user can finish signup.
+    if user.email_verified_at.is_none() {
+        tracing::info!(user_id = %user.id, "login rejected: email not verified, resending OTP");
+        if let Err(e) = issue_signup_otp(&state, &user).await {
+            tracing::warn!(
+                user_id = %user.id,
+                error = %e.error_description,
+                "OTP resend failed during unverified login"
+            );
+        }
+        return Ok(Redirect::to(&verify_email_redirect(
+            &state.config.frontend_url,
+            user.id,
+            &user.email,
+            &form,
+        ))
+        .into_response());
+    }
+
+    // 3c. Second factor — if TOTP is enabled, defer session issuance until
+    // the user proves possession of the authenticator on /login/totp.
+    if user.totp_enabled {
+        let expires_at = OffsetDateTime::now_utc() + Duration::seconds(TOTP_CHALLENGE_TTL_SECS);
+        let ticket = pending_totp_logins::create(
+            &state.pool,
+            pending_totp_logins::NewPendingLogin {
+                user_id: user.id,
+                client_id: &form.client_id,
+                redirect_uri: &form.redirect_uri,
+                scope: &form.scope,
+                oauth_state: &form.state,
+                code_challenge: &form.code_challenge,
+                code_challenge_method: &form.code_challenge_method,
+                nonce: form.nonce.as_deref(),
+                expires_at,
+            },
+        )
+        .await
+        .map_err(|e| OidcError::server_error(e.to_string()))?;
+
+        tracing::info!(user_id = %user.id, ticket = %ticket.id, "TOTP challenge issued");
+
+        return Ok(Redirect::to(&totp_challenge_redirect(
+            &state.config.frontend_url,
+            ticket.id,
+        ))
+        .into_response());
+    }
+
     // 4. Generate a random authorization code (32 bytes → 43 base64url chars)
     let mut code_bytes = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut code_bytes);
@@ -103,6 +160,44 @@ pub async fn post_login(
     );
 
     Ok((updated_jar, Redirect::to(&redirect_url)).into_response())
+}
+
+/// URL the web client visits to present the TOTP challenge form. Only the
+/// opaque ticket id is exposed — OIDC params live server-side on the
+/// `pending_totp_logins` row.
+fn totp_challenge_redirect(frontend_url: &str, ticket_id: uuid::Uuid) -> String {
+    format!(
+        "{}/login/totp?ticket={}",
+        frontend_url,
+        urlencoded(&ticket_id.to_string())
+    )
+}
+
+/// Redirect URL to the `/verify-email` page after a login attempt by an
+/// unverified user. Mirrors `register::verify_email_redirect_url` but with the
+/// `error` param explaining why login was blocked.
+fn verify_email_redirect(
+    frontend_url: &str,
+    pending_user_id: uuid::Uuid,
+    pending_email: &str,
+    form: &LoginForm,
+) -> String {
+    let mut query = format!(
+        "pending_user_id={}&pending_email={}&client_id={}&redirect_uri={}&scope={}&state={}&code_challenge={}&code_challenge_method={}&error={}",
+        urlencoded(&pending_user_id.to_string()),
+        urlencoded(pending_email),
+        urlencoded(&form.client_id),
+        urlencoded(&form.redirect_uri),
+        urlencoded(&form.scope),
+        urlencoded(&form.state),
+        urlencoded(&form.code_challenge),
+        urlencoded(&form.code_challenge_method),
+        urlencoded("Confirm your email to finish signing in"),
+    );
+    if let Some(n) = &form.nonce {
+        query.push_str(&format!("&nonce={}", urlencoded(n)));
+    }
+    format!("{}/verify-email?{}", frontend_url, query)
 }
 
 /// Build a redirect back to the web-client login page with an error message in the query string.
