@@ -91,7 +91,10 @@ pub async fn post_friend_request(
     friend_request_local(&state, caller_id, address).await
 }
 
-/// Send a friend request to a local user (auto-accept).
+/// Send a friend request to a local user. Mirrors the cross-IdP shape:
+/// both rows land in `pending`, the target gets a single `FriendRequest`
+/// WS event, and the friendship only transitions to `accepted` when the
+/// target POSTs `/api/friends/:id/accept`.
 async fn friend_request_local(
     state: &AppState,
     caller_id: Uuid,
@@ -117,8 +120,10 @@ async fn friend_request_local(
     let caller_actor_uri = caller.actor_uri.as_deref()
         .ok_or_else(|| OidcError::server_error("Caller has no actor_uri"))?;
 
-    // Create friendship: caller → target
-    let friendship = friendships::create_friendship(
+    // Both rows persist as `pending`. The caller's row is the placeholder
+    // for "I asked them"; the target's row is what `get_pending_requests`
+    // and `accept_friendship` operate on.
+    let caller_row = friendships::create_friendship(
         &state.pool,
         caller_id,
         target_actor_uri,
@@ -127,14 +132,7 @@ async fn friend_request_local(
     .await
     .map_err(|e| OidcError::server_error(e.to_string()))?;
 
-    // Auto-accept for local users.
-    let friendship = friendships::set_status(&state.pool, friendship.id, "accepted")
-        .await
-        .map_err(|e| OidcError::server_error(e.to_string()))?
-        .ok_or_else(|| OidcError::server_error("Friendship not found after insert"))?;
-
-    // Create reciprocal friendship: target → caller (also auto-accept)
-    let reciprocal = friendships::create_friendship(
+    let target_row = friendships::create_friendship(
         &state.pool,
         target.id,
         caller_actor_uri,
@@ -143,42 +141,25 @@ async fn friend_request_local(
     .await
     .map_err(|e| OidcError::server_error(e.to_string()))?;
 
-    friendships::set_status(&state.pool, reciprocal.id, "accepted")
-        .await
-        .map_err(|e| OidcError::server_error(e.to_string()))?;
+    // Single notification: the target sees an incoming request. The DM
+    // conversation is minted later inside `accept_friendship`, so
+    // `conversation_id` is None here.
+    state.hub.send_to_user(
+        &target.id,
+        WsEvent::FriendRequest(FriendshipPayload {
+            friendship_id: target_row.id,
+            actor_uri: caller_actor_uri.to_string(),
+            username: caller.username.clone(),
+            display_name: caller.display_name.clone(),
+            conversation_id: None,
+        }),
+    );
 
-    // Auto-accept means the DM conversation should exist immediately for
-    // both sides, matching the `accept_friendship` flow.
-    let (conversation_id, _created) = conversations::get_or_create_dm(
-        &state.pool,
-        caller_actor_uri,
-        target_actor_uri,
-    )
-    .await
-    .map_err(|e| OidcError::server_error(e.to_string()))?;
-
-    // Notify target via WebSocket. `FriendRequest` doesn't carry the
-    // conversation id (no DM yet from the requester's POV in the generic
-    // flow), but the immediate `FriendAccepted` does.
-    let request_payload = FriendshipPayload {
-        friendship_id: reciprocal.id,
-        actor_uri: caller_actor_uri.to_string(),
-        username: caller.username.clone(),
-        display_name: caller.display_name.clone(),
-        conversation_id: None,
-    };
-    let accepted_payload = FriendshipPayload {
-        conversation_id: Some(conversation_id),
-        ..request_payload.clone()
-    };
-    state.hub.send_to_user(&target.id, WsEvent::FriendRequest(request_payload));
-    state.hub.send_to_user(&target.id, WsEvent::FriendAccepted(accepted_payload));
-
-    tracing::info!(caller = %caller_id, target = %target.id, "friend request sent + accepted (local)");
+    tracing::info!(caller = %caller_id, target = %target.id, "friend request sent (local, pending)");
 
     Ok((StatusCode::CREATED, Json(FriendResponse {
-        friendship_id: friendship.id,
-        status: friendship.status,
+        friendship_id: caller_row.id,
+        status: caller_row.status,
     })))
 }
 
@@ -399,7 +380,28 @@ pub async fn accept_friendship(
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?
     {
-        // Local friend — push WS event directly.
+        // Local friend — also flip the requester's reverse row. Both rows
+        // live in this DB (we inserted them together in `friend_request_local`
+        // / `handle_follow`), so the friend list query (`status='accepted'`)
+        // only finds the friendship after we update both sides here.
+        if let Some(reverse) = friendships::find_by_owner_and_uri(
+            &state.pool,
+            friend_user.id,
+            caller_actor_uri,
+        )
+        .await
+        .map_err(|e| OidcError::server_error(e.to_string()))?
+        {
+            friendships::set_status(&state.pool, reverse.id, "accepted")
+                .await
+                .map_err(|e| OidcError::server_error(e.to_string()))?;
+        } else {
+            tracing::warn!(
+                friend = %friendship.friend_actor_uri,
+                "local accept with no reverse friendship row — friend list will look one-sided"
+            );
+        }
+
         state.hub.send_to_user(&friend_user.id, WsEvent::FriendAccepted(FriendshipPayload {
             friendship_id: friendship.id,
             actor_uri: caller_actor_uri.to_string(),

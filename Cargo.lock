@@ -1032,6 +1032,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "dev-inject-data"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "argon2",
+ "nanoid",
+ "rand 0.8.5",
+ "sqlx",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -16,6 +16,7 @@ members = [
     "crates/state",
     "crates/storage",
     "crates/totp",
+    "crates/dev-inject-data",
 ]
 
 [workspace.dependencies]

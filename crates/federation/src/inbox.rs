@@ -89,12 +89,14 @@ async fn handle_follow(
     // Check if this is a local actor.
     let base = state.config.issuer();
     if let Some(follower) = local_actor(actor_url, &base, &state.pool).await {
-        // Local-to-local: create mutual friendships and auto-accept.
+        // Local-to-local: insert both rows as `pending` and notify the
+        // recipient with a single `FriendRequest`. The DM conversation is
+        // minted later by `accept_friendship` once the recipient consents.
         let follower_uri = follower.actor_uri.as_deref()
             .ok_or_else(|| OidcError::server_error("Follower has no actor_uri"))?;
 
         // Follower → recipient
-        let f1 = friendships::create_friendship(
+        friendships::create_friendship(
             &state.pool,
             follower.id,
             recipient_actor_uri,
@@ -102,12 +104,9 @@ async fn handle_follow(
         )
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?;
-        friendships::set_status(&state.pool, f1.id, "accepted")
-            .await
-            .map_err(|e| OidcError::server_error(e.to_string()))?;
 
-        // Recipient → follower
-        let f2 = friendships::create_friendship(
+        // Recipient → follower — this is the row the recipient will accept.
+        let recipient_row = friendships::create_friendship(
             &state.pool,
             recipient.id,
             follower_uri,
@@ -115,41 +114,22 @@ async fn handle_follow(
         )
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?;
-        friendships::set_status(&state.pool, f2.id, "accepted")
-            .await
-            .map_err(|e| OidcError::server_error(e.to_string()))?;
 
-        // Auto-accept local-to-local — create the DM conversation
-        // immediately, same shape as `accept_friendship`.
-        let (conversation_id, _created) = conversations::get_or_create_dm(
-            &state.pool,
-            recipient_actor_uri,
-            follower_uri,
-        )
-        .await
-        .map_err(|e| OidcError::server_error(e.to_string()))?;
-
-        // Push real-time notification to inbox owner. Only `FriendAccepted`
-        // carries the conversation_id — the preceding `FriendRequest` keeps
-        // the no-conversation-yet semantics consistent across paths.
-        let request_payload = FriendshipPayload {
-            friendship_id: f2.id,
-            actor_uri: follower_uri.to_string(),
-            username: follower.username.clone(),
-            display_name: follower.display_name.clone(),
-            conversation_id: None,
-        };
-        let accepted_payload = FriendshipPayload {
-            conversation_id: Some(conversation_id),
-            ..request_payload.clone()
-        };
-        state.hub.send_to_user(&recipient.id, WsEvent::FriendRequest(request_payload));
-        state.hub.send_to_user(&recipient.id, WsEvent::FriendAccepted(accepted_payload));
+        state.hub.send_to_user(
+            &recipient.id,
+            WsEvent::FriendRequest(FriendshipPayload {
+                friendship_id: recipient_row.id,
+                actor_uri: follower_uri.to_string(),
+                username: follower.username.clone(),
+                display_name: follower.display_name.clone(),
+                conversation_id: None,
+            }),
+        );
 
         tracing::info!(
             follower = %follower.username,
             recipient = %recipient.username,
-            "local friend request auto-accepted"
+            "local friend request notified (pending)"
         );
     } else {
         // Remote actor — cache and create a pending friendship for the recipient.

@@ -1,0 +1,18 @@
+[package]
+name    = "dev-inject-data"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "dev-inject-data"
+path = "src/main.rs"
+
+[dependencies]
+sqlx     = { workspace = true }
+tokio    = { workspace = true }
+uuid     = { workspace = true }
+argon2   = "0.5"
+rand     = "0.8"
+nanoid   = { workspace = true }
+anyhow   = "1"
