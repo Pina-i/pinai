@@ -7,9 +7,10 @@ pub mod events;
 pub mod hub;
 
 pub use events::{
-    DeviceJoinedPayload, DmPayload, EditedDmPayload, FriendshipPayload, HeartbeatAckPayload,
-    MlsCommitPayload, MlsWelcomeReadyPayload, PresenceUpdatePayload, ProfileUpdatePayload,
-    SendDmPayload, TypingPayload, TypingStartPayload, UnwatchConversationPayload,
-    WatchConversationPayload, WsAttachment, WsClientMessage, WsEvent,
+    DeviceJoinedPayload, DmPayload, EditedDmPayload, FriendshipPayload, GroupCreatedPayload,
+    GroupRenamedPayload, HeartbeatAckPayload, MemberAddedPayload, MemberRemovedPayload,
+    MemberRoleChangedPayload, MlsCommitPayload, MlsWelcomeReadyPayload, PresenceUpdatePayload,
+    ProfileUpdatePayload, SendDmPayload, TypingPayload, TypingStartPayload,
+    UnwatchConversationPayload, WatchConversationPayload, WsAttachment, WsClientMessage, WsEvent,
 };
 pub use hub::{ConnectionHandle, WsHub};

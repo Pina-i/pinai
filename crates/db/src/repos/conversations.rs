@@ -77,6 +77,93 @@ pub async fn add_member(
     .await
 }
 
+/// Add a member to a conversation with an explicit role (`'member'`|`'admin'`).
+/// Unlike [`add_member`], re-adding an existing member also resets their role —
+/// used by group creation (creator → `'admin'`) and the add-member endpoint.
+pub async fn add_member_with_role(
+    pool: &PgPool,
+    conversation_id: Uuid,
+    actor_uri: &str,
+    role: &str,
+) -> Result<ConversationMember, sqlx::Error> {
+    sqlx::query_as::<_, ConversationMember>(
+        r#"
+        INSERT INTO conversation_members (conversation_id, actor_uri, role)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (conversation_id, actor_uri)
+            DO UPDATE SET left_at = NULL, role = EXCLUDED.role
+        RETURNING *
+        "#,
+    )
+    .bind(conversation_id)
+    .bind(actor_uri)
+    .bind(role)
+    .fetch_one(pool)
+    .await
+}
+
+/// Soft-remove a member (set `left_at = now()`). Returns the updated row, or
+/// `None` if the actor wasn't an active member.
+pub async fn remove_member(
+    pool: &PgPool,
+    conversation_id: Uuid,
+    actor_uri: &str,
+) -> Result<Option<ConversationMember>, sqlx::Error> {
+    sqlx::query_as::<_, ConversationMember>(
+        r#"
+        UPDATE conversation_members
+        SET left_at = now()
+        WHERE conversation_id = $1 AND actor_uri = $2 AND left_at IS NULL
+        RETURNING *
+        "#,
+    )
+    .bind(conversation_id)
+    .bind(actor_uri)
+    .fetch_optional(pool)
+    .await
+}
+
+/// Change an active member's role. Returns the updated row, or `None` if the
+/// actor wasn't an active member.
+pub async fn set_role(
+    pool: &PgPool,
+    conversation_id: Uuid,
+    actor_uri: &str,
+    role: &str,
+) -> Result<Option<ConversationMember>, sqlx::Error> {
+    sqlx::query_as::<_, ConversationMember>(
+        r#"
+        UPDATE conversation_members
+        SET role = $3
+        WHERE conversation_id = $1 AND actor_uri = $2 AND left_at IS NULL
+        RETURNING *
+        "#,
+    )
+    .bind(conversation_id)
+    .bind(actor_uri)
+    .bind(role)
+    .fetch_optional(pool)
+    .await
+}
+
+/// Fetch a single active member (used for membership + role gates).
+pub async fn get_member(
+    pool: &PgPool,
+    conversation_id: Uuid,
+    actor_uri: &str,
+) -> Result<Option<ConversationMember>, sqlx::Error> {
+    sqlx::query_as::<_, ConversationMember>(
+        r#"
+        SELECT * FROM conversation_members
+        WHERE conversation_id = $1 AND actor_uri = $2 AND left_at IS NULL
+        "#,
+    )
+    .bind(conversation_id)
+    .bind(actor_uri)
+    .fetch_optional(pool)
+    .await
+}
+
 /// Find the existing DM conversation between exactly two actors.
 /// Returns the conversation ID if one exists.
 pub async fn find_dm_between(

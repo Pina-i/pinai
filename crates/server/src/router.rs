@@ -22,9 +22,10 @@ use idp_federation::{
     webfinger::get_webfinger,
 };
 use idp_messaging::{
-    attachments::{get_attachment, upload_attachments},
+    add_group_member, attachments::{get_attachment, upload_attachments},
     blob::get_attachment_blob,
-    edit_message, get_conversation, list_conversations, mark_read, send_message,
+    create_group, edit_message, get_conversation, list_conversations, list_group_members,
+    mark_read, remove_group_member, rename_group, send_message, set_member_role,
 };
 use idp_social::{
     accept_friendship, delete_friendship, get_friends, get_incoming_requests,
@@ -147,6 +148,25 @@ pub fn build(state: AppState) -> Router {
         .route("/api/dm/{conversation_id}", get(get_conversation))
         .route("/api/dm/{conversation_id}/read", post(mark_read))
         .route("/api/dm/{message_id}/edit", patch(edit_message))
+
+        // ── Group conversations REST API (Bearer-auth) ────────────────────────
+        // Membership + roles live in `conversation_members`; MLS key material
+        // (commits/welcomes) flows separately through the Delivery Service.
+        // `{actor_uri}` segments are percent-encoded by the client.
+        .route("/api/groups", post(create_group))
+        .route("/api/groups/{conversation_id}", patch(rename_group))
+        .route(
+            "/api/groups/{conversation_id}/members",
+            get(list_group_members).post(add_group_member),
+        )
+        .route(
+            "/api/groups/{conversation_id}/members/{actor_uri}",
+            delete(remove_group_member),
+        )
+        .route(
+            "/api/groups/{conversation_id}/members/{actor_uri}/role",
+            post(set_member_role),
+        )
 
         // ── Avatar API (Bearer-auth) ────────────────────────────────────
         .route("/api/avatar", put(put_avatar).delete(delete_avatar))

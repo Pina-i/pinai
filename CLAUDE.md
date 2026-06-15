@@ -153,6 +153,12 @@ db, broker, storage, config ──► (leaves)
 | `GET /api/dm` | List conversations (`kind`, `name`, `members[]` with `avatarUrl`, `unread_count`, `last_message_at`, `last_message_sender`). No plaintext preview — clients compute it from the decrypted MLS stream |
 | `GET /api/dm/:conversation_id` | Conversation history (keyset cursor) — every row carries `mls_ciphertext`; marks as read on initial load |
 | `PATCH /api/dm/:message_id/edit` | Replace the row's `mls_ciphertext` and stamp `edited_at`; sender-only |
+| `POST /api/groups` | Create a group conversation (Bearer). Body: `{ name?, member_actor_uris[] }`. Caller becomes admin; members join as `member`. Returns the group view; emits `group_created` WS to local members. Client bootstraps MLS afterwards. |
+| `GET /api/groups/:conversation_id/members` | List members with `role` (`admin`/`member`) + `displayName`/`avatarUrl` (Bearer; member-gated). |
+| `POST /api/groups/:conversation_id/members` | Add a member (Bearer; **admin-gated**). Body: `{ actor_uri }`. Emits `member_added`. MLS key delivery happens separately via the welcome the client posts. |
+| `DELETE /api/groups/:conversation_id/members/:actor_uri` | Remove a member (**admin-gated**) or leave (caller == target). `actor_uri` percent-encoded. Sets `left_at`; emits `member_removed`. |
+| `PATCH /api/groups/:conversation_id` | Rename a group (Bearer; **admin-gated**). Body: `{ name }`. Emits `group_renamed`. |
+| `POST /api/groups/:conversation_id/members/:actor_uri/role` | Promote/demote a member (**admin-gated**). Body: `{ role: "admin" \| "member" }`. Emits `member_role_changed`. |
 | `POST /api/attachments` | Upload up to 5 multipart files; returns orphan attachment IDs |
 | `GET /api/attachments/:id` | Returns a token-protected blob URL + metadata (Bearer auth) |
 | `GET /api/attachments/:id/blob` | The actual byte fetch — token-authed; streams bytes through the IdP from the private object store (or from origin via HTTP-Sig for remote) |
@@ -240,7 +246,8 @@ recovery_codes           — 10 per user, single-use, peppered HMAC
 remote_actors            — cache of federated users (inbox_url, avatar_url, fetched_at TTL)
 friendships              — friend graph (friend_actor_uri, friend_avatar_url, status)
 conversations            — anchor for every conversation (kind: dm|group, name)
-conversation_members     — participants (actor_uri, joined_at, left_at)
+conversation_members     — participants (actor_uri, joined_at, left_at, role: member|admin —
+                            role is meaningful only for groups; DMs leave both at 'member')
 direct_messages          — messages (conversation_id, sender_actor_uri, mls_ciphertext, activity_uri,
                             reply_to_id) — body is opaque MLS ciphertext after Phase 3
 conversation_reads       — last_read_at per user per conversation (unread tracking)

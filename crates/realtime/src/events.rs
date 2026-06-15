@@ -31,6 +31,16 @@ pub enum WsEvent {
     /// A new device of the recipient's account just registered. Other live
     /// sessions add its leaf to every group they're in.
     DeviceJoined(DeviceJoinedPayload),
+    /// A group conversation was created with the recipient as a member.
+    GroupCreated(GroupCreatedPayload),
+    /// A member was added to a group the recipient belongs to.
+    MemberAdded(MemberAddedPayload),
+    /// A member was removed from (or left) a group the recipient belongs to.
+    MemberRemoved(MemberRemovedPayload),
+    /// A member's role changed (promoted to / demoted from admin).
+    MemberRoleChanged(MemberRoleChangedPayload),
+    /// A group was renamed.
+    GroupRenamed(GroupRenamedPayload),
 }
 
 /// Slim attachment projection carried on the wire alongside DM events.
@@ -162,6 +172,58 @@ pub struct DeviceJoinedPayload {
     /// Standard-base64-encoded Ed25519 public key (32 bytes raw). Receiving
     /// devices use it to look up the new device when targeting MLS Add commits.
     pub drk_public_key: String,
+}
+
+// ─── Group membership payloads ─────────────────────────────────────────────────
+//
+// Membership changes are tracked server-side in `conversation_members` and
+// pushed to every *local* member so sidebars and member panels update without
+// a refresh. Key material still travels through the MLS commit/welcome path.
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupCreatedPayload {
+    pub conversation_id: Uuid,
+    pub name: Option<String>,
+    pub creator_actor_uri: String,
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: OffsetDateTime,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemberAddedPayload {
+    pub conversation_id: Uuid,
+    pub actor_uri: String,
+    pub role: String,
+    pub added_by_actor_uri: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemberRemovedPayload {
+    pub conversation_id: Uuid,
+    pub actor_uri: String,
+    /// `None` when the member left on their own; otherwise the admin who removed them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub removed_by_actor_uri: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemberRoleChangedPayload {
+    pub conversation_id: Uuid,
+    pub actor_uri: String,
+    pub role: String,
+    pub changed_by_actor_uri: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupRenamedPayload {
+    pub conversation_id: Uuid,
+    pub name: Option<String>,
+    pub renamed_by_actor_uri: String,
 }
 
 // ─── Client-to-server messages ───────────────────────────────────────────────

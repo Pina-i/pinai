@@ -175,6 +175,8 @@ pub struct ConversationMember {
     pub actor_uri: String,
     pub joined_at: OffsetDateTime,
     pub left_at: Option<OffsetDateTime>,
+    /// `'member'` | `'admin'` — only meaningful for groups; DMs stay `'member'`.
+    pub role: String,
 }
 
 // ─── DirectMessage ────────────────────────────────────────────────────────────

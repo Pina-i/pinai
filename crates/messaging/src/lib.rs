@@ -8,6 +8,7 @@
 
 pub mod attachments;
 pub mod blob;
+pub mod groups;
 pub mod handlers;
 pub mod orphan_sweep;
 
@@ -15,4 +16,9 @@ pub use handlers::{
     edit_message, get_conversation, list_conversations, mark_read, send_message,
     ConversationListItem, ConversationMemberInfo, ConversationQuery, EditMessageRequest,
     MessageResponse, SendMessageRequest,
+};
+pub use groups::{
+    add_group_member, create_group, list_group_members, remove_group_member, rename_group,
+    set_member_role, AddMemberRequest, CreateGroupRequest, GroupMember, GroupView,
+    RenameGroupRequest, SetRoleRequest,
 };

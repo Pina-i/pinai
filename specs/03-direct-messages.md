@@ -36,6 +36,8 @@ CREATE TABLE conversation_members (
   actor_uri        TEXT NOT NULL,             -- local or remote
   joined_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
   left_at          TIMESTAMPTZ,               -- NULL = still a member
+  role             TEXT NOT NULL DEFAULT 'member'
+                     CHECK (role IN ('member', 'admin')),  -- group management gate; ignored for DMs
   PRIMARY KEY (conversation_id, actor_uri)
 );
 
@@ -79,7 +81,7 @@ CREATE INDEX idx_dm_conversation_cursor
 
 > **Conversation ID ownership**: DM `conversation_id` is decided at **friendship-accept time** by the accepter's IdP, not by the first-message sender. `accept_friendship` calls `conversations::get_or_create_dm` in the same logical transaction as `set_status('accepted')`, then surfaces the new id in the WS `friend_accepted` payload (`conversation_id` field, `None` on `friend_request`/`friend_removed`). For cross-IdP accepts the id rides on the outbound AP `Accept{Follow}` activity in a non-standard `conversationId` field; the receiving inbox reads it and calls `get_or_create_dm_with_id` so both IdPs persist the row under the same UUID. A peer running pre-refactor code is a safe degradation — the field is absent, the local IdP falls back to `get_or_create_dm`, and the two sides end up with different ids (the same pre-refactor state). Same-IdP and cross-IdP requests share one model — both leave the friendship `pending` until the recipient POSTs `/api/friends/:id/accept`, and `accept_friendship` is the single place where the conversation is minted. Clients then always read `dmData.id` from `localDmConvos` and pin it on `POST /api/dm`; the WS `dm-conversations` query is invalidated on `friend_accepted` so the new row appears immediately.
 
-> **Group name default**: when a group conversation is created, the server sets `name` to the comma-joined `display_name` values of all initial members excluding the creator, e.g. `"Bob, Harry"`. The creator's own name is omitted since the conversation list is always shown from the perspective of the local user. The name is stored as plain text and can be updated freely via `PATCH /api/dm/:conversation_id` (group only).
+> **Group name**: optional at creation. When the client sends a blank/absent name the server stores `NULL`, and clients derive the title from the member `display_name` values (e.g. `"Bob, Harry"`) — the list is shown from the local user's perspective, so their own name is omitted. A stored name can be changed via `PATCH /api/groups/:conversation_id` (admin only). See **§9 Group conversation management**.
 
 ### Delivery flow
 
@@ -558,6 +560,66 @@ ATTACHMENT_BLOCKED_MIMES=          # comma-separated, additive
 - Magic-byte file-type sniffing as a second validation layer.
 
 See `docs/plans/2026-05-05-message-attachments-design.md` for the full design.
+
+---
+
+## 10. Group conversation management
+
+Group conversations are `conversations` rows with `kind = 'group'`. Their
+membership and roles live in `conversation_members`; the REST API below owns
+**membership, roles, the authorization gates, and the membership WS events**.
+MLS key material (commits/welcomes) flows separately through the Delivery
+Service (`specs/05-e2ee.md`) — after creating or adding a member here, the
+client bootstraps/extends the MLS group so keys reach the new members.
+
+### Roles
+
+`conversation_members.role` is `'admin'` or `'member'` (default `'member'`;
+ignored for DMs). The **creator** of a group becomes its first `admin`. Only
+admins may add/remove members, rename the group, or change roles. Any member
+may leave (self-removal). Removal and leaving are soft — `left_at` is set, never
+a hard delete, so earlier messages stay attached to the conversation.
+
+### Endpoints (Bearer-auth)
+
+| Endpoint | Gate | Behaviour |
+|---|---|---|
+| `POST /api/groups` | member | Body `{ name?, member_actor_uris[] }`. Creates a `kind='group'` row, adds the caller as `admin` and each URI as `member`. Returns the group view (`conversationId`, `name`, `members[]` with roles). Emits `group_created`. |
+| `GET /api/groups/:id/members` | member | Members with `role`, `displayName`, `avatarUrl`. |
+| `POST /api/groups/:id/members` | **admin** | Body `{ actor_uri }`. Upserts the member (role `member`, idempotent). Emits `member_added`. |
+| `DELETE /api/groups/:id/members/:actor_uri` | **admin** or self | Sets `left_at`. `actor_uri` is percent-encoded. Emits `member_removed` (`removed_by_actor_uri` is `null` on self-leave). |
+| `PATCH /api/groups/:id` | **admin** | Body `{ name }`. Renames the group. Emits `group_renamed`. |
+| `POST /api/groups/:id/members/:actor_uri/role` | **admin** | Body `{ role }`. Promote/demote. Emits `member_role_changed`. |
+
+### WS events
+
+`group_created`, `member_added`, `member_removed`, `member_role_changed`, and
+`group_renamed` are pushed to every **local** member of the conversation (same
+local-fanout pattern as `mls_commit`). Remote members learn of membership
+through the MLS welcome/commit federation path; cross-IdP convergence of the
+`conversation_members` table itself is out of scope here.
+
+### Create flow (client → server)
+
+```mermaid
+sequenceDiagram
+  participant C as Client (creator)
+  participant IdP as identity-provider
+  C->>IdP: POST /api/groups { name?, member_actor_uris }
+  IdP->>IdP: create conversation(kind=group) + add creator(admin) + members
+  IdP-->>C: { conversationId, members[] } + group_created WS
+  loop per member
+    C->>IdP: claim KeyPackage + POST commit + POST welcome (MLS)
+    IdP-->>C: welcome added to recipient; keys delivered
+  end
+```
+
+### Forking a 1:1
+
+A 1:1 DM is private to exactly two people and is never mutated in place.
+"Adding people" to a 1:1 is a **client-side** action that opens the group
+composer pre-seeded with the DM peer and calls `POST /api/groups` — a brand-new
+group is created and the original two-person conversation is left untouched.
 
 ---
 
