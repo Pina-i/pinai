@@ -32,11 +32,7 @@ const SWEEP_INTERVAL: Duration = Duration::from_secs(300); // 5 min
 /// Storage may be `None` if object storage isn't configured — DB rows are
 /// still cleaned up; storage objects (which won't exist anyway in that case)
 /// are silently skipped.
-pub async fn run_orphan_sweep(
-    pool: PgPool,
-    storage: Option<StorageClient>,
-    config: Arc<Config>,
-) {
+pub async fn run_orphan_sweep(pool: PgPool, storage: Option<StorageClient>, config: Arc<Config>) {
     tracing::info!(
         interval_secs = SWEEP_INTERVAL.as_secs(),
         ttl_secs = config.attachment_orphan_ttl.as_secs(),

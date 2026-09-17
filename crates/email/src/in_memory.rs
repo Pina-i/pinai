@@ -29,7 +29,12 @@ impl InMemoryEmailSender {
     /// Take everything sent so far and clear the buffer. Useful for asserting
     /// one specific email landed without bleed from a previous test.
     pub fn take_sent(&self) -> Vec<SentEmail> {
-        std::mem::take(&mut *self.sent.lock().expect("InMemoryEmailSender mutex poisoned"))
+        std::mem::take(
+            &mut *self
+                .sent
+                .lock()
+                .expect("InMemoryEmailSender mutex poisoned"),
+        )
     }
 
     pub fn peek_sent(&self) -> Vec<SentEmail> {
@@ -68,8 +73,12 @@ mod tests {
     #[tokio::test]
     async fn records_send_and_drains_on_take() {
         let s = InMemoryEmailSender::new();
-        s.send_signup_otp("alice@example.com", "Alice", "111111").await.unwrap();
-        s.send_signup_otp("bob@example.com", "Bob", "222222").await.unwrap();
+        s.send_signup_otp("alice@example.com", "Alice", "111111")
+            .await
+            .unwrap();
+        s.send_signup_otp("bob@example.com", "Bob", "222222")
+            .await
+            .unwrap();
 
         let drained = s.take_sent();
         assert_eq!(drained.len(), 2);

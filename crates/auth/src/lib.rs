@@ -17,4 +17,3 @@ pub mod verify_email;
 pub mod ws;
 
 pub use idp_state::{AppState, OidcError};
-

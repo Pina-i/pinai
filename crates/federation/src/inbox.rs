@@ -83,7 +83,9 @@ async fn handle_follow(
         .and_then(|v| v.as_str())
         .ok_or_else(|| OidcError::invalid_request("Follow missing actor field"))?;
 
-    let recipient_actor_uri = recipient.actor_uri.as_deref()
+    let recipient_actor_uri = recipient
+        .actor_uri
+        .as_deref()
         .ok_or_else(|| OidcError::server_error("Recipient has no actor_uri"))?;
 
     // Check if this is a local actor.
@@ -92,7 +94,9 @@ async fn handle_follow(
         // Local-to-local: insert both rows as `pending` and notify the
         // recipient with a single `FriendRequest`. The DM conversation is
         // minted later by `accept_friendship` once the recipient consents.
-        let follower_uri = follower.actor_uri.as_deref()
+        let follower_uri = follower
+            .actor_uri
+            .as_deref()
             .ok_or_else(|| OidcError::server_error("Follower has no actor_uri"))?;
 
         // Follower → recipient
@@ -151,14 +155,9 @@ async fn handle_follow(
         .map_err(|e| OidcError::server_error(e.to_string()))?;
 
         // Create pending friendship: recipient → remote actor.
-        let friendship = friendships::create_friendship(
-            &state.pool,
-            recipient.id,
-            actor_url,
-            None,
-        )
-        .await
-        .map_err(|e| OidcError::server_error(e.to_string()))?;
+        let friendship = friendships::create_friendship(&state.pool, recipient.id, actor_url, None)
+            .await
+            .map_err(|e| OidcError::server_error(e.to_string()))?;
 
         // Notify inbox owner of pending friend request. No conversation
         // yet — created on accept.
@@ -182,10 +181,7 @@ async fn handle_follow(
 // ─── Accept ──────────────────────────────────────────────────────────────────
 
 async fn handle_accept(state: &AppState, body: &Value) -> Result<(), OidcError> {
-    let accepter_uri = body
-        .get("actor")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let accepter_uri = body.get("actor").and_then(|v| v.as_str()).unwrap_or("");
 
     // Pina'i extension: the accepter's IdP minted the DM conversation
     // alongside `set_status('accepted')` and surfaces its id here so
@@ -199,23 +195,19 @@ async fn handle_accept(state: &AppState, body: &Value) -> Result<(), OidcError> 
         .and_then(|s| Uuid::parse_str(s).ok());
 
     // Find the local user who sent the follow by looking at the object's actor.
-    let follow_actor = body
-        .get("object")
-        .and_then(|o| {
-            if o.is_string() {
-                None
-            } else {
-                o.get("actor").and_then(|a| a.as_str())
-            }
-        });
+    let follow_actor = body.get("object").and_then(|o| {
+        if o.is_string() {
+            None
+        } else {
+            o.get("actor").and_then(|a| a.as_str())
+        }
+    });
 
     if let Some(local_actor_uri) = follow_actor {
         if let Ok(Some(local_user)) = users::find_by_actor_uri(&state.pool, local_actor_uri).await {
-            if let Ok(Some(friendship)) = friendships::find_by_owner_and_uri(
-                &state.pool,
-                local_user.id,
-                accepter_uri,
-            ).await {
+            if let Ok(Some(friendship)) =
+                friendships::find_by_owner_and_uri(&state.pool, local_user.id, accepter_uri).await
+            {
                 friendships::set_status(&state.pool, friendship.id, "accepted")
                     .await
                     .map_err(|e| OidcError::server_error(e.to_string()))?;
@@ -225,16 +217,20 @@ async fn handle_accept(state: &AppState, body: &Value) -> Result<(), OidcError> 
                     advertised_conv_id,
                     local_actor_uri,
                     accepter_uri,
-                ).await?;
+                )
+                .await?;
 
                 let (username, display_name) = resolve_remote_name(state, accepter_uri).await;
-                state.hub.send_to_user(&local_user.id, WsEvent::FriendAccepted(FriendshipPayload {
-                    friendship_id: friendship.id,
-                    actor_uri: accepter_uri.to_string(),
-                    username,
-                    display_name,
-                    conversation_id: Some(conversation_id),
-                }));
+                state.hub.send_to_user(
+                    &local_user.id,
+                    WsEvent::FriendAccepted(FriendshipPayload {
+                        friendship_id: friendship.id,
+                        actor_uri: accepter_uri.to_string(),
+                        username,
+                        display_name,
+                        conversation_id: Some(conversation_id),
+                    }),
+                );
 
                 // Wire the new remote friend into batch presence polling.
                 if let Some(registry) = &state.remote_registry {
@@ -261,7 +257,11 @@ async fn handle_accept(state: &AppState, body: &Value) -> Result<(), OidcError> 
 
     for friendship in rows {
         if let Ok(Some(owner)) = users::find_by_id(&state.pool, friendship.owner_user_id).await {
-            if owner.actor_uri.as_deref().map_or(false, |u| u.starts_with(&prefix)) {
+            if owner
+                .actor_uri
+                .as_deref()
+                .map_or(false, |u| u.starts_with(&prefix))
+            {
                 friendships::set_status(&state.pool, friendship.id, "accepted")
                     .await
                     .map_err(|e| OidcError::server_error(e.to_string()))?;
@@ -270,21 +270,21 @@ async fn handle_accept(state: &AppState, body: &Value) -> Result<(), OidcError> 
                     Some(u) => u,
                     None => continue,
                 };
-                let conversation_id = create_local_dm_for_accept(
-                    state,
-                    advertised_conv_id,
-                    owner_uri,
-                    accepter_uri,
-                ).await?;
+                let conversation_id =
+                    create_local_dm_for_accept(state, advertised_conv_id, owner_uri, accepter_uri)
+                        .await?;
 
                 let (username, display_name) = resolve_remote_name(state, accepter_uri).await;
-                state.hub.send_to_user(&owner.id, WsEvent::FriendAccepted(FriendshipPayload {
-                    friendship_id: friendship.id,
-                    actor_uri: accepter_uri.to_string(),
-                    username,
-                    display_name,
-                    conversation_id: Some(conversation_id),
-                }));
+                state.hub.send_to_user(
+                    &owner.id,
+                    WsEvent::FriendAccepted(FriendshipPayload {
+                        friendship_id: friendship.id,
+                        actor_uri: accepter_uri.to_string(),
+                        username,
+                        display_name,
+                        conversation_id: Some(conversation_id),
+                    }),
+                );
 
                 // Wire the new remote friend into batch presence polling.
                 if let Some(registry) = &state.remote_registry {
@@ -310,32 +310,19 @@ async fn create_local_dm_for_accept(
     accepter_uri: &str,
 ) -> Result<Uuid, OidcError> {
     let result = match advertised {
-        Some(id) => conversations::get_or_create_dm_with_id(
-            &state.pool,
-            id,
-            owner_uri,
-            accepter_uri,
-        )
-        .await,
-        None => conversations::get_or_create_dm(
-            &state.pool,
-            owner_uri,
-            accepter_uri,
-        )
-        .await,
+        Some(id) => {
+            conversations::get_or_create_dm_with_id(&state.pool, id, owner_uri, accepter_uri).await
+        }
+        None => conversations::get_or_create_dm(&state.pool, owner_uri, accepter_uri).await,
     };
-    let (conv_id, _created) = result
-        .map_err(|e| OidcError::server_error(e.to_string()))?;
+    let (conv_id, _created) = result.map_err(|e| OidcError::server_error(e.to_string()))?;
     Ok(conv_id)
 }
 
 // ─── Reject ──────────────────────────────────────────────────────────────────
 
 async fn handle_reject(state: &AppState, body: &Value) -> Result<(), OidcError> {
-    let rejecter_uri = body
-        .get("actor")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let rejecter_uri = body.get("actor").and_then(|v| v.as_str()).unwrap_or("");
 
     let rows = sqlx::query_as::<_, idp_db::models::Friendship>(
         "SELECT * FROM friendships WHERE friend_actor_uri = $1 AND status = 'pending'",
@@ -350,13 +337,16 @@ async fn handle_reject(state: &AppState, body: &Value) -> Result<(), OidcError> 
             .await
             .map_err(|e| OidcError::server_error(e.to_string()))?;
 
-        state.hub.send_to_user(&friendship.owner_user_id, WsEvent::FriendRemoved(FriendshipPayload {
-            friendship_id: friendship.id,
-            actor_uri: rejecter_uri.to_string(),
-            username: String::new(),
-            display_name: None,
-            conversation_id: None,
-        }));
+        state.hub.send_to_user(
+            &friendship.owner_user_id,
+            WsEvent::FriendRemoved(FriendshipPayload {
+                friendship_id: friendship.id,
+                actor_uri: rejecter_uri.to_string(),
+                username: String::new(),
+                display_name: None,
+                conversation_id: None,
+            }),
+        );
 
         // Drop from batch presence polling — we no longer have a
         // friendship to track for this remote actor.
@@ -394,10 +384,7 @@ async fn handle_undo_follow(
     body: &Value,
     recipient: &idp_db::models::User,
 ) -> Result<(), OidcError> {
-    let actor_url = body
-        .get("actor")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let actor_url = body.get("actor").and_then(|v| v.as_str()).unwrap_or("");
 
     let recipient_actor_uri = recipient.actor_uri.as_deref().unwrap_or("");
 
@@ -416,13 +403,16 @@ async fn handle_undo_follow(
 
     // Notify recipient.
     let (username, display_name) = resolve_remote_name(state, actor_url).await;
-    state.hub.send_to_user(&recipient.id, WsEvent::FriendRemoved(FriendshipPayload {
-        friendship_id: Uuid::nil(),
-        actor_uri: actor_url.to_string(),
-        username,
-        display_name,
-        conversation_id: None,
-    }));
+    state.hub.send_to_user(
+        &recipient.id,
+        WsEvent::FriendRemoved(FriendshipPayload {
+            friendship_id: Uuid::nil(),
+            actor_uri: actor_url.to_string(),
+            username,
+            display_name,
+            conversation_id: None,
+        }),
+    );
 
     // Drop from batch presence polling — we no longer have a
     // friendship to track for this remote actor.
@@ -446,10 +436,7 @@ async fn handle_create(
         None => return Ok(()),
     };
 
-    let obj_type = obj
-        .get("type")
-        .and_then(|t| t.as_str())
-        .unwrap_or("");
+    let obj_type = obj.get("type").and_then(|t| t.as_str()).unwrap_or("");
 
     if obj_type != "Note" {
         return Ok(());
@@ -457,10 +444,7 @@ async fn handle_create(
 
     // After Phase 3 every DM-bearing Note must be MLS-flavoured. Reject
     // anything else — peers running pre-MLS builds can't interop.
-    let media_type = obj
-        .get("mediaType")
-        .and_then(|m| m.as_str())
-        .unwrap_or("");
+    let media_type = obj.get("mediaType").and_then(|m| m.as_str()).unwrap_or("");
     if media_type != "application/mls" {
         tracing::warn!(
             recipient = %recipient.username,
@@ -486,10 +470,7 @@ async fn handle_update_note(
     // Same MLS-only gate as Create{Note}: a peer running a pre-MLS build
     // can't produce an Update we can apply, since the row's body is opaque
     // ciphertext now.
-    let media_type = obj
-        .get("mediaType")
-        .and_then(|m| m.as_str())
-        .unwrap_or("");
+    let media_type = obj.get("mediaType").and_then(|m| m.as_str()).unwrap_or("");
     if media_type != "application/mls" {
         tracing::warn!(
             %media_type,
@@ -498,15 +479,9 @@ async fn handle_update_note(
         return Ok(());
     }
 
-    let activity_uri = obj
-        .get("id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let activity_uri = obj.get("id").and_then(|v| v.as_str()).unwrap_or("");
 
-    let new_b64 = obj
-        .get("content")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let new_b64 = obj.get("content").and_then(|v| v.as_str()).unwrap_or("");
 
     if activity_uri.is_empty() || new_b64.is_empty() {
         return Ok(());
@@ -579,10 +554,7 @@ async fn handle_update(
         None => return Ok(()),
     };
 
-    let obj_type = obj
-        .get("type")
-        .and_then(|t| t.as_str())
-        .unwrap_or("");
+    let obj_type = obj.get("type").and_then(|t| t.as_str()).unwrap_or("");
 
     if obj_type == "Note" {
         return handle_update_note(state, body, obj, recipient).await;
@@ -592,32 +564,22 @@ async fn handle_update(
         return Ok(());
     }
 
-    let actor_uri = obj
-        .get("id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let actor_uri = obj.get("id").and_then(|v| v.as_str()).unwrap_or("");
 
     if actor_uri.is_empty() {
         return Ok(());
     }
 
-    let new_display_name = obj
-        .get("name")
-        .and_then(|v| v.as_str());
+    let new_display_name = obj.get("name").and_then(|v| v.as_str());
     let new_avatar_url = obj
         .get("icon")
         .and_then(|v| v.get("url"))
         .and_then(|v| v.as_str());
 
     // 1. Update remote_actors cache.
-    remote_actors::update_profile(
-        &state.pool,
-        actor_uri,
-        new_display_name,
-        new_avatar_url,
-    )
-    .await
-    .map_err(|e| OidcError::server_error(e.to_string()))?;
+    remote_actors::update_profile(&state.pool, actor_uri, new_display_name, new_avatar_url)
+        .await
+        .map_err(|e| OidcError::server_error(e.to_string()))?;
 
     // 2. Update friend_avatar_url on all matching friendships.
     friendships::update_friend_avatar(&state.pool, actor_uri, new_avatar_url)
@@ -695,11 +657,16 @@ async fn resolve_remote_name(state: &AppState, actor_uri: &str) -> (String, Opti
     if let Ok(Some(user)) = users::find_by_actor_uri(&state.pool, actor_uri).await {
         return (user.username, user.display_name);
     }
-    let display_name = remote_actors::find_by_actor_uri(&state.pool, actor_uri).await
+    let display_name = remote_actors::find_by_actor_uri(&state.pool, actor_uri)
+        .await
         .ok()
         .flatten()
         .and_then(|ra| ra.display_name);
-    let username = actor_uri.rsplit('/').next().unwrap_or("unknown").to_string();
+    let username = actor_uri
+        .rsplit('/')
+        .next()
+        .unwrap_or("unknown")
+        .to_string();
     (username, display_name)
 }
 
@@ -765,7 +732,9 @@ pub(crate) async fn persist_inbound_attachments(
             Some(s) if s > 0 && s <= max_size => s,
             Some(s) => {
                 tracing::warn!(
-                    idx = i, size = s, max = max_size,
+                    idx = i,
+                    size = s,
+                    max = max_size,
                     "inbound attachment size out of range — skipping"
                 );
                 continue;

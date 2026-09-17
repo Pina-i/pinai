@@ -6,7 +6,7 @@
 pub mod handlers;
 
 pub use handlers::{
-    accept_friendship, delete_friendship, get_friends, get_incoming_requests,
-    post_friend_request, reject_friendship, search_users, FriendRequest, FriendRequestSummary,
-    FriendResponse, SearchQuery, UserSummary,
+    accept_friendship, delete_friendship, get_friends, get_incoming_requests, post_friend_request,
+    reject_friendship, search_users, FriendRequest, FriendRequestSummary, FriendResponse,
+    SearchQuery, UserSummary,
 };

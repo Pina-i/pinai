@@ -19,13 +19,12 @@ pub async fn validate_redirect_uri(
     client_id: &str,
     redirect_uri: &str,
 ) -> Result<bool, sqlx::Error> {
-    let row: Option<(bool,)> = sqlx::query_as(
-        "SELECT $2 = ANY(redirect_uris) FROM oauth_clients WHERE client_id = $1",
-    )
-    .bind(client_id)
-    .bind(redirect_uri)
-    .fetch_optional(pool)
-    .await?;
+    let row: Option<(bool,)> =
+        sqlx::query_as("SELECT $2 = ANY(redirect_uris) FROM oauth_clients WHERE client_id = $1")
+            .bind(client_id)
+            .bind(redirect_uri)
+            .fetch_optional(pool)
+            .await?;
 
     Ok(row.map(|(v,)| v).unwrap_or(false))
 }

@@ -98,9 +98,8 @@ pub struct Config {
 /// `ATTACHMENT_BLOCKED_EXTENSIONS`. Stored lowercased; comparison is
 /// lowercase-vs-lowercase.
 const BUILTIN_BLOCKED_EXTENSIONS: &[&str] = &[
-    "exe", "sh", "bat", "cmd", "com", "ps1", "vbs", "js", "wsf", "hta", "scr",
-    "pif", "lnk", "app", "dmg", "pkg", "msi", "msix", "deb", "rpm", "appimage",
-    "jar", "war", "dll", "so", "dylib",
+    "exe", "sh", "bat", "cmd", "com", "ps1", "vbs", "js", "wsf", "hta", "scr", "pif", "lnk", "app",
+    "dmg", "pkg", "msi", "msix", "deb", "rpm", "appimage", "jar", "war", "dll", "so", "dylib",
 ];
 
 /// Built-in MIME blocklist. Extended (never replaced) by `ATTACHMENT_BLOCKED_MIMES`.
@@ -147,8 +146,9 @@ impl Config {
                 .unwrap_or_else(|_| "8080".into())
                 .parse::<u16>()
                 .map_err(|e| ConfigError::InvalidPort(e.to_string()))?,
-            session_secret: std::env::var("SESSION_SECRET")
-                .unwrap_or_else(|_| "dev-only-insecure-session-secret-change-in-production-00000000".into()),
+            session_secret: std::env::var("SESSION_SECRET").unwrap_or_else(|_| {
+                "dev-only-insecure-session-secret-change-in-production-00000000".into()
+            }),
             frontend_url: std::env::var("FRONTEND_URL")
                 .unwrap_or_else(|_| "http://localhost:5173".into()),
             cors_origins: std::env::var("CORS_ORIGINS")
@@ -172,10 +172,7 @@ impl Config {
                 "ATTACHMENT_MAX_FILES_PER_MESSAGE",
                 5,
             )?,
-            attachment_max_byte_size: parse_env_u64(
-                "ATTACHMENT_MAX_BYTE_SIZE",
-                50 * 1024 * 1024,
-            )?,
+            attachment_max_byte_size: parse_env_u64("ATTACHMENT_MAX_BYTE_SIZE", 50 * 1024 * 1024)?,
             attachment_url_ttl: Duration::from_secs(parse_env_u64(
                 "ATTACHMENT_URL_TTL_SECS",
                 3600,
@@ -186,17 +183,16 @@ impl Config {
             )?),
             attachment_blocked_extensions: merge_blocklist(
                 BUILTIN_BLOCKED_EXTENSIONS,
-                std::env::var("ATTACHMENT_BLOCKED_EXTENSIONS").ok().as_deref(),
+                std::env::var("ATTACHMENT_BLOCKED_EXTENSIONS")
+                    .ok()
+                    .as_deref(),
             ),
             attachment_blocked_mimes: merge_blocklist(
                 BUILTIN_BLOCKED_MIMES,
                 std::env::var("ATTACHMENT_BLOCKED_MIMES").ok().as_deref(),
             ),
 
-            e2ee_keypackage_cap_per_device: parse_env_usize(
-                "E2EE_KEYPACKAGE_CAP_PER_DEVICE",
-                100,
-            )?,
+            e2ee_keypackage_cap_per_device: parse_env_usize("E2EE_KEYPACKAGE_CAP_PER_DEVICE", 100)?,
             e2ee_keypackage_refill_threshold: parse_env_usize(
                 "E2EE_KEYPACKAGE_REFILL_THRESHOLD",
                 20,

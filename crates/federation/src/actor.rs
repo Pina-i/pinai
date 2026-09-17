@@ -33,12 +33,7 @@ pub async fn get_actor(
         .ok_or_else(|| OidcError::not_found("User not found"))?;
 
     let display_name = user.display_name.as_deref().unwrap_or(&user.username);
-    let actor = Actor::person(
-        &base,
-        &slug,
-        display_name,
-        &state.keypair.public_key_pem,
-    );
+    let actor = Actor::person(&base, &slug, display_name, &state.keypair.public_key_pem);
 
     let mut response = Json(actor).into_response();
     response.headers_mut().insert(

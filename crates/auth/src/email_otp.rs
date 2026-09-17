@@ -29,8 +29,7 @@ pub fn generate_numeric_otp(len: usize) -> String {
 /// HMAC-SHA256(pepper, code). Pepper lives in env, never in the DB — a leaked
 /// table can't be brute-forced offline without it.
 pub fn hash(code: &str, pepper: &[u8]) -> Vec<u8> {
-    let mut mac =
-        HmacSha256::new_from_slice(pepper).expect("HMAC accepts any key length");
+    let mut mac = HmacSha256::new_from_slice(pepper).expect("HMAC accepts any key length");
     mac.update(code.as_bytes());
     mac.finalize().into_bytes().to_vec()
 }

@@ -124,11 +124,12 @@ pub async fn get_attachment_blob(
     Path(id): Path<Uuid>,
     Query(q): Query<BlobQuery>,
 ) -> Result<Response, OidcError> {
-    let (_user_id, token_att_id) = match verify_blob_token(state.config.session_secret.as_bytes(), &q.token) {
-        Ok(pair) => pair,
-        Err(TokenError::Expired) => return Err(OidcError::access_denied("Token expired")),
-        Err(_) => return Err(OidcError::access_denied("Invalid token")),
-    };
+    let (_user_id, token_att_id) =
+        match verify_blob_token(state.config.session_secret.as_bytes(), &q.token) {
+            Ok(pair) => pair,
+            Err(TokenError::Expired) => return Err(OidcError::access_denied("Token expired")),
+            Err(_) => return Err(OidcError::access_denied("Invalid token")),
+        };
 
     if token_att_id != id {
         return Err(OidcError::access_denied("Token does not match attachment"));

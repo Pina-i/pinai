@@ -59,9 +59,8 @@ pub async fn post_packages(
 
     // Lifetime check on every entry — server-imposed ceiling on `expires_at`.
     let now = OffsetDateTime::now_utc();
-    let max_lifetime = time::Duration::seconds(
-        state.config.e2ee_keypackage_lifetime.as_secs() as i64,
-    );
+    let max_lifetime =
+        time::Duration::seconds(state.config.e2ee_keypackage_lifetime.as_secs() as i64);
     for (i, entry) in body.packages.iter().enumerate() {
         let lifetime = entry.expires_at - now;
         if lifetime > max_lifetime {
@@ -93,9 +92,9 @@ pub async fn post_packages(
     // batch in the table.
     let mut decoded: Vec<Vec<u8>> = Vec::with_capacity(body.packages.len());
     for (i, entry) in body.packages.iter().enumerate() {
-        let bytes = B64
-            .decode(&entry.key_package)
-            .map_err(|_| OidcError::invalid_request(format!("packages[{i}].key_package is not valid base64")))?;
+        let bytes = B64.decode(&entry.key_package).map_err(|_| {
+            OidcError::invalid_request(format!("packages[{i}].key_package is not valid base64"))
+        })?;
         if bytes.is_empty() {
             return Err(OidcError::invalid_request(format!(
                 "packages[{i}].key_package is empty"
@@ -129,8 +128,7 @@ pub async fn post_packages(
         .and_then(|v| v.to_str().ok());
     let (display_name, kind) = parse_user_agent(ua);
     if let Err(e) =
-        user_devices::upsert_device(&state.pool, user_id, body.device_id, &display_name, kind)
-            .await
+        user_devices::upsert_device(&state.pool, user_id, body.device_id, &display_name, kind).await
     {
         warn!(
             user_id = %user_id,
@@ -189,7 +187,8 @@ pub async fn post_packages_claim(
     headers: HeaderMap,
     Json(body): Json<ClaimRequest>,
 ) -> Result<Json<ClaimResponse>, OidcError> {
-    let requester = require_user_or_peer(&state, &headers, "post", "/api/keys/packages/claim").await?;
+    let requester =
+        require_user_or_peer(&state, &headers, "post", "/api/keys/packages/claim").await?;
 
     // Rate-limit per requester identity to bound abuse.
     if !try_consume(&requester.rate_limit_key()) {

@@ -123,14 +123,9 @@ pub async fn post_commit(
         if body.epoch > 1 {
             return Err(OidcError::not_found("conversation not found"));
         }
-        conversations::create_conversation_with_id(
-            &state.pool,
-            conversation_id,
-            "dm",
-            None,
-        )
-        .await
-        .map_err(|e| OidcError::server_error(e.to_string()))?;
+        conversations::create_conversation_with_id(&state.pool, conversation_id, "dm", None)
+            .await
+            .map_err(|e| OidcError::server_error(e.to_string()))?;
         conversations::add_member(&state.pool, conversation_id, &proposer_actor_uri)
             .await
             .map_err(|e| OidcError::server_error(e.to_string()))?;
@@ -144,7 +139,9 @@ pub async fn post_commit(
         );
     }
     if !members.iter().any(|m| m.actor_uri == proposer_actor_uri) {
-        return Err(OidcError::access_denied("not a member of this conversation"));
+        return Err(OidcError::access_denied(
+            "not a member of this conversation",
+        ));
     }
 
     // Decode the blob upfront — no point taking the unique-index lock if the
@@ -299,7 +296,9 @@ pub async fn get_commits_since(
         return Err(OidcError::not_found("conversation not found"));
     }
     if !members.iter().any(|m| m.actor_uri == actor_uri) {
-        return Err(OidcError::access_denied("not a member of this conversation"));
+        return Err(OidcError::access_denied(
+            "not a member of this conversation",
+        ));
     }
 
     if query.since < 0 {
@@ -442,7 +441,9 @@ pub async fn post_welcome(
         let recipient = users::find_by_actor_uri(&state.pool, &body.recipient_actor_uri)
             .await
             .map_err(|e| OidcError::server_error(e.to_string()))?
-            .ok_or_else(|| OidcError::not_found("recipient_actor_uri matches our issuer but no such user"))?;
+            .ok_or_else(|| {
+                OidcError::not_found("recipient_actor_uri matches our issuer but no such user")
+            })?;
 
         // Add the welcome recipient to `conversation_members` so the
         // subsequent `POST /api/dm` finds a 2-member DM via
@@ -450,13 +451,9 @@ pub async fn post_welcome(
         // upserts (ON CONFLICT DO UPDATE SET left_at = NULL). The
         // founding commit (post_commit, above) already lazy-created
         // the conversation row + the proposer's membership.
-        conversations::add_member(
-            &state.pool,
-            body.conversation_id,
-            &body.recipient_actor_uri,
-        )
-        .await
-        .map_err(|e| OidcError::server_error(e.to_string()))?;
+        conversations::add_member(&state.pool, body.conversation_id, &body.recipient_actor_uri)
+            .await
+            .map_err(|e| OidcError::server_error(e.to_string()))?;
 
         let row = mls_welcomes::insert_welcome(
             &state.pool,
@@ -509,13 +506,9 @@ pub async fn post_welcome(
     // instead of creating a parallel one. The remote IdP independently
     // tracks its own membership when it processes the incoming AP
     // `Create{Note}` welcome.
-    conversations::add_member(
-        &state.pool,
-        body.conversation_id,
-        &body.recipient_actor_uri,
-    )
-    .await
-    .map_err(|e| OidcError::server_error(e.to_string()))?;
+    conversations::add_member(&state.pool, body.conversation_id, &body.recipient_actor_uri)
+        .await
+        .map_err(|e| OidcError::server_error(e.to_string()))?;
 
     let inbox_url = resolve_remote_inbox(&state, &body.recipient_actor_uri).await?;
 

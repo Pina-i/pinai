@@ -44,16 +44,11 @@ pub async fn create_conversation_with_id(
 }
 
 /// Find a conversation by its ID.
-pub async fn find_by_id(
-    pool: &PgPool,
-    id: Uuid,
-) -> Result<Option<Conversation>, sqlx::Error> {
-    sqlx::query_as::<_, Conversation>(
-        "SELECT * FROM conversations WHERE id = $1",
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await
+pub async fn find_by_id(pool: &PgPool, id: Uuid) -> Result<Option<Conversation>, sqlx::Error> {
+    sqlx::query_as::<_, Conversation>("SELECT * FROM conversations WHERE id = $1")
+        .bind(id)
+        .fetch_optional(pool)
+        .await
 }
 
 /// Add a member to a conversation.
@@ -244,7 +239,10 @@ pub async fn get_or_create_dm_with_id(
     let (conv_id, created) = if let Some(existing) = find_by_id(pool, id).await? {
         (existing.id, false)
     } else {
-        (create_conversation_with_id(pool, id, "dm", None).await?.id, true)
+        (
+            create_conversation_with_id(pool, id, "dm", None).await?.id,
+            true,
+        )
     };
 
     // `add_member` upserts (ON CONFLICT DO UPDATE SET left_at = NULL), so

@@ -91,7 +91,10 @@ pub async fn run_heartbeat_sweep(
             continue;
         }
 
-        debug!(count = stale.len(), "heartbeat sweep found stale connections");
+        debug!(
+            count = stale.len(),
+            "heartbeat sweep found stale connections"
+        );
 
         for (_user_id, actor_uri) in stale {
             // Only transition online → away (don't re-publish if already away/offline)

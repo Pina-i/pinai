@@ -26,11 +26,10 @@ pub async fn set_if_unset(
 }
 
 pub async fn get(pool: &PgPool, user_id: Uuid) -> Result<Option<Vec<u8>>, sqlx::Error> {
-    let row: (Option<Vec<u8>>,) = sqlx::query_as(
-        "SELECT history_archive_salt FROM users WHERE id = $1",
-    )
-    .bind(user_id)
-    .fetch_one(pool)
-    .await?;
+    let row: (Option<Vec<u8>>,) =
+        sqlx::query_as("SELECT history_archive_salt FROM users WHERE id = $1")
+            .bind(user_id)
+            .fetch_one(pool)
+            .await?;
     Ok(row.0)
 }

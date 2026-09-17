@@ -84,7 +84,10 @@ impl RemotePresenceRegistry {
     /// Register remote actors for batch polling.
     /// Called when friendships change (new friend accepted, friend removed).
     pub fn register_for_batch_poll(&self, domain: &str, actor_uris: Vec<String>) {
-        let mut entry = self.batch_poll_domains.entry(domain.to_string()).or_default();
+        let mut entry = self
+            .batch_poll_domains
+            .entry(domain.to_string())
+            .or_default();
         for uri in actor_uris {
             entry.insert(uri);
         }
@@ -133,12 +136,7 @@ impl RemotePresenceRegistry {
     pub fn batch_poll_snapshot(&self) -> HashMap<String, Vec<String>> {
         self.batch_poll_domains
             .iter()
-            .map(|entry| {
-                (
-                    entry.key().clone(),
-                    entry.value().iter().cloned().collect(),
-                )
-            })
+            .map(|entry| (entry.key().clone(), entry.value().iter().cloned().collect()))
             .collect()
     }
 
@@ -194,11 +192,7 @@ impl RemotePresenceRegistry {
 
     /// Replace the running SSE task for `domain` with a fresh one whose actor
     /// list is the union of every watcher's actors. Caller holds the lock.
-    async fn respawn_sse(
-        self: &Arc<Self>,
-        active: &mut HashMap<String, ActiveSse>,
-        domain: &str,
-    ) {
+    async fn respawn_sse(self: &Arc<Self>, active: &mut HashMap<String, ActiveSse>, domain: &str) {
         let Some(entry) = active.get_mut(domain) else {
             return;
         };
@@ -278,9 +272,7 @@ pub async fn run_batch_poller(
                                 event: ap.state,
                                 actor_uri: ap.actor_uri.clone(),
                                 timestamp: time::OffsetDateTime::now_utc()
-                                    .format(
-                                        &time::format_description::well_known::Rfc3339,
-                                    )
+                                    .format(&time::format_description::well_known::Rfc3339)
                                     .unwrap_or_default(),
                             };
                             if let Ok(payload) = serde_json::to_string(&event) {

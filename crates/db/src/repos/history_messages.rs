@@ -64,8 +64,9 @@ pub async fn page(
     limit: i64,
 ) -> Result<Vec<HistoryMessage>, sqlx::Error> {
     match after {
-        None => sqlx::query_as::<_, HistoryMessage>(
-            r#"
+        None => {
+            sqlx::query_as::<_, HistoryMessage>(
+                r#"
             SELECT id, user_id, conversation_id, ciphertext, nonce,
                    client_message_id, created_at
             FROM history_messages
@@ -73,13 +74,15 @@ pub async fn page(
             ORDER BY created_at DESC, id DESC
             LIMIT $2
             "#,
-        )
-        .bind(user_id)
-        .bind(limit)
-        .fetch_all(pool)
-        .await,
-        Some((ts, id)) => sqlx::query_as::<_, HistoryMessage>(
-            r#"
+            )
+            .bind(user_id)
+            .bind(limit)
+            .fetch_all(pool)
+            .await
+        }
+        Some((ts, id)) => {
+            sqlx::query_as::<_, HistoryMessage>(
+                r#"
             SELECT id, user_id, conversation_id, ciphertext, nonce,
                    client_message_id, created_at
             FROM history_messages
@@ -88,13 +91,14 @@ pub async fn page(
             ORDER BY created_at DESC, id DESC
             LIMIT $4
             "#,
-        )
-        .bind(user_id)
-        .bind(ts)
-        .bind(id)
-        .bind(limit)
-        .fetch_all(pool)
-        .await,
+            )
+            .bind(user_id)
+            .bind(ts)
+            .bind(id)
+            .bind(limit)
+            .fetch_all(pool)
+            .await
+        }
     }
 }
 

@@ -123,7 +123,12 @@ async fn resolve_member(state: &AppState, actor_uri: &str, role: String) -> Grou
             role,
         };
     }
-    GroupMember { actor_uri: actor_uri.to_string(), display_name: None, avatar_url: None, role }
+    GroupMember {
+        actor_uri: actor_uri.to_string(),
+        display_name: None,
+        avatar_url: None,
+        role,
+    }
 }
 
 async fn build_member_views(state: &AppState, members: &[ConversationMember]) -> Vec<GroupMember> {
@@ -162,10 +167,16 @@ pub async fn create_group(
     let caller_actor = require_caller_actor(&state, &headers).await?;
 
     if body.member_actor_uris.is_empty() {
-        return Err(OidcError::invalid_request("A group needs at least one other member"));
+        return Err(OidcError::invalid_request(
+            "A group needs at least one other member",
+        ));
     }
 
-    let name = body.name.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let name = body
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
 
     let conv = conversations::create_conversation(&state.pool, "group", name)
         .await
@@ -249,10 +260,14 @@ pub async fn add_group_member(
     let caller_actor = require_caller_actor(&state, &headers).await?;
     require_admin(&state, conversation_id, &caller_actor).await?;
 
-    let member =
-        conversations::add_member_with_role(&state.pool, conversation_id, &body.actor_uri, "member")
-            .await
-            .map_err(|e| OidcError::server_error(e.to_string()))?;
+    let member = conversations::add_member_with_role(
+        &state.pool,
+        conversation_id,
+        &body.actor_uri,
+        "member",
+    )
+    .await
+    .map_err(|e| OidcError::server_error(e.to_string()))?;
 
     let view = resolve_member(&state, &body.actor_uri, member.role.clone()).await;
 
@@ -380,7 +395,9 @@ pub async fn set_member_role(
     require_admin(&state, conversation_id, &caller_actor).await?;
 
     if body.role != "admin" && body.role != "member" {
-        return Err(OidcError::invalid_request("role must be 'admin' or 'member'"));
+        return Err(OidcError::invalid_request(
+            "role must be 'admin' or 'member'",
+        ));
     }
 
     let updated = conversations::set_role(&state.pool, conversation_id, &actor_uri, &body.role)

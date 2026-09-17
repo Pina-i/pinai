@@ -43,13 +43,18 @@ async fn main() -> Result<()> {
     let fixture = match env::args().nth(1).as_deref() {
         Some("alice") => ALICE,
         Some("bob") => BOB,
-        Some(other) => return Err(anyhow!("Unknown fixture: {other} (expected 'alice' or 'bob')")),
+        Some(other) => {
+            return Err(anyhow!(
+                "Unknown fixture: {other} (expected 'alice' or 'bob')"
+            ))
+        }
         None => return Err(anyhow!("Usage: dev-inject-data <alice|bob>")),
     };
 
-    let database_url =
-        env::var("DATABASE_URL").context("DATABASE_URL must be set (source docker/.env.alice or .env.bob)")?;
-    let domain = env::var("DOMAIN").context("DOMAIN must be set (matches the IdP's configured domain)")?;
+    let database_url = env::var("DATABASE_URL")
+        .context("DATABASE_URL must be set (source docker/.env.alice or .env.bob)")?;
+    let domain =
+        env::var("DOMAIN").context("DOMAIN must be set (matches the IdP's configured domain)")?;
 
     let pool = PgPoolOptions::new()
         .max_connections(2)

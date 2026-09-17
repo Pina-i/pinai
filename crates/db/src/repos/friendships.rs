@@ -47,13 +47,12 @@ pub async fn delete_friendship(
     owner_user_id: Uuid,
     friend_actor_uri: &str,
 ) -> Result<bool, sqlx::Error> {
-    let result = sqlx::query(
-        "DELETE FROM friendships WHERE owner_user_id = $1 AND friend_actor_uri = $2",
-    )
-    .bind(owner_user_id)
-    .bind(friend_actor_uri)
-    .execute(pool)
-    .await?;
+    let result =
+        sqlx::query("DELETE FROM friendships WHERE owner_user_id = $1 AND friend_actor_uri = $2")
+            .bind(owner_user_id)
+            .bind(friend_actor_uri)
+            .execute(pool)
+            .await?;
     Ok(result.rows_affected() > 0)
 }
 

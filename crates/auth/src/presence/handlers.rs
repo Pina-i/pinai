@@ -95,4 +95,3 @@ pub async fn post_presence_batch(
 
     Ok(Json(PresenceResponse { presence }))
 }
-

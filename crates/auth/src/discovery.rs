@@ -42,7 +42,16 @@ pub async fn openid_configuration(
         grant_types_supported: vec!["authorization_code"],
         subject_types_supported: vec!["public"],
         id_token_signing_alg_values_supported: vec!["EdDSA"],
-        claims_supported: vec!["sub", "iss", "aud", "exp", "iat", "email", "preferred_username", "nonce"],
+        claims_supported: vec![
+            "sub",
+            "iss",
+            "aud",
+            "exp",
+            "iat",
+            "email",
+            "preferred_username",
+            "nonce",
+        ],
         code_challenge_methods_supported: vec!["S256"],
         token_endpoint_auth_methods_supported: vec!["none"],
     }))

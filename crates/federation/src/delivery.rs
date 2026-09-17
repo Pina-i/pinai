@@ -91,7 +91,11 @@ pub async fn resolve_remote_actor(
         actor_url: actor.id,
         inbox: actor.inbox,
         preferred_username: Some(actor.preferred_username),
-        display_name: if actor.name.is_empty() { None } else { Some(actor.name) },
+        display_name: if actor.name.is_empty() {
+            None
+        } else {
+            Some(actor.name)
+        },
         avatar_url: None, // Actor struct doesn't have icon field yet
     })
 }

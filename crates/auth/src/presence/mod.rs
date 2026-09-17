@@ -7,4 +7,6 @@ pub mod sse;
 
 // Transitional re-exports so callers inside this crate keep working
 // (`crate::presence::types`, `crate::presence::store`, etc.).
-pub use idp_presence::{fanout, remote, sse_client, store, subscriber, sweep, types, PresenceStore};
+pub use idp_presence::{
+    fanout, remote, sse_client, store, subscriber, sweep, types, PresenceStore,
+};

@@ -123,11 +123,17 @@ pub async fn send_message(
         .map_err(|e| OidcError::server_error(e.to_string()))?
         .ok_or_else(|| OidcError::server_error("Sender not found"))?;
 
-    let sender_actor_uri = sender.actor_uri.as_deref()
+    let sender_actor_uri = sender
+        .actor_uri
+        .as_deref()
         .ok_or_else(|| OidcError::server_error("Sender has no actor_uri"))?;
 
-    let sender_display_name: Option<String> =
-        Some(sender.display_name.clone().unwrap_or_else(|| sender.username.clone()));
+    let sender_display_name: Option<String> = Some(
+        sender
+            .display_name
+            .clone()
+            .unwrap_or_else(|| sender.username.clone()),
+    );
 
     // Pre-validate attachments BEFORE creating the message so a 400 here
     // doesn't leave a content-less message in the DB.
@@ -159,7 +165,10 @@ pub async fn send_message(
     }
 
     // Parse recipient: "@username@domain" or "username@domain" or bare "username"
-    let address = body.recipient_address.strip_prefix('@').unwrap_or(&body.recipient_address);
+    let address = body
+        .recipient_address
+        .strip_prefix('@')
+        .unwrap_or(&body.recipient_address);
     let mut parts = address.splitn(2, '@');
     let username = parts.next().unwrap_or(address);
     let domain_opt = parts.next();
@@ -216,19 +225,19 @@ pub async fn send_message(
         // just bootstrapped), use it; otherwise let the server pick
         // one.
         let (conversation_id, _created) = match body.conversation_id {
-            Some(client_id) => conversations::get_or_create_dm_with_id(
-                &state.pool,
-                client_id,
-                sender_actor_uri,
-                &recipient_actor_uri,
-            )
-            .await,
-            None => conversations::get_or_create_dm(
-                &state.pool,
-                sender_actor_uri,
-                &recipient_actor_uri,
-            )
-            .await,
+            Some(client_id) => {
+                conversations::get_or_create_dm_with_id(
+                    &state.pool,
+                    client_id,
+                    sender_actor_uri,
+                    &recipient_actor_uri,
+                )
+                .await
+            }
+            None => {
+                conversations::get_or_create_dm(&state.pool, sender_actor_uri, &recipient_actor_uri)
+                    .await
+            }
         }
         .map_err(|e| OidcError::server_error(e.to_string()))?;
 
@@ -244,7 +253,8 @@ pub async fn send_message(
         .map_err(|e| OidcError::server_error(e.to_string()))?;
 
         let attachments_metadata =
-            link_message_attachments(&state, &body.attachment_ids, msg.id, sender_actor_uri).await?;
+            link_message_attachments(&state, &body.attachment_ids, msg.id, sender_actor_uri)
+                .await?;
 
         // Build the MLS-flavored Create{Note} envelope and deliver in the
         // background. A missed delivery self-heals via the recipient's
@@ -267,9 +277,13 @@ pub async fn send_message(
         let sender_username = sender.username.clone();
         let inbox_for_task = inbox_url.clone();
         tokio::spawn(async move {
-            if let Err(e) =
-                delivery::deliver_activity(&state_clone, &inbox_for_task, &activity, &sender_username)
-                    .await
+            if let Err(e) = delivery::deliver_activity(
+                &state_clone,
+                &inbox_for_task,
+                &activity,
+                &sender_username,
+            )
+            .await
             {
                 tracing::warn!(%inbox_for_task, "failed to deliver remote dm: {e:?}");
             }
@@ -297,19 +311,22 @@ pub async fn send_message(
             "direct message dispatched to remote actor via ActivityPub"
         );
 
-        Ok((StatusCode::CREATED, Json(MessageResponse {
-            id: msg.id,
-            conversation_id,
-            sender_actor_uri: msg.sender_actor_uri,
-            sender_display_name,
-            mls_ciphertext: B64.encode(&msg.mls_ciphertext),
-            activity_uri: msg.activity_uri,
-            federation_status: msg.federation_status,
-            created_at: msg.created_at,
-            edited_at: msg.edited_at,
-            reply_to_id: body.reply_to_id,
-            attachments: attachments_metadata,
-        })))
+        Ok((
+            StatusCode::CREATED,
+            Json(MessageResponse {
+                id: msg.id,
+                conversation_id,
+                sender_actor_uri: msg.sender_actor_uri,
+                sender_display_name,
+                mls_ciphertext: B64.encode(&msg.mls_ciphertext),
+                activity_uri: msg.activity_uri,
+                federation_status: msg.federation_status,
+                created_at: msg.created_at,
+                edited_at: msg.edited_at,
+                reply_to_id: body.reply_to_id,
+                attachments: attachments_metadata,
+            }),
+        ))
     } else {
         // ── Local delivery ────────────────────────────────────────────────────
         let recipient = users::find_by_username(&state.pool, username)
@@ -321,26 +338,28 @@ pub async fn send_message(
             return Err(OidcError::invalid_request("Cannot send a DM to yourself"));
         }
 
-        let recipient_actor_uri = recipient.actor_uri.as_deref()
+        let recipient_actor_uri = recipient
+            .actor_uri
+            .as_deref()
             .ok_or_else(|| OidcError::server_error("Recipient has no actor_uri"))?;
 
         // Get or create the DM conversation. When the client passes a
         // pinned `conversation_id` (Phase 5b: the MLS `group_id` it
         // just bootstrapped), use it; otherwise let the server pick.
         let (conversation_id, _created) = match body.conversation_id {
-            Some(client_id) => conversations::get_or_create_dm_with_id(
-                &state.pool,
-                client_id,
-                sender_actor_uri,
-                recipient_actor_uri,
-            )
-            .await,
-            None => conversations::get_or_create_dm(
-                &state.pool,
-                sender_actor_uri,
-                recipient_actor_uri,
-            )
-            .await,
+            Some(client_id) => {
+                conversations::get_or_create_dm_with_id(
+                    &state.pool,
+                    client_id,
+                    sender_actor_uri,
+                    recipient_actor_uri,
+                )
+                .await
+            }
+            None => {
+                conversations::get_or_create_dm(&state.pool, sender_actor_uri, recipient_actor_uri)
+                    .await
+            }
         }
         .map_err(|e| OidcError::server_error(e.to_string()))?;
 
@@ -356,7 +375,8 @@ pub async fn send_message(
         .map_err(|e| OidcError::server_error(e.to_string()))?;
 
         let attachments_metadata =
-            link_message_attachments(&state, &body.attachment_ids, msg.id, sender_actor_uri).await?;
+            link_message_attachments(&state, &body.attachment_ids, msg.id, sender_actor_uri)
+                .await?;
 
         let event = WsEvent::NewDm(DmPayload {
             message_id: msg.id,
@@ -394,19 +414,22 @@ pub async fn send_message(
             "direct message sent"
         );
 
-        Ok((StatusCode::CREATED, Json(MessageResponse {
-            id: msg.id,
-            conversation_id,
-            sender_actor_uri: msg.sender_actor_uri,
-            sender_display_name,
-            mls_ciphertext: B64.encode(&msg.mls_ciphertext),
-            activity_uri: msg.activity_uri,
-            federation_status: msg.federation_status,
-            created_at: msg.created_at,
-            edited_at: msg.edited_at,
-            reply_to_id: body.reply_to_id,
-            attachments: attachments_metadata,
-        })))
+        Ok((
+            StatusCode::CREATED,
+            Json(MessageResponse {
+                id: msg.id,
+                conversation_id,
+                sender_actor_uri: msg.sender_actor_uri,
+                sender_display_name,
+                mls_ciphertext: B64.encode(&msg.mls_ciphertext),
+                activity_uri: msg.activity_uri,
+                federation_status: msg.federation_status,
+                created_at: msg.created_at,
+                edited_at: msg.edited_at,
+                reply_to_id: body.reply_to_id,
+                attachments: attachments_metadata,
+            }),
+        ))
     }
 }
 
@@ -479,7 +502,9 @@ pub async fn get_conversation(
         .map_err(|e| OidcError::server_error(e.to_string()))?
         .ok_or_else(|| OidcError::server_error("Caller not found"))?;
 
-    let caller_actor_uri = caller.actor_uri.as_deref()
+    let caller_actor_uri = caller
+        .actor_uri
+        .as_deref()
         .ok_or_else(|| OidcError::server_error("Caller has no actor_uri"))?;
 
     // Verify the caller is a member of this conversation.
@@ -504,9 +529,7 @@ pub async fn get_conversation(
             )
             .await
         }
-        _ => {
-            messages::get_conversation(&state.pool, conversation_id, limit).await
-        }
+        _ => messages::get_conversation(&state.pool, conversation_id, limit).await,
     }
     .map_err(|e| OidcError::server_error(e.to_string()))?;
 
@@ -598,7 +621,9 @@ pub async fn mark_read(
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?
         .ok_or_else(|| OidcError::server_error("Caller not found"))?;
-    let caller_actor_uri = caller.actor_uri.as_deref()
+    let caller_actor_uri = caller
+        .actor_uri
+        .as_deref()
         .ok_or_else(|| OidcError::server_error("Caller has no actor_uri"))?;
 
     let members = conversations::get_members(&state.pool, conversation_id)
@@ -656,7 +681,9 @@ pub async fn list_conversations(
         .map_err(|e| OidcError::server_error(e.to_string()))?
         .ok_or_else(|| OidcError::server_error("Caller not found"))?;
 
-    let caller_actor_uri = caller.actor_uri.as_deref()
+    let caller_actor_uri = caller
+        .actor_uri
+        .as_deref()
         .ok_or_else(|| OidcError::server_error("Caller has no actor_uri"))?;
 
     let summaries = messages::list_conversations(&state.pool, caller_id, caller_actor_uri)
@@ -667,8 +694,8 @@ pub async fn list_conversations(
         .into_iter()
         .map(|s| {
             // Parse the members JSON array from the DB.
-            let members: Vec<ConversationMemberInfo> = serde_json::from_value(s.members.clone())
-                .unwrap_or_default();
+            let members: Vec<ConversationMemberInfo> =
+                serde_json::from_value(s.members.clone()).unwrap_or_default();
             ConversationListItem {
                 conversation_id: s.conversation_id,
                 kind: s.kind,
@@ -711,16 +738,24 @@ pub async fn edit_message(
         .map_err(|e| OidcError::server_error(e.to_string()))?
         .ok_or_else(|| OidcError::server_error("Caller not found"))?;
 
-    let caller_actor_uri = caller.actor_uri.as_deref()
+    let caller_actor_uri = caller
+        .actor_uri
+        .as_deref()
         .ok_or_else(|| OidcError::server_error("Caller has no actor_uri"))?;
 
     // Update — the WHERE clause enforces sender ownership and non-deleted.
-    let updated = messages::edit_message(&state.pool, message_id, caller_actor_uri, &new_mls_ciphertext)
-        .await
-        .map_err(|e| OidcError::server_error(e.to_string()))?
-        .ok_or_else(|| OidcError::not_found("Message not found or you are not the sender"))?;
+    let updated = messages::edit_message(
+        &state.pool,
+        message_id,
+        caller_actor_uri,
+        &new_mls_ciphertext,
+    )
+    .await
+    .map_err(|e| OidcError::server_error(e.to_string()))?
+    .ok_or_else(|| OidcError::not_found("Message not found or you are not the sender"))?;
 
-    let edited_at = updated.edited_at
+    let edited_at = updated
+        .edited_at
         .ok_or_else(|| OidcError::server_error("edited_at missing after update"))?;
 
     let event = WsEvent::MessageEdited(EditedDmPayload {
@@ -741,7 +776,9 @@ pub async fn edit_message(
         }
         if member.actor_uri.starts_with(&format!("{}/users/", base)) {
             // Local recipient: push via WS + broker.
-            if let Ok(Some(other_user)) = users::find_by_actor_uri(&state.pool, &member.actor_uri).await {
+            if let Ok(Some(other_user)) =
+                users::find_by_actor_uri(&state.pool, &member.actor_uri).await
+            {
                 state.hub.send_to_user(&other_user.id, event.clone());
                 if let Ok(json) = serde_json::to_string(&event) {
                     let broker = state.broker.clone();
@@ -771,14 +808,21 @@ pub async fn edit_message(
                 updated.conversation_id,
                 &new_mls_ciphertext,
             );
-            if let Ok(Some(ra)) = remote_actors::find_by_actor_uri(&state.pool, &member.actor_uri).await {
+            if let Ok(Some(ra)) =
+                remote_actors::find_by_actor_uri(&state.pool, &member.actor_uri).await
+            {
                 if let Some(inbox_url) = ra.inbox_url {
                     let state_clone = state.clone();
                     let sender_username = caller.username.clone();
                     tokio::spawn(async move {
                         if let Err(e) = delivery::deliver_activity(
-                            &state_clone, &inbox_url, &activity, &sender_username,
-                        ).await {
+                            &state_clone,
+                            &inbox_url,
+                            &activity,
+                            &sender_username,
+                        )
+                        .await
+                        {
                             tracing::warn!(%inbox_url, "failed to deliver Update{{Note}}: {e:?}");
                         }
                     });
@@ -861,8 +905,12 @@ pub async fn send_group_message(
         .actor_uri
         .as_deref()
         .ok_or_else(|| OidcError::server_error("Sender has no actor_uri"))?;
-    let sender_display_name =
-        Some(sender.display_name.clone().unwrap_or_else(|| sender.username.clone()));
+    let sender_display_name = Some(
+        sender
+            .display_name
+            .clone()
+            .unwrap_or_else(|| sender.username.clone()),
+    );
 
     // Membership gate.
     let members = conversations::get_members(&state.pool, conversation_id)
@@ -961,7 +1009,8 @@ pub async fn send_group_message(
         let sender_username = sender.username.clone();
         tokio::spawn(async move {
             if let Err(e) =
-                delivery::deliver_activity(&state_clone, &inbox_url, &activity, &sender_username).await
+                delivery::deliver_activity(&state_clone, &inbox_url, &activity, &sender_username)
+                    .await
             {
                 tracing::warn!(%inbox_url, "failed to deliver group message: {e:?}");
             }

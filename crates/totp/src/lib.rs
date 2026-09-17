@@ -205,7 +205,10 @@ mod tests {
     fn recovery_code_verify_round_trip() {
         let pepper = b"pepper-pepper-pepper-pepper-pepper-pepper";
         let codes = generate_recovery_codes();
-        let hashed: Vec<_> = codes.iter().map(|c| hash_recovery_code(c, pepper)).collect();
+        let hashed: Vec<_> = codes
+            .iter()
+            .map(|c| hash_recovery_code(c, pepper))
+            .collect();
         for (code, hash) in codes.iter().zip(&hashed) {
             assert!(verify_recovery_code(code, hash, pepper));
             assert!(verify_recovery_code(&code.to_lowercase(), hash, pepper));

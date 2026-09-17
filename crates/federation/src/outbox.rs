@@ -57,10 +57,7 @@ pub async fn get_followers(
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?;
 
-    let items: Vec<serde_json::Value> = friends
-        .iter()
-        .map(|f| json!(f.friend_actor_uri))
-        .collect();
+    let items: Vec<serde_json::Value> = friends.iter().map(|f| json!(f.friend_actor_uri)).collect();
 
     let collection = OrderedCollection::new(&followers_url, items.len() as i64, items);
     ap_response(Json(collection))
@@ -85,10 +82,7 @@ pub async fn get_following(
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?;
 
-    let items: Vec<serde_json::Value> = friends
-        .iter()
-        .map(|f| json!(f.friend_actor_uri))
-        .collect();
+    let items: Vec<serde_json::Value> = friends.iter().map(|f| json!(f.friend_actor_uri)).collect();
 
     let collection = OrderedCollection::new(&following_url, items.len() as i64, items);
     ap_response(Json(collection))

@@ -52,7 +52,11 @@ pub async fn post_login(
         Some(u) => u,
         None => {
             tracing::warn!("login failed: unknown email");
-            return Ok(login_error_redirect(&state.config.frontend_url, &form, "Invalid email or password"));
+            return Ok(login_error_redirect(
+                &state.config.frontend_url,
+                &form,
+                "Invalid email or password",
+            ));
         }
     };
 
@@ -65,12 +69,20 @@ pub async fn post_login(
         .is_err()
     {
         tracing::warn!("login failed: incorrect password");
-        return Ok(login_error_redirect(&state.config.frontend_url, &form, "Invalid email or password"));
+        return Ok(login_error_redirect(
+            &state.config.frontend_url,
+            &form,
+            "Invalid email or password",
+        ));
     }
 
     // 3. Validate the code_challenge_method (defense in depth)
     if form.code_challenge_method != "S256" {
-        return Ok(login_error_redirect(&state.config.frontend_url, &form, "Invalid request"));
+        return Ok(login_error_redirect(
+            &state.config.frontend_url,
+            &form,
+            "Invalid request",
+        ));
     }
 
     // 3b. Hard gate on email verification — credentials are correct, but the

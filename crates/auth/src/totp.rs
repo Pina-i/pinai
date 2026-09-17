@@ -83,8 +83,8 @@ pub async fn post_login_totp(
 
     let used_recovery = match (form.code.as_deref(), form.recovery_code.as_deref()) {
         (Some(code), _) if !code.is_empty() => {
-            let ok = verify_code(secret, code)
-                .map_err(|e| OidcError::server_error(e.to_string()))?;
+            let ok =
+                verify_code(secret, code).map_err(|e| OidcError::server_error(e.to_string()))?;
             if !ok {
                 pending_totp_logins::increment_attempts(&state.pool, ticket.id)
                     .await
@@ -268,9 +268,7 @@ pub async fn post_enroll_verify(
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?
         .ok_or_else(|| {
-            OidcError::invalid_request(
-                "No pending enrollment — call /api/totp/enroll first",
-            )
+            OidcError::invalid_request("No pending enrollment — call /api/totp/enroll first")
         })?;
 
     let ok = verify_code(&pending.secret, &body.code)
@@ -324,8 +322,7 @@ pub async fn post_disable(
         .as_deref()
         .ok_or_else(|| OidcError::server_error("TOTP enabled but secret missing"))?;
 
-    let ok = verify_code(secret, &body.code)
-        .map_err(|e| OidcError::server_error(e.to_string()))?;
+    let ok = verify_code(secret, &body.code).map_err(|e| OidcError::server_error(e.to_string()))?;
     if !ok {
         return Err(OidcError::invalid_grant("Incorrect code"));
     }
@@ -379,8 +376,7 @@ pub async fn post_regenerate_recovery_codes(
         .as_deref()
         .ok_or_else(|| OidcError::server_error("TOTP enabled but secret missing"))?;
 
-    let ok = verify_code(secret, &body.code)
-        .map_err(|e| OidcError::server_error(e.to_string()))?;
+    let ok = verify_code(secret, &body.code).map_err(|e| OidcError::server_error(e.to_string()))?;
     if !ok {
         return Err(OidcError::invalid_grant("Incorrect code"));
     }

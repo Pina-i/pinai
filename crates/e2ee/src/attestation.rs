@@ -58,10 +58,7 @@ mod tests {
         let actor = "https://idp.alice.com/users/alice_xK9mP";
         let device = Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
         let drk = [0u8; 32];
-        let expires = OffsetDateTime::parse(
-            "2027-05-14T00:00:00Z",
-            &Rfc3339,
-        ).unwrap();
+        let expires = OffsetDateTime::parse("2027-05-14T00:00:00Z", &Rfc3339).unwrap();
         let kid = "key-2026-01";
 
         let bytes = canonical_attestation_bytes(actor, &device, &drk, expires, kid);

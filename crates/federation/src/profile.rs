@@ -66,18 +66,14 @@ pub async fn propagate_profile_update(state: &AppState, user_id: Uuid) {
     }
 
     // ── 2. Remote fanout via signed Update{Person} ──────────────────────
-    let remote_friends = match friendships::list_remote_friends_with_inbox(
-        &state.pool,
-        user_id,
-    )
-    .await
-    {
-        Ok(list) => list,
-        Err(e) => {
-            tracing::error!(error = %e, "profile update: remote friend lookup failed");
-            return;
-        }
-    };
+    let remote_friends =
+        match friendships::list_remote_friends_with_inbox(&state.pool, user_id).await {
+            Ok(list) => list,
+            Err(e) => {
+                tracing::error!(error = %e, "profile update: remote friend lookup failed");
+                return;
+            }
+        };
 
     if remote_friends.is_empty() {
         return;

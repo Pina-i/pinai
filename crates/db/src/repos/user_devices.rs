@@ -140,11 +140,7 @@ pub async fn mark_revoked(
 /// Returns true iff `(user_id, device_id)` exists. Used by the revoke
 /// handler to disambiguate "already revoked" (200) from "not yours"
 /// (404) when `mark_revoked` reports 0 rows.
-pub async fn exists(
-    pool: &PgPool,
-    user_id: Uuid,
-    device_id: Uuid,
-) -> Result<bool, sqlx::Error> {
+pub async fn exists(pool: &PgPool, user_id: Uuid, device_id: Uuid) -> Result<bool, sqlx::Error> {
     let row: Option<(i32,)> = sqlx::query_as(
         r#"
         SELECT 1

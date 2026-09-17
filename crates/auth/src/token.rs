@@ -34,7 +34,9 @@ pub async fn post_token(
 ) -> Result<Json<TokenResponse>, OidcError> {
     // 1. Validate grant_type
     if form.grant_type != "authorization_code" {
-        return Err(OidcError::invalid_request("grant_type must be 'authorization_code'"));
+        return Err(OidcError::invalid_request(
+            "grant_type must be 'authorization_code'",
+        ));
     }
 
     // 2. Validate client exists
@@ -46,9 +48,10 @@ pub async fn post_token(
     tracing::debug!("client validated");
 
     // 3. Validate redirect_uri against client's registered URIs
-    let uri_valid = clients::validate_redirect_uri(&state.pool, &form.client_id, &form.redirect_uri)
-        .await
-        .map_err(|e| OidcError::server_error(e.to_string()))?;
+    let uri_valid =
+        clients::validate_redirect_uri(&state.pool, &form.client_id, &form.redirect_uri)
+            .await
+            .map_err(|e| OidcError::server_error(e.to_string()))?;
     if !uri_valid {
         return Err(OidcError::invalid_grant("redirect_uri mismatch"));
     }

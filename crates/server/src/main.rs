@@ -7,11 +7,11 @@ use tracing::{info, warn};
 use idp_config::Config;
 use idp_db::run_migrations;
 use idp_email::{EmailConfig, EmailSender, LettreSmtpSender};
-use idp_state::AppState;
 use idp_presence::remote::RemotePresenceRegistry;
 use idp_presence::store::PresenceStore;
 use idp_presence::sweep::HeartbeatTracker;
 use idp_realtime::WsHub;
+use idp_state::AppState;
 use jwt_utils::load_ed_keypair_from_pem;
 
 mod router;

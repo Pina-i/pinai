@@ -18,9 +18,7 @@ pub fn build_session_cookie(user_id: Uuid, secure: bool) -> Cookie<'static> {
 /// Build a placeholder cookie suitable for `SignedCookieJar::remove`.
 /// The jar's `remove` method handles setting max_age=0 / expires=epoch.
 pub fn clear_session_cookie() -> Cookie<'static> {
-    Cookie::build((SESSION_COOKIE_NAME, ""))
-        .path("/")
-        .build()
+    Cookie::build((SESSION_COOKIE_NAME, "")).path("/").build()
 }
 
 /// URL-encode a string (percent-encode non-unreserved characters).

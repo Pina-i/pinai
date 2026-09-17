@@ -235,12 +235,8 @@ pub fn deliver_commit_to_remote_members(
                 &content_b64,
                 json!({ "mlsEpoch": epoch }),
             );
-            let activity = build_create_envelope(
-                &activity_id,
-                &sender_actor_uri,
-                &recipient_actor_uri,
-                note,
-            );
+            let activity =
+                build_create_envelope(&activity_id, &sender_actor_uri, &recipient_actor_uri, note);
 
             let state_for_task = state.clone();
             let inbox_url_clone = inbox_url.clone();
@@ -310,20 +306,12 @@ pub fn deliver_welcome_to_remote(
             &content_b64,
             json!({ "mlsRecipientDeviceId": recipient_device_id.to_string() }),
         );
-        let activity = build_create_envelope(
-            &activity_id,
-            &sender_actor_uri,
-            &recipient_actor_uri,
-            note,
-        );
+        let activity =
+            build_create_envelope(&activity_id, &sender_actor_uri, &recipient_actor_uri, note);
 
-        if let Err(e) = delivery::deliver_activity(
-            &state,
-            &recipient_inbox_url,
-            &activity,
-            &sender_username,
-        )
-        .await
+        if let Err(e) =
+            delivery::deliver_activity(&state, &recipient_inbox_url, &activity, &sender_username)
+                .await
         {
             tracing::warn!(
                 %recipient_inbox_url,
@@ -371,10 +359,7 @@ pub async fn handle_inbound_mls_note(
     note: &Value,
     recipient: &idp_db::models::User,
 ) -> Result<(), OidcError> {
-    let mls_kind = note
-        .get("mlsKind")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let mls_kind = note.get("mlsKind").and_then(|v| v.as_str()).unwrap_or("");
 
     let conversation_id_str = note
         .get("context")
@@ -407,9 +392,7 @@ pub async fn handle_inbound_mls_note(
             let epoch = note
                 .get("mlsEpoch")
                 .and_then(|v| v.as_i64())
-                .ok_or_else(|| {
-                    OidcError::invalid_request("MLS commit Note missing `mlsEpoch`")
-                })?;
+                .ok_or_else(|| OidcError::invalid_request("MLS commit Note missing `mlsEpoch`"))?;
             ingest_commit(state, conversation_id, epoch, &blob, proposer_actor_uri).await
         }
         "welcome" => {
@@ -417,9 +400,7 @@ pub async fn handle_inbound_mls_note(
                 .get("mlsRecipientDeviceId")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| {
-                    OidcError::invalid_request(
-                        "MLS welcome Note missing `mlsRecipientDeviceId`",
-                    )
+                    OidcError::invalid_request("MLS welcome Note missing `mlsRecipientDeviceId`")
                 })?;
             let device_id: Uuid = device_id_str.parse().map_err(|_| {
                 OidcError::invalid_request("MLS welcome `mlsRecipientDeviceId` is not a UUID")
@@ -570,8 +551,13 @@ async fn ingest_application_message(
     // Document objects). Their plaintext metadata is, after Phase 5,
     // intentionally obscured by the sender — server still records what
     // came in for orphan-sweep audit and size accounting.
-    crate::inbox::persist_inbound_attachments(state, msg.id, sender_actor_uri, note.get("attachment"))
-        .await;
+    crate::inbox::persist_inbound_attachments(
+        state,
+        msg.id,
+        sender_actor_uri,
+        note.get("attachment"),
+    )
+    .await;
 
     // Re-read attachments so the WS event carries them inline and the
     // recipient's UI can render without a refetch.
@@ -590,12 +576,11 @@ async fn ingest_application_message(
             })
             .unwrap_or_default();
 
-    let sender_display_name = match remote_actors::find_by_actor_uri(&state.pool, sender_actor_uri)
-        .await
-    {
-        Ok(Some(ra)) => ra.display_name,
-        _ => None,
-    };
+    let sender_display_name =
+        match remote_actors::find_by_actor_uri(&state.pool, sender_actor_uri).await {
+            Ok(Some(ra)) => ra.display_name,
+            _ => None,
+        };
 
     let event = WsEvent::NewDm(DmPayload {
         message_id: msg.id,
@@ -639,15 +624,10 @@ async fn ingest_welcome(
     conversation_id: Uuid,
     blob: &[u8],
 ) -> Result<(), OidcError> {
-    let row = mls_welcomes::insert_welcome(
-        &state.pool,
-        recipient.id,
-        device_id,
-        conversation_id,
-        blob,
-    )
-    .await
-    .map_err(|e| OidcError::server_error(e.to_string()))?;
+    let row =
+        mls_welcomes::insert_welcome(&state.pool, recipient.id, device_id, conversation_id, blob)
+            .await
+            .map_err(|e| OidcError::server_error(e.to_string()))?;
 
     state.hub.send_to_user(
         &recipient.id,

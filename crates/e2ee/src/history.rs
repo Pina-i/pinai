@@ -87,7 +87,9 @@ pub async fn post_batch(
         let nc = Base64::decode_vec(&e.nonce)
             .map_err(|_| OidcError::invalid_request("nonce must be base64"))?;
         if nc.len() != NONCE_BYTES {
-            return Err(OidcError::invalid_request("nonce must be 12 bytes (AES-GCM)"));
+            return Err(OidcError::invalid_request(
+                "nonce must be 12 bytes (AES-GCM)",
+            ));
         }
         decoded.push((e.id, e.conversation_id, ct, nc, e.client_message_id));
     }

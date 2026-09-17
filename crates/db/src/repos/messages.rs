@@ -73,16 +73,11 @@ fn extract_activity_uuid(activity_uri: &str) -> Option<Uuid> {
 }
 
 /// Find a message by its primary key.
-pub async fn find_by_id(
-    pool: &PgPool,
-    id: Uuid,
-) -> Result<Option<DirectMessage>, sqlx::Error> {
-    sqlx::query_as::<_, DirectMessage>(
-        "SELECT * FROM direct_messages WHERE id = $1",
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await
+pub async fn find_by_id(pool: &PgPool, id: Uuid) -> Result<Option<DirectMessage>, sqlx::Error> {
+    sqlx::query_as::<_, DirectMessage>("SELECT * FROM direct_messages WHERE id = $1")
+        .bind(id)
+        .fetch_optional(pool)
+        .await
 }
 
 /// Find a message by its ActivityPub activity URI.
@@ -90,12 +85,10 @@ pub async fn find_by_activity_uri(
     pool: &PgPool,
     activity_uri: &str,
 ) -> Result<Option<DirectMessage>, sqlx::Error> {
-    sqlx::query_as::<_, DirectMessage>(
-        "SELECT * FROM direct_messages WHERE activity_uri = $1",
-    )
-    .bind(activity_uri)
-    .fetch_optional(pool)
-    .await
+    sqlx::query_as::<_, DirectMessage>("SELECT * FROM direct_messages WHERE activity_uri = $1")
+        .bind(activity_uri)
+        .fetch_optional(pool)
+        .await
 }
 
 /// Fetch the initial page of a conversation (most recent messages, newest

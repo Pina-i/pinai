@@ -23,19 +23,31 @@ impl OidcError {
     pub fn invalid_request(desc: impl Into<String>) -> Self {
         let desc = desc.into();
         tracing::warn!(error = "invalid_request", description = %desc);
-        Self { status: StatusCode::BAD_REQUEST, error: "invalid_request", error_description: desc }
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            error: "invalid_request",
+            error_description: desc,
+        }
     }
 
     pub fn invalid_client(desc: impl Into<String>) -> Self {
         let desc = desc.into();
         tracing::warn!(error = "invalid_client", description = %desc);
-        Self { status: StatusCode::UNAUTHORIZED, error: "invalid_client", error_description: desc }
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            error: "invalid_client",
+            error_description: desc,
+        }
     }
 
     pub fn invalid_grant(desc: impl Into<String>) -> Self {
         let desc = desc.into();
         tracing::warn!(error = "invalid_grant", description = %desc);
-        Self { status: StatusCode::BAD_REQUEST, error: "invalid_grant", error_description: desc }
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            error: "invalid_grant",
+            error_description: desc,
+        }
     }
 
     pub fn unauthorized_client(desc: impl Into<String>) -> Self {
@@ -51,7 +63,11 @@ impl OidcError {
     pub fn access_denied(desc: impl Into<String>) -> Self {
         let desc = desc.into();
         tracing::warn!(error = "access_denied", description = %desc);
-        Self { status: StatusCode::FORBIDDEN, error: "access_denied", error_description: desc }
+        Self {
+            status: StatusCode::FORBIDDEN,
+            error: "access_denied",
+            error_description: desc,
+        }
     }
 
     pub fn server_error(desc: impl Into<String>) -> Self {
@@ -67,7 +83,11 @@ impl OidcError {
     pub fn not_found(desc: impl Into<String>) -> Self {
         let desc = desc.into();
         tracing::warn!(error = "not_found", description = %desc);
-        Self { status: StatusCode::NOT_FOUND, error: "not_found", error_description: desc }
+        Self {
+            status: StatusCode::NOT_FOUND,
+            error: "not_found",
+            error_description: desc,
+        }
     }
 }
 

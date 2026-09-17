@@ -64,9 +64,7 @@ pub async fn insert_commit(
             let winner = find_by_epoch(pool, conversation_id, epoch)
                 .await?
                 .ok_or_else(|| {
-                    sqlx::Error::Protocol(
-                        "unique violation but no winning row found".to_string(),
-                    )
+                    sqlx::Error::Protocol("unique violation but no winning row found".to_string())
                 })?;
             Ok(InsertOutcome::Conflict(winner))
         }

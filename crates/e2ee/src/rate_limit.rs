@@ -23,13 +23,18 @@ struct Bucket {
 
 impl Bucket {
     fn new() -> Self {
-        Self { tokens: BURST, last_refill: Instant::now() }
+        Self {
+            tokens: BURST,
+            last_refill: Instant::now(),
+        }
     }
 
     /// Add tokens proportional to elapsed time since the last refill,
     /// clamped at `BURST`.
     fn refill(&mut self, now: Instant) {
-        let elapsed = now.saturating_duration_since(self.last_refill).as_secs_f64();
+        let elapsed = now
+            .saturating_duration_since(self.last_refill)
+            .as_secs_f64();
         self.tokens = (self.tokens + elapsed * RATE_PER_SEC).min(BURST);
         self.last_refill = now;
     }

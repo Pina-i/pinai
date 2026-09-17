@@ -98,10 +98,7 @@ pub async fn link_to_message(
     Ok(result.rows_affected())
 }
 
-pub async fn find_by_id(
-    pool: &PgPool,
-    id: Uuid,
-) -> Result<Option<Attachment>, sqlx::Error> {
+pub async fn find_by_id(pool: &PgPool, id: Uuid) -> Result<Option<Attachment>, sqlx::Error> {
     sqlx::query_as::<_, Attachment>("SELECT * FROM message_attachments WHERE id = $1")
         .bind(id)
         .fetch_optional(pool)

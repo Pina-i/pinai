@@ -155,4 +155,3 @@ async fn generate_and_store_code(
 
     Ok(code)
 }
-

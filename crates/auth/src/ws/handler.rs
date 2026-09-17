@@ -50,7 +50,10 @@ pub async fn ws_upgrade(
     let claims = match validate_access_token(&params.token, &state.keypair, &issuer, "web-client") {
         Ok(c) => c,
         Err(_) => {
-            return (axum::http::StatusCode::UNAUTHORIZED, "Invalid or expired token")
+            return (
+                axum::http::StatusCode::UNAUTHORIZED,
+                "Invalid or expired token",
+            )
                 .into_response();
         }
     };
@@ -58,7 +61,11 @@ pub async fn ws_upgrade(
     let user_id = match claims.sub.parse::<Uuid>() {
         Ok(id) => id,
         Err(_) => {
-            return (axum::http::StatusCode::UNAUTHORIZED, "Invalid subject claim").into_response();
+            return (
+                axum::http::StatusCode::UNAUTHORIZED,
+                "Invalid subject claim",
+            )
+                .into_response();
         }
     };
 
@@ -103,8 +110,7 @@ async fn handle_socket(
             Ok(entries) => {
                 let count = entries.len();
                 for entry in entries {
-                    let envelope =
-                        format!(r#"{{"id":"{}","event":{}}}"#, entry.id, entry.payload);
+                    let envelope = format!(r#"{{"id":"{}","event":{}}}"#, entry.id, entry.payload);
                     if ws_sink.send(Message::Text(envelope.into())).await.is_err() {
                         info!(%user_id, "websocket closed during catch-up replay");
                         // Cleanup happens inside receive_messages; just return here.
@@ -128,12 +134,7 @@ async fn handle_socket(
     // `handle` moves into receive_messages; cleanup (offline publish, HB unregister)
     // happens there after the loop exits, ensuring the handle is dropped before we check counts.
     let recv_task = tokio::spawn(receive_messages(
-        ws_stream,
-        user_id,
-        conn_id,
-        actor_uri,
-        state,
-        handle,
+        ws_stream, user_id, conn_id, actor_uri, state, handle,
     ));
 
     // When either task finishes, drop both JoinHandles.
@@ -306,14 +307,14 @@ async fn remote_members_by_domain(
         std::collections::HashMap::new();
     let local_issuer = state.config.issuer();
 
-    let members = match idp_db::repos::conversations::get_members(&state.pool, conversation_id).await
-    {
-        Ok(m) => m,
-        Err(e) => {
-            warn!(%conversation_id, "failed to load members for watch: {e}");
-            return by_domain;
-        }
-    };
+    let members =
+        match idp_db::repos::conversations::get_members(&state.pool, conversation_id).await {
+            Ok(m) => m,
+            Err(e) => {
+                warn!(%conversation_id, "failed to load members for watch: {e}");
+                return by_domain;
+            }
+        };
 
     for member in members {
         // Local members do not need an SSE — their presence/typing arrives via
@@ -321,14 +322,13 @@ async fn remote_members_by_domain(
         if member.actor_uri.starts_with(&local_issuer) {
             continue;
         }
-        if let Some(host) = url::Url::parse(&member.actor_uri)
-            .ok()
-            .and_then(|u| match (u.host_str().map(|h| h.to_string()), u.port()) {
+        if let Some(host) = url::Url::parse(&member.actor_uri).ok().and_then(|u| {
+            match (u.host_str().map(|h| h.to_string()), u.port()) {
                 (Some(host), Some(port)) => Some(format!("{host}:{port}")),
                 (Some(host), None) => Some(host),
                 _ => None,
-            })
-        {
+            }
+        }) {
             by_domain.entry(host).or_default().push(member.actor_uri);
         }
     }
@@ -345,7 +345,9 @@ async fn handle_watch_conversation(state: &AppState, conversation_id: Uuid) {
     if by_domain.is_empty() {
         return;
     }
-    registry.watch_conversation(conversation_id, by_domain).await;
+    registry
+        .watch_conversation(conversation_id, by_domain)
+        .await;
 }
 
 /// Handle unwatch_conversation: drop interest; closes outbound SSE for any
@@ -400,11 +402,7 @@ async fn handle_typing_start(
 const MAX_MLS_CIPHERTEXT_BYTES: usize = 64 * 1024;
 
 /// Process a SendDm client-to-server message.
-async fn handle_send_dm(
-    state: &AppState,
-    sender_id: Uuid,
-    payload: idp_realtime::SendDmPayload,
-) {
+async fn handle_send_dm(state: &AppState, sender_id: Uuid, payload: idp_realtime::SendDmPayload) {
     let mls_ciphertext = match B64.decode(&payload.mls_ciphertext) {
         Ok(b) if !b.is_empty() && b.len() <= MAX_MLS_CIPHERTEXT_BYTES => b,
         Ok(b) => {
@@ -518,8 +516,12 @@ async fn handle_send_dm(
         };
 
         let local_domain = &state.config.domain;
-        let sender_display_name =
-            Some(sender.display_name.clone().unwrap_or_else(|| sender.username.clone()));
+        let sender_display_name = Some(
+            sender
+                .display_name
+                .clone()
+                .unwrap_or_else(|| sender.username.clone()),
+        );
         // Recipient never sees the sender's correlation token.
         let recipient_payload = DmPayload {
             message_id: msg.id,
@@ -631,19 +633,16 @@ async fn handle_remote_dm(
             },
         };
 
-    let (conversation_id, _created) = match conversations::get_or_create_dm(
-        &state.pool,
-        sender_actor_uri,
-        &recipient_actor_uri,
-    )
-    .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            warn!(%sender_id, "failed to get/create conversation: {e}");
-            return;
-        }
-    };
+    let (conversation_id, _created) =
+        match conversations::get_or_create_dm(&state.pool, sender_actor_uri, &recipient_actor_uri)
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                warn!(%sender_id, "failed to get/create conversation: {e}");
+                return;
+            }
+        };
 
     let activity_uri = format!(
         "{}/users/{}/activities/{}",
@@ -695,8 +694,12 @@ async fn handle_remote_dm(
     });
 
     let local_domain = &state.config.domain;
-    let sender_display_name =
-        Some(sender.display_name.clone().unwrap_or_else(|| sender.username.clone()));
+    let sender_display_name = Some(
+        sender
+            .display_name
+            .clone()
+            .unwrap_or_else(|| sender.username.clone()),
+    );
     let event = WsEvent::NewDm(DmPayload {
         message_id: msg.id,
         conversation_id,

@@ -42,7 +42,8 @@ pub async fn get_webfinger(
         .map_err(|e| OidcError::server_error(e.to_string()))?
         .ok_or_else(|| OidcError::not_found("User not found"))?;
 
-    let actor_url = user.actor_uri
+    let actor_url = user
+        .actor_uri
         .as_deref()
         .ok_or_else(|| OidcError::server_error("User has no actor_uri"))?;
     let subject = format!("acct:{}@{}", user.username, state.config.domain);

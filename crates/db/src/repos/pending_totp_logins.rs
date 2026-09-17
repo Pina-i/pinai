@@ -62,10 +62,7 @@ pub async fn create(
     Ok(row)
 }
 
-pub async fn find_active(
-    pool: &PgPool,
-    id: Uuid,
-) -> Result<Option<PendingTotpLogin>, sqlx::Error> {
+pub async fn find_active(pool: &PgPool, id: Uuid) -> Result<Option<PendingTotpLogin>, sqlx::Error> {
     sqlx::query_as::<_, PendingTotpLogin>(
         r#"
         SELECT *

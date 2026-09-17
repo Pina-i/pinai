@@ -51,8 +51,8 @@ pub struct RegisterDeviceResponse {
     pub signature: String,
     /// IdP JWKS `kid` of the signing key, for verification.
     pub kid: String,
-    pub issued_at: String,    // RFC3339
-    pub expires_at: String,   // RFC3339
+    pub issued_at: String,  // RFC3339
+    pub expires_at: String, // RFC3339
     /// Standard-base64-encoded canonical bytes the IdP signed — returned so the
     /// client can re-verify locally before persisting.
     pub signed_message: String,
@@ -109,7 +109,9 @@ pub async fn register_device(
     let drk_pub = Base64::decode_vec(&body.drk_public_key)
         .map_err(|_| OidcError::invalid_request("drk_public_key must be base64"))?;
     if drk_pub.len() != 32 {
-        return Err(OidcError::invalid_request("drk_public_key must be 32 bytes (Ed25519)"));
+        return Err(OidcError::invalid_request(
+            "drk_public_key must be 32 bytes (Ed25519)",
+        ));
     }
 
     let user = users::find_by_id(&state.pool, user_id)
@@ -126,7 +128,10 @@ pub async fn register_device(
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?;
 
-    let is_first_time = existing.as_ref().map(|d| d.drk_public_key.is_none()).unwrap_or(true);
+    let is_first_time = existing
+        .as_ref()
+        .map(|d| d.drk_public_key.is_none())
+        .unwrap_or(true);
     let is_rotation = match &existing {
         Some(d) => d
             .drk_public_key
@@ -161,7 +166,8 @@ pub async fn register_device(
     let expires_at = issued_at + Duration::days(ATTESTATION_TTL_DAYS);
     let kid = state.config.jwt_key_id.clone();
 
-    let canonical = canonical_attestation_bytes(&actor_uri, &body.device_id, &drk_pub, expires_at, &kid);
+    let canonical =
+        canonical_attestation_bytes(&actor_uri, &body.device_id, &drk_pub, expires_at, &kid);
     let signature = sign_attestation(&state.keypair.signing_key, &canonical);
     let sig_bytes: [u8; 64] = signature.to_bytes();
 
@@ -199,12 +205,7 @@ pub async fn register_device(
 }
 
 /// Notify the user's other live sessions so they fan out MLS Add commits.
-async fn emit_device_joined(
-    state: &AppState,
-    actor_uri: &str,
-    device_id: Uuid,
-    drk_pub: &[u8],
-) {
+async fn emit_device_joined(state: &AppState, actor_uri: &str, device_id: Uuid, drk_pub: &[u8]) {
     let user = match users::find_by_actor_uri(&state.pool, actor_uri).await {
         Ok(Some(u)) => u,
         Ok(None) => {
@@ -291,7 +292,11 @@ pub fn parse_user_agent(ua: Option<&str>) -> (String, &'static str) {
     // "Mobile" in the UA (per Google's guidance). Without it, Android
     // is a tablet.
     if ua.contains("Android") {
-        let kind = if ua.contains("Mobile") { "phone" } else { "tablet" };
+        let kind = if ua.contains("Mobile") {
+            "phone"
+        } else {
+            "tablet"
+        };
         return (browser_on(ua, "Android"), kind);
     }
 
@@ -354,29 +359,44 @@ mod tests {
 
     #[test]
     fn missing_ua_falls_back_to_web_client() {
-        assert_eq!(parse_user_agent(None), ("Web client".to_string(), "unknown"));
-        assert_eq!(parse_user_agent(Some("")), ("Web client".to_string(), "unknown"));
+        assert_eq!(
+            parse_user_agent(None),
+            ("Web client".to_string(), "unknown")
+        );
+        assert_eq!(
+            parse_user_agent(Some("")),
+            ("Web client".to_string(), "unknown")
+        );
     }
 
     #[test]
     fn iphone_safari() {
         let ua = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_3 like Mac OS X) \
                   AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3 Mobile/15E148 Safari/604.1";
-        assert_eq!(parse_user_agent(Some(ua)), ("Safari on iOS".to_string(), "phone"));
+        assert_eq!(
+            parse_user_agent(Some(ua)),
+            ("Safari on iOS".to_string(), "phone")
+        );
     }
 
     #[test]
     fn ipad_safari() {
         let ua = "Mozilla/5.0 (iPad; CPU OS 17_3 like Mac OS X) \
                   AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3 Mobile/15E148 Safari/604.1";
-        assert_eq!(parse_user_agent(Some(ua)), ("Safari on iPadOS".to_string(), "tablet"));
+        assert_eq!(
+            parse_user_agent(Some(ua)),
+            ("Safari on iPadOS".to_string(), "tablet")
+        );
     }
 
     #[test]
     fn android_chrome_phone() {
         let ua = "Mozilla/5.0 (Linux; Android 14; Pixel 8) \
                   AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36";
-        assert_eq!(parse_user_agent(Some(ua)), ("Chrome on Android".to_string(), "phone"));
+        assert_eq!(
+            parse_user_agent(Some(ua)),
+            ("Chrome on Android".to_string(), "phone")
+        );
     }
 
     #[test]
@@ -384,27 +404,40 @@ mod tests {
         // Same UA without "Mobile" → tablet per Google's convention.
         let ua = "Mozilla/5.0 (Linux; Android 14) \
                   AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
-        assert_eq!(parse_user_agent(Some(ua)), ("Chrome on Android".to_string(), "tablet"));
+        assert_eq!(
+            parse_user_agent(Some(ua)),
+            ("Chrome on Android".to_string(), "tablet")
+        );
     }
 
     #[test]
     fn firefox_macos() {
-        let ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:130.0) Gecko/20100101 Firefox/130.0";
-        assert_eq!(parse_user_agent(Some(ua)), ("Firefox on macOS".to_string(), "laptop"));
+        let ua =
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:130.0) Gecko/20100101 Firefox/130.0";
+        assert_eq!(
+            parse_user_agent(Some(ua)),
+            ("Firefox on macOS".to_string(), "laptop")
+        );
     }
 
     #[test]
     fn chrome_windows() {
         let ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) \
                   AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36";
-        assert_eq!(parse_user_agent(Some(ua)), ("Chrome on Windows".to_string(), "laptop"));
+        assert_eq!(
+            parse_user_agent(Some(ua)),
+            ("Chrome on Windows".to_string(), "laptop")
+        );
     }
 
     #[test]
     fn edge_wins_over_chrome() {
         let ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) \
                   AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0";
-        assert_eq!(parse_user_agent(Some(ua)), ("Edge on Windows".to_string(), "laptop"));
+        assert_eq!(
+            parse_user_agent(Some(ua)),
+            ("Edge on Windows".to_string(), "laptop")
+        );
     }
 
     #[test]

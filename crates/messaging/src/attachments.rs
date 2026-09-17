@@ -359,7 +359,9 @@ pub async fn get_attachment(
     };
 
     if !allowed {
-        return Err(OidcError::access_denied("Not authorised to access attachment"));
+        return Err(OidcError::access_denied(
+            "Not authorised to access attachment",
+        ));
     }
 
     let (token, expires_at_system) = mint_blob_token(
@@ -391,7 +393,10 @@ pub async fn get_attachment(
 /// Format a `SystemTime` as an RFC 3339 string with second precision.
 fn format_rfc3339(t: SystemTime) -> String {
     use time::format_description::well_known::Rfc3339;
-    let secs = t.duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let secs = t
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     time::OffsetDateTime::from_unix_timestamp(secs as i64)
         .ok()
         .and_then(|dt| dt.format(&Rfc3339).ok())

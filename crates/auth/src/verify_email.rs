@@ -75,10 +75,9 @@ pub async fn post_verify_email_and_login(
         return Ok(Redirect::to(&format!("{}/login", state.config.frontend_url)).into_response());
     }
 
-    let Some(code_row) =
-        email_verification_codes::find_active_for_user(&state.pool, user.id)
-            .await
-            .map_err(|e| OidcError::server_error(e.to_string()))?
+    let Some(code_row) = email_verification_codes::find_active_for_user(&state.pool, user.id)
+        .await
+        .map_err(|e| OidcError::server_error(e.to_string()))?
     else {
         return Ok(verify_error_redirect(
             &state.config.frontend_url,
@@ -105,7 +104,11 @@ pub async fn post_verify_email_and_login(
         } else {
             format!("Incorrect code — {} attempt(s) left", remaining)
         };
-        return Ok(verify_error_redirect(&state.config.frontend_url, &form, &msg));
+        return Ok(verify_error_redirect(
+            &state.config.frontend_url,
+            &form,
+            &msg,
+        ));
     }
 
     // Guard PKCE method here too so the verify path can't sneak in `plain`.
@@ -207,13 +210,10 @@ pub async fn post_resend_verification(
         return Ok(StatusCode::GONE);
     }
 
-    let recent = email_verification_codes::count_recent_for_user(
-        &state.pool,
-        user.id,
-        RESEND_WINDOW_SECS,
-    )
-    .await
-    .map_err(|e| OidcError::server_error(e.to_string()))?;
+    let recent =
+        email_verification_codes::count_recent_for_user(&state.pool, user.id, RESEND_WINDOW_SECS)
+            .await
+            .map_err(|e| OidcError::server_error(e.to_string()))?;
 
     if recent >= RESEND_MAX_PER_WINDOW {
         tracing::warn!(user_id = %user.id, recent, "resend rate-limited");
