@@ -3,6 +3,7 @@ use uuid::Uuid;
 
 use crate::models::User;
 
+#[allow(clippy::too_many_arguments)]
 pub async fn create_user(
     pool: &PgPool,
     username: &str,
@@ -32,6 +33,7 @@ pub async fn create_user(
 }
 
 /// Insert a user with a pre-generated UUID.
+#[allow(clippy::too_many_arguments)]
 pub async fn create_user_with_id(
     pool: &PgPool,
     id: Uuid,

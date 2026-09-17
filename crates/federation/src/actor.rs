@@ -1,9 +1,9 @@
 //! ActivityPub actor endpoints.
 //!
 //! - `GET /users/:username` — per-user `Person` actor profile.
-//! - `GET /actor`           — instance-level `Application` actor used for
-//!                            HTTP-Signature key resolution on inter-IdP calls
-//!                            (presence batch poll, presence SSE stream).
+//! - `GET /actor` — instance-level `Application` actor used for
+//!   HTTP-Signature key resolution on inter-IdP calls
+//!   (presence batch poll, presence SSE stream).
 
 use axum::{
     extract::{Path, State},

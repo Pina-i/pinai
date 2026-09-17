@@ -36,6 +36,12 @@ pub struct WsHub {
     connections: DashMap<Uuid, Vec<(Uuid, ConnectionTx)>>,
 }
 
+impl Default for WsHub {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl WsHub {
     pub fn new() -> Self {
         Self {

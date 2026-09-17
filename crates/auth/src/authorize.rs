@@ -124,7 +124,7 @@ pub async fn get_authorize(
 }
 
 /// Generate a random auth code and persist it in the database.
-
+#[allow(clippy::too_many_arguments)]
 async fn generate_and_store_code(
     pool: &idp_db::PgPool,
     user_id: Uuid,

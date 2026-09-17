@@ -173,7 +173,7 @@ pub async fn send_message(
     let username = parts.next().unwrap_or(address);
     let domain_opt = parts.next();
 
-    let is_remote = domain_opt.map_or(false, |d| d != state.config.domain);
+    let is_remote = domain_opt.is_some_and(|d| d != state.config.domain);
 
     let activity_uri = format!(
         "{}/users/{}/activities/{}",

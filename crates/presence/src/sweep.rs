@@ -27,6 +27,12 @@ pub struct HeartbeatTracker {
     connections: DashMap<(Uuid, Uuid), (String, Instant)>,
 }
 
+impl Default for HeartbeatTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl HeartbeatTracker {
     pub fn new() -> Self {
         Self {

@@ -13,6 +13,12 @@ pub struct PresenceStore {
     states: DashMap<String, (PresenceState, Instant)>,
 }
 
+impl Default for PresenceStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PresenceStore {
     pub fn new() -> Self {
         Self {

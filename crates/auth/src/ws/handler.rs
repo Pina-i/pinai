@@ -440,7 +440,7 @@ async fn handle_send_dm(state: &AppState, sender_id: Uuid, payload: idp_realtime
     let username = parts.next().unwrap_or(address);
     let domain_opt = parts.next();
 
-    let is_remote = domain_opt.map_or(false, |d| d != state.config.domain);
+    let is_remote = domain_opt.is_some_and(|d| d != state.config.domain);
 
     if is_remote {
         let domain = domain_opt.unwrap();
@@ -581,6 +581,7 @@ async fn handle_send_dm(state: &AppState, sender_id: Uuid, payload: idp_realtime
 }
 
 /// Deliver a DM to a remote recipient via ActivityPub.
+#[allow(clippy::too_many_arguments)]
 async fn handle_remote_dm(
     state: &AppState,
     sender_id: Uuid,

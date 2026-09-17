@@ -260,7 +260,7 @@ async fn handle_accept(state: &AppState, body: &Value) -> Result<(), OidcError> 
             if owner
                 .actor_uri
                 .as_deref()
-                .map_or(false, |u| u.starts_with(&prefix))
+                .is_some_and(|u| u.starts_with(&prefix))
             {
                 friendships::set_status(&state.pool, friendship.id, "accepted")
                     .await

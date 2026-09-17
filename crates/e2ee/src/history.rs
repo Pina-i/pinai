@@ -19,6 +19,8 @@ use idp_db::repos::{history_messages, history_salt, users};
 use idp_federation::auth::require_auth;
 use idp_state::{AppState, OidcError};
 
+type DecodedEntry = (Uuid, Uuid, Vec<u8>, Vec<u8>, Option<String>);
+
 const BATCH_CAP: usize = 50;
 const DEFAULT_PAGE_LIMIT: i64 = 100;
 const MAX_PAGE_LIMIT: i64 = 500;
@@ -79,8 +81,7 @@ pub async fn post_batch(
     }
 
     // Validate every entry before any DB write — partial batches are worse than rejection.
-    let mut decoded: Vec<(Uuid, Uuid, Vec<u8>, Vec<u8>, Option<String>)> =
-        Vec::with_capacity(body.entries.len());
+    let mut decoded: Vec<DecodedEntry> = Vec::with_capacity(body.entries.len());
     for e in body.entries {
         let ct = Base64::decode_vec(&e.ciphertext)
             .map_err(|_| OidcError::invalid_request("ciphertext must be base64"))?;
@@ -298,7 +299,7 @@ async fn member_of_conversations(
 }
 
 fn dedup_count(ids: &[Uuid]) -> usize {
-    let mut copy: Vec<_> = ids.iter().copied().collect();
+    let mut copy: Vec<_> = ids.to_vec();
     copy.sort();
     copy.dedup();
     copy.len()

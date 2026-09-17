@@ -267,6 +267,7 @@ pub fn deliver_commit_to_remote_members(
 ///
 /// `recipient_actor_uri` and `recipient_inbox_url` come from a fresh AP
 /// resolution by the caller, so we don't repeat the WebFinger trip.
+#[allow(clippy::too_many_arguments)]
 pub fn deliver_welcome_to_remote(
     state: &AppState,
     sender_username: &str,

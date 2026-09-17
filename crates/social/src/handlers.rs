@@ -45,7 +45,7 @@ pub async fn search_users(
 ) -> Result<Json<Vec<UserSummary>>, OidcError> {
     require_auth(&state, &headers).await?;
 
-    let limit = params.limit.min(50).max(1);
+    let limit = params.limit.clamp(1, 50);
     let results = users::search_by_username(&state.pool, &params.q, limit)
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?;
@@ -442,7 +442,7 @@ pub async fn accept_friendship(
 
             let accept_id = format!("{}/accepts/{}", caller_actor_uri, Uuid::new_v4());
             let follow_activity = Activity::follow(
-                &format!("{}/follows/{}", &friendship.friend_actor_uri, friendship.id),
+                &format!("{}/follows/{}", friendship.friend_actor_uri, friendship.id),
                 &friendship.friend_actor_uri,
                 caller_actor_uri,
             );

@@ -82,7 +82,7 @@ pub async fn get_attachment_content(
                     None => h.to_string(),
                 })
             })
-            .map_or(false, |h| h == peer_host)
+            .is_some_and(|h| h == peer_host)
     });
 
     if !peer_is_member {

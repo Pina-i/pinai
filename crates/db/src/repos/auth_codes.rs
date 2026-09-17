@@ -4,6 +4,7 @@ use uuid::Uuid;
 
 use crate::models::AuthCode;
 
+#[allow(clippy::too_many_arguments)]
 pub async fn create_code(
     pool: &PgPool,
     code: &str,

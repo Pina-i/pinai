@@ -86,7 +86,7 @@ pub async fn update_profile(
     // ── bio ─────────────────────────────────────────────────────────────
     let bio: Option<&str> = match body.bio.as_deref() {
         None => None,
-        Some(value) if value.is_empty() => None,
+        Some("") => None,
         Some(value) => {
             if value.chars().count() > BIO_MAX {
                 return Err(OidcError::invalid_request(format!(

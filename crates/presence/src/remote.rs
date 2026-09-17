@@ -58,6 +58,12 @@ pub struct RemotePresenceRegistry {
     sse_deps: std::sync::OnceLock<SseDeps>,
 }
 
+impl Default for RemotePresenceRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RemotePresenceRegistry {
     pub fn new() -> Self {
         Self {

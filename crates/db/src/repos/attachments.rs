@@ -35,6 +35,7 @@ pub async fn insert_orphan(
 
 /// Insert a remote attachment (received via federation inbox). `message_id` is
 /// known immediately and `remote_origin_url` is set; bytes live on the origin IdP.
+#[allow(clippy::too_many_arguments)]
 pub async fn insert_remote(
     pool: &PgPool,
     id: Uuid,
