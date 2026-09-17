@@ -6,7 +6,8 @@ SHELL := bash
         alice-docker bob-docker \
         alice-docker-dev bob-docker-dev \
         alice-docker-win bob-docker-win \
-        alice-down bob-down alice-down-v bob-down-v
+        alice-down bob-down alice-down-v bob-down-v \
+        fmt fmt-check lint check
 
 # ── Local dev (cargo run on host) ─────────────────────────────────────────────
 # Fastest inner loop. Requires the Rust toolchain locally. Each target seeds
@@ -85,3 +86,20 @@ alice-down-v:
 
 bob-down-v:
 	docker compose -f docker/docker-compose.yml --project-name pinai-bob down -v
+
+# ── Lint & format ─────────────────────────────────────────────────────────────
+# Requires the clippy and rustfmt components (`rustup component add clippy
+# rustfmt`). The tree is clean at stock rustfmt defaults and clippy's default
+# lint set, so `lint` denies warnings outright to keep it that way.
+
+fmt:
+	cargo fmt --all
+
+fmt-check:
+	cargo fmt --all --check
+
+lint:
+	cargo clippy --workspace --all-targets -- -D warnings
+
+check: fmt-check lint
+	cargo test --workspace
