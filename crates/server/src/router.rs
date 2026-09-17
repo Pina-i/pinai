@@ -25,7 +25,8 @@ use idp_messaging::{
     add_group_member, attachments::{get_attachment, upload_attachments},
     blob::get_attachment_blob,
     create_group, edit_message, get_conversation, list_conversations, list_group_members,
-    mark_read, remove_group_member, rename_group, send_message, set_member_role,
+    mark_read, remove_group_member, rename_group, send_group_message, send_message,
+    set_member_role,
 };
 use idp_social::{
     accept_friendship, delete_friendship, get_friends, get_incoming_requests,
@@ -155,6 +156,7 @@ pub fn build(state: AppState) -> Router {
         // `{actor_uri}` segments are percent-encoded by the client.
         .route("/api/groups", post(create_group))
         .route("/api/groups/{conversation_id}", patch(rename_group))
+        .route("/api/groups/{conversation_id}/messages", post(send_group_message))
         .route(
             "/api/groups/{conversation_id}/members",
             get(list_group_members).post(add_group_member),

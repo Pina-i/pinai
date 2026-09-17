@@ -154,6 +154,7 @@ db, broker, storage, config ──► (leaves)
 | `GET /api/dm/:conversation_id` | Conversation history (keyset cursor) — every row carries `mls_ciphertext`; marks as read on initial load |
 | `PATCH /api/dm/:message_id/edit` | Replace the row's `mls_ciphertext` and stamp `edited_at`; sender-only |
 | `POST /api/groups` | Create a group conversation (Bearer). Body: `{ name?, member_actor_uris[] }`. Caller becomes admin; members join as `member`. Returns the group view; emits `group_created` WS to local members. Client bootstraps MLS afterwards. |
+| `POST /api/groups/:conversation_id/messages` | Send a message to a group (Bearer; member-gated). Body: `{ mls_ciphertext, reply_to_id?, attachment_ids? }`. Persists one row, then fans the ciphertext out to every other member — local via WS, remote via signed AP `Create{Note}` (`mlsKind: application`). |
 | `GET /api/groups/:conversation_id/members` | List members with `role` (`admin`/`member`) + `displayName`/`avatarUrl` (Bearer; member-gated). |
 | `POST /api/groups/:conversation_id/members` | Add a member (Bearer; **admin-gated**). Body: `{ actor_uri }`. Emits `member_added`. MLS key delivery happens separately via the welcome the client posts. |
 | `DELETE /api/groups/:conversation_id/members/:actor_uri` | Remove a member (**admin-gated**) or leave (caller == target). `actor_uri` percent-encoded. Sets `left_at`; emits `member_removed`. |

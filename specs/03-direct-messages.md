@@ -590,6 +590,19 @@ a hard delete, so earlier messages stay attached to the conversation.
 | `DELETE /api/groups/:id/members/:actor_uri` | **admin** or self | Sets `left_at`. `actor_uri` is percent-encoded. Emits `member_removed` (`removed_by_actor_uri` is `null` on self-leave). |
 | `PATCH /api/groups/:id` | **admin** | Body `{ name }`. Renames the group. Emits `group_renamed`. |
 | `POST /api/groups/:id/members/:actor_uri/role` | **admin** | Body `{ role }`. Promote/demote. Emits `member_role_changed`. |
+| `POST /api/groups/:id/messages` | member | Body `{ mls_ciphertext, reply_to_id?, attachment_ids? }`. See **Message fan-out** below. |
+
+### Message fan-out
+
+A group message is **one** `direct_messages` row carrying a single MLS
+ciphertext — MLS encrypts for the whole group, so every member decrypts the
+same blob. `POST /api/groups/:id/messages` persists the row, then fans the
+ciphertext out: local members receive a `new_dm` WS event (and broker publish);
+remote members receive a signed AP `Create{Note}` (`mlsKind: application`) at
+their inbox, exactly like a 1:1 — only enumerated over `conversation_members`
+instead of a single recipient. Delivery is best-effort and self-heals via the
+recipient's catch-up pull. The sender encrypts once with the group's existing
+MLS state (no per-message bootstrap), so there is no `ensureGroupExists` step.
 
 ### WS events
 

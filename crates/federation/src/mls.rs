@@ -149,7 +149,7 @@ fn build_create_envelope(
 /// self-heal on a future profile fetch — we don't WebFinger here because
 /// commits are time-sensitive and a slow remote IdP would block delivery to
 /// every other peer.
-async fn resolve_remote_inboxes(
+pub async fn resolve_remote_inboxes(
     state: &AppState,
     members: &[ConversationMember],
 ) -> Vec<(String, String)> {

@@ -817,3 +817,171 @@ pub async fn edit_message(
         attachments: attachments_metadata,
     }))
 }
+
+// ─── Send a group message ───────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct SendGroupMessageRequest {
+    /// Pre-encrypted MLSMessage body (base64). One ciphertext decrypts for the
+    /// whole group, so the same blob is fanned out to every member.
+    pub mls_ciphertext: String,
+    #[serde(default)]
+    pub reply_to_id: Option<Uuid>,
+    #[serde(default)]
+    pub attachment_ids: Vec<Uuid>,
+}
+
+/// POST /api/groups/:conversation_id/messages
+///
+/// Persist one message row for the group, then fan the ciphertext out to every
+/// other member — local members over WS, remote members via a signed AP
+/// `Create{Note}` (`mlsKind: application`). Mirrors `send_message`, but
+/// enumerates `conversation_members` instead of resolving a single recipient.
+/// Membership-gated.
+#[tracing::instrument(skip_all, fields(conversation_id = %conversation_id))]
+pub async fn send_group_message(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(conversation_id): Path<Uuid>,
+    Json(body): Json<SendGroupMessageRequest>,
+) -> Result<(StatusCode, Json<MessageResponse>), OidcError> {
+    let mls_ciphertext = B64
+        .decode(&body.mls_ciphertext)
+        .map_err(|_| OidcError::invalid_request("`mls_ciphertext` is not valid base64"))?;
+    if mls_ciphertext.is_empty() {
+        return Err(OidcError::invalid_request("`mls_ciphertext` is empty"));
+    }
+
+    let sender_id = require_auth(&state, &headers).await?;
+    let sender = users::find_by_id(&state.pool, sender_id)
+        .await
+        .map_err(|e| OidcError::server_error(e.to_string()))?
+        .ok_or_else(|| OidcError::server_error("Sender not found"))?;
+    let sender_actor_uri = sender
+        .actor_uri
+        .as_deref()
+        .ok_or_else(|| OidcError::server_error("Sender has no actor_uri"))?;
+    let sender_display_name =
+        Some(sender.display_name.clone().unwrap_or_else(|| sender.username.clone()));
+
+    // Membership gate.
+    let members = conversations::get_members(&state.pool, conversation_id)
+        .await
+        .map_err(|e| OidcError::server_error(e.to_string()))?;
+    if !members.iter().any(|m| m.actor_uri == sender_actor_uri) {
+        return Err(OidcError::not_found("Conversation not found"));
+    }
+
+    // Resolve the reply parent's activity_uri so remote members can thread it.
+    let mut parent_activity_uri: Option<String> = None;
+    if let Some(parent_id) = body.reply_to_id {
+        let parent = messages::find_by_id(&state.pool, parent_id)
+            .await
+            .map_err(|e| OidcError::server_error(e.to_string()))?
+            .ok_or_else(|| OidcError::not_found("Parent message not found"))?;
+        parent_activity_uri = Some(parent.activity_uri.clone());
+    }
+
+    let activity_uri = format!(
+        "{}/users/{}/activities/{}",
+        state.config.issuer(),
+        sender.username,
+        Uuid::new_v4(),
+    );
+    let local_domain = state.config.domain.clone();
+
+    let msg = messages::create_message(
+        &state.pool,
+        conversation_id,
+        sender_actor_uri,
+        &mls_ciphertext,
+        &activity_uri,
+        body.reply_to_id,
+    )
+    .await
+    .map_err(|e| OidcError::server_error(e.to_string()))?;
+
+    let attachments_metadata =
+        link_message_attachments(&state, &body.attachment_ids, msg.id, sender_actor_uri).await?;
+
+    // One event, reused for every local member + the sender's own echo.
+    let event = WsEvent::NewDm(DmPayload {
+        message_id: msg.id,
+        conversation_id,
+        kind: "group".to_string(),
+        sender_address: sender.federated_address(&local_domain),
+        sender_display_name: sender_display_name.clone(),
+        mls_ciphertext: B64.encode(&msg.mls_ciphertext),
+        created_at: msg.created_at,
+        reply_to_id: body.reply_to_id,
+        attachments: attachments_metadata.iter().map(Into::into).collect(),
+        client_id: None,
+    });
+
+    // Local fanout — push to every local member (and the sender, for multi-device).
+    let local_prefix = format!("{}/users/", state.config.issuer());
+    for member in &members {
+        if member.actor_uri == sender_actor_uri || !member.actor_uri.starts_with(&local_prefix) {
+            continue;
+        }
+        if let Ok(Some(u)) = users::find_by_actor_uri(&state.pool, &member.actor_uri).await {
+            state.hub.send_to_user(&u.id, event.clone());
+            if let Ok(json) = serde_json::to_string(&event) {
+                let broker = state.broker.clone();
+                let rid = u.id;
+                tokio::spawn(async move {
+                    if let Err(e) = broker.publish(rid, &json).await {
+                        tracing::warn!(%rid, "broker publish failed: {e}");
+                    }
+                });
+            }
+        }
+    }
+    state.hub.send_to_user(&sender_id, event);
+
+    // Remote fanout — AP Create{Note} per remote member; best-effort, self-heals
+    // via the recipient's catch-up pull on reconnect.
+    let remote_inboxes = federation_mls::resolve_remote_inboxes(&state, &members).await;
+    for (recipient_actor_uri, inbox_url) in remote_inboxes {
+        let mut activity = federation_mls::build_application_create_activity(
+            &activity_uri,
+            &activity_uri,
+            sender_actor_uri,
+            &recipient_actor_uri,
+            conversation_id,
+            &mls_ciphertext,
+            parent_activity_uri.as_deref(),
+        );
+        crate::attachments::inject_attachments_into_ap_activity(
+            &mut activity,
+            &state.config.issuer(),
+            &attachments_metadata,
+        );
+        let state_clone = state.clone();
+        let sender_username = sender.username.clone();
+        tokio::spawn(async move {
+            if let Err(e) =
+                delivery::deliver_activity(&state_clone, &inbox_url, &activity, &sender_username).await
+            {
+                tracing::warn!(%inbox_url, "failed to deliver group message: {e:?}");
+            }
+        });
+    }
+
+    Ok((
+        StatusCode::CREATED,
+        Json(MessageResponse {
+            id: msg.id,
+            conversation_id,
+            sender_actor_uri: msg.sender_actor_uri,
+            sender_display_name,
+            mls_ciphertext: B64.encode(&msg.mls_ciphertext),
+            activity_uri: msg.activity_uri,
+            federation_status: msg.federation_status,
+            created_at: msg.created_at,
+            edited_at: msg.edited_at,
+            reply_to_id: body.reply_to_id,
+            attachments: attachments_metadata,
+        }),
+    ))
+}
