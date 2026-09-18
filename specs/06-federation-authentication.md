@@ -35,10 +35,10 @@ server-to-server endpoint uses the same scheme and the same code path.
 | Endpoint | Direction | Spec |
 |---|---|---|
 | `POST /users/:username/inbox` | inbound activities | this file, § Inbound |
-| `GET /api/attachments/:id/content` | peer fetching attachment bytes | `03-direct-messages.md` |
-| `POST /api/presence/batch` | peer batch-polling presence | `04-presence.md` |
-| `GET /api/presence/stream` | peer SSE subscription | `04-presence.md` |
-| `POST /api/keys/packages/claim` | peer claiming a KeyPackage | `05-e2ee.md` |
+| `GET /api/attachments/:id/content` | peer fetching attachment bytes | `identity-provider/specs/03-direct-messages.md` |
+| `POST /api/presence/batch` | peer batch-polling presence | `identity-provider/specs/04-presence.md` |
+| `GET /api/presence/stream` | peer SSE subscription | `identity-provider/specs/04-presence.md` |
+| `POST /api/keys/packages/claim` | peer claiming a KeyPackage | `identity-provider/specs/05-e2ee.md` |
 
 Implementation lives in `crates/federation-transport/`, shared with the chat server. Domain
 handling — which activity verbs a service accepts and what they do — stays in the service.

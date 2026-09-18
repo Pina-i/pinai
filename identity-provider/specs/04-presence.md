@@ -220,7 +220,7 @@ Authorization: (HTTP Signature — see below)
 Both inter-IdP presence endpoints authenticate the calling instance with an HTTP Signature,
 the same scheme and the same code path as every other server-to-server endpoint. The signing
 and verification rules, the verifying-key cache and the peer URL policy are defined once in
-`06-federation-authentication.md`; nothing here is specific to presence.
+`specs/06-federation-authentication.md`; nothing here is specific to presence.
 
 No new key material — the key pair that signs JWTs signs these requests too.
 

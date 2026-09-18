@@ -119,7 +119,7 @@ Bob's IdP ← receives HTTP POST to /users/bob/inbox
 
 > **Note on outbound delivery**: ActivityPub delivery for DMs (and every
 > other activity type) runs in a background `tokio::spawn`, best-effort.
-> No persistent outbox queue — see `specs/01 § Federation delivery semantics`
+> No persistent outbox queue — see `identity-provider/specs/01-identity-federation.md § Federation delivery semantics`
 > for the rationale and the per-activity recovery story.
 
 ### Pagination — infinite scroll upward
@@ -493,7 +493,7 @@ Lifecycle:
 | `GET /api/dm/{conv_id}` | Bearer | Each message gains `attachments: [{ id, mime_type, byte_size, original_filename }]`. |
 | `GET /api/attachments/{id}` | Bearer | Returns `{ url, expires_at, mime_type, byte_size, original_filename }`. The `url` is a token-protected blob URL on this IdP. |
 | `GET /api/attachments/{id}/blob?token=...` | HMAC token | The actual fetch. Streams bytes through the IdP — local from the private object store, remote via an HTTP-Sig fetch to the origin. |
-| `GET /api/attachments/{id}/content` | HTTP Signature (see `06-federation-authentication.md`) | Peer-IdP-facing source of truth. Streams bytes through the IdP after a membership check (peer must have an actor in the conversation). |
+| `GET /api/attachments/{id}/content` | HTTP Signature (see `specs/06-federation-authentication.md`) | Peer-IdP-facing source of truth. Streams bytes through the IdP after a membership check (peer must have an actor in the conversation). |
 
 Blob URL TTL: `attachment_url_ttl` (default 1 hour). Browser caches the bytes
 once loaded; the URL only needs to live until first fetch. `<img onError>` /
@@ -569,7 +569,7 @@ Group conversations are `conversations` rows with `kind = 'group'`. Their
 membership and roles live in `conversation_members`; the REST API below owns
 **membership, roles, the authorization gates, and the membership WS events**.
 MLS key material (commits/welcomes) flows separately through the Delivery
-Service (`specs/05-e2ee.md`) — after creating or adding a member here, the
+Service (`identity-provider/specs/05-e2ee.md`) — after creating or adding a member here, the
 client bootstraps/extends the MLS group so keys reach the new members.
 
 ### Roles

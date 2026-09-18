@@ -8,11 +8,12 @@ Discord alternative. One Cargo workspace spans every Rust crate here.
 ```
 compose.yaml               # the platform — `docker compose up` from here
 .env.example               # one deployment unit, one env template
+specs/                     # platform-wide specs; service specs live in the service
 crates/                    # shared libraries (was the core-libs repo)
   common-types/  jwt-utils/  http-signatures/  activitypub/  observability/
   federation-transport/    # S2S: actor resolution, signed delivery, verification
 identity-provider/         # Layer 2 — identity & messaging backbone
-  crates/  migrations/  keys/  docker/Dockerfile
+  crates/  migrations/  keys/  specs/  docker/Dockerfile
 chat-server/               # Layer 3 — chat & voice rooms, attached to the IdP
 ```
 
@@ -25,6 +26,40 @@ these services, not a dependency graph.
 
 Each service subtree has its own `CLAUDE.md` with its architecture and
 constraints — read that one before working inside it.
+
+## Specs
+
+Platform-wide specifications live in `specs/` at the root. Anything scoped to one service
+lives in that service's own `specs/` folder, listed by its `CLAUDE.md`.
+
+| File | Contents | Read when working on… |
+|---|---|---|
+| `specs/02-architecture-diagram.md` | Mermaid flowchart of the whole platform — clients, both IdPs, and their infrastructure | Understanding the global picture; add a component here whenever one is introduced |
+| `specs/06-federation-authentication.md` | The two credentials (Bearer JWT vs HTTP Signature), the signing scheme, the three inbound checks, the verifying-key cache, and the peer request policy | Anything server-to-server, in any service: inboxes, inter-IdP calls, HTTP Signatures, key rotation |
+
+A spec belongs at the root when a second service would need the same document — the
+federation transport in `crates/federation-transport/` is described once and implemented by
+every service that speaks ActivityPub. A spec that declares one service's tables or
+endpoints belongs with that service.
+
+**Spec paths are written from the repo root everywhere** — in specs, in `CLAUDE.md` files
+and in doc comments. A bare `specs/…` would otherwise mean a different folder depending on
+which file you were reading.
+
+### Changing a spec
+
+Specs describe the final, stable state of a feature. They do not narrate development, and
+they do not carry change history — that belongs in commits, or in a write-up alongside them.
+
+When a change touches more than one spec:
+
+1. Read every affected spec before editing any of them.
+2. Apply the change consistently across all of them, and use a mermaid diagram where it
+   shows a mechanism prose would not.
+3. Update `specs/02-architecture-diagram.md` if a component or flow was introduced.
+4. Define a shared mechanism in exactly one spec and reference it from the others. A
+   mechanism documented inside one of its consumers drifts from the code, and from the
+   other consumers, without anyone noticing.
 
 ## Workspace rules
 

@@ -11,7 +11,7 @@
 //! Delivery is best-effort and inline (`tokio::spawn`). A missed delivery
 //! self-heals via the `remote_actors.fetched_at` TTL on the recipient side
 //! — `Update{Person}` is idempotent, so re-running it after a TTL re-fetch
-//! produces the same end state. See `specs/01 § Federation delivery
+//! produces the same end state. See `identity-provider/specs/01-identity-federation.md § Federation delivery
 //! semantics` for the rationale behind not having a durable outbox.
 
 use activitypub::Activity;

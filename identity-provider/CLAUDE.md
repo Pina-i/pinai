@@ -188,16 +188,19 @@ db, broker, storage, config ──► (leaves)
 
 ## Spec files **IMPORTANT**
 
-All detailed specifications live in `specs/`. **Read only the file(s) relevant to your task.**
+This service's specifications live in `identity-provider/specs/`. Platform-wide specs —
+the architecture diagram and federation authentication — live in `specs/` at the repo
+root; the root `CLAUDE.md` lists them. **Read only the file(s) relevant to your task.**
+
+Spec paths are written from the repo root throughout, so a reference means the same
+file wherever it is read from.
 
 | File | Contents | Read when working on… |
 |---|---|---|
-| `specs/01-identity-federation.md` | `users`, `remote_actors`, `friendships` schema, real-time profile propagation, Redis broker strategy, federation delivery semantics | Auth, user accounts, friend requests, profile updates, WebFinger, ActivityPub inbox/outbox |
-| `specs/02-architecture-diagram.md` | Mermaid flowchart of the full system (C4-style) | Understanding the global picture, updating the diagram |
-| `specs/03-direct-messages.md` | `conversations`, `conversation_members`, `direct_messages` schema, DM delivery (local + federated), unread tracking, reactions, replies, message editing | Anything touching DMs, conversations, messages, reactions, replies, unread counts |
-| `specs/04-presence.md` | Presence states (online/away/offline), typing indicators, Redis pub-sub channels, inter-IdP SSE stream, heartbeat, `PresenceStore` | Online status, typing indicators, presence propagation, inter-IdP SSE |
-| `specs/05-e2ee.md` | MLS-based E2EE: trust model (user-controlled MSK / SSK / USK / Recovery Key), key directory tables + endpoints, group lifecycle on top of `conversation_members`, MLSCiphertext wire format, encrypted attachments, multi-device pairing, account recovery | Anything touching message content, identity keys, KeyPackages, group commits/welcomes, encrypted attachments, device pairing |
-| `specs/06-federation-authentication.md` | The two credentials (Bearer JWT vs HTTP Signature), the signing scheme, the three inbound checks, the verifying-key cache, and the peer request policy | Anything server-to-server: the inbox, inter-IdP presence, peer attachment fetches, KeyPackage claims, HTTP Signatures, key rotation |
+| `identity-provider/specs/01-identity-federation.md` | `users`, `remote_actors`, `friendships` schema, real-time profile propagation, Redis broker strategy, federation delivery semantics | Auth, user accounts, friend requests, profile updates, WebFinger, ActivityPub inbox/outbox |
+| `identity-provider/specs/03-direct-messages.md` | `conversations`, `conversation_members`, `direct_messages` schema, DM delivery (local + federated), unread tracking, reactions, replies, message editing | Anything touching DMs, conversations, messages, reactions, replies, unread counts |
+| `identity-provider/specs/04-presence.md` | Presence states (online/away/offline), typing indicators, Redis pub-sub channels, inter-IdP SSE stream, heartbeat, `PresenceStore` | Online status, typing indicators, presence propagation, inter-IdP SSE |
+| `identity-provider/specs/05-e2ee.md` | MLS-based E2EE: trust model (user-controlled MSK / SSK / USK / Recovery Key), key directory tables + endpoints, group lifecycle on top of `conversation_members`, MLSCiphertext wire format, encrypted attachments, multi-device pairing, account recovery | Anything touching message content, identity keys, KeyPackages, group commits/welcomes, encrypted attachments, device pairing |
 
 ## Spec file modifications **IMPORTANT**
 
@@ -226,7 +229,7 @@ Don't mention any "phase" development or what is currently being worked on. The 
 - **Streams** → durable events (DMs, profile updates, friend requests). Must survive disconnect.
 
 ### Federation
-- **Outbound AP delivery** is best-effort, inline `tokio::spawn` per remote inbox — no persistent outbox queue. Each activity owns its own reconciliation story (TTL re-fetch, idempotent retry, time-sensitive drop). See `specs/01 § Federation delivery semantics`.
+- **Outbound AP delivery** is best-effort, inline `tokio::spawn` per remote inbox — no persistent outbox queue. Each activity owns its own reconciliation story (TTL re-fetch, idempotent retry, time-sensitive drop). See `identity-provider/specs/01-identity-federation.md § Federation delivery semantics`.
 - **`remote_actors.inbox_url`** is cached on first WebFinger resolution. `remote_actors::upsert()` uses `COALESCE(EXCLUDED.inbox_url, remote_actors.inbox_url)` — never overwrite a cached value with `None`.
 - **HTTP Signatures** are mandatory on all incoming ActivityPub activities and on inter-IdP presence SSE auth. Reuses the AP RSA key pair — no separate key material.
 
@@ -333,12 +336,10 @@ COOKIE_SECRET=<64-byte-hex-or-random-string>
 
 ## Workflow for cross-cutting tasks
 
-If a task touches multiple spec files (e.g. adding group conversations affects both
-`specs/03-direct-messages.md` and `specs/04-presence.md`):
+The general rule for changes spanning several specs is in the root `CLAUDE.md` and applies
+here — it is not repeated, so that it cannot drift. On top of it, a change inside this
+service also means:
 
-1. Read all relevant spec files.
-2. Make changes consistently across all affected files.
-3. Check the quick-reference schema above for any table that needs updating.
-4. Note any impact on the architecture diagram (`specs/02-architecture-diagram.md`) — update it if new components or flows are introduced.
-5. Update all the specs files that are affected by the change (if needed).
-6. If the workspace structure change or API endpoints are added/modified/deleted, change the according sections of this file consistently
+- Check the quick-reference schema above for any table that needs updating.
+- If the workspace structure changed, or API endpoints were added, modified or deleted,
+  update the corresponding sections of this file to match.

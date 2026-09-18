@@ -13,7 +13,7 @@
 //!   every pending Welcome targeted at the calling device.
 //!
 //! All three operate on byte blobs and do no MLS parsing — the server is
-//! opaque to message content (see `specs/05-e2ee.md § 4`).
+//! opaque to message content (see `identity-provider/specs/05-e2ee.md § 4`).
 //!
 //! Outbound federation is initiated here too: when a local user appends a
 //! Commit, every remote member's IdP gets a best-effort `Create{Note}` with

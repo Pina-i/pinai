@@ -11,7 +11,7 @@
 //! Every MLS payload rides inside a `Create{Note}` activity with
 //! `mediaType: application/mls`. A custom `mlsKind` field discriminates
 //! commit / welcome / application without forcing the server to parse the
-//! opaque MLSMessage body. See `specs/05-e2ee.md § 5`.
+//! opaque MLSMessage body. See `identity-provider/specs/05-e2ee.md § 5`.
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use serde_json::{json, Value};

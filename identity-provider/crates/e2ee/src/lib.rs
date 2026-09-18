@@ -20,7 +20,7 @@
 //! devices. The Recovery Key ciphertext is opaque to the server; the
 //! Argon2id-derived KEK never leaves the user's device.
 //!
-//! See `specs/05-e2ee.md` for the protocol-level design.
+//! See `identity-provider/specs/05-e2ee.md` for the protocol-level design.
 
 pub mod attestation;
 pub mod auth;

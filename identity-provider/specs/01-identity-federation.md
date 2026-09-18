@@ -398,7 +398,7 @@ Redis pub-sub remains appropriate for presence events since they are high-freque
 
 > Delivery covered here is the outbound half. Every activity leaves signed, and every
 > activity arriving at `POST /users/:username/inbox` is authenticated before any state is
-> touched — see `06-federation-authentication.md` for the signing scheme, the three inbound
+> touched — see `specs/06-federation-authentication.md` for the signing scheme, the three inbound
 > checks, and the peer request policy.
 
 Outbound ActivityPub activities are delivered **inline** via `tokio::spawn`

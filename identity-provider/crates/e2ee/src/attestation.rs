@@ -1,6 +1,6 @@
 //! Ed25519 attestation signing. The IdP signs
 //! `(actor_uri, device_id, drk_pub, expires_at, kid)`; peer clients verify
-//! against the issuer's JWKS. See `specs/05-e2ee.md` for the wire format.
+//! against the issuer's JWKS. See `identity-provider/specs/05-e2ee.md` for the wire format.
 
 use base64ct::{Base64, Encoding as _};
 use ed25519_dalek::{Signature, Signer, SigningKey};

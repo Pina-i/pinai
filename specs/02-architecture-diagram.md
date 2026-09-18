@@ -87,7 +87,7 @@ flowchart TD
     %% ── Federation (ActivityPub) ──────────────────────────────────────
     %% Outbound delivery is best-effort, inline tokio::spawn — no queue.
     %% Recovery for missed deliveries is per-activity (TTL re-fetch, idempotent retry,
-    %% time-sensitive activities just drop). See specs/01 § Federation delivery semantics.
+    %% time-sensitive activities just drop). See identity-provider/specs/01-identity-federation.md § Federation delivery semantics.
     MSG_B -->|"HTTP POST ActivityPub activity\nbest-effort, inline tokio::spawn"| MSG_A
     MSG_A -->|"update remote_actors cache\n+ friendships.friend_avatar_url"| REMOTE_A
     MSG_A -->|"update remote_actors cache\n+ friendships.friend_avatar_url"| FRIENDS_A
