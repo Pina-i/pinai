@@ -55,7 +55,8 @@ pub struct SignParams<'a> {
 
 /// Produce the value for the `Signature:` header.
 pub fn sign_request(p: SignParams<'_>) -> Result<String, SignError> {
-    let (header_names, sig_string) = build_signature_string(p.method, p.path, p.host, p.date, p.digest);
+    let (header_names, sig_string) =
+        build_signature_string(p.method, p.path, p.host, p.date, p.digest);
     let sig: Signature = p.signing_key.sign(sig_string.as_bytes());
     let sig_b64 = Base64::encode_string(sig.to_bytes().as_ref());
     Ok(format!(
@@ -97,7 +98,11 @@ pub fn parse_signature_header(value: &str) -> Result<ParsedSignature, VerifyErro
         if let Some(v) = strip_quoted(part, "keyId") {
             key_id = Some(v.to_string());
         } else if let Some(v) = strip_quoted(part, "headers") {
-            headers = Some(v.split_whitespace().map(|s| s.to_string()).collect::<Vec<_>>());
+            headers = Some(
+                v.split_whitespace()
+                    .map(|s| s.to_string())
+                    .collect::<Vec<_>>(),
+            );
         } else if let Some(v) = strip_quoted(part, "signature") {
             signature = Some(Base64::decode_vec(v).map_err(|_| VerifyError::Base64)?);
         }
@@ -131,7 +136,8 @@ pub fn verify_request(
         let line = match name.as_str() {
             "(request-target)" => format!("(request-target): {} {}", method.to_lowercase(), path),
             other => {
-                let val = get_header(other).ok_or_else(|| VerifyError::MissingHeader(other.to_string()))?;
+                let val = get_header(other)
+                    .ok_or_else(|| VerifyError::MissingHeader(other.to_string()))?;
                 format!("{}: {}", other, val)
             }
         };

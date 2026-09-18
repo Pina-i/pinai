@@ -105,12 +105,7 @@ impl Actor {
     /// * `handle`          — full handle, e.g. `alex-7G4K`
     /// * `display_name`    — human-readable name
     /// * `public_key_pem`  — PEM-encoded Ed25519 **public** key
-    pub fn person(
-        base_url: &str,
-        handle: &str,
-        display_name: &str,
-        public_key_pem: &str,
-    ) -> Self {
+    pub fn person(base_url: &str, handle: &str, display_name: &str, public_key_pem: &str) -> Self {
         let actor_url = format!("{}/users/{}", base_url, handle);
         Self {
             context: actor_context(),
@@ -273,7 +268,9 @@ impl Activity {
             activity_type: "Update".to_string(),
             actor: actor_url.to_string(),
             object: person,
-            to: Some(vec!["https://www.w3.org/ns/activitystreams#Public".to_string()]),
+            to: Some(vec![
+                "https://www.w3.org/ns/activitystreams#Public".to_string()
+            ]),
             cc: None,
             published: Some(utc_now_rfc3339()),
             content: None,

@@ -25,11 +25,7 @@ pub struct ApiError {
 }
 
 impl ApiError {
-    pub fn new(
-        status: StatusCode,
-        code: impl Into<String>,
-        message: impl Into<String>,
-    ) -> Self {
+    pub fn new(status: StatusCode, code: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             status,
             code: code.into(),

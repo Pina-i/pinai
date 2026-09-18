@@ -11,8 +11,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilte
 /// | `RUST_LOG`   | `info`  | Log filter. E.g. `debug`, `info,sqlx=warn`, `idp_oidc=debug`  |
 /// | `LOG_FORMAT` | (unset) | Set to `json` for machine-readable production logs             |
 pub fn init_tracing(service_name: &str) {
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
     let use_json = std::env::var("LOG_FORMAT").ok().as_deref() == Some("json");
 

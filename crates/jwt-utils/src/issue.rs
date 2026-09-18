@@ -7,9 +7,9 @@ use crate::{EdKeyPair, JwtUtilsError};
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AccessTokenClaims {
     pub iss: String,
-    pub sub: String,               // user UUID as string
-    pub aud: String,               // client_id
-    pub exp: i64,                  // unix timestamp
+    pub sub: String, // user UUID as string
+    pub aud: String, // client_id
+    pub exp: i64,    // unix timestamp
     pub iat: i64,
     pub email: String,
     pub preferred_username: String,
@@ -31,8 +31,8 @@ pub struct IdTokenClaims {
 pub fn issue_access_token(
     keypair: &EdKeyPair,
     issuer: &str,
-    subject: &str,    // user UUID
-    audience: &str,   // client_id
+    subject: &str,  // user UUID
+    audience: &str, // client_id
     email: &str,
     username: &str,
     ttl_seconds: i64,

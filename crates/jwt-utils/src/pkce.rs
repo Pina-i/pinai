@@ -27,7 +27,11 @@ pub fn compute_code_challenge(verifier: &str) -> String {
 /// Uses constant-time comparison to prevent timing attacks.
 pub fn verify_pkce(code_verifier: &str, stored_challenge: &str) -> Result<(), JwtUtilsError> {
     let computed = compute_code_challenge(code_verifier);
-    if computed.as_bytes().ct_eq(stored_challenge.as_bytes()).into() {
+    if computed
+        .as_bytes()
+        .ct_eq(stored_challenge.as_bytes())
+        .into()
+    {
         Ok(())
     } else {
         Err(JwtUtilsError::PkceVerificationFailed)

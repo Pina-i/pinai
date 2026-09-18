@@ -11,8 +11,8 @@ pub struct Jwk {
     pub kid: String,
     #[serde(rename = "use")]
     pub use_: &'static str, // "sig"
-    pub alg: &'static str,  // "EdDSA"
-    pub x: String,           // base64url(public_key_bytes), no padding
+    pub alg: &'static str, // "EdDSA"
+    pub x: String,         // base64url(public_key_bytes), no padding
 }
 
 /// A JSON Web Key Set.
