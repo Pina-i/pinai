@@ -61,8 +61,8 @@ services:
 
   idp:
     build:
-      context: ..
-      dockerfile: docker/Dockerfile
+      context: ../..
+      dockerfile: identity-provider/docker/Dockerfile
     env_file: .env
     network_mode: host
     environment:

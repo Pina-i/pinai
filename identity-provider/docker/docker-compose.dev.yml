@@ -10,6 +10,6 @@
 services:
   idp:
     build:
-      context: ..
-      dockerfile: docker/Dockerfile.dev
+      context: ../..
+      dockerfile: identity-provider/docker/Dockerfile.dev
     tty: true

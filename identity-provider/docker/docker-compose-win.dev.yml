@@ -70,8 +70,8 @@ services:
 
   idp:
     build:
-      context: ..
-      dockerfile: docker/Dockerfile.dev
+      context: ../..
+      dockerfile: identity-provider/docker/Dockerfile.dev
     env_file: .env
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}

@@ -7,7 +7,7 @@
 #
 #   docker compose -f docker/docker-compose.yml -f docker/docker-compose.dev.yml up -d --build
 #
-# Cache-mount IDs are versioned (-v1) — bump after big workspace restructures.
+# Cache-mount IDs are versioned (-v2) — bump after big workspace restructures.
 
 # ── Cargo-chef base ──────────────────────────────────────────────────────────
 FROM rust:bookworm AS chef
@@ -18,21 +18,23 @@ WORKDIR /build
 FROM chef AS planner
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/
+COPY identity-provider/crates/ identity-provider/crates/
 RUN cargo chef prepare --recipe-path recipe.json
 
 # ── Build (debug profile) ────────────────────────────────────────────────────
 FROM chef AS builder
 COPY --from=planner /build/recipe.json recipe.json
 
-RUN --mount=type=cache,id=idp-cargo-registry-v1,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,id=idp-cargo-git-v1,target=/usr/local/cargo/git,sharing=locked \
+RUN --mount=type=cache,id=idp-cargo-registry-v2,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=idp-cargo-git-v2,target=/usr/local/cargo/git,sharing=locked \
     cargo chef cook --recipe-path recipe.json
 
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/
-COPY migrations/ migrations/
-RUN --mount=type=cache,id=idp-cargo-registry-v1,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,id=idp-cargo-git-v1,target=/usr/local/cargo/git,sharing=locked \
+COPY identity-provider/crates/ identity-provider/crates/
+COPY identity-provider/migrations/ identity-provider/migrations/
+RUN --mount=type=cache,id=idp-cargo-registry-v2,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=idp-cargo-git-v2,target=/usr/local/cargo/git,sharing=locked \
     cargo build -p idp-server && \
     cp target/debug/idp-server /idp-server
 
