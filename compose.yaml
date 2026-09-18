@@ -61,7 +61,7 @@ services:
 
   idp:
     build:
-      context: ../..
+      context: .
       dockerfile: identity-provider/docker/Dockerfile
     env_file: .env
     network_mode: host
@@ -71,7 +71,7 @@ services:
       STORAGE_ENDPOINT: http://localhost:${RUSTFS_PORT:-9000}
       REDIS_URL: redis://localhost:${REDIS_PORT:-6379}
     volumes:
-      - ../keys:/run/secrets:ro
+      - ./identity-provider/keys:/run/secrets:ro
     depends_on:
       postgres:
         condition: service_healthy

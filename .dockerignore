@@ -6,5 +6,8 @@ docs/
 
 # Never let runtime secrets into a build context.
 **/keys/
-**/.env
+.env
+.env.*
+!.env.example
+**/docker/.env
 **/docker/.env.*

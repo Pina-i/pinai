@@ -70,7 +70,7 @@ services:
 
   idp:
     build:
-      context: ../..
+      context: .
       dockerfile: identity-provider/docker/Dockerfile.dev
     env_file: .env
     environment:
@@ -91,7 +91,7 @@ services:
     ports:
       - "${PORT:-8080}:${PORT:-8080}"
     volumes:
-      - ../keys:/run/secrets:ro
+      - ./identity-provider/keys:/run/secrets:ro
     tty: true
     depends_on:
       postgres:

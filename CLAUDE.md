@@ -6,12 +6,18 @@ Discord alternative. One Cargo workspace spans every Rust crate here.
 ## Layout
 
 ```
+compose.yaml               # the platform — `docker compose up` from here
+.env.example               # one deployment unit, one env template
 crates/                    # shared libraries (was the core-libs repo)
   common-types/  jwt-utils/  http-signatures/  activitypub/  observability/
 identity-provider/         # Layer 2 — identity & messaging backbone
-  crates/  migrations/  docker/  keys/  Makefile
-chat-server/               # Layer 3 — self-hostable community server
+  crates/  migrations/  keys/  docker/Dockerfile
+chat-server/               # Layer 3 — chat & voice rooms, attached to the IdP
 ```
+
+The chat server is attached to exactly one identity provider and deploys with
+it, so compose and environment live here at the root rather than per service.
+Dockerfiles stay with their service — they are build inputs tied to its crates.
 
 `web-client` stays a separate repository: it shares an HTTP contract with
 these services, not a dependency graph.
@@ -38,18 +44,16 @@ Run from the repo root:
 |---|---|
 | `make check` | fmt-check + clippy `-D warnings` + tests, all 21 crates |
 | `make fmt` | rustfmt the workspace |
-| `make alice` / `make bob` | run an IdP dev instance (delegates to the subtree) |
+| `make alice` / `make bob` | run a full dev instance |
 | `cargo run -p idp-server` | run a single binary |
+| `docker compose up -d` | bring up the platform |
 
-Service Makefiles resolve `docker/.env.*` and `./keys` relative to their own
-directory, so invoke them as `make -C identity-provider <target>` (or via the
-root delegating targets), never from the repo root directly.
+`JWT_PRIVATE_KEY_PATH` and the other paths in the env files resolve against the
+working directory, so run everything from the repo root.
 
 ## Docker
 
-Images build from the **repo root** as context, because the workspace manifest
-and the shared crates sit above each service subtree:
-
-```
-docker compose -f identity-provider/docker/docker-compose.yml build
-```
+`compose.yaml` is at the root and the build context is `.`, because the
+workspace manifest and the shared crates sit above every service subtree. The
+`alice` / `bob` targets bring up two independent instances (distinct compose
+project names) for exercising federation between them.

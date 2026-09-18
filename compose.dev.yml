@@ -1,7 +1,6 @@
 # Dev override for Linux. Apply on top of docker-compose.yml:
 #
-#   docker compose -f docker/docker-compose.yml \
-#                  -f docker/docker-compose.dev.yml \
+#   docker compose -f compose.yaml -f compose.dev.yml \
 #                  --project-name pinai-alice up -d --build
 #
 # Only changes the idp service: switches to Dockerfile.dev (debug profile) and
@@ -10,6 +9,6 @@
 services:
   idp:
     build:
-      context: ../..
+      context: .
       dockerfile: identity-provider/docker/Dockerfile.dev
     tty: true

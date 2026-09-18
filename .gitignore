@@ -3,9 +3,11 @@ docs/
 .idea
 .zed
 
-# Runtime secrets and keys — patterns are path-agnostic so they keep matching
-# wherever a service subtree lives in the monorepo.
+# Runtime secrets and keys. Deny-by-default: every .env variant is ignored and
+# the committed template is the single explicit exception.
 .env
+.env.*
+!.env.example
 **/docker/.env
 **/docker/.env.*
 keys/

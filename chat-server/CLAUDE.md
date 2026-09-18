@@ -11,14 +11,22 @@ This service is **Layer 3** of a three-layer architecture:
 
 ## What This Service Does
 
-A self-hostable community server managing channels, messages, and roles. It is **intentionally simple and stateless regarding credentials**:
+A community server hosting chat **and voice** rooms. It is **intentionally simple and
+stateless regarding credentials**:
 
 - Does NOT store passwords
 - Does NOT manage friendships
-- Does NOT implement any federation protocol
-- Validates identity exclusively via JWT tokens issued by any Pina-i-compatible identity provider
+- Validates identity exclusively via JWT tokens issued by a Pina-i-compatible identity provider
 
-Any user from any identity provider can join any chat server. The trust boundary is the JWT.
+**A chat server is attached to exactly one identity provider.** A room is addressed by a
+URL derived from that IdP, the way a Matrix room is addressed by its home server. The
+chat server and its IdP deploy together as one unit — this service is not independently
+self-hostable.
+
+**Trust policy is single-tenant for now**: only the attached IdP's users can join. The
+home-server shape is deliberate, though — letting users from a remote IdP join a room
+hosted here is the intended direction, so nothing here may foreclose it. See
+*Key Design Decisions*.
 
 ## Tech Stack
 
@@ -33,11 +41,13 @@ Any user from any identity provider can join any chat server. The trust boundary
 
 ## Related Repositories
 
-| Repo | Role |
+Everything below `pina-i/pinai` is a subtree of this monorepo.
+
+| Path | Role |
 |------|------|
-| `pina-i/identity-provider` | Issues the JWTs this service validates |
-| `pina-i/core-libs` | Shared JWT validation logic (`jwt-utils` crate) |
-| `pina-i/web-client` | Frontend that connects to this service via WebSocket |
+| `identity-provider/` | The attached IdP — issues the JWTs this service validates |
+| `crates/jwt-utils/` | Shared JWT validation logic (workspace path dependency) |
+| `pina-i/web-client` | Frontend — separate repository, connects via WebSocket |
 
 ## Workspace Structure (Cargo)
 
@@ -53,47 +63,23 @@ chat-server/
 │   ├── db/                 # SQLx models, migrations, repositories
 │   └── config/             # Configuration loading, env vars
 ├── migrations/             # SQLx migrations
-├── docker/
-│   ├── Dockerfile
-│   └── docker-compose.yml  # Standalone self-hosted deployment
-└── .env.example
+└── docker/
+    └── Dockerfile
 ```
+
+Compose and environment live at the **monorepo root**, not here: the IdP and the chat
+server are one deployment unit. See the root `CLAUDE.md`.
 
 ## Deployment
 
-This repo ships its own `Dockerfile` and `docker-compose.yml`. No external infrastructure repo is needed.
-
-```yaml
-# docker/docker-compose.yml
-services:
-  chat:
-    build: ..
-    environment:
-      DOMAIN: chat.gaming.com
-      DATABASE_URL: postgres://pina:secret@postgres/chat_server
-      JWKS_CACHE_TTL_SECONDS: 3600
-    ports:
-      - "8080:8080"
-    depends_on:
-      - postgres
-
-  postgres:
-    image: postgres:16
-    environment:
-      POSTGRES_USER: pina
-      POSTGRES_PASSWORD: secret
-      POSTGRES_DB: chat_server
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-
-volumes:
-  pgdata:
-```
+Deployed together with its identity provider from the monorepo root `compose.yaml`.
+There is no standalone compose for this service.
 
 **Key operational notes:**
 - TLS must be terminated by a reverse proxy (Caddy or Nginx) in production
-- JWKS must be fetched over HTTPS only — reject HTTP issuers in production
 - No secrets or credentials belong in this service
+- Voice needs an SFU and TURN/STUN for NAT traversal — **not yet chosen**; nothing below
+  assumes a particular one
 
 ## Key API Endpoints
 
@@ -112,28 +98,40 @@ volumes:
 ## JWT Validation Flow
 
 1. Client presents a Bearer JWT in the `Authorization` header
-2. Extract `iss` (issuer) claim from the JWT
-3. Fetch JWKS from `{iss}/.well-known/jwks.json`
-4. Cache the keyset with a TTL (e.g. 1 hour)
-5. On cache miss or signature failure: refetch JWKS before rejecting
-6. Validate signature, `exp`, `iat`, `aud`
-7. Use `(iss, sub)` pair as the unique local user key — create a local user record on first login
+2. Extract the `iss` (issuer) claim and reject it unless it is on the accepted-issuer
+   allowlist — today that is the attached IdP alone
+3. Fetch JWKS from `{iss}/.well-known/jwks.json` and cache the keyset with a TTL
+4. On cache miss or signature failure, refetch once before rejecting — handles key rotation
+5. Validate signature, `exp`, `iat`, `aud`
+6. Use the `(iss, sub)` pair as the unique local user key — create a local user record on
+   first login
+
+Step 2 is the whole trust policy. Widening the allowlist is what turns this into a
+federated home server; every other step already works unchanged for a remote issuer.
 
 ## Key Design Decisions
 
-- **User identity key**: `(issuer, subject)` pair — never just `sub` alone, as `sub` is only unique per issuer
-- **JWKS caching**: Cache with TTL + refetch on validation failure to handle key rotation gracefully
+- **User identity key**: `(issuer, subject)` pair — never just `sub` alone, as `sub` is
+  only unique per issuer. Keep the compound key **even while single-tenant**: it costs one
+  column now and a migration plus a rekey of every user row and foreign key later.
+- **Trust policy is config, not structure**: accepted issuers are an allowlist that
+  currently holds exactly one entry — the attached IdP. Opening up to remote IdPs should
+  be a config change, not a refactor. This is the seam federation plugs into.
+- **JWKS**: validate against the attached IdP's key. The multi-issuer cache (TTL, refetch
+  on validation failure for key rotation) is deferred until the allowlist can hold more
+  than one entry — it is isolated runtime logic and cheap to add then.
 - **No password storage**: The auth module must never touch passwords in any form
 - **WebSocket auth**: Authenticate the WS connection at upgrade time using the JWT; do not re-validate on every message
 - **Roles are local**: Role assignments are managed entirely by this chat server — the IdP has no knowledge of them
-- **Multi-IdP support**: The server must accept JWTs from any valid OIDC issuer, not just one hardcoded IdP
 
 ## Environment Variables
 
 ```env
 DATABASE_URL=postgres://user:pass@localhost/chat_server
 DOMAIN=chat.gaming.com
-PORT=8080
+PORT=8081
+# Accepted token issuers, comma-separated. Single-tenant today: the attached IdP only.
+ACCEPTED_ISSUERS=http://localhost:8080
 JWKS_CACHE_TTL_SECONDS=3600
 ```
 
