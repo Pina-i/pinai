@@ -1,0 +1,10 @@
+# The Dockerfiles COPY explicit paths; everything else is context-transfer cost.
+target/
+.git/
+docs/
+**/specs/
+
+# Never let runtime secrets into a build context.
+**/keys/
+**/.env
+**/docker/.env.*
