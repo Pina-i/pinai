@@ -11,6 +11,12 @@
 Makefile     text eol=lf
 Dockerfile*  text eol=lf
 
+# SQLx records a SHA-384 of each migration in _sqlx_migrations and refuses to
+# run when a previously applied file no longer matches. Their bytes are a
+# content address, so converting them retroactively breaks every existing
+# database — LF or CRLF, they are frozen as first applied.
+identity-provider/migrations/*.sql -text
+
 # Never convert these.
 *.png  binary
 *.jpg  binary
