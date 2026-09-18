@@ -37,6 +37,25 @@ constraints — read that one before working inside it.
   globs. Add a `chat-server/crates/*` member when that service gets its first
   crate.
 
+## Tests
+
+Unit tests live in their own file, declared as a child module of the code they
+cover so they keep access to its private items:
+
+```rust
+// src/verify.rs — at the end of the file, nothing else
+#[cfg(test)]
+mod tests;
+```
+
+```
+src/verify.rs        # implementation
+src/verify/tests.rs  # starts with `use super::*;`
+```
+
+A crate root (`lib.rs`, `mod.rs`) puts its tests beside it at `src/tests.rs`.
+Integration tests that drive a crate from outside still belong in `tests/`.
+
 ## Commands
 
 Run from the repo root:
