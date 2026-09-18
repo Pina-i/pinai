@@ -303,3 +303,6 @@ fn merge_blocklist(builtins: &[&str], env_value: Option<&str>) -> Vec<String> {
     }
     out
 }
+
+#[cfg(test)]
+mod tests;

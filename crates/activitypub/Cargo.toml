@@ -8,3 +8,8 @@ serde      = { workspace = true }
 serde_json = { workspace = true }
 time       = { version = "0.3", features = ["serde", "formatting"] }
 uuid       = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+# `parsing` is test-only: the published timestamp is parsed rather than
+# pattern-matched, without adding the feature to the shipped build.
+time = { version = "0.3", features = ["parsing"] }
