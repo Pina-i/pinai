@@ -16,17 +16,17 @@ stateless regarding credentials**:
 
 - Does NOT store passwords
 - Does NOT manage friendships
-- Validates identity exclusively via JWT tokens issued by a Pina-i-compatible identity provider
+- Validates identity exclusively via JWT tokens issued by **its own** identity provider
 
 **A chat server is attached to exactly one identity provider.** A room is addressed by a
 URL derived from that IdP, the way a Matrix room is addressed by its home server. The
 chat server and its IdP deploy together as one unit — this service is not independently
 self-hostable.
 
-**Trust policy is single-tenant for now**: only the attached IdP's users can join. The
-home-server shape is deliberate, though — letting users from a remote IdP join a room
-hosted here is the intended direction, so nothing here may foreclose it. See
-*Key Design Decisions*.
+**Only the attached IdP's users can join, for now.** Opening rooms to remote instances is
+the intended direction, but it arrives as server-to-server federation — signed requests
+between instances, the model the IdP already runs — not as this service accepting a wider
+set of user tokens. Nothing here may foreclose that. See *Key Design Decisions*.
 
 ## Tech Stack
 
@@ -98,28 +98,32 @@ There is no standalone compose for this service.
 ## JWT Validation Flow
 
 1. Client presents a Bearer JWT in the `Authorization` header
-2. Extract the `iss` (issuer) claim and reject it unless it is on the accepted-issuer
-   allowlist — today that is the attached IdP alone
-3. Fetch JWKS from `{iss}/.well-known/jwks.json` and cache the keyset with a TTL
+2. Reject it unless `iss` equals `IDP_ISSUER` — the one IdP this server is attached to
+3. Fetch JWKS from `{IDP_ISSUER}/.well-known/jwks.json` and cache the keyset with a TTL
 4. On cache miss or signature failure, refetch once before rejecting — handles key rotation
 5. Validate signature, `exp`, `iat`, `aud`
 6. Use the `(iss, sub)` pair as the unique local user key — create a local user record on
    first login
 
-Step 2 is the whole trust policy. Widening the allowlist is what turns this into a
-federated home server; every other step already works unchanged for a remote issuer.
+This path authenticates **local users only**, and always will. Federation does not widen
+it — see below.
 
 ## Key Design Decisions
 
 - **User identity key**: `(issuer, subject)` pair — never just `sub` alone, as `sub` is
-  only unique per issuer. Keep the compound key **even while single-tenant**: it costs one
-  column now and a migration plus a rekey of every user row and foreign key later.
-- **Trust policy is config, not structure**: accepted issuers are an allowlist that
-  currently holds exactly one entry — the attached IdP. Opening up to remote IdPs should
-  be a config change, not a refactor. This is the seam federation plugs into.
-- **JWKS**: validate against the attached IdP's key. The multi-issuer cache (TTL, refetch
-  on validation failure for key rotation) is deferred until the allowlist can hold more
-  than one entry — it is isolated runtime logic and cheap to add then.
+  only unique per issuer. Keep the compound key **even while single-tenant**: federated
+  users arrive as issuer-scoped actor URIs, so a table keyed on `sub` alone collides the
+  first time a remote `@alex@other.example` needs a local record — and retrofitting it
+  means a migration plus a rekey of every user row and foreign key.
+- **One issuer, not an allowlist**: `iss` must equal `IDP_ISSUER`. The server already
+  needs that value to fetch JWKS and to build room URLs, so a separate list of accepted
+  issuers would just be a second copy that can drift out of agreement with it.
+- **Federation is server-to-server, not more JWTs**: a remote user never presents a token
+  here. Their client talks to their own home server, and the two servers exchange signed
+  HTTP requests — exactly what `identity-provider/crates/federation/` already does
+  (`delivery.rs` signs outbound, `http_signature.rs` verifies inbound, keyed at
+  `<issuer>/actor#main-key`). When rooms open to remote instances, this service grows an
+  inbox on that model and reuses `crates/http-signatures/`. The JWT path is untouched.
 - **No password storage**: The auth module must never touch passwords in any form
 - **WebSocket auth**: Authenticate the WS connection at upgrade time using the JWT; do not re-validate on every message
 - **Roles are local**: Role assignments are managed entirely by this chat server — the IdP has no knowledge of them
@@ -130,8 +134,9 @@ federated home server; every other step already works unchanged for a remote iss
 DATABASE_URL=postgres://user:pass@localhost/chat_server
 DOMAIN=chat.gaming.com
 PORT=8081
-# Accepted token issuers, comma-separated. Single-tenant today: the attached IdP only.
-ACCEPTED_ISSUERS=http://localhost:8080
+# The one identity provider this chat server is attached to. Rooms are addressed
+# under it and its JWTs are the only ones accepted.
+IDP_ISSUER=http://localhost:8080
 JWKS_CACHE_TTL_SECONDS=3600
 ```
 
