@@ -610,7 +610,7 @@
 
   <section>
     <h2><span class="num">06</span> How this was checked</h2>
-    <p>18 tests cover the new code. Because a test that passes with and without a fix is worthless, each guard was verified by mutation — disabling it in place and confirming the suite noticed:</p>
+    <p>24 tests cover this work — 18 in <code>federation-transport</code> for the digest, screen and cache, 6 in <code>idp-federation</code> for the actor binding. Because a test that passes with and without a fix is worthless, each guard was verified by mutation — disabling it in place and confirming the suite noticed:</p>
     <div class="tbl-scroll">
       <table>
         <thead><tr><th>Guard disabled</th><th>Result</th></tr></thead>
