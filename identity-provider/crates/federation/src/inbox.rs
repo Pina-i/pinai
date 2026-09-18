@@ -15,9 +15,9 @@
 //! messages of `kind = "reaction"` inside the encrypted body.
 
 use axum::{
+    body::Bytes,
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
-    Json,
 };
 use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use serde_json::Value;
@@ -29,14 +29,28 @@ use idp_realtime::{EditedDmPayload, FriendshipPayload, ProfileUpdatePayload, WsE
 
 use idp_state::{AppState, OidcError};
 
+use crate::http_signature::{verify_body_digest, verify_http_signature};
+
 /// POST /users/:slug/inbox
 #[tracing::instrument(skip_all, fields(slug = %slug))]
 pub async fn post_inbox(
     State(state): State<AppState>,
     Path(slug): Path<String>,
-    _headers: HeaderMap,
-    Json(body): Json<Value>,
+    headers: HeaderMap,
+    body: Bytes,
 ) -> Result<StatusCode, OidcError> {
+    // Authenticate the peer before touching any state. `Bytes` rather than
+    // `Json` because the digest must be taken over the bytes as received —
+    // re-serialising a parsed Value would not reproduce them.
+    let signature_path = format!("/users/{}/inbox", slug);
+    let key_id = verify_http_signature(&headers, "post", &signature_path).await?;
+    verify_body_digest(&headers, &body)?;
+
+    let body: Value = serde_json::from_slice(&body)
+        .map_err(|e| OidcError::invalid_request(format!("malformed activity JSON: {e}")))?;
+
+    verify_actor_binding(&key_id, &body)?;
+
     // 1. Resolve the inbox owner.
     let actor_uri = format!("{}/users/{}", state.config.issuer(), slug);
     let recipient = users::find_by_actor_uri(&state.pool, &actor_uri)
@@ -69,6 +83,32 @@ pub async fn post_inbox(
     }
 
     Ok(StatusCode::ACCEPTED)
+}
+
+/// The activity's `actor`, which AP allows to be either a URI or an embedded object.
+fn activity_actor(body: &Value) -> Option<&str> {
+    match body.get("actor")? {
+        Value::String(s) => Some(s.as_str()),
+        Value::Object(o) => o.get("id").and_then(|v| v.as_str()),
+        _ => None,
+    }
+}
+
+/// Reject an activity whose `actor` is not the key that signed the request.
+///
+/// A verified signature only proves *some* actor signed this; without this
+/// binding any federated peer could post activities on behalf of anyone.
+fn verify_actor_binding(key_id: &str, body: &Value) -> Result<(), OidcError> {
+    let signer = key_id.split('#').next().unwrap_or_default();
+    let claimed = activity_actor(body)
+        .ok_or_else(|| OidcError::invalid_request("activity missing actor field"))?;
+    if signer != claimed {
+        tracing::warn!(%signer, %claimed, "inbox activity actor does not match signer");
+        return Err(OidcError::access_denied(
+            "activity actor does not match the signing key",
+        ));
+    }
+    Ok(())
 }
 
 // ─── Follow (friend request) ─────────────────────────────────────────────────
@@ -796,4 +836,50 @@ fn extract_attachment_uuid(url: &str) -> Option<Uuid> {
     let trimmed = url.strip_suffix("/content").unwrap_or(url);
     let last_segment = trimmed.rsplit('/').next()?;
     Uuid::parse_str(last_segment).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    const KEY_ID: &str = "https://idp.bob.com/users/bob#main-key";
+    const BOB: &str = "https://idp.bob.com/users/bob";
+
+    #[test]
+    fn accepts_activity_signed_by_its_own_actor() {
+        let body = json!({ "type": "Follow", "actor": BOB });
+        assert!(verify_actor_binding(KEY_ID, &body).is_ok());
+    }
+
+    #[test]
+    fn accepts_actor_as_embedded_object() {
+        let body = json!({ "type": "Follow", "actor": { "id": BOB } });
+        assert!(verify_actor_binding(KEY_ID, &body).is_ok());
+    }
+
+    /// The forgery this binding exists to stop: a peer with a valid key of its
+    /// own signing an Accept on behalf of someone else, which would flip a
+    /// pending friendship to accepted without the real actor consenting.
+    #[test]
+    fn rejects_activity_claiming_a_different_actor() {
+        let body = json!({ "type": "Accept", "actor": "https://idp.alice.com/users/alice" });
+        assert!(verify_actor_binding(KEY_ID, &body).is_err());
+    }
+
+    #[test]
+    fn rejects_actor_that_only_prefixes_the_signer() {
+        let body = json!({ "type": "Follow", "actor": "https://idp.bob.com/users/bobby" });
+        assert!(verify_actor_binding(KEY_ID, &body).is_err());
+    }
+
+    #[test]
+    fn rejects_activity_with_no_actor() {
+        assert!(verify_actor_binding(KEY_ID, &json!({ "type": "Follow" })).is_err());
+    }
+
+    #[test]
+    fn rejects_non_string_non_object_actor() {
+        assert!(verify_actor_binding(KEY_ID, &json!({ "actor": 42 })).is_err());
+    }
 }
