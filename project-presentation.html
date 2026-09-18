@@ -1,0 +1,1237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pina'i — Architecture</title>
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:ital,wght@0,400;0,700;1,400&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0a0a0f;
+    --surface: #111118;
+    --border: #1e1e2e;
+    --accent: #5865f2;
+    --accent2: #eb459e;
+    --accent3: #57f287;
+    --accent4: #fee75c;
+    --text: #e8e8f0;
+    --muted: #6b6b8a;
+    --code-bg: #0d0d18;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  html { scroll-behavior: smooth; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Syne', sans-serif;
+    overflow-x: hidden;
+  }
+
+  /* NOISE TEXTURE */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.04'/%3E%3C/svg%3E");
+    pointer-events: none;
+    z-index: 1000;
+    opacity: 0.4;
+  }
+
+  /* HERO */
+  .hero {
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: flex-start;
+    padding: 80px 10vw;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .hero-grid {
+    position: absolute;
+    inset: 0;
+    background-image: 
+      linear-gradient(rgba(88,101,242,0.07) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(88,101,242,0.07) 1px, transparent 1px);
+    background-size: 60px 60px;
+    animation: gridShift 20s linear infinite;
+  }
+
+  @keyframes gridShift {
+    0% { transform: translateY(0); }
+    100% { transform: translateY(60px); }
+  }
+
+  .hero-glow {
+    position: absolute;
+    width: 800px;
+    height: 800px;
+    border-radius: 50%;
+    background: radial-gradient(circle, rgba(88,101,242,0.15) 0%, transparent 70%);
+    top: -200px;
+    right: -200px;
+    animation: pulse 6s ease-in-out infinite;
+  }
+
+  .hero-glow2 {
+    position: absolute;
+    width: 500px;
+    height: 500px;
+    border-radius: 50%;
+    background: radial-gradient(circle, rgba(235,69,158,0.1) 0%, transparent 70%);
+    bottom: -100px;
+    left: 5vw;
+    animation: pulse 8s ease-in-out infinite 2s;
+  }
+
+  @keyframes pulse {
+    0%, 100% { transform: scale(1); opacity: 1; }
+    50% { transform: scale(1.1); opacity: 0.7; }
+  }
+
+  .badge {
+    font-family: 'Space Mono', monospace;
+    font-size: 0.7rem;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    color: var(--accent3);
+    border: 1px solid var(--accent3);
+    padding: 4px 12px;
+    border-radius: 2px;
+    margin-bottom: 24px;
+    display: inline-block;
+    animation: fadeUp 0.8s ease both;
+  }
+
+  .hero h1 {
+    font-size: clamp(3rem, 8vw, 7rem);
+    font-weight: 800;
+    line-height: 0.95;
+    letter-spacing: -0.03em;
+    margin-bottom: 12px;
+    animation: fadeUp 0.8s ease both 0.1s;
+  }
+
+  .hero h1 span { color: var(--accent); }
+  .hero h1 .accent2 { color: var(--accent2); }
+
+  .hero-sub {
+    font-size: clamp(1rem, 2vw, 1.3rem);
+    color: var(--muted);
+    max-width: 580px;
+    line-height: 1.6;
+    margin-top: 20px;
+    margin-bottom: 48px;
+    animation: fadeUp 0.8s ease both 0.2s;
+  }
+
+  .hero-pills {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    animation: fadeUp 0.8s ease both 0.3s;
+  }
+
+  .pill {
+    font-family: 'Space Mono', monospace;
+    font-size: 0.75rem;
+    padding: 8px 16px;
+    border: 1px solid var(--border);
+    border-radius: 100px;
+    color: var(--muted);
+    background: var(--surface);
+    transition: all 0.2s;
+  }
+
+  .pill:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+    transform: translateY(-2px);
+  }
+
+  .scroll-hint {
+    position: absolute;
+    bottom: 40px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    animation: fadeUp 1s ease both 0.8s;
+  }
+
+  .scroll-hint span {
+    font-family: 'Space Mono', monospace;
+    font-size: 0.65rem;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+
+  .scroll-line {
+    width: 1px;
+    height: 50px;
+    background: linear-gradient(to bottom, var(--muted), transparent);
+    animation: scrollLine 2s ease-in-out infinite;
+  }
+
+  @keyframes scrollLine {
+    0% { transform: scaleY(0); transform-origin: top; }
+    50% { transform: scaleY(1); transform-origin: top; }
+    51% { transform: scaleY(1); transform-origin: bottom; }
+    100% { transform: scaleY(0); transform-origin: bottom; }
+  }
+
+  @keyframes fadeUp {
+    from { opacity: 0; transform: translateY(20px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  /* SECTIONS */
+  section {
+    padding: 100px 10vw;
+    position: relative;
+  }
+
+  .section-label {
+    font-family: 'Space Mono', monospace;
+    font-size: 0.65rem;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 16px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .section-label::before {
+    content: '';
+    width: 32px;
+    height: 1px;
+    background: var(--accent);
+  }
+
+  .section-title {
+    font-size: clamp(2rem, 4vw, 3.5rem);
+    font-weight: 800;
+    letter-spacing: -0.02em;
+    line-height: 1.05;
+    margin-bottom: 60px;
+  }
+
+  /* PRINCIPLES */
+  .principles-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 2px;
+    border: 1px solid var(--border);
+  }
+
+  .principle-card {
+    background: var(--surface);
+    padding: 40px 32px;
+    border-right: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+    position: relative;
+    overflow: hidden;
+    transition: all 0.3s;
+  }
+
+  .principle-card::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 2px;
+    background: var(--card-accent, var(--accent));
+    transform: scaleX(0);
+    transform-origin: left;
+    transition: transform 0.4s ease;
+  }
+
+  .principle-card:hover::before { transform: scaleX(1); }
+
+  .principle-card:hover {
+    background: #14141f;
+    transform: translateY(-2px);
+  }
+
+  .principle-icon {
+    font-size: 2rem;
+    margin-bottom: 16px;
+  }
+
+  .principle-card h3 {
+    font-size: 1.1rem;
+    font-weight: 700;
+    margin-bottom: 10px;
+    letter-spacing: -0.01em;
+  }
+
+  .principle-card p {
+    font-size: 0.88rem;
+    color: var(--muted);
+    line-height: 1.6;
+  }
+
+  /* ARCHITECTURE DIAGRAM */
+  .arch-section {
+    background: var(--surface);
+    border-top: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+  }
+
+  .arch-diagram {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    font-family: 'Space Mono', monospace;
+  }
+
+  .arch-layer {
+    border: 1px solid var(--border);
+    padding: 32px;
+    position: relative;
+    transition: all 0.3s;
+    cursor: pointer;
+  }
+
+  .arch-layer:hover {
+    border-color: var(--layer-color);
+    background: rgba(255,255,255,0.02);
+  }
+
+  .arch-layer-header {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    margin-bottom: 20px;
+  }
+
+  .layer-number {
+    font-size: 0.65rem;
+    letter-spacing: 0.15em;
+    color: var(--layer-color);
+    border: 1px solid var(--layer-color);
+    padding: 3px 8px;
+    white-space: nowrap;
+  }
+
+  .layer-title {
+    font-family: 'Syne', sans-serif;
+    font-size: 1.3rem;
+    font-weight: 700;
+    color: var(--layer-color);
+  }
+
+  .arch-layer[data-layer="1"] { --layer-color: #57f287; }
+  .arch-layer[data-layer="2"] { --layer-color: #5865f2; }
+  .arch-layer[data-layer="3"] { --layer-color: #eb459e; }
+
+  .layer-components {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+
+  .component-box {
+    border: 1px solid var(--border);
+    padding: 12px 20px;
+    font-size: 0.78rem;
+    color: var(--text);
+    background: var(--bg);
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    transition: all 0.2s;
+  }
+
+  .component-box:hover {
+    border-color: var(--layer-color);
+  }
+
+  .component-box .cname {
+    font-weight: 700;
+    font-size: 0.85rem;
+  }
+
+  .component-box .ctech {
+    color: var(--muted);
+    font-size: 0.7rem;
+  }
+
+  .arch-connector {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    padding: 8px;
+    font-family: 'Space Mono', monospace;
+    font-size: 0.7rem;
+    color: var(--muted);
+    letter-spacing: 0.1em;
+  }
+
+  .arch-connector::before, .arch-connector::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: linear-gradient(to right, transparent, var(--border));
+  }
+
+  .arch-connector::after {
+    background: linear-gradient(to left, transparent, var(--border));
+  }
+
+  /* FEDERATION */
+  .trust-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-family: 'Space Mono', monospace;
+    font-size: 0.8rem;
+  }
+
+  .trust-table th {
+    text-align: left;
+    padding: 16px 20px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--accent);
+    font-size: 0.65rem;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+  }
+
+  .trust-table td {
+    padding: 16px 20px;
+    border: 1px solid var(--border);
+    color: var(--text);
+    transition: all 0.2s;
+  }
+
+  .trust-table tr:hover td { background: var(--surface); }
+
+  .trust-table td:nth-child(3) {
+    color: var(--accent3);
+  }
+
+  /* SCENARIOS */
+  .scenarios-list {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+
+  .scenario {
+    border: 1px solid var(--border);
+    overflow: hidden;
+  }
+
+  .scenario-header {
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    padding: 28px 32px;
+    cursor: pointer;
+    transition: background 0.2s;
+    user-select: none;
+  }
+
+  .scenario-header:hover { background: var(--surface); }
+
+  .scenario-letter {
+    font-family: 'Space Mono', monospace;
+    font-size: 0.7rem;
+    font-weight: 700;
+    letter-spacing: 0.15em;
+    color: var(--accent4);
+    border: 1px solid var(--accent4);
+    padding: 4px 8px;
+    min-width: 40px;
+    text-align: center;
+  }
+
+  .scenario-title {
+    font-size: 1.1rem;
+    font-weight: 700;
+    flex: 1;
+  }
+
+  .scenario-toggle {
+    font-family: 'Space Mono', monospace;
+    font-size: 1.2rem;
+    color: var(--muted);
+    transition: transform 0.3s;
+  }
+
+  .scenario.open .scenario-toggle { transform: rotate(45deg); }
+
+  .scenario-body {
+    max-height: 0;
+    overflow: hidden;
+    transition: max-height 0.5s ease;
+  }
+
+  .scenario.open .scenario-body { max-height: 600px; }
+
+  .scenario-inner {
+    padding: 0 32px 32px 32px;
+  }
+
+  .flow-steps {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    margin-top: 16px;
+  }
+
+  .flow-step {
+    display: flex;
+    align-items: flex-start;
+    gap: 16px;
+    padding: 14px 20px;
+    background: var(--code-bg);
+    border-left: 3px solid transparent;
+    font-size: 0.88rem;
+    line-height: 1.5;
+    animation: none;
+    transition: border-color 0.2s;
+  }
+
+  .flow-step:hover { border-color: var(--accent); }
+
+  .step-num {
+    font-family: 'Space Mono', monospace;
+    font-size: 0.65rem;
+    color: var(--accent);
+    background: rgba(88,101,242,0.1);
+    border: 1px solid rgba(88,101,242,0.3);
+    padding: 2px 8px;
+    min-width: 32px;
+    text-align: center;
+    margin-top: 2px;
+  }
+
+  /* ROADMAP */
+  .roadmap {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+
+  .roadmap-item {
+    display: grid;
+    grid-template-columns: 100px 1fr auto;
+    align-items: center;
+    gap: 24px;
+    padding: 24px 28px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    transition: all 0.3s;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .roadmap-item::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 0;
+    background: linear-gradient(to right, rgba(88,101,242,0.08), transparent);
+    transition: width 0.4s ease;
+  }
+
+  .roadmap-item:hover::before { width: 100%; }
+  .roadmap-item:hover { border-color: rgba(88,101,242,0.4); }
+
+  .phase-badge {
+    font-family: 'Space Mono', monospace;
+    font-size: 0.65rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    padding: 5px 10px;
+    border: 1px solid;
+    text-align: center;
+  }
+
+  .roadmap-item:nth-child(1) .phase-badge { color: #57f287; border-color: #57f287; }
+  .roadmap-item:nth-child(2) .phase-badge { color: #5865f2; border-color: #5865f2; }
+  .roadmap-item:nth-child(3) .phase-badge { color: #eb459e; border-color: #eb459e; }
+  .roadmap-item:nth-child(4) .phase-badge { color: #fee75c; border-color: #fee75c; }
+  .roadmap-item:nth-child(5) .phase-badge { color: #ff7c7c; border-color: #ff7c7c; }
+  .roadmap-item:nth-child(6) .phase-badge { color: #9b59b6; border-color: #9b59b6; }
+  .roadmap-item:nth-child(7) .phase-badge { color: #f97316; border-color: #f97316; }
+
+  .roadmap-desc { font-size: 0.95rem; font-weight: 600; }
+  .roadmap-tech { 
+    font-family: 'Space Mono', monospace;
+    font-size: 0.7rem;
+    color: var(--muted);
+    text-align: right;
+  }
+
+  /* CODE BLOCKS */
+  .code-group {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 3px;
+  }
+
+  .code-card {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    overflow: hidden;
+  }
+
+  .code-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 20px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    font-family: 'Space Mono', monospace;
+    font-size: 0.7rem;
+    color: var(--muted);
+  }
+
+  .code-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+  }
+
+  pre {
+    padding: 24px;
+    font-family: 'Space Mono', monospace;
+    font-size: 0.75rem;
+    line-height: 1.7;
+    color: var(--text);
+    overflow-x: auto;
+  }
+
+  .kw { color: #5865f2; }
+  .str { color: #57f287; }
+  .comment { color: var(--muted); }
+  .key { color: var(--accent4); }
+
+  /* NAV */
+  nav {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 100;
+    padding: 0 10vw;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    height: 64px;
+    background: rgba(10,10,15,0.85);
+    backdrop-filter: blur(20px);
+    border-bottom: 1px solid var(--border);
+  }
+
+  .nav-logo {
+    font-family: 'Space Mono', monospace;
+    font-size: 0.8rem;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    color: var(--accent);
+  }
+
+  .nav-links {
+    display: flex;
+    gap: 32px;
+    list-style: none;
+  }
+
+  .nav-links a {
+    font-family: 'Space Mono', monospace;
+    font-size: 0.7rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    text-decoration: none;
+    color: var(--muted);
+    transition: color 0.2s;
+  }
+
+  .nav-links a:hover { color: var(--text); }
+
+  /* FOOTER */
+  footer {
+    border-top: 1px solid var(--border);
+    padding: 60px 10vw;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 24px;
+  }
+
+  footer p {
+    font-family: 'Space Mono', monospace;
+    font-size: 0.72rem;
+    color: var(--muted);
+    line-height: 1.7;
+  }
+
+  .footer-key-insight {
+    background: rgba(88,101,242,0.08);
+    border: 1px solid rgba(88,101,242,0.2);
+    padding: 20px 28px;
+    max-width: 560px;
+    font-size: 0.85rem;
+    line-height: 1.6;
+    color: var(--text);
+  }
+
+  .footer-key-insight strong { color: var(--accent); }
+
+  /* SCROLL REVEAL */
+  .reveal {
+    opacity: 0;
+    transform: translateY(30px);
+    transition: opacity 0.7s ease, transform 0.7s ease;
+  }
+
+  .reveal.visible {
+    opacity: 1;
+    transform: translateY(0);
+  }
+
+  /* RESPONSIVE */
+  @media (max-width: 768px) {
+    section { padding: 60px 6vw; }
+    nav { padding: 0 6vw; }
+    .nav-links { display: none; }
+    .code-group { grid-template-columns: 1fr; }
+    .roadmap-item { grid-template-columns: 80px 1fr; }
+    .roadmap-tech { display: none; }
+    .hero { padding: 80px 6vw; }
+    footer { padding: 40px 6vw; }
+  }
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="nav-logo">// PINA'I</div>
+  <ul class="nav-links">
+    <li><a href="#overview">Overview</a></li>
+    <li><a href="#architecture">Architecture</a></li>
+    <li><a href="#storage">Storage</a></li>
+    <li><a href="#federation">Federation</a></li>
+    <li><a href="#scenarios">Scenarios</a></li>
+    <li><a href="#roadmap">Roadmap</a></li>
+  </ul>
+</nav>
+
+<!-- HERO -->
+<section class="hero" id="top">
+  <div class="hero-grid"></div>
+  <div class="hero-glow"></div>
+  <div class="hero-glow2"></div>
+  <div class="badge">Architecture Document v1.1</div>
+  <h1>Pina'i<br><span>Federated</span><br><span class="accent2">Chat Platform</span></h1>
+  <p class="hero-sub">A self-hostable, open-source Discord alternative where every layer is independently deployable — from identity to community servers. Your identity, your data, your rules.</p>
+  <div class="hero-pills">
+    <div class="pill">🐳 Docker-first</div>
+    <div class="pill">⚡ ActivityPub Federation</div>
+    <div class="pill">🔐 OIDC / OAuth2</div>
+    <div class="pill">🦀 Rust Backend</div>
+    <div class="pill">⚛️ React + Vite</div>
+    <div class="pill">📡 WebSockets</div>
+    <div class="pill">🗄️ S3 Object Storage</div>
+  </div>
+  <div class="scroll-hint">
+    <span>Scroll</span>
+    <div class="scroll-line"></div>
+  </div>
+</section>
+
+<!-- OVERVIEW -->
+<section id="overview">
+  <div class="section-label">01 — Project Overview</div>
+  <h2 class="section-title reveal">Built on open standards.<br>Owned by no one.</h2>
+  <div class="principles-grid reveal">
+    <div class="principle-card" style="--card-accent: #57f287">
+      <div class="principle-icon">🐳</div>
+      <h3>Self-Hostable</h3>
+      <p>Every layer ships as a Docker image. Run your own identity provider, messaging backbone, or community server independently.</p>
+    </div>
+    <div class="principle-card" style="--card-accent: #5865f2">
+      <div class="principle-icon">🌐</div>
+      <h3>Federated</h3>
+      <p>Instances communicate via ActivityPub — the same protocol powering Mastodon. No central authority required.</p>
+    </div>
+    <div class="principle-card" style="--card-accent: #eb459e">
+      <div class="principle-icon">🆔</div>
+      <h3>Portable Identity</h3>
+      <p>Your identity (alice@idp.alice.com) is not tied to any chat server. Join any community without creating new accounts.</p>
+    </div>
+    <div class="principle-card" style="--card-accent: #fee75c">
+      <div class="principle-icon">🔑</div>
+      <h3>Open Auth Standards</h3>
+      <p>OIDC/OAuth2 for authentication. Chat servers never store passwords — they only validate JWT tokens.</p>
+    </div>
+    <div class="principle-card" style="--card-accent: #ff7c7c">
+      <div class="principle-icon">🛡️</div>
+      <h3>No Password Storage</h3>
+      <p>Chat servers are stateless regarding credentials. Passwords stay with your identity provider, nowhere else.</p>
+    </div>
+    <div class="principle-card" style="--card-accent: #9b59b6">
+      <div class="principle-icon">📡</div>
+      <h3>HTTP Signatures</h3>
+      <p>Inter-server trust uses cryptographic HTTP signatures. No shared secrets. Federation without compromise.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ARCHITECTURE -->
+<section id="architecture" class="arch-section">
+  <div class="section-label">02 — Three-Layer Architecture</div>
+  <h2 class="section-title reveal">Independent. Composable.<br>Deployable.</h2>
+
+  <div class="arch-diagram reveal">
+
+    <div class="arch-layer" data-layer="1">
+      <div class="arch-layer-header">
+        <span class="layer-number">LAYER 1</span>
+        <span class="layer-title">Clients</span>
+      </div>
+      <div class="layer-components">
+        <div class="component-box">
+          <span class="cname">Web Client</span>
+          <span class="ctech">React + Vite · Browser</span>
+        </div>
+        <div class="component-box">
+          <span class="cname">Desktop App</span>
+          <span class="ctech">Electron · Cross-platform</span>
+        </div>
+        <div class="component-box">
+          <span class="cname">Mobile App</span>
+          <span class="ctech">Future support · PWA</span>
+        </div>
+      </div>
+      <p style="margin-top:16px; font-size:0.82rem; color:var(--muted);">Clients communicate with two backends: the Identity Provider for auth & DMs, and Chat Servers for community channels.</p>
+    </div>
+
+    <div class="arch-connector">↕ JWT Tokens · OIDC Flow · WebSocket</div>
+
+    <div class="arch-layer" data-layer="2">
+      <div class="arch-layer-header">
+        <span class="layer-number">LAYER 2</span>
+        <span class="layer-title">Identity &amp; Messaging Backbone</span>
+      </div>
+      <div class="layer-components">
+        <div class="component-box">
+          <span class="cname">OIDC Provider</span>
+          <span class="ctech">Rust · User auth · JWT issuance</span>
+        </div>
+        <div class="component-box">
+          <span class="cname">Messaging Backbone</span>
+          <span class="ctech">Rust · Friends · Private DMs</span>
+        </div>
+        <div class="component-box">
+          <span class="cname">ActivityPub Federation</span>
+          <span class="ctech">W3C Standard · HTTP Signatures</span>
+        </div>
+        <div class="component-box">
+          <span class="cname">PostgreSQL</span>
+          <span class="ctech">Users · Friends · DMs · Actors</span>
+        </div>
+        <div class="component-box">
+          <span class="cname">RustFS</span>
+          <span class="ctech">S3-compatible · Avatars · DM attachments</span>
+        </div>
+      </div>
+      <p style="margin-top:16px; font-size:0.82rem; color:var(--muted);">The most important layer. Bundles OIDC + messaging + federation + object storage in a single self-hostable unit. Permanent identity: <code style="color:var(--accent)">alice@idp.alice.com</code></p>
+    </div>
+
+    <div class="arch-connector">↕ JWT Validation via JWKS · No password sharing</div>
+
+    <div class="arch-layer" data-layer="3">
+      <div class="arch-layer-header">
+        <span class="layer-number">LAYER 3</span>
+        <span class="layer-title">Chat Servers (Communities)</span>
+      </div>
+      <div class="layer-components">
+        <div class="component-box">
+          <span class="cname">Axum + Tokio</span>
+          <span class="ctech">Rust · Async HTTP + WebSocket</span>
+        </div>
+        <div class="component-box">
+          <span class="cname">JWT Validation</span>
+          <span class="ctech">JWKS public keys · Stateless auth</span>
+        </div>
+        <div class="component-box">
+          <span class="cname">Channel Management</span>
+          <span class="ctech">Channels · Messages · Roles</span>
+        </div>
+        <div class="component-box">
+          <span class="cname">PostgreSQL</span>
+          <span class="ctech">Channels · Messages · Members</span>
+        </div>
+      </div>
+      <p style="margin-top:16px; font-size:0.82rem; color:var(--muted);">Intentionally simple. No passwords. No friendships. No federation protocol. Any user from any identity provider can join any chat server.</p>
+    </div>
+
+  </div>
+</section>
+
+<!-- STORAGE -->
+<section id="storage">
+  <div class="section-label">03 — Object Storage</div>
+  <h2 class="section-title reveal">Your files.<br>Your instance.</h2>
+
+  <div class="reveal" style="margin-bottom:60px">
+    <p style="font-size:1rem; color:var(--muted); max-width:700px; line-height:1.7; margin-bottom:40px;">
+      Each identity provider instance ships with its own <strong style="color:var(--text)">RustFS</strong> object storage — an S3-compatible server written in Rust. Avatars and DM attachments are owned by the sender's instance. No cross-instance data copying.
+    </p>
+
+    <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(280px,1fr)); gap:3px; margin-bottom:48px;">
+      <div class="component-box" style="padding:24px 28px; background:var(--surface); border:1px solid var(--border)">
+        <div style="color:var(--accent3); font-weight:700; margin-bottom:8px; font-family:'Space Mono',monospace; font-size:0.75rem; letter-spacing:0.1em;">AVATARS</div>
+        <p style="font-size:0.88rem; color:var(--muted); line-height:1.6;">Stored on the user's own IdP storage, served via a public URL — <code style="color:var(--text)">https://storage.idp.alice.com/avatars/{user_id}.jpg</code>. No authentication required. Anyone can fetch it.</p>
+      </div>
+      <div class="component-box" style="padding:24px 28px; background:var(--surface); border:1px solid var(--border)">
+        <div style="color:var(--accent); font-weight:700; margin-bottom:8px; font-family:'Space Mono',monospace; font-size:0.75rem; letter-spacing:0.1em;">DM ATTACHMENTS</div>
+        <p style="font-size:0.88rem; color:var(--muted); line-height:1.6;">Uploaded to the <strong style="color:var(--text)">sender's</strong> instance storage. The IdP generates a time-limited <strong style="color:var(--text)">presigned URL</strong> delivered inside the ActivityPub Note. Bob's client fetches directly from Alice's storage — no relay.</p>
+      </div>
+      <div class="component-box" style="padding:24px 28px; background:var(--surface); border:1px solid var(--border)">
+        <div style="color:var(--accent2); font-weight:700; margin-bottom:8px; font-family:'Space Mono',monospace; font-size:0.75rem; letter-spacing:0.1em;">S3-COMPATIBLE API</div>
+        <p style="font-size:0.88rem; color:var(--muted); line-height:1.6;">Code targets the standard S3 API via <code style="color:var(--text)">aws-sdk-s3</code> for Rust. RustFS can be swapped for MinIO, Ceph, or any S3-compatible service with zero code changes — just change the endpoint URL.</p>
+      </div>
+    </div>
+
+    <div style="background:rgba(88,101,242,0.07); border:1px solid rgba(88,101,242,0.2); padding:28px 32px; max-width:760px;">
+      <div style="font-family:'Space Mono',monospace; font-size:0.65rem; letter-spacing:0.15em; color:var(--accent); margin-bottom:16px; text-transform:uppercase;">Asset Ownership Model</div>
+      <table class="trust-table">
+        <thead>
+          <tr>
+            <th>Asset Type</th>
+            <th>Storage Location</th>
+            <th>Access Method</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>User avatar</td>
+            <td>Sender's IdP RustFS instance</td>
+            <td>Public URL — no auth</td>
+          </tr>
+          <tr>
+            <td>DM image / file / video</td>
+            <td>Sender's IdP RustFS instance</td>
+            <td>Presigned URL — time-limited</td>
+          </tr>
+          <tr>
+            <td>Channel attachments</td>
+            <td>Chat server storage (future)</td>
+            <td>TBD — Phase 7+</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- FEDERATION -->
+<section id="federation">
+  <div class="section-label">04 — Federation</div>
+  <h2 class="section-title reveal">Talk to anyone.<br>From any instance.</h2>
+
+  <div class="reveal" style="margin-bottom:60px">
+    <p style="font-size:1rem; color:var(--muted); max-width:700px; line-height:1.7; margin-bottom:40px;">
+      Without federation, <code style="color:var(--accent)">alice@idp.alice.com</code> and <code style="color:var(--accent2)">bob@idp.bob.com</code> would be isolated silos. ActivityPub bridges them — the same W3C standard powering Mastodon.
+    </p>
+
+    <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(280px,1fr)); gap:3px; margin-bottom:48px;">
+      <div class="component-box" style="padding:24px 28px; background:var(--surface); border:1px solid var(--border)">
+        <div style="color:var(--accent3); font-weight:700; margin-bottom:8px; font-family:'Space Mono',monospace; font-size:0.75rem; letter-spacing:0.1em;">WEBFINGER</div>
+        <p style="font-size:0.88rem; color:var(--muted); line-height:1.6;">Standard HTTP discovery endpoint. Given <code style="color:var(--text)">alice@idp.alice.com</code>, Bob's server queries <code style="color:var(--text)">idp.alice.com/.well-known/webfinger</code> to find Alice's inbox URL and public key.</p>
+      </div>
+      <div class="component-box" style="padding:24px 28px; background:var(--surface); border:1px solid var(--border)">
+        <div style="color:var(--accent); font-weight:700; margin-bottom:8px; font-family:'Space Mono',monospace; font-size:0.75rem; letter-spacing:0.1em;">HTTP SIGNATURES</div>
+        <p style="font-size:0.88rem; color:var(--muted); line-height:1.6;">When delivering activities between servers, each HTTP request is signed with a private key and verified with the sender's public key. No shared secrets required.</p>
+      </div>
+      <div class="component-box" style="padding:24px 28px; background:var(--surface); border:1px solid var(--border)">
+        <div style="color:var(--accent2); font-weight:700; margin-bottom:8px; font-family:'Space Mono',monospace; font-size:0.75rem; letter-spacing:0.1em;">ACTOR MODEL</div>
+        <p style="font-size:0.88rem; color:var(--muted); line-height:1.6;">Remote users are stored locally as "actors" with their public key and inbox URL cached. Efficient message delivery without repeated discovery calls.</p>
+      </div>
+    </div>
+
+    <div class="section-label" style="margin-bottom:24px">Trust Architecture</div>
+    <table class="trust-table">
+      <thead>
+        <tr>
+          <th>Relationship</th>
+          <th>Responsibility</th>
+          <th>Technology</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>User → IdP</td>
+          <td>User authenticates with password or passkey</td>
+          <td>OIDC / OAuth2</td>
+        </tr>
+        <tr>
+          <td>User → Chat Server</td>
+          <td>Chat server validates JWT issued by IdP</td>
+          <td>JWT + JWKS</td>
+        </tr>
+        <tr>
+          <td>IdP → IdP</td>
+          <td>Servers authenticate each other for DM delivery</td>
+          <td>HTTP Signatures</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- SCENARIOS -->
+<section id="scenarios" style="background:var(--surface); border-top:1px solid var(--border); border-bottom:1px solid var(--border)">
+  <div class="section-label">05 — Example Scenarios</div>
+  <h2 class="section-title reveal">See it in action.</h2>
+
+  <div class="scenarios-list reveal">
+
+    <div class="scenario" id="scenA">
+      <div class="scenario-header" onclick="toggleScenario('scenA')">
+        <span class="scenario-letter">A</span>
+        <span class="scenario-title">Alice sends a private message to Bob</span>
+        <span class="scenario-toggle">+</span>
+      </div>
+      <div class="scenario-body">
+        <div class="scenario-inner">
+          <p style="font-size:0.88rem; color:var(--muted); line-height:1.6; margin-bottom:16px;">Alice and Bob are on different self-hosted identity providers. Private messages never transit through any chat server.</p>
+          <div class="flow-steps">
+            <div class="flow-step"><span class="step-num">01</span><span>Alice types a DM in her client and hits send.</span></div>
+            <div class="flow-step"><span class="step-num">02</span><span>Alice's client sends the message to <code style="color:var(--accent)">idp.alice.com</code> over WebSocket.</span></div>
+            <div class="flow-step"><span class="step-num">03</span><span><code style="color:var(--accent)">idp.alice.com</code> wraps the message in an ActivityPub activity and signs the HTTP request with its private key.</span></div>
+            <div class="flow-step"><span class="step-num">04</span><span><code style="color:var(--accent)">idp.alice.com</code> discovers Bob's inbox URL via WebFinger on <code style="color:var(--accent2)">idp.bob.com</code>.</span></div>
+            <div class="flow-step"><span class="step-num">05</span><span><code style="color:var(--accent)">idp.alice.com</code> delivers the signed activity to Bob's inbox at <code style="color:var(--accent2)">idp.bob.com</code>.</span></div>
+            <div class="flow-step"><span class="step-num">06</span><span><code style="color:var(--accent2)">idp.bob.com</code> verifies the HTTP signature using Alice's server's public key.</span></div>
+            <div class="flow-step"><span class="step-num">07</span><span><code style="color:var(--accent2)">idp.bob.com</code> pushes the message to Bob via WebSocket.</span></div>
+            <div class="flow-step"><span class="step-num">08</span><span>Bob sees the message in real time. <strong style="color:var(--accent3)">No chat server was involved.</strong></span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="scenario" id="scenB">
+      <div class="scenario-header" onclick="toggleScenario('scenB')">
+        <span class="scenario-letter">B</span>
+        <span class="scenario-title">Alice joins a chat server</span>
+        <span class="scenario-toggle">+</span>
+      </div>
+      <div class="scenario-body">
+        <div class="scenario-inner">
+          <p style="font-size:0.88rem; color:var(--muted); line-height:1.6; margin-bottom:16px;">Alice wants to join the gaming community at <code style="color:var(--accent)">chat.gaming.com</code>. She already has an account at <code style="color:var(--accent)">idp.alice.com</code>.</p>
+          <div class="flow-steps">
+            <div class="flow-step"><span class="step-num">01</span><span>Alice navigates to <code style="color:var(--accent)">chat.gaming.com</code> in her browser.</span></div>
+            <div class="flow-step"><span class="step-num">02</span><span><code style="color:var(--accent)">chat.gaming.com</code> redirects Alice to her configured IdP: <code style="color:var(--accent)">idp.alice.com</code>.</span></div>
+            <div class="flow-step"><span class="step-num">03</span><span>Alice authenticates at <code style="color:var(--accent)">idp.alice.com</code> (password, passkey, etc.).</span></div>
+            <div class="flow-step"><span class="step-num">04</span><span><code style="color:var(--accent)">idp.alice.com</code> issues a signed JWT token containing Alice's identity and claims.</span></div>
+            <div class="flow-step"><span class="step-num">05</span><span>Alice's client presents the JWT to <code style="color:var(--accent)">chat.gaming.com</code>.</span></div>
+            <div class="flow-step"><span class="step-num">06</span><span><code style="color:var(--accent)">chat.gaming.com</code> fetches <code style="color:var(--accent)">idp.alice.com</code>'s public key via the JWKS endpoint and validates the JWT.</span></div>
+            <div class="flow-step"><span class="step-num">07</span><span>A local user record is created using the <code style="color:var(--accent4)">(issuer, subject)</code> pair as a unique key.</span></div>
+            <div class="flow-step"><span class="step-num">08</span><span>Alice is granted access. Her roles are managed locally by the chat server.</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="scenario" id="scenC">
+      <div class="scenario-header" onclick="toggleScenario('scenC')">
+        <span class="scenario-letter">C</span>
+        <span class="scenario-title">Alice adds Bob as a friend</span>
+        <span class="scenario-toggle">+</span>
+      </div>
+      <div class="scenario-body">
+        <div class="scenario-inner">
+          <p style="font-size:0.88rem; color:var(--muted); line-height:1.6; margin-bottom:16px;">Alice knows Bob's identity: <code style="color:var(--accent2)">bob@idp.bob.com</code>. She wants to add him as a friend across instances.</p>
+          <div class="flow-steps">
+            <div class="flow-step"><span class="step-num">01</span><span>Alice searches for <code style="color:var(--accent2)">bob@idp.bob.com</code> in her client.</span></div>
+            <div class="flow-step"><span class="step-num">02</span><span><code style="color:var(--accent)">idp.alice.com</code> queries <code style="color:var(--accent2)">idp.bob.com/.well-known/webfinger</code> to discover Bob's profile.</span></div>
+            <div class="flow-step"><span class="step-num">03</span><span><code style="color:var(--accent2)">idp.bob.com</code> returns Bob's inbox URL and public key.</span></div>
+            <div class="flow-step"><span class="step-num">04</span><span><code style="color:var(--accent)">idp.alice.com</code> sends a <strong>Follow activity</strong> (ActivityPub) to Bob's inbox, signed with its private key.</span></div>
+            <div class="flow-step"><span class="step-num">05</span><span><code style="color:var(--accent2)">idp.bob.com</code> verifies the signature and notifies Bob of the friend request.</span></div>
+            <div class="flow-step"><span class="step-num">06</span><span>Bob accepts — <code style="color:var(--accent2)">idp.bob.com</code> sends an <strong>Accept activity</strong> back to <code style="color:var(--accent)">idp.alice.com</code>.</span></div>
+            <div class="flow-step"><span class="step-num">07</span><span>Both servers cache each other as remote actors.</span></div>
+            <div class="flow-step"><span class="step-num">08</span><span><strong style="color:var(--accent3)">Alice and Bob are now friends and can exchange private DMs.</strong></span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+<!-- DEPLOYMENT -->
+<section id="deployment">
+  <div class="section-label">06 — Deployment</div>
+  <h2 class="section-title reveal">Deploy in minutes.<br>Own it forever.</h2>
+
+  <div class="code-group reveal">
+    <div class="code-card">
+      <div class="code-header">
+        <div class="code-dot" style="background:#57f287"></div>
+        <span>docker-compose.yml — Identity Provider</span>
+      </div>
+      <pre><span class="comment"># Self-hosted Identity Provider</span>
+<span class="key">services</span>:
+  <span class="key">idp</span>:
+    <span class="key">image</span>: <span class="str">ghcr.io/pina-i/identity-provider</span>
+    <span class="key">environment</span>:
+      <span class="key">DOMAIN</span>: <span class="str">idp.alice.com</span>
+      <span class="key">STORAGE_ENDPOINT</span>: <span class="str">http://rustfs:9000</span>
+    <span class="key">ports</span>:
+      - <span class="str">"443:8080"</span>
+    <span class="key">depends_on</span>:
+      - <span class="str">postgres</span>
+      - <span class="str">rustfs</span>
+
+  <span class="key">rustfs</span>:
+    <span class="key">image</span>: <span class="str">rustfs/rustfs:latest</span>
+    <span class="key">ports</span>:
+      - <span class="str">"9000:9000"</span>
+    <span class="key">volumes</span>:
+      - <span class="str">fsdata:/data</span>
+
+  <span class="key">postgres</span>:
+    <span class="key">image</span>: <span class="str">postgres:16</span>
+    <span class="key">volumes</span>:
+      - <span class="str">pgdata:/var/lib/postgresql/data</span></pre>
+    </div>
+    <div class="code-card">
+      <div class="code-header">
+        <div class="code-dot" style="background:#5865f2"></div>
+        <span>docker-compose.yml — Chat Server</span>
+      </div>
+      <pre><span class="comment"># Self-hosted Community Chat Server</span>
+<span class="key">services</span>:
+  <span class="key">chat</span>:
+    <span class="key">image</span>: <span class="str">ghcr.io/pina-i/chat-server</span>
+    <span class="key">environment</span>:
+      <span class="key">DOMAIN</span>: <span class="str">chat.gaming.com</span>
+    <span class="key">ports</span>:
+      - <span class="str">"443:8080"</span>
+    <span class="key">depends_on</span>:
+      - <span class="str">postgres</span>
+
+  <span class="key">postgres</span>:
+    <span class="key">image</span>: <span class="str">postgres:16</span>
+    <span class="key">volumes</span>:
+      - <span class="str">pgdata:/var/lib/postgresql/data</span></pre>
+    </div>
+  </div>
+</section>
+
+<!-- ROADMAP -->
+<section id="roadmap" style="background:var(--surface); border-top:1px solid var(--border)">
+  <div class="section-label">07 — Development Roadmap</div>
+  <h2 class="section-title reveal">Start simple.<br>Grow incrementally.</h2>
+
+  <div class="roadmap reveal">
+    <div class="roadmap-item">
+      <span class="phase-badge">Phase 1</span>
+      <span class="roadmap-desc">Chat server with local auth, channels, WebSocket</span>
+      <span class="roadmap-tech">Foundation</span>
+    </div>
+    <div class="roadmap-item">
+      <span class="phase-badge">Phase 2</span>
+      <span class="roadmap-desc">Abstract auth behind trait, add OIDC client support</span>
+      <span class="roadmap-tech">Auth Layer</span>
+    </div>
+    <div class="roadmap-item">
+      <span class="phase-badge">Phase 3</span>
+      <span class="roadmap-desc">Identity provider (OIDC + user management)</span>
+      <span class="roadmap-tech">IdP</span>
+    </div>
+    <div class="roadmap-item">
+      <span class="phase-badge">Phase 4</span>
+      <span class="roadmap-desc">Messaging backbone (friends, DMs)</span>
+      <span class="roadmap-tech">Social Graph</span>
+    </div>
+    <div class="roadmap-item">
+      <span class="phase-badge">Phase 5</span>
+      <span class="roadmap-desc">ActivityPub federation between IdP instances</span>
+      <span class="roadmap-tech">Federation</span>
+    </div>
+    <div class="roadmap-item">
+      <span class="phase-badge">Phase 6</span>
+      <span class="roadmap-desc">Public instance, docs, contributor guide</span>
+      <span class="roadmap-tech">Open Source</span>
+    </div>
+    <div class="roadmap-item">
+      <span class="phase-badge">Phase 7</span>
+      <span class="roadmap-desc">Object storage — avatars, DM attachments, presigned URLs (RustFS)</span>
+      <span class="roadmap-tech">Storage Layer</span>
+    </div>
+  </div>
+
+  <div style="margin-top:48px; background:rgba(88,101,242,0.07); border:1px solid rgba(88,101,242,0.2); padding:28px 32px; max-width:760px;" class="reveal">
+    <div style="font-family:'Space Mono',monospace; font-size:0.65rem; letter-spacing:0.15em; color:var(--accent); margin-bottom:12px; text-transform:uppercase;">Key Insight</div>
+    <p style="font-size:0.95rem; line-height:1.7; color:var(--text)">
+      Chat servers (Phase 1–2) and the Identity Provider (Phase 3+) are completely independent projects that can be developed in parallel by different contributors. The interface between them is a <strong style="color:var(--accent)">JWT token</strong> — nothing more.
+    </p>
+  </div>
+</section>
+
+<footer>
+  <div>
+    <p style="color:var(--accent); font-weight:700; margin-bottom:8px;">// PINA'I</p>
+    <p>Federated Open-Source Chat Platform<br>Architecture Document v1.1 · Open Source</p>
+  </div>
+  <div style="display:flex; gap:3px; flex-wrap:wrap;">
+    <div style="background:var(--surface); border:1px solid var(--border); padding:8px 16px; font-size:0.7rem; color:var(--muted)">ActivityPub</div>
+    <div style="background:var(--surface); border:1px solid var(--border); padding:8px 16px; font-size:0.7rem; color:var(--muted)">OIDC</div>
+    <div style="background:var(--surface); border:1px solid var(--border); padding:8px 16px; font-size:0.7rem; color:var(--muted)">Rust</div>
+    <div style="background:var(--surface); border:1px solid var(--border); padding:8px 16px; font-size:0.7rem; color:var(--muted)">React</div>
+    <div style="background:var(--surface); border:1px solid var(--border); padding:8px 16px; font-size:0.7rem; color:var(--muted)">PostgreSQL</div>
+    <div style="background:var(--surface); border:1px solid var(--border); padding:8px 16px; font-size:0.7rem; color:var(--muted)">RustFS</div>
+    <div style="background:var(--surface); border:1px solid var(--border); padding:8px 16px; font-size:0.7rem; color:var(--muted)">Docker
+  </div>
+</footer>
+
+<script>
+  // SCROLL REVEAL
+  const reveals = document.querySelectorAll('.reveal');
+  const observer = new IntersectionObserver((entries) => {
+    entries.forEach((entry, i) => {
+      if (entry.isIntersecting) {
+        setTimeout(() => entry.target.classList.add('visible'), i * 80);
+        observer.unobserve(entry.target);
+      }
+    });
+  }, { threshold: 0.1 });
+  reveals.forEach(el => observer.observe(el));
+
+  // ACCORDION SCENARIOS
+  function toggleScenario(id) {
+    const el = document.getElementById(id);
+    el.classList.toggle('open');
+  }
+
+  // Stagger children of reveal elements
+  document.querySelectorAll('.principles-grid .principle-card').forEach((card, i) => {
+    card.style.transitionDelay = `${i * 60}ms`;
+  });
+</script>
+</body>
+</html>

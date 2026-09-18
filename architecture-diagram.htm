@@ -1,0 +1,449 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta http-equiv="content-type" content="text/html; charset=UTF-8">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Pina'i — Architecture Diagram</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Syne:wght@400;700;800&display=swap');
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #0a0d12; color: #e2e8f0;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 16px;
+    min-height: 100vh; display: flex; flex-direction: column;
+    align-items: center; padding: 40px 20px;
+    background-image:
+      radial-gradient(ellipse at 20% 20%, rgba(99,102,241,0.08) 0%, transparent 50%),
+      radial-gradient(ellipse at 80% 80%, rgba(6,182,212,0.08) 0%, transparent 50%);
+  }
+  h1 {
+    font-family: 'Syne', sans-serif; font-size: 1.4rem; font-weight: 800;
+    letter-spacing: 0.15em; text-transform: uppercase; color: #94a3b8;
+    margin-bottom: 8px; text-align: center;
+  }
+  .subtitle { font-size: 0.8rem; color: #334155; letter-spacing: 0.1em; text-transform: uppercase; margin-bottom: 48px; text-align: center; }
+  .diagram { width: 100%; max-width: 1200px; display: flex; flex-direction: column; gap: 0; align-items: center; }
+
+  .node {
+    border-radius: 10px; padding: 16px 20px; display: flex; flex-direction: column;
+    align-items: center; gap: 6px; position: relative;
+    border: 1px solid rgba(255,255,255,0.08);
+    animation: fadeIn 0.5s ease forwards; opacity: 0;
+  }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+  .node-icon { font-size: 1.4rem; line-height: 1; }
+  .node-title { font-family: 'Syne', sans-serif; font-weight: 700; font-size: 0.9rem; letter-spacing: 0.08em; text-transform: uppercase; white-space: nowrap; }
+  .node-sub { font-size: 0.9rem; color: #64748b; text-align: center; line-height: 1.5; }
+  .node-tag { font-size: 0.7rem; padding: 2px 7px; border-radius: 4px; margin-top: 4px; letter-spacing: 0.05em; font-weight: 600; }
+
+  .blue   { background: rgba(99,102,241,0.1);  border-color: rgba(99,102,241,0.3); }
+  .blue .node-title { color: #a5b4fc; } .blue .node-tag { background: rgba(99,102,241,0.2); color: #a5b4fc; }
+  .cyan   { background: rgba(6,182,212,0.1);   border-color: rgba(6,182,212,0.3); }
+  .cyan .node-title { color: #67e8f9; } .cyan .node-tag { background: rgba(6,182,212,0.2); color: #67e8f9; }
+  .green  { background: rgba(34,197,94,0.1);   border-color: rgba(34,197,94,0.3); }
+  .green .node-title { color: #86efac; } .green .node-tag { background: rgba(34,197,94,0.2); color: #86efac; }
+  .red    { background: rgba(239,68,68,0.1);   border-color: rgba(239,68,68,0.3); }
+  .red .node-title { color: #fca5a5; } .red .node-tag { background: rgba(239,68,68,0.2); color: #fca5a5; }
+  .yellow { background: rgba(234,179,8,0.1);   border-color: rgba(234,179,8,0.3); }
+  .yellow .node-title { color: #fde047; } .yellow .node-tag { background: rgba(234,179,8,0.2); color: #fde047; }
+  .purple { background: rgba(168,85,247,0.1);  border-color: rgba(168,85,247,0.3); }
+  .purple .node-title { color: #d8b4fe; } .purple .node-tag { background: rgba(168,85,247,0.2); color: #d8b4fe; }
+  .emerald { background: rgba(16,185,129,0.1); border-color: rgba(16,185,129,0.3); }
+  .emerald .node-title { color: #6ee7b7; } .emerald .node-tag { background: rgba(16,185,129,0.2); color: #6ee7b7; }
+  .orange { background: rgba(249,115,22,0.1);  border-color: rgba(249,115,22,0.3); }
+  .orange .node-title { color: #fdba74; } .orange .node-tag { background: rgba(249,115,22,0.2); color: #fdba74; }
+
+  .arrow-down { display: flex; flex-direction: column; align-items: center; margin: 4px 0; }
+  .arrow-line { width: 1px; height: 28px; background: linear-gradient(to bottom, rgba(99,102,241,0.5), rgba(6,182,212,0.5)); }
+  .arrow-head { width: 0; height: 0; border-left: 5px solid transparent; border-right: 5px solid transparent; border-top: 7px solid rgba(6,182,212,0.6); }
+  .arrow-label { font-size: 0.7rem; color: #475569; letter-spacing: 0.1em; text-transform: uppercase; margin-top: 2px; text-align: center; }
+  .bd-line { width: 1px; height: 32px; background: rgba(99,102,241,0.6); position: relative; }
+  .bd-line::before { content: '▲'; position: absolute; top: -2px; left: 50%; transform: translateX(-50%); font-size: 10px; color: rgba(99,102,241,0.8); }
+  .bd-line::after  { content: '▼'; position: absolute; bottom: -2px; left: 50%; transform: translateX(-50%); font-size: 10px; color: rgba(99,102,241,0.8); }
+
+  .group {
+    display: flex; align-items: center; padding: 16px 20px;
+    border: 1px dashed rgba(99,102,241,0.25); border-radius: 14px;
+    background: rgba(99,102,241,0.03); position: relative;
+  }
+  .group-label {
+    position: absolute; top: -10px; left: 16px;
+    font-size: 0.7rem; background: #0a0d12; padding: 0 8px;
+    letter-spacing: 0.1em; text-transform: uppercase; font-weight: 600;
+  }
+
+  .sub-group {
+    display: flex; flex-direction: column; align-items: center; padding: 12px 10px 10px;
+    border: 1px dashed rgba(255,255,255,0.07); border-radius: 10px;
+    background: rgba(0,0,0,0.2); position: relative; gap: 8px;
+  }
+  .sub-group-label {
+    position: absolute; top: -9px; left: 10px;
+    font-size: 0.65rem; background: #0d1117; padding: 0 6px;
+    letter-spacing: 0.1em; text-transform: uppercase; font-weight: 600; color: #475569;
+  }
+
+  .layer-title {
+    font-size: 0.9rem; color: #94a3b8; letter-spacing: 0.15em;
+    text-transform: uppercase; font-weight: 700;
+    padding: 4px 16px; border-radius: 20px;
+    background: rgba(255,255,255,0.03);
+    border: 1px solid rgba(255,255,255,0.05);
+    margin-bottom: 12px;
+  }
+
+  .fed-bridge {
+    display: flex; flex-direction: column; align-items: center;
+    justify-content: center; gap: 6px; padding: 10px 16px;
+    border: 1px dashed rgba(234,179,8,0.3); border-radius: 10px;
+    background: rgba(234,179,8,0.03); min-width: 100px;
+  }
+  .fed-bridge-label { font-size: 0.73rem; color: #ca8a04; letter-spacing: 0.08em; text-transform: uppercase; font-weight: 600; text-align: center; }
+  .fed-bridge-sub { font-size: 0.68rem; color: #475569; text-align: center; line-height: 1.6; }
+  .fed-arrow { font-size: 1rem; color: rgba(234,179,8,0.5); }
+</style>
+</head>
+<body>
+
+<h1>Pina'i</h1>
+<div class="subtitle">Three-layer federated architecture · Self-Hosted Open-Source Chat Platform</div>
+
+<div class="diagram">
+
+  <!-- ═══════════════════════════════════════════ -->
+  <!-- LAYER 1 — CLIENTS                          -->
+  <!-- ═══════════════════════════════════════════ -->
+  <div class="layer-title">Layer 1 — Clients</div>
+
+  <div style="display:flex; gap:48px; width:100%; justify-content:center; margin-bottom:4px;">
+    <div style="display:flex; flex-direction:column; align-items:center; gap:8px;">
+      <div style="font-size:0.7rem; color:#334155; letter-spacing:0.1em; text-transform:uppercase;">Alice</div>
+      <div style="display:flex; gap:8px;">
+        <div class="node blue" style="width:100px; animation-delay:0.05s">
+          <div class="node-icon">🖥️</div>
+          <div class="node-title">Web</div>
+          <div class="node-sub">React + Vite</div>
+        </div>
+        <div class="node blue" style="width:100px; animation-delay:0.1s">
+          <div class="node-icon">🖱️</div>
+          <div class="node-title">Desktop</div>
+          <div class="node-sub">Electron</div>
+        </div>
+      </div>
+    </div>
+    <div style="display:flex; flex-direction:column; align-items:center; gap:8px;">
+      <div style="font-size:0.7rem; color:#334155; letter-spacing:0.1em; text-transform:uppercase;">Bob</div>
+      <div style="display:flex; gap:8px;">
+        <div class="node blue" style="width:100px; animation-delay:0.05s">
+          <div class="node-icon">🖥️</div>
+          <div class="node-title">Web</div>
+          <div class="node-sub">React + Vite</div>
+        </div>
+        <div class="node blue" style="width:100px; animation-delay:0.1s">
+          <div class="node-icon">🖱️</div>
+          <div class="node-title">Desktop</div>
+          <div class="node-sub">Electron</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- arrows down to identity layer -->
+  <div style="display:flex; gap:248px;">
+    <div class="arrow-down"><div class="bd-line"></div><div class="arrow-label">OIDC + WebSocket</div></div>
+    <div class="arrow-down"><div class="bd-line"></div><div class="arrow-label">OIDC + WebSocket</div></div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════ -->
+  <!-- LAYER 2 — IDENTITY + MESSAGING BACKBONE    -->
+  <!-- ═══════════════════════════════════════════ -->
+  <div class="layer-title" style="margin-top:8px;">Layer 2 — Identity &amp; Messaging Backbone</div>
+
+  <div style="display:flex; gap:16px; width:100%; justify-content:center; align-items:flex-start;">
+
+    <!-- Alice's IdP -->
+    <div class="group" style="flex-direction:column; gap:12px;">
+      <div class="group-label" style="color:#a855f7;">idp.alice.com 🏠</div>
+
+      <!-- Services row -->
+      <div style="display:flex; gap:8px; align-items:flex-start;">
+        <div class="node red" style="width:130px; animation-delay:0.2s">
+          <div class="node-icon">🔐</div>
+          <div class="node-title">OIDC</div>
+          <div class="node-sub">Auth + JWT<br>User accounts</div>
+          <div class="node-tag">OAuth2</div>
+        </div>
+        <div class="node purple" style="width:155px; animation-delay:0.25s">
+          <div class="node-icon">💬</div>
+          <div class="node-title">Msg Backbone</div>
+          <div class="node-sub">Friends · DMs<br>ActivityPub inbox<br>federation_queue worker</div>
+          <div class="node-tag">Federation</div>
+        </div>
+        <div class="node cyan" style="width:135px; animation-delay:0.28s">
+          <div class="node-icon">⚡</div>
+          <div class="node-title">WebSocket</div>
+          <div class="node-sub">Thin delivery layer<br>reads Redis Streams<br>last_event_id catch-up</div>
+          <div class="node-tag">Axum + Tokio</div>
+        </div>
+      </div>
+
+      <!-- Redis broker -->
+      <div class="sub-group" style="width:100%;">
+        <div class="sub-group-label">Redis (broker)</div>
+        <div style="display:flex; gap:8px;">
+          <div class="node emerald" style="width:195px; animation-delay:0.3s">
+            <div class="node-icon">📡</div>
+            <div class="node-title">pub-sub</div>
+            <div class="node-sub">Presence · online/offline · typing<br>Ephemeral — lossy OK</div>
+            <div class="node-tag">Transient</div>
+          </div>
+          <div class="node emerald" style="width:195px; animation-delay:0.32s">
+            <div class="node-icon">🌊</div>
+            <div class="node-title">Streams</div>
+            <div class="node-sub">DMs · profile updates<br>Friend requests · AP outbox<br>Per-device consumer position</div>
+            <div class="node-tag">Durable · at-least-once</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- DB + Storage -->
+      <div style="display:flex; gap:8px; margin-top:2px;">
+        <div class="arrow-down" style="flex:1; align-items:center;"><div class="arrow-line"></div><div class="arrow-head"></div><div class="arrow-label">Persist</div></div>
+        <div class="arrow-down" style="flex:1; align-items:center;"><div class="arrow-line"></div><div class="arrow-head"></div><div class="arrow-label">Assets</div></div>
+      </div>
+      <div style="display:flex; gap:8px; align-items:flex-start;">
+        <div class="sub-group" style="flex:1;">
+          <div class="sub-group-label">PostgreSQL</div>
+          <div class="node green" style="width:100%; animation-delay:0.35s">
+            <div class="node-icon">🐘</div>
+            <div class="node-title">Identity tables</div>
+            <div class="node-sub">users (username+NanoID, display_name,<br>actor_uri, inbox_url, outbox_url)<br>remote_actors (cache, inbox_url, fetched_at)<br>friendships (friend_actor_uri,<br>friend_avatar_url, status)</div>
+            <div class="node-tag">Owned by instance</div>
+          </div>
+          <div class="node green" style="width:100%; animation-delay:0.37s">
+            <div class="node-icon">✉️</div>
+            <div class="node-title">DM tables</div>
+            <div class="node-sub">direct_messages (activity_uri,<br>federation_status, reply_to_id, soft delete)<br>dm_conversation_reads (last_read_at)<br>message_reactions (emoji · UNIQUE per user)</div>
+            <div class="node-tag">Keyset paginated</div>
+          </div>
+          <div class="node yellow" style="width:100%; animation-delay:0.39s">
+            <div class="node-icon">📤</div>
+            <div class="node-title">federation_queue</div>
+            <div class="node-sub">activity (JSONB) · target_inbox<br>attempts · next_attempt<br>Exponential backoff: 30s→5m→30m→6h→24h<br>Profile updates &amp; non-DM activities</div>
+            <div class="node-tag">Durable outbox</div>
+          </div>
+        </div>
+        <div class="node orange" style="width:115px; animation-delay:0.4s; align-self:flex-start;">
+          <div class="node-icon">🗄️</div>
+          <div class="node-title">RustFS</div>
+          <div class="node-sub">Avatars<br>DM attachments<br>Presigned URLs</div>
+          <div class="node-tag">S3-compatible</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Federation bridge -->
+    <div style="display:flex; flex-direction:column; align-items:center; gap:10px; padding-top:70px; flex-shrink:0;">
+      <div class="fed-bridge">
+        <div class="fed-arrow">⟵ ⟶</div>
+        <div class="fed-bridge-label">ActivityPub</div>
+        <div class="fed-bridge-sub">
+          HTTP Signatures<br>
+          WebFinger<br>
+          HTTPS<br>
+          ─────────<br>
+          Create{Note}<br>
+          Update{Note}<br>
+          Update{Person}<br>
+          Like / Undo{Like}
+        </div>
+      </div>
+      <div style="font-size:0.65rem; color:#475569; text-align:center; line-height:1.8; border:1px dashed rgba(234,179,8,0.15); border-radius:8px; padding:8px 10px; background:rgba(234,179,8,0.02);">
+        DMs → inline<br>tokio::spawn<br>─────<br>Profile updates →<br>federation_queue<br>(backoff retry)
+      </div>
+    </div>
+
+    <!-- Bob's IdP -->
+    <div class="group" style="flex-direction:column; gap:12px;">
+      <div class="group-label" style="color:#a855f7;">idp.bob.com 🏠</div>
+
+      <!-- Services row -->
+      <div style="display:flex; gap:8px; align-items:flex-start;">
+        <div class="node red" style="width:130px; animation-delay:0.2s">
+          <div class="node-icon">🔐</div>
+          <div class="node-title">OIDC</div>
+          <div class="node-sub">Auth + JWT<br>User accounts</div>
+          <div class="node-tag">OAuth2</div>
+        </div>
+        <div class="node purple" style="width:155px; animation-delay:0.25s">
+          <div class="node-icon">💬</div>
+          <div class="node-title">Msg Backbone</div>
+          <div class="node-sub">Friends · DMs<br>ActivityPub inbox<br>federation_queue worker</div>
+          <div class="node-tag">Federation</div>
+        </div>
+        <div class="node cyan" style="width:135px; animation-delay:0.28s">
+          <div class="node-icon">⚡</div>
+          <div class="node-title">WebSocket</div>
+          <div class="node-sub">Thin delivery layer<br>reads Redis Streams<br>last_event_id catch-up</div>
+          <div class="node-tag">Axum + Tokio</div>
+        </div>
+      </div>
+
+      <!-- Redis broker -->
+      <div class="sub-group" style="width:100%;">
+        <div class="sub-group-label">Redis (broker)</div>
+        <div style="display:flex; gap:8px;">
+          <div class="node emerald" style="width:195px; animation-delay:0.3s">
+            <div class="node-icon">📡</div>
+            <div class="node-title">pub-sub</div>
+            <div class="node-sub">Presence · online/offline · typing<br>Ephemeral — lossy OK</div>
+            <div class="node-tag">Transient</div>
+          </div>
+          <div class="node emerald" style="width:195px; animation-delay:0.32s">
+            <div class="node-icon">🌊</div>
+            <div class="node-title">Streams</div>
+            <div class="node-sub">DMs · profile updates<br>Friend requests · AP outbox<br>Per-device consumer position</div>
+            <div class="node-tag">Durable · at-least-once</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- DB + Storage -->
+      <div style="display:flex; gap:8px; margin-top:2px;">
+        <div class="arrow-down" style="flex:1; align-items:center;"><div class="arrow-line"></div><div class="arrow-head"></div><div class="arrow-label">Persist</div></div>
+        <div class="arrow-down" style="flex:1; align-items:center;"><div class="arrow-line"></div><div class="arrow-head"></div><div class="arrow-label">Assets</div></div>
+      </div>
+      <div style="display:flex; gap:8px; align-items:flex-start;">
+        <div class="sub-group" style="flex:1;">
+          <div class="sub-group-label">PostgreSQL</div>
+          <div class="node green" style="width:100%; animation-delay:0.35s">
+            <div class="node-icon">🐘</div>
+            <div class="node-title">Identity tables</div>
+            <div class="node-sub">users (username+NanoID, display_name,<br>actor_uri, inbox_url, outbox_url)<br>remote_actors (cache, inbox_url, fetched_at)<br>friendships (friend_actor_uri,<br>friend_avatar_url, status)</div>
+            <div class="node-tag">Owned by instance</div>
+          </div>
+          <div class="node green" style="width:100%; animation-delay:0.37s">
+            <div class="node-icon">✉️</div>
+            <div class="node-title">DM tables</div>
+            <div class="node-sub">direct_messages (activity_uri,<br>federation_status, reply_to_id, soft delete)<br>dm_conversation_reads (last_read_at)<br>message_reactions (emoji · UNIQUE per user)</div>
+            <div class="node-tag">Keyset paginated</div>
+          </div>
+          <div class="node yellow" style="width:100%; animation-delay:0.39s">
+            <div class="node-icon">📤</div>
+            <div class="node-title">federation_queue</div>
+            <div class="node-sub">activity (JSONB) · target_inbox<br>attempts · next_attempt<br>Exponential backoff: 30s→5m→30m→6h→24h<br>Profile updates &amp; non-DM activities</div>
+            <div class="node-tag">Durable outbox</div>
+          </div>
+        </div>
+        <div class="node orange" style="width:115px; animation-delay:0.4s; align-self:flex-start;">
+          <div class="node-icon">🗄️</div>
+          <div class="node-title">RustFS</div>
+          <div class="node-sub">Avatars<br>DM attachments<br>Presigned URLs</div>
+          <div class="node-tag">S3-compatible</div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- arrows down to chat servers -->
+  <div style="display:flex; gap:248px; margin-top:4px;">
+    <div class="arrow-down"><div class="arrow-line"></div><div class="arrow-head"></div><div class="arrow-label">JWT (join server)</div></div>
+    <div class="arrow-down"><div class="arrow-line"></div><div class="arrow-head"></div><div class="arrow-label">JWT (join server)</div></div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════ -->
+  <!-- LAYER 3 — CHAT SERVERS                     -->
+  <!-- ═══════════════════════════════════════════ -->
+  <div class="layer-title" style="margin-top:8px;">Layer 3 — Chat Servers (Communities)</div>
+
+  <div style="display:flex; gap:16px; width:100%; justify-content:center; align-items:flex-start;">
+
+    <!-- Chat server A -->
+    <div class="group" style="flex-direction:column; gap:12px;">
+      <div class="group-label" style="color:#06b6d4;">chat.gaming.com 🏠</div>
+      <div class="node cyan" style="width:210px; animation-delay:0.5s">
+        <div class="node-icon">⚡</div>
+        <div class="node-title">Chat Server</div>
+        <div class="node-sub">Axum + Tokio<br>WebSocket handler<br>JWT validation only</div>
+        <div class="node-tag">Rust — No federation</div>
+      </div>
+      <div class="arrow-down"><div class="arrow-line"></div><div class="arrow-head"></div><div class="arrow-label">Persist</div></div>
+      <div class="node green" style="width:210px; animation-delay:0.55s">
+        <div class="node-icon">🐘</div>
+        <div class="node-title">PostgreSQL</div>
+        <div class="node-sub">Channels, messages<br>roles, members</div>
+        <div class="node-tag">Owned by instance</div>
+      </div>
+    </div>
+
+    <!-- Chat server B -->
+    <div class="group" style="flex-direction:column; gap:12px;">
+      <div class="group-label" style="color:#06b6d4;">chat.devs.com 🏠</div>
+      <div class="node cyan" style="width:210px; animation-delay:0.5s">
+        <div class="node-icon">⚡</div>
+        <div class="node-title">Chat Server</div>
+        <div class="node-sub">Axum + Tokio<br>WebSocket handler<br>JWT validation only</div>
+        <div class="node-tag">Rust — No federation</div>
+      </div>
+      <div class="arrow-down"><div class="arrow-line"></div><div class="arrow-head"></div><div class="arrow-label">Persist</div></div>
+      <div class="node green" style="width:210px; animation-delay:0.55s">
+        <div class="node-icon">🐘</div>
+        <div class="node-title">PostgreSQL</div>
+        <div class="node-sub">Channels, messages<br>roles, members</div>
+        <div class="node-tag">Owned by instance</div>
+      </div>
+    </div>
+
+    <!-- Chat server C -->
+    <div class="group" style="flex-direction:column; gap:12px;">
+      <div class="group-label" style="color:#06b6d4;">chat.art.com 🏠</div>
+      <div class="node cyan" style="width:210px; animation-delay:0.5s">
+        <div class="node-icon">⚡</div>
+        <div class="node-title">Chat Server</div>
+        <div class="node-sub">Axum + Tokio<br>WebSocket handler<br>JWT validation only</div>
+        <div class="node-tag">Rust — No federation</div>
+      </div>
+      <div class="arrow-down"><div class="arrow-line"></div><div class="arrow-head"></div><div class="arrow-label">Persist</div></div>
+      <div class="node green" style="width:210px; animation-delay:0.55s">
+        <div class="node-icon">🐘</div>
+        <div class="node-title">PostgreSQL</div>
+        <div class="node-sub">Channels, messages<br>roles, members</div>
+        <div class="node-tag">Owned by instance</div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Legend -->
+  <div style="margin-top:40px; display:flex; gap:16px; flex-wrap:wrap; justify-content:center;">
+    <div style="display:flex; align-items:center; gap:6px; font-size:0.75rem; color:#64748b;">
+      <div style="width:12px;height:12px;border-radius:3px;background:rgba(99,102,241,0.3);"></div> Client
+    </div>
+    <div style="display:flex; align-items:center; gap:6px; font-size:0.75rem; color:#64748b;">
+      <div style="width:12px;height:12px;border-radius:3px;background:rgba(239,68,68,0.3);"></div> OIDC
+    </div>
+    <div style="display:flex; align-items:center; gap:6px; font-size:0.75rem; color:#64748b;">
+      <div style="width:12px;height:12px;border-radius:3px;background:rgba(168,85,247,0.3);"></div> Messaging Backbone (ActivityPub)
+    </div>
+    <div style="display:flex; align-items:center; gap:6px; font-size:0.75rem; color:#64748b;">
+      <div style="width:12px;height:12px;border-radius:3px;background:rgba(6,182,212,0.3);"></div> WebSocket Layer / Chat Server
+    </div>
+    <div style="display:flex; align-items:center; gap:6px; font-size:0.75rem; color:#64748b;">
+      <div style="width:12px;height:12px;border-radius:3px;background:rgba(16,185,129,0.3);"></div> Redis Broker (pub-sub + Streams)
+    </div>
+    <div style="display:flex; align-items:center; gap:6px; font-size:0.75rem; color:#64748b;">
+      <div style="width:12px;height:12px;border-radius:3px;background:rgba(34,197,94,0.3);"></div> Persistence (PostgreSQL)
+    </div>
+    <div style="display:flex; align-items:center; gap:6px; font-size:0.75rem; color:#64748b;">
+      <div style="width:12px;height:12px;border-radius:3px;background:rgba(234,179,8,0.3);"></div> Federation Queue (durable outbox)
+    </div>
+    <div style="display:flex; align-items:center; gap:6px; font-size:0.75rem; color:#64748b;">
+      <div style="width:12px;height:12px;border-radius:3px;background:rgba(249,115,22,0.3);"></div> Object Storage (RustFS · S3-compatible)
+    </div>
+  </div>
+
+</div>
+
+</body></html>
