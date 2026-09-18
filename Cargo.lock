@@ -1272,6 +1272,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 
 [[package]]
+name = "federation-transport"
+version = "0.1.0"
+dependencies = [
+ "activitypub",
+ "ed25519-dalek",
+ "http 1.5.0",
+ "http-signatures",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "ff"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2067,6 +2083,7 @@ dependencies = [
  "activitypub",
  "axum",
  "base64 0.22.1",
+ "federation-transport",
  "http-signatures",
  "idp-broker",
  "idp-config",
@@ -2204,6 +2221,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "axum-extra",
+ "federation-transport",
  "idp-broker",
  "idp-config",
  "idp-db",

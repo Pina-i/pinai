@@ -19,6 +19,7 @@ base64      = "0.22"
 
 activitypub     = { workspace = true }
 http-signatures = { workspace = true }
+federation-transport = { workspace = true }
 jwt-utils       = { workspace = true }
 
 idp-broker   = { path = "../broker",   package = "idp-broker" }

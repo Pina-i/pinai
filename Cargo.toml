@@ -35,3 +35,4 @@ common-types    = { path = "crates/common-types" }
 observability   = { path = "crates/observability" }
 activitypub     = { path = "crates/activitypub" }
 http-signatures = { path = "crates/http-signatures" }
+federation-transport = { path = "crates/federation-transport" }

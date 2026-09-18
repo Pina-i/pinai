@@ -1,0 +1,17 @@
+[package]
+name    = "federation-transport"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde      = { workspace = true }
+serde_json = { workspace = true }
+thiserror  = { workspace = true }
+tracing    = { workspace = true }
+reqwest    = { workspace = true }
+http       = "1"
+url        = "2"
+
+activitypub     = { workspace = true }
+http-signatures = { workspace = true }
+ed25519-dalek   = { version = "2", features = ["pkcs8", "pem"] }

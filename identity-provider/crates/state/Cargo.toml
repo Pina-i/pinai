@@ -16,3 +16,4 @@ idp-email    = { path = "../email",    package = "idp-email" }
 idp-presence = { path = "../presence", package = "idp-presence" }
 idp-realtime = { path = "../realtime", package = "idp-realtime" }
 idp-storage  = { path = "../storage",  package = "idp-storage" }
+federation-transport = { workspace = true }

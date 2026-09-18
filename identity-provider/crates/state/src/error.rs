@@ -100,3 +100,15 @@ impl IntoResponse for OidcError {
         (self.status, Json(body)).into_response()
     }
 }
+
+impl From<federation_transport::TransportError> for OidcError {
+    fn from(e: federation_transport::TransportError) -> Self {
+        use federation_transport::TransportError as T;
+        match e {
+            T::BadRequest(d) => Self::invalid_request(d),
+            T::Denied(d) => Self::access_denied(d),
+            T::NotFound(d) => Self::not_found(d),
+            T::Upstream(d) => Self::server_error(d),
+        }
+    }
+}

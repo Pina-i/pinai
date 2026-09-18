@@ -41,7 +41,7 @@ pub async fn require_user_or_peer(
     if headers.get("Authorization").is_some() {
         return require_auth(state, headers).await.map(Requester::User);
     }
-    verify_http_signature(headers, method, path)
-        .await
-        .map(Requester::Peer)
+    Ok(Requester::Peer(
+        verify_http_signature(headers, method, path).await?,
+    ))
 }
