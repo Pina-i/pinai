@@ -19,3 +19,6 @@ pub enum JwtUtilsError {
     #[error("PKCE verification failed")]
     PkceVerificationFailed,
 }
+
+#[cfg(test)]
+mod tests;
