@@ -54,6 +54,7 @@ pub fn issue_access_token(
     encode(&header, &claims, &keypair.encoding_key).map_err(JwtUtilsError::Jwt)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn issue_id_token(
     keypair: &EdKeyPair,
     issuer: &str,
