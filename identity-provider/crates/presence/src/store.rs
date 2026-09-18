@@ -67,3 +67,6 @@ impl PresenceStore {
             .collect()
     }
 }
+
+#[cfg(test)]
+mod tests;
