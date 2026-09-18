@@ -8,9 +8,12 @@ serde      = { workspace = true }
 serde_json = { workspace = true }
 thiserror  = { workspace = true }
 tracing    = { workspace = true }
-reqwest    = { workspace = true }
+reqwest    = { workspace = true, features = ["stream"] }
 http       = "1"
 url        = "2"
+tokio       = { workspace = true }
+futures-util = { workspace = true }
+moka        = { version = "0.12", features = ["future"] }
 
 activitypub     = { workspace = true }
 http-signatures = { workspace = true }

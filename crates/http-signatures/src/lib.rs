@@ -128,6 +128,20 @@ pub fn verify_request(
 ) -> Result<(), VerifyError> {
     use ed25519_dalek::pkcs8::DecodePublicKey;
 
+    let verifying_key = VerifyingKey::from_public_key_pem(public_key_pem)
+        .map_err(|e| VerifyError::KeyParse(e.to_string()))?;
+    verify_request_with_key(method, path, sig_header, get_header, &verifying_key)
+}
+
+/// As [`verify_request`], for a caller that already holds the parsed key —
+/// which lets a key cache skip PEM parsing on every request.
+pub fn verify_request_with_key(
+    method: &str,
+    path: &str,
+    sig_header: &str,
+    get_header: impl Fn(&str) -> Option<String>,
+    verifying_key: &VerifyingKey,
+) -> Result<(), VerifyError> {
     let parsed = parse_signature_header(sig_header)?;
 
     // Re-build the signature string using the header names listed in the Signature header.
@@ -144,10 +158,6 @@ pub fn verify_request(
         lines.push(line);
     }
     let sig_string = lines.join("\n");
-
-    // Decode the public key.
-    let verifying_key = VerifyingKey::from_public_key_pem(public_key_pem)
-        .map_err(|e| VerifyError::KeyParse(e.to_string()))?;
 
     // Deserialise and verify the signature.
     let sig_bytes: [u8; 64] = parsed

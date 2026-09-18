@@ -3,6 +3,7 @@ use http_signatures::{http_date_now, sha256_digest, sign_request, SignParams};
 use tracing::{debug, warn};
 
 use crate::error::TransportError;
+use crate::http::{client, screen_url, UrlPolicy};
 
 /// The identity a signed request is made under.
 pub struct Signer<'a> {
@@ -21,10 +22,9 @@ pub async fn signed_post(
     target_url: &str,
     body: &[u8],
     content_type: &str,
+    policy: UrlPolicy,
 ) -> Result<reqwest::Response, TransportError> {
-    let url: url::Url = target_url
-        .parse()
-        .map_err(|e| TransportError::BadRequest(format!("invalid target URL: {e}")))?;
+    let url = screen_url(target_url, policy).await?;
     let host = url
         .host_str()
         .ok_or_else(|| TransportError::BadRequest("target URL missing host".into()))?;
@@ -53,7 +53,7 @@ pub async fn signed_post(
 
     debug!(%target_url, "sending signed POST");
 
-    let resp = reqwest::Client::new()
+    let resp = client()
         .post(target_url)
         .header("Content-Type", content_type)
         .header("Date", &date)

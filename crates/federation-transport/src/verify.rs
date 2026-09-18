@@ -1,13 +1,18 @@
 use http::HeaderMap;
 
 use crate::error::TransportError;
+use crate::keycache::KeyCache;
 
-/// Verify an incoming HTTP Signature by fetching the signer's public key from
-/// their actor document at the URL embedded in `keyId`.
+/// Verify an incoming HTTP Signature against the signer's published key.
 ///
 /// Returns the verified `keyId` (e.g. `https://idp.alice.com/actor#main-key`),
 /// from which callers derive the requesting peer's actor URI.
+///
+/// A key from the cache that fails to verify is treated as possibly rotated,
+/// not as a forgery: it is refetched once (rate limited per key) and retried
+/// before the request is rejected.
 pub async fn verify_http_signature(
+    cache: &KeyCache,
     headers: &HeaderMap,
     method: &str,
     path: &str,
@@ -19,28 +24,7 @@ pub async fn verify_http_signature(
 
     let parsed = http_signatures::parse_signature_header(sig_header)
         .map_err(|e| TransportError::BadRequest(format!("invalid Signature header: {e}")))?;
-
-    let key_id = &parsed.key_id;
-    let actor_url = key_id
-        .split('#')
-        .next()
-        .ok_or_else(|| TransportError::BadRequest("invalid keyId format".into()))?;
-
-    let actor_doc: serde_json::Value = reqwest::Client::new()
-        .get(actor_url)
-        .header("Accept", "application/activity+json")
-        .send()
-        .await
-        .map_err(|e| TransportError::Upstream(format!("failed to fetch actor: {e}")))?
-        .json()
-        .await
-        .map_err(|e| TransportError::Upstream(format!("failed to parse actor: {e}")))?;
-
-    let public_key_pem = actor_doc
-        .get("publicKey")
-        .and_then(|pk| pk.get("publicKeyPem"))
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| TransportError::BadRequest("actor has no publicKeyPem".into()))?;
+    let key_id = parsed.key_id;
 
     let get_header = |name: &str| -> Option<String> {
         headers
@@ -49,10 +33,26 @@ pub async fn verify_http_signature(
             .map(|s| s.to_string())
     };
 
-    http_signatures::verify_request(method, path, sig_header, get_header, public_key_pem)
-        .map_err(|e| TransportError::Denied(format!("signature verification failed: {e}")))?;
+    let (key, from_cache) = cache.get(&key_id).await?;
 
-    Ok(key_id.to_string())
+    let denied = |e: http_signatures::VerifyError| {
+        TransportError::Denied(format!("signature verification failed: {e}"))
+    };
+
+    match http_signatures::verify_request_with_key(method, path, sig_header, get_header, &key) {
+        Ok(()) => {
+            cache.store_verified(&key_id, key).await;
+            Ok(key_id)
+        }
+        Err(_) if from_cache => {
+            let fresh = cache.refetch(&key_id).await?;
+            http_signatures::verify_request_with_key(method, path, sig_header, get_header, &fresh)
+                .map_err(denied)?;
+            cache.store_verified(&key_id, fresh).await;
+            Ok(key_id)
+        }
+        Err(e) => Err(denied(e)),
+    }
 }
 
 /// Verify the `Digest` header covers, and matches, the received body.

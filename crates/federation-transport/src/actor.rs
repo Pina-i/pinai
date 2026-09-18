@@ -2,6 +2,7 @@ use activitypub::{Actor, WebFingerResponse};
 use tracing::debug;
 
 use crate::error::TransportError;
+use crate::http::{get_json_screened, UrlPolicy};
 
 /// A resolved remote actor with what is needed to deliver to it and cache it.
 pub struct RemoteActor {
@@ -21,6 +22,7 @@ pub async fn resolve_remote_actor(
     username: &str,
     domain: &str,
     scheme: &str,
+    policy: UrlPolicy,
 ) -> Result<RemoteActor, TransportError> {
     let resource = format!("acct:{}@{}", username, domain);
     let webfinger_url = format!(
@@ -30,23 +32,15 @@ pub async fn resolve_remote_actor(
 
     debug!(%webfinger_url, "resolving remote actor via WebFinger");
 
-    let client = reqwest::Client::new();
-    let wf_resp = client
-        .get(&webfinger_url)
-        .header("Accept", "application/jrd+json")
-        .send()
+    let wf_doc = get_json_screened(&webfinger_url, "application/jrd+json", policy)
         .await
-        .map_err(|e| TransportError::Upstream(format!("WebFinger request failed: {e}")))?;
-
-    if !wf_resp.status().is_success() {
-        return Err(TransportError::NotFound(
-            "Remote user not found (WebFinger failed)".into(),
-        ));
-    }
-
-    let wf: WebFingerResponse = wf_resp
-        .json()
-        .await
+        .map_err(|e| match e {
+            TransportError::Upstream(_) => {
+                TransportError::NotFound("Remote user not found (WebFinger failed)".into())
+            }
+            other => other,
+        })?;
+    let wf: WebFingerResponse = serde_json::from_value(wf_doc)
         .map_err(|e| TransportError::Upstream(format!("WebFinger parse failed: {e}")))?;
 
     let actor_url = wf
@@ -58,22 +52,8 @@ pub async fn resolve_remote_actor(
 
     debug!(%actor_url, "fetching remote actor");
 
-    let actor_resp = client
-        .get(&actor_url)
-        .header("Accept", "application/activity+json")
-        .send()
-        .await
-        .map_err(|e| TransportError::Upstream(format!("Actor fetch failed: {e}")))?;
-
-    if !actor_resp.status().is_success() {
-        return Err(TransportError::Upstream(
-            "Failed to fetch remote actor".into(),
-        ));
-    }
-
-    let actor: Actor = actor_resp
-        .json()
-        .await
+    let actor_doc = get_json_screened(&actor_url, "application/activity+json", policy).await?;
+    let actor: Actor = serde_json::from_value(actor_doc)
         .map_err(|e| TransportError::Upstream(format!("Actor parse failed: {e}")))?;
 
     Ok(RemoteActor {

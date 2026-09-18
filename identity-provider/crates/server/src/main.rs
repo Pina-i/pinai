@@ -4,6 +4,7 @@ use axum_extra::extract::cookie::Key;
 use sqlx::postgres::PgPoolOptions;
 use tracing::{info, warn};
 
+use federation_transport::{KeyCache, UrlPolicy};
 use idp_config::Config;
 use idp_db::run_migrations;
 use idp_email::{EmailConfig, EmailSender, LettreSmtpSender};
@@ -138,6 +139,16 @@ async fn main() -> anyhow::Result<()> {
 
     let email_otp_pepper = Arc::new(config.email_otp_pepper.clone());
 
+    // An https issuer means production: peers must be https and must not resolve
+    // into private address space. The alice/bob dev pair federates over
+    // http://localhost, so a plain-http issuer relaxes both.
+    let url_policy = UrlPolicy::from_issuer(&config.issuer());
+    info!(
+        require_https = url_policy.require_https,
+        allow_private_networks = url_policy.allow_private_networks,
+        "federation peer URL policy"
+    );
+
     let state = AppState {
         pool: pool.clone(),
         keypair: Arc::clone(&keypair),
@@ -151,6 +162,8 @@ async fn main() -> anyhow::Result<()> {
         remote_registry: Some(Arc::clone(&remote_registry)),
         email: Arc::clone(&email_sender),
         email_otp_pepper: Arc::clone(&email_otp_pepper),
+        url_policy,
+        key_cache: Arc::new(KeyCache::new(url_policy)),
     };
 
     // Spawn presence background tasks

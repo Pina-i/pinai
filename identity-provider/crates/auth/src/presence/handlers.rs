@@ -75,7 +75,7 @@ pub async fn post_presence_batch(
     Json(body): Json<PresenceBatchRequest>,
 ) -> Result<Json<PresenceResponse>, OidcError> {
     // Verify HTTP Signature
-    verify_sig(&headers, "post", "/api/presence/batch").await?;
+    verify_sig(&state.key_cache, &headers, "post", "/api/presence/batch").await?;
 
     let store = state
         .presence_store

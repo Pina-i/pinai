@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use axum::extract::FromRef;
 use axum_extra::extract::cookie::Key;
+use federation_transport::{KeyCache, UrlPolicy};
 use idp_broker::EventBroker;
 use idp_config::Config;
 use idp_db::PgPool;
@@ -38,6 +39,10 @@ pub struct AppState {
     pub email: Arc<dyn EmailSender>,
     /// HMAC pepper for email OTP code hashes. Never logged or stored.
     pub email_otp_pepper: Arc<Vec<u8>>,
+    /// What a peer URL may be — an https issuer is treated as production.
+    pub url_policy: UrlPolicy,
+    /// Verifying keys for inbound HTTP Signatures.
+    pub key_cache: Arc<KeyCache>,
 }
 
 /// Allow `SignedCookieJar` to extract the key from `AppState`.

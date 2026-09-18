@@ -43,7 +43,7 @@ pub async fn post_inbox(
     // `Json` because the digest must be taken over the bytes as received —
     // re-serialising a parsed Value would not reproduce them.
     let signature_path = format!("/users/{}/inbox", slug);
-    let key_id = verify_http_signature(&headers, "post", &signature_path).await?;
+    let key_id = verify_http_signature(&state.key_cache, &headers, "post", &signature_path).await?;
     verify_body_digest(&headers, &body)?;
 
     let body: Value = serde_json::from_slice(&body)

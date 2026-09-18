@@ -35,3 +35,4 @@ idp-realtime   = { path = "../realtime",   package = "idp-realtime" }
 idp-social     = { path = "../social",     package = "idp-social" }
 idp-state      = { path = "../state",      package = "idp-state" }
 idp-storage    = { path = "../storage",    package = "idp-storage" }
+federation-transport = { workspace = true }

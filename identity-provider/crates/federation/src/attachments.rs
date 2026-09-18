@@ -31,7 +31,7 @@ pub async fn get_attachment_content(
     Path(id): Path<Uuid>,
 ) -> Result<Response, OidcError> {
     let path = format!("/api/attachments/{id}/content");
-    let key_id = verify_http_signature(&headers, "get", &path).await?;
+    let key_id = verify_http_signature(&state.key_cache, &headers, "get", &path).await?;
 
     // Extract the peer's host from `keyId` (e.g. https://idp.bob.com/actor#main-key).
     let peer_host = key_id

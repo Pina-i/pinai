@@ -3,7 +3,7 @@
 //! The transport — WebFinger resolution and signed POSTs — lives in
 //! `federation-transport`; this module only binds it to `AppState`.
 
-use federation_transport::{signed_post, Signer};
+use federation_transport::{signed_post, Signer, UrlPolicy};
 use serde::de::DeserializeOwned;
 
 use idp_state::{AppState, OidcError};
@@ -21,7 +21,13 @@ pub async fn resolve_remote_actor(
     } else {
         "http"
     };
-    Ok(federation_transport::resolve_remote_actor(username, domain, scheme).await?)
+    Ok(federation_transport::resolve_remote_actor(
+        username,
+        domain,
+        scheme,
+        UrlPolicy::from_issuer(local_issuer),
+    )
+    .await?)
 }
 
 /// The signing identity for a local user's outbound requests.
@@ -51,7 +57,14 @@ pub async fn deliver_activity(
         signing_key: &state.keypair.signing_key,
     };
 
-    signed_post(&signer, inbox_url, &body, "application/activity+json").await?;
+    signed_post(
+        &signer,
+        inbox_url,
+        &body,
+        "application/activity+json",
+        state.url_policy,
+    )
+    .await?;
     Ok(())
 }
 
@@ -75,9 +88,15 @@ where
         signing_key: &state.keypair.signing_key,
     };
 
-    signed_post(&signer, target_url, &body_bytes, "application/json")
-        .await?
-        .json::<R>()
-        .await
-        .map_err(|e| OidcError::server_error(format!("response decode failed: {e}")))
+    signed_post(
+        &signer,
+        target_url,
+        &body_bytes,
+        "application/json",
+        state.url_policy,
+    )
+    .await?
+    .json::<R>()
+    .await
+    .map_err(|e| OidcError::server_error(format!("response decode failed: {e}")))
 }
