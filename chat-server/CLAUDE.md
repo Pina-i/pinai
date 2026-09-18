@@ -121,9 +121,11 @@ it — see below.
 - **Federation is server-to-server, not more JWTs**: a remote user never presents a token
   here. Their client talks to their own home server, and the two servers exchange signed
   HTTP requests — exactly what `identity-provider/crates/federation/` already does
-  (`delivery.rs` signs outbound, `http_signature.rs` verifies inbound, keyed at
-  `<issuer>/actor#main-key`). When rooms open to remote instances, this service grows an
-  inbox on that model and reuses `crates/http-signatures/`. The JWT path is untouched.
+  keyed at `<issuer>/actor#main-key`. That transport is already extracted to
+  `crates/federation-transport/` — actor resolution, signed delivery, and inbound
+  signature + digest verification. When rooms open to remote instances, this service
+  adds an inbox on top of it and writes only its own verb handlers. The JWT path is
+  untouched.
 - **No password storage**: The auth module must never touch passwords in any form
 - **WebSocket auth**: Authenticate the WS connection at upgrade time using the JWT; do not re-validate on every message
 - **Roles are local**: Role assignments are managed entirely by this chat server — the IdP has no knowledge of them

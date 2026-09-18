@@ -10,6 +10,7 @@ compose.yaml               # the platform — `docker compose up` from here
 .env.example               # one deployment unit, one env template
 crates/                    # shared libraries (was the core-libs repo)
   common-types/  jwt-utils/  http-signatures/  activitypub/  observability/
+  federation-transport/    # S2S: actor resolution, signed delivery, verification
 identity-provider/         # Layer 2 — identity & messaging backbone
   crates/  migrations/  keys/  docker/Dockerfile
 chat-server/               # Layer 3 — chat & voice rooms, attached to the IdP
