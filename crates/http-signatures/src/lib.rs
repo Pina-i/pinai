@@ -199,3 +199,6 @@ fn strip_quoted<'a>(input: &'a str, key: &str) -> Option<&'a str> {
         .strip_prefix(&prefix)
         .and_then(|s| s.strip_suffix('"'))
 }
+
+#[cfg(test)]
+mod tests;
