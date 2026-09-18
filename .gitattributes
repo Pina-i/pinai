@@ -1,0 +1,22 @@
+# Line endings are normalised to LF in the repository, whatever the
+# contributing platform checks out with.
+* text=auto
+
+# Files a shell sources or a container runs, where a carriage return is not
+# cosmetic: it survives into the value `source` assigns and into RUN commands.
+# A CR inside DOMAIN reaches issuer(), and from there actor_uri.
+.env         text eol=lf
+.env.*       text eol=lf
+*.sh         text eol=lf
+Makefile     text eol=lf
+Dockerfile*  text eol=lf
+
+# Never convert these.
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.webp binary
+*.ico  binary
+*.pdf  binary
+*.woff binary
+*.woff2 binary
