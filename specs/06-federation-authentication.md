@@ -96,13 +96,18 @@ one cannot, and all three are required.
 ```mermaid
 flowchart TD
   R["Inbound request"] --> S{"1 · Signature valid<br/>for the key at keyId?"}
-  S -->|no| X1["401 — reject"]
+  S -->|no| X1["reject"]
   S -->|yes| D{"2 · Signature covers Digest,<br/>and body hashes to it?"}
-  D -->|no| X2["401 — reject"]
+  D -->|no| X2["reject"]
   D -->|yes| A{"3 · activity actor<br/>== signing key's actor?"}
-  A -->|no| X3["401 — reject"]
+  A -->|no| X3["reject"]
   A -->|yes| H["Handlers"]
 ```
+
+A rejection is `400` when the request is malformed — no `Signature` header, an
+unparseable one, a `keyId` that does not resolve, a missing `Digest` — and `403` when a
+check fails on a well-formed request: a signature that does not verify, a digest that does
+not match the body, an actor that is not the signer, or a refetch refused by the rate limit.
 
 #### 1 — Signature
 

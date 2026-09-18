@@ -130,7 +130,7 @@ impl Config {
     /// Load configuration from environment variables.
     /// Call `dotenvy::dotenv().ok()` before this in main.rs.
     pub fn from_env() -> Result<Self, ConfigError> {
-        let environment = match std::env::var("IDP_ENV").as_deref() {
+        let environment = match env_var("IDP_ENV").as_deref() {
             Ok("development") | Ok("dev") => Environment::Development,
             Ok("production") | Ok("prod") | Err(_) => Environment::Production,
             Ok(other) => return Err(ConfigError::InvalidEnvironment(other.to_string())),
@@ -142,31 +142,30 @@ impl Config {
             environment,
             jwt_private_key_path: PathBuf::from(require_env("JWT_PRIVATE_KEY_PATH")?),
             jwt_key_id: require_env("JWT_KEY_ID")?,
-            port: std::env::var("PORT")
+            port: env_var("PORT")
                 .unwrap_or_else(|_| "8080".into())
                 .parse::<u16>()
                 .map_err(|e| ConfigError::InvalidPort(e.to_string()))?,
-            session_secret: std::env::var("SESSION_SECRET").unwrap_or_else(|_| {
+            session_secret: env_var("SESSION_SECRET").unwrap_or_else(|_| {
                 "dev-only-insecure-session-secret-change-in-production-00000000".into()
             }),
-            frontend_url: std::env::var("FRONTEND_URL")
+            frontend_url: env_var("FRONTEND_URL")
                 .unwrap_or_else(|_| "http://localhost:5173".into()),
-            cors_origins: std::env::var("CORS_ORIGINS")
+            cors_origins: env_var("CORS_ORIGINS")
                 .unwrap_or_else(|_| "http://localhost:5173,http://localhost:3000".into())
                 .split(',')
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect(),
-            redis_url: std::env::var("REDIS_URL")
-                .unwrap_or_else(|_| "redis://127.0.0.1:6379".into()),
-            storage_endpoint: std::env::var("STORAGE_ENDPOINT").ok(),
-            storage_access_key: std::env::var("STORAGE_ACCESS_KEY").ok(),
-            storage_secret_key: std::env::var("STORAGE_SECRET_KEY").ok(),
-            storage_bucket_avatars: std::env::var("STORAGE_BUCKET_AVATARS")
+            redis_url: env_var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into()),
+            storage_endpoint: env_var("STORAGE_ENDPOINT").ok(),
+            storage_access_key: env_var("STORAGE_ACCESS_KEY").ok(),
+            storage_secret_key: env_var("STORAGE_SECRET_KEY").ok(),
+            storage_bucket_avatars: env_var("STORAGE_BUCKET_AVATARS")
                 .unwrap_or_else(|_| "avatars".into()),
-            storage_bucket_attachments: std::env::var("STORAGE_BUCKET_ATTACHMENTS")
+            storage_bucket_attachments: env_var("STORAGE_BUCKET_ATTACHMENTS")
                 .unwrap_or_else(|_| "attachments".into()),
-            storage_public_url: std::env::var("STORAGE_PUBLIC_URL").ok(),
+            storage_public_url: env_var("STORAGE_PUBLIC_URL").ok(),
 
             attachment_max_files_per_message: parse_env_usize(
                 "ATTACHMENT_MAX_FILES_PER_MESSAGE",
@@ -183,13 +182,11 @@ impl Config {
             )?),
             attachment_blocked_extensions: merge_blocklist(
                 BUILTIN_BLOCKED_EXTENSIONS,
-                std::env::var("ATTACHMENT_BLOCKED_EXTENSIONS")
-                    .ok()
-                    .as_deref(),
+                env_var("ATTACHMENT_BLOCKED_EXTENSIONS").ok().as_deref(),
             ),
             attachment_blocked_mimes: merge_blocklist(
                 BUILTIN_BLOCKED_MIMES,
-                std::env::var("ATTACHMENT_BLOCKED_MIMES").ok().as_deref(),
+                env_var("ATTACHMENT_BLOCKED_MIMES").ok().as_deref(),
             ),
 
             e2ee_keypackage_cap_per_device: parse_env_usize("E2EE_KEYPACKAGE_CAP_PER_DEVICE", 100)?,
@@ -202,16 +199,16 @@ impl Config {
                 30 * 24 * 60 * 60,
             )?),
 
-            smtp_host: std::env::var("SMTP_HOST").unwrap_or_else(|_| "mailpit".into()),
-            smtp_port: std::env::var("SMTP_PORT")
+            smtp_host: env_var("SMTP_HOST").unwrap_or_else(|_| "mailpit".into()),
+            smtp_port: env_var("SMTP_PORT")
                 .unwrap_or_else(|_| "1025".into())
                 .parse::<u16>()
                 .map_err(|e| ConfigError::InvalidPort(e.to_string()))?,
-            smtp_username: std::env::var("SMTP_USERNAME").unwrap_or_default(),
-            smtp_password: std::env::var("SMTP_PASSWORD").unwrap_or_default(),
-            smtp_from: std::env::var("SMTP_FROM")
+            smtp_username: env_var("SMTP_USERNAME").unwrap_or_default(),
+            smtp_password: env_var("SMTP_PASSWORD").unwrap_or_default(),
+            smtp_from: env_var("SMTP_FROM")
                 .unwrap_or_else(|_| "Pīna'i <no-reply@localhost>".into()),
-            smtp_starttls: std::env::var("SMTP_STARTTLS")
+            smtp_starttls: env_var("SMTP_STARTTLS")
                 .ok()
                 .map(|v| matches!(v.to_lowercase().as_str(), "true" | "1" | "yes"))
                 .unwrap_or(false),
@@ -250,12 +247,23 @@ impl Config {
     }
 }
 
+/// Read an environment variable with surrounding whitespace removed.
+///
+/// A `.env` saved with CRLF endings leaves a trailing `\r` on every value when a
+/// shell sources it, while Docker Compose strips it — so the same file yields
+/// different values depending on how the process was started. Unnoticed, a `\r`
+/// in `DOMAIN` reaches `issuer()` and is baked into `actor_uri`, where remote
+/// instances resolve a URL the origin no longer recognises.
+fn env_var(key: &str) -> Result<String, std::env::VarError> {
+    std::env::var(key).map(|v| v.trim().to_string())
+}
+
 fn require_env(key: &'static str) -> Result<String, ConfigError> {
-    std::env::var(key).map_err(|_| ConfigError::MissingVar(key))
+    env_var(key).map_err(|_| ConfigError::MissingVar(key))
 }
 
 fn parse_env_usize(key: &'static str, default: usize) -> Result<usize, ConfigError> {
-    match std::env::var(key) {
+    match env_var(key) {
         Err(_) => Ok(default),
         Ok(raw) => raw
             .parse()
@@ -264,7 +272,7 @@ fn parse_env_usize(key: &'static str, default: usize) -> Result<usize, ConfigErr
 }
 
 fn parse_env_u64(key: &'static str, default: u64) -> Result<u64, ConfigError> {
-    match std::env::var(key) {
+    match env_var(key) {
         Err(_) => Ok(default),
         Ok(raw) => raw
             .parse()
@@ -275,8 +283,8 @@ fn parse_env_u64(key: &'static str, default: u64) -> Result<u64, ConfigError> {
 /// Hex-decoded ≥ 32-byte HMAC pepper. Required at startup so an operator can't
 /// silently run with a missing or weak value.
 fn parse_email_otp_pepper() -> Result<Vec<u8>, ConfigError> {
-    let raw = std::env::var("EMAIL_OTP_PEPPER")
-        .map_err(|_| ConfigError::MissingVar("EMAIL_OTP_PEPPER"))?;
+    let raw =
+        env_var("EMAIL_OTP_PEPPER").map_err(|_| ConfigError::MissingVar("EMAIL_OTP_PEPPER"))?;
     let bytes = hex::decode(raw.trim())
         .map_err(|e| ConfigError::InvalidValue("EMAIL_OTP_PEPPER", e.to_string()))?;
     if bytes.len() < 32 {

@@ -158,3 +158,51 @@ fn storage_is_disabled_when_any_credential_is_missing() {
         );
     }
 }
+
+// ─── Environment reading ─────────────────────────────────────────────────────
+
+/// A `.env` saved with CRLF endings leaves a trailing `\r` on every value a
+/// shell sources, while Docker Compose strips it. Left in, a `\r` in `DOMAIN`
+/// reaches `issuer()` and is written into `actor_uri`, and remote instances then
+/// resolve a URL the origin's own actor endpoint does not recognise.
+#[test]
+fn a_value_from_a_crlf_env_file_is_read_without_its_carriage_return() {
+    let key = "PINAI_TEST_CRLF_DOMAIN";
+    std::env::set_var(key, "localhost:8081\r");
+
+    assert_eq!(env_var(key).unwrap(), "localhost:8081");
+
+    std::env::remove_var(key);
+}
+
+#[test]
+fn surrounding_whitespace_is_stripped_from_env_values() {
+    let key = "PINAI_TEST_PADDED_VALUE";
+    std::env::set_var(key, "  idp.alice.com \t\n");
+
+    assert_eq!(env_var(key).unwrap(), "idp.alice.com");
+
+    std::env::remove_var(key);
+}
+
+#[test]
+fn a_missing_variable_is_still_reported_missing() {
+    assert!(env_var("PINAI_TEST_DEFINITELY_UNSET").is_err());
+}
+
+/// The whole point of trimming: a domain read from a CRLF file must still build
+/// an issuer a peer can resolve.
+#[test]
+fn an_issuer_built_from_a_trimmed_domain_has_no_control_characters() {
+    let key = "PINAI_TEST_CRLF_ISSUER_DOMAIN";
+    std::env::set_var(key, "idp.bob.com\r");
+
+    let cfg = Config {
+        domain: env_var(key).unwrap(),
+        ..config()
+    };
+    assert_eq!(cfg.issuer(), "https://idp.bob.com");
+    assert!(!cfg.issuer().chars().any(|c| c.is_control()));
+
+    std::env::remove_var(key);
+}
