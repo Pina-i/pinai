@@ -1,0 +1,15 @@
+[package]
+name    = "http-signatures"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+thiserror     = { workspace = true }
+# Ed25519 signing / verification
+ed25519-dalek = { version = "2", features = ["pkcs8", "pem"] }
+# SHA-256 for the Digest header
+sha2          = "0.10"
+# Base64 encoding for signatures and digest
+base64ct      = { version = "1", features = ["alloc"] }
+# Timestamp for the Date header
+time          = { version = "0.3", features = ["formatting"] }

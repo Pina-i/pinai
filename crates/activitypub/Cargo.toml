@@ -1,0 +1,10 @@
+[package]
+name    = "activitypub"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde      = { workspace = true }
+serde_json = { workspace = true }
+time       = { version = "0.3", features = ["serde", "formatting"] }
+uuid       = { version = "1", features = ["v4"] }

@@ -1,9 +1,11 @@
-/target
-keys/
+target/
 docs/
-.env
-docker/.env.alice
-docker/.env.bob
-docker/.env
 .idea
 .zed
+
+# Runtime secrets and keys — patterns are path-agnostic so they keep matching
+# wherever a service subtree lives in the monorepo.
+.env
+**/docker/.env
+**/docker/.env.*
+keys/

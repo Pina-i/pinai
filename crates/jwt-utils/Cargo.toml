@@ -1,0 +1,30 @@
+[package]
+name    = "jwt-utils"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde      = { workspace = true }
+serde_json = { workspace = true }
+thiserror  = { workspace = true }
+
+# JWT signing/validation — v9 supports EdDSA via Algorithm::EdDSA
+jsonwebtoken = "9"
+
+# Ed25519 key parsing and public-key extraction (PKCS#8 PEM support)
+ed25519-dalek = { version = "2", features = ["pkcs8", "pem"] }
+
+# SHA-256 for PKCE challenge computation
+sha2 = "0.10"
+
+# Constant-time base64url (no padding) — used for JWK x field and PKCE
+base64ct = { version = "1", features = ["alloc"] }
+
+# Constant-time comparison for PKCE verification
+subtle = "2"
+
+# Code verifier generation
+rand = "0.8"
+
+# Timestamp handling for exp/iat claims
+time = { version = "0.3", features = ["serde"] }
