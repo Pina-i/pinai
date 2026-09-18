@@ -398,6 +398,26 @@ pub struct PostWelcomeResponse {
     pub id: Uuid,
 }
 
+/// Snapshot a group's roster for the wire, or `None` for a 1:1 DM — those
+/// materialise on both IdPs at friendship-accept and need no advertising.
+async fn group_snapshot(
+    state: &AppState,
+    conversation_id: Uuid,
+) -> Result<Option<federation_mls::GroupSnapshot>, OidcError> {
+    let conv = conversations::find_by_id(&state.pool, conversation_id)
+        .await
+        .map_err(|e| OidcError::server_error(e.to_string()))?;
+    let Some(conv) = conv.filter(|c| c.kind == "group") else {
+        return Ok(None);
+    };
+    let members = conversations::get_members(&state.pool, conversation_id)
+        .await
+        .map_err(|e| OidcError::server_error(e.to_string()))?;
+    Ok(Some(federation_mls::GroupSnapshot::new(
+        conv.name, &members,
+    )))
+}
+
 /// Deliver a Welcome bundle. The endpoint handles both same-IdP and
 /// cross-IdP recipients:
 /// - **Local recipient** → insert into `mls_welcomes` + push the
@@ -510,6 +530,11 @@ pub async fn post_welcome(
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?;
 
+    // Snapshot the roster for the Welcome. Group membership lives only on the
+    // IdP hosting the group, so this is the recipient's IdP's one chance to
+    // materialise the conversation — a Welcome alone is just key material.
+    let group = group_snapshot(&state, body.conversation_id).await?;
+
     let inbox_url = resolve_remote_inbox(&state, &body.recipient_actor_uri).await?;
 
     federation_mls::deliver_welcome_to_remote(
@@ -521,6 +546,7 @@ pub async fn post_welcome(
         body.recipient_device_id,
         body.conversation_id,
         &blob,
+        group,
     );
 
     tracing::info!(

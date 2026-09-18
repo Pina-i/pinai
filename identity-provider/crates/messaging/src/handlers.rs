@@ -267,6 +267,7 @@ pub async fn send_message(
             conversation_id,
             &mls_ciphertext,
             parent_activity_uri.as_deref(),
+            None,
         );
         crate::attachments::inject_attachments_into_ap_activity(
             &mut activity,
@@ -919,6 +920,10 @@ pub async fn send_group_message(
     if !members.iter().any(|m| m.actor_uri == sender_actor_uri) {
         return Err(OidcError::not_found("Conversation not found"));
     }
+    let conversation_name = conversations::find_by_id(&state.pool, conversation_id)
+        .await
+        .map_err(|e| OidcError::server_error(e.to_string()))?
+        .and_then(|c| c.name);
 
     // Resolve the reply parent's activity_uri so remote members can thread it.
     let mut parent_activity_uri: Option<String> = None;
@@ -988,7 +993,9 @@ pub async fn send_group_message(
     state.hub.send_to_user(&sender_id, event);
 
     // Remote fanout — AP Create{Note} per remote member; best-effort, self-heals
-    // via the recipient's catch-up pull on reconnect.
+    // via the recipient's catch-up pull on reconnect. The roster rides along so
+    // a member whose Welcome never landed still gets the conversation.
+    let group = federation_mls::GroupSnapshot::new(conversation_name, &members);
     let remote_inboxes = federation_mls::resolve_remote_inboxes(&state, &members).await;
     for (recipient_actor_uri, inbox_url) in remote_inboxes {
         let mut activity = federation_mls::build_application_create_activity(
@@ -999,6 +1006,7 @@ pub async fn send_group_message(
             conversation_id,
             &mls_ciphertext,
             parent_activity_uri.as_deref(),
+            Some(&group),
         );
         crate::attachments::inject_attachments_into_ap_activity(
             &mut activity,

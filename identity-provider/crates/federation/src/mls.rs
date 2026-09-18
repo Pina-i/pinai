@@ -22,10 +22,57 @@ use idp_db::repos::{
     attachments as attachments_repo, conversations, messages, mls_commits, mls_welcomes,
     remote_actors, users,
 };
-use idp_realtime::{DmPayload, MlsCommitPayload, MlsWelcomeReadyPayload, WsAttachment, WsEvent};
+use idp_realtime::{
+    DmPayload, GroupCreatedPayload, MlsCommitPayload, MlsWelcomeReadyPayload, WsAttachment, WsEvent,
+};
 use idp_state::{AppState, OidcError};
 
 use crate::delivery;
+
+/// A group conversation as the sending IdP sees it, carried on every MLS Note
+/// bound for a remote member.
+///
+/// `POST /api/groups` writes `conversations` + `conversation_members` on the
+/// creator's IdP only, and a Welcome carries nothing but key material — so
+/// without this snapshot a remote member's own IdP has no row to hang the
+/// group on, and the conversation never reaches their list.
+#[derive(Debug, Clone)]
+pub struct GroupSnapshot {
+    pub name: Option<String>,
+    pub members: Vec<GroupSnapshotMember>,
+}
+
+#[derive(Debug, Clone)]
+pub struct GroupSnapshotMember {
+    pub actor_uri: String,
+    pub role: String,
+}
+
+impl GroupSnapshot {
+    pub fn new(name: Option<String>, members: &[ConversationMember]) -> Self {
+        Self {
+            name,
+            members: members
+                .iter()
+                .map(|m| GroupSnapshotMember {
+                    actor_uri: m.actor_uri.clone(),
+                    role: m.role.clone(),
+                })
+                .collect(),
+        }
+    }
+
+    fn to_json(&self) -> Value {
+        json!({
+            "name": self.name,
+            "members": self
+                .members
+                .iter()
+                .map(|m| json!({ "actorUri": m.actor_uri, "role": m.role }))
+                .collect::<Vec<_>>(),
+        })
+    }
+}
 
 /// Build a `Create{Note}` activity for an MLS application message (regular
 /// DM, reply, edit, reaction — all opaque to the server). The caller controls
@@ -33,9 +80,12 @@ use crate::delivery;
 /// matches what's on the wire.
 ///
 /// `reply_to_activity_uri` becomes the AP `inReplyTo` field when present.
+/// `group` is `Some` only for group conversations, so a message self-heals a
+/// membership row the Welcome never managed to deliver.
 /// Attachments are not injected here — call
 /// `messaging::attachments::inject_attachments_into_ap_activity` on the
 /// returned Value when needed.
+#[allow(clippy::too_many_arguments)]
 pub fn build_application_create_activity(
     activity_id: &str,
     note_id: &str,
@@ -44,6 +94,7 @@ pub fn build_application_create_activity(
     conversation_id: Uuid,
     mls_ciphertext: &[u8],
     reply_to_activity_uri: Option<&str>,
+    group: Option<&GroupSnapshot>,
 ) -> Value {
     let mut extra = serde_json::Map::new();
     if let Some(parent_uri) = reply_to_activity_uri {
@@ -51,6 +102,9 @@ pub fn build_application_create_activity(
             "inReplyTo".to_string(),
             Value::String(parent_uri.to_string()),
         );
+    }
+    if let Some(snapshot) = group {
+        extra.insert("mlsGroup".to_string(), snapshot.to_json());
     }
     let note = build_mls_note(
         note_id,
@@ -277,6 +331,7 @@ pub fn deliver_welcome_to_remote(
     recipient_device_id: Uuid,
     conversation_id: Uuid,
     welcome_blob: &[u8],
+    group: Option<GroupSnapshot>,
 ) {
     let state = state.clone();
     let sender_username = sender_username.to_string();
@@ -298,6 +353,10 @@ pub fn deliver_welcome_to_remote(
             sender_username,
             Uuid::new_v4(),
         );
+        let mut extra = json!({ "mlsRecipientDeviceId": recipient_device_id.to_string() });
+        if let (Some(map), Some(snapshot)) = (extra.as_object_mut(), group.as_ref()) {
+            map.insert("mlsGroup".to_string(), snapshot.to_json());
+        }
         let note = build_mls_note(
             &note_id,
             &sender_actor_uri,
@@ -305,7 +364,7 @@ pub fn deliver_welcome_to_remote(
             conversation_id,
             "welcome",
             &content_b64,
-            json!({ "mlsRecipientDeviceId": recipient_device_id.to_string() }),
+            extra,
         );
         let activity =
             build_create_envelope(&activity_id, &sender_actor_uri, &recipient_actor_uri, note);
@@ -406,7 +465,16 @@ pub async fn handle_inbound_mls_note(
             let device_id: Uuid = device_id_str.parse().map_err(|_| {
                 OidcError::invalid_request("MLS welcome `mlsRecipientDeviceId` is not a UUID")
             })?;
-            ingest_welcome(state, recipient, device_id, conversation_id, &blob).await
+            ingest_welcome(
+                state,
+                note,
+                recipient,
+                device_id,
+                conversation_id,
+                &blob,
+                proposer_actor_uri,
+            )
+            .await
         }
         "application" => {
             ingest_application_message(
@@ -493,6 +561,124 @@ async fn ingest_commit(
     Ok(())
 }
 
+/// Materialise a group conversation advertised by an inbound MLS Note, and
+/// converge it with the sender's roster.
+///
+/// The IdP hosting a group owns its `conversation_members`; nothing federates
+/// that table on its own. Mirroring the snapshot locally is what puts the
+/// group in the recipient's list at all, and what keeps their own sends
+/// fanning out to every member. No snapshot (1:1 DM, or a peer predating the
+/// field) → no-op, leaving the DM paths untouched.
+async fn ensure_group_from_snapshot(
+    state: &AppState,
+    note: &Value,
+    conversation_id: Uuid,
+    recipient: &idp_db::models::User,
+    sender_actor_uri: &str,
+) -> Result<(), OidcError> {
+    let Some(snapshot) = note.get("mlsGroup") else {
+        return Ok(());
+    };
+    let recipient_actor_uri = recipient
+        .actor_uri
+        .as_deref()
+        .ok_or_else(|| OidcError::server_error("recipient has no actor_uri"))?;
+
+    let roster: Vec<(&str, &str)> = snapshot
+        .get("members")
+        .and_then(|v| v.as_array())
+        .map(|members| {
+            members
+                .iter()
+                .filter_map(|m| Some((m.get("actorUri")?.as_str()?, m.get("role")?.as_str()?)))
+                .collect()
+        })
+        .unwrap_or_default();
+    if roster.is_empty() {
+        tracing::warn!(%conversation_id, "inbound mlsGroup snapshot has no usable members");
+        return Ok(());
+    }
+    let advertised_name = snapshot.get("name").and_then(|v| v.as_str());
+
+    let conv = conversations::find_by_id(&state.pool, conversation_id)
+        .await
+        .map_err(|e| OidcError::server_error(e.to_string()))?;
+    let local = conversations::get_members(&state.pool, conversation_id)
+        .await
+        .map_err(|e| OidcError::server_error(e.to_string()))?;
+
+    // Every Note re-asserts the roster, so an add or a role change converges on
+    // the next message a member receives. Bail before any write when nothing
+    // moved — this runs on every inbound group message, not just the Welcome.
+    //
+    // Additive only: a local member missing from the snapshot is left alone.
+    // The snapshot is whatever the *sending* member's IdP mirrors, which may
+    // itself be stale, so honouring its absences would let one peer undo a
+    // removal another peer already applied. Removal is enforced by the MLS
+    // Remove commit regardless — the roster only routes ciphertext.
+    let members_converged = roster
+        .iter()
+        .all(|(uri, role)| local.iter().any(|m| m.actor_uri == *uri && m.role == *role));
+    let rename =
+        advertised_name.filter(|n| conv.as_ref().and_then(|c| c.name.as_deref()) != Some(*n));
+    if members_converged && rename.is_none() {
+        return Ok(());
+    }
+
+    let is_new_to_recipient = !local.iter().any(|m| m.actor_uri == recipient_actor_uri);
+
+    let conv = match conv {
+        Some(existing) => match rename {
+            Some(name) => conversations::update_name(&state.pool, existing.id, name)
+                .await
+                .map_err(|e| OidcError::server_error(e.to_string()))?
+                .unwrap_or(existing),
+            None => existing,
+        },
+        None => conversations::create_conversation_with_id(
+            &state.pool,
+            conversation_id,
+            "group",
+            advertised_name,
+        )
+        .await
+        .map_err(|e| OidcError::server_error(e.to_string()))?,
+    };
+
+    for (actor_uri, role) in &roster {
+        conversations::add_member_with_role(&state.pool, conv.id, actor_uri, role)
+            .await
+            .map_err(|e| OidcError::server_error(e.to_string()))?;
+    }
+
+    // Gated on the recipient's own membership, not on the conversation being
+    // new: a second member's Welcome lands in an already-materialised group
+    // and still has to reach them.
+    if is_new_to_recipient {
+        let creator_actor_uri = roster
+            .iter()
+            .find(|(_, role)| *role == "admin")
+            .map(|(uri, _)| uri.to_string())
+            .unwrap_or_else(|| sender_actor_uri.to_string());
+        state.hub.send_to_user(
+            &recipient.id,
+            WsEvent::GroupCreated(GroupCreatedPayload {
+                conversation_id: conv.id,
+                name: conv.name.clone(),
+                creator_actor_uri,
+                created_at: conv.created_at,
+            }),
+        );
+        tracing::info!(
+            recipient = %recipient.username,
+            conversation_id = %conv.id,
+            "materialised federated group from inbound snapshot"
+        );
+    }
+
+    Ok(())
+}
+
 async fn ingest_application_message(
     state: &AppState,
     body: &Value,
@@ -526,16 +712,32 @@ async fn ingest_application_message(
         }
     }
 
+    // A group the Welcome never reached still materialises here, off the
+    // message's own snapshot.
+    ensure_group_from_snapshot(state, note, conversation_id, recipient, sender_actor_uri).await?;
+
     // Persist the conversation under the sender-supplied UUID when present
     // (so both IdPs agree on the conversation_id from the very first DM).
-    let (resolved_conversation_id, _created) = conversations::get_or_create_dm_with_id(
-        &state.pool,
-        conversation_id,
-        sender_actor_uri,
-        recipient_actor_uri,
-    )
-    .await
-    .map_err(|e| OidcError::server_error(e.to_string()))?;
+    // A group is resolved by id and never routed through the DM helper:
+    // `find_dm_between` would match the sender's 1:1 with the recipient first
+    // and file the group's ciphertext into it.
+    let existing = conversations::find_by_id(&state.pool, conversation_id)
+        .await
+        .map_err(|e| OidcError::server_error(e.to_string()))?;
+    let resolved_conversation_id = match existing {
+        Some(conv) if conv.kind == "group" => conv.id,
+        _ => {
+            conversations::get_or_create_dm_with_id(
+                &state.pool,
+                conversation_id,
+                sender_actor_uri,
+                recipient_actor_uri,
+            )
+            .await
+            .map_err(|e| OidcError::server_error(e.to_string()))?
+            .0
+        }
+    };
 
     let msg = messages::create_message(
         &state.pool,
@@ -620,11 +822,15 @@ async fn ingest_application_message(
 
 async fn ingest_welcome(
     state: &AppState,
+    note: &Value,
     recipient: &idp_db::models::User,
     device_id: Uuid,
     conversation_id: Uuid,
     blob: &[u8],
+    sender_actor_uri: &str,
 ) -> Result<(), OidcError> {
+    ensure_group_from_snapshot(state, note, conversation_id, recipient, sender_actor_uri).await?;
+
     let row =
         mls_welcomes::insert_welcome(&state.pool, recipient.id, device_id, conversation_id, blob)
             .await
@@ -646,3 +852,6 @@ async fn ingest_welcome(
     );
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

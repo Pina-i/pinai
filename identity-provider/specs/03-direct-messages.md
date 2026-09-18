@@ -608,9 +608,78 @@ MLS state (no per-message bootstrap), so there is no `ensureGroupExists` step.
 
 `group_created`, `member_added`, `member_removed`, `member_role_changed`, and
 `group_renamed` are pushed to every **local** member of the conversation (same
-local-fanout pattern as `mls_commit`). Remote members learn of membership
-through the MLS welcome/commit federation path; cross-IdP convergence of the
-`conversation_members` table itself is out of scope here.
+local-fanout pattern as `mls_commit`). A remote member receives `group_created`
+from their own IdP instead, the moment it materialises the group from an
+inbound snapshot — see **Federated groups** below.
+
+### Federated groups
+
+`POST /api/groups` writes `conversations` + `conversation_members` on the
+creator's IdP only, and a Welcome carries nothing but key material. Since
+`GET /api/dm` is driven entirely off `conversation_members`, a remote member
+whose IdP holds no row would never see the group — no reload, and no number of
+inbound messages, would surface it.
+
+Every MLS Note bound for a remote member therefore carries an `mlsGroup`
+snapshot of the sender's roster beside the payload:
+
+```json
+{
+  "mlsKind": "welcome",
+  "context": "9f1c…",
+  "content": "<base64 MLS Welcome>",
+  "mlsRecipientDeviceId": "3b7e…",
+  "mlsGroup": {
+    "name": "Weekend trip",
+    "members": [
+      { "actorUri": "https://idp.alice.com/users/alice_xK9mP", "role": "admin" },
+      { "actorUri": "https://idp.bob.com/users/pierre_q4Rt",   "role": "member" }
+    ]
+  }
+}
+```
+
+The receiving IdP creates the conversation under the advertised `context` UUID
+with `kind = 'group'`, upserts every member, and pushes `group_created` to the
+recipient — once per recipient, gated on their own membership row being new,
+so the second welcome into an already-materialised group still notifies its
+target. Both Welcomes and group `Create{Note}`s carry the snapshot, so a group
+whose Welcome never landed still materialises on the first message to arrive.
+1:1 DMs never carry one: their row is minted on both IdPs at friendship-accept.
+
+Because the snapshot is a point-in-time copy, an inbound Note is also what
+converges membership: the next Note a member receives upserts any roster entry
+their IdP is missing, so an add or a role change propagates without a dedicated
+activity. Convergence is **additive only** — a local member absent from the
+snapshot is left in place, because the snapshot reflects whatever the *sending*
+member's IdP mirrors and may itself be stale; honouring its absences would let
+one peer undo a removal another has already applied. A removal therefore
+converges on the hosting IdP alone. That costs nothing in confidentiality: the
+roster only routes ciphertext, and the MLS Remove commit has already cut the
+member off cryptographically.
+
+An inbound group `Create{Note}` is filed under its `context` UUID directly.
+The DM lazy-create (`get_or_create_dm_with_id`) is reserved for `kind = 'dm'`:
+it matches on the two actors before the id, so routing a group through it
+would file the group's ciphertext into the sender's existing 1:1 with the
+recipient.
+
+```mermaid
+sequenceDiagram
+  participant A as Alice's client
+  participant IA as idp.alice.com
+  participant IB as idp.bob.com
+  participant P as Pierre's client
+  A->>IA: POST /api/groups { name?, member_actor_uris }
+  IA->>IA: conversation(kind=group) + conversation_members
+  IA-->>A: { conversationId, members[] }
+  A->>IA: POST /api/mls/welcomes { recipient, device, welcome_blob }
+  IA->>IB: Create{Note} mlsKind=welcome + mlsGroup
+  IB->>IB: conversation(kind=group) + upsert roster
+  IB-->>P: group_created, mls_welcome_ready
+  P->>IB: GET /api/mls/welcomes → join MLS group
+  P->>IB: GET /api/dm → group in the list
+```
 
 ### Create flow (client → server)
 

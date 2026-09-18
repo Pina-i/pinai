@@ -680,6 +680,7 @@ async fn handle_remote_dm(
         conversation_id,
         mls_ciphertext,
         None,
+        None,
     );
 
     let state_clone = state.clone();
