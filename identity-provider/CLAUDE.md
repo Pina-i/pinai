@@ -13,7 +13,8 @@ This repo is **Layer 2** of a three-layer architecture:
 | **2** | **`pina-i/identity-provider` ← this repo** | OIDC, DMs, friends, ActivityPub federation |
 | 3 | `pina-i/chat-server` | Community servers, JWT validation only |
 
-Shared crates (JWT utils, HTTP Signatures, ActivityPub types) live in `pina-i/core-libs`.
+Shared crates (JWT utils, HTTP Signatures, ActivityPub types, federation transport) live in
+`crates/` at the monorepo root.
 
 ---
 
@@ -196,6 +197,7 @@ All detailed specifications live in `specs/`. **Read only the file(s) relevant t
 | `specs/03-direct-messages.md` | `conversations`, `conversation_members`, `direct_messages` schema, DM delivery (local + federated), unread tracking, reactions, replies, message editing | Anything touching DMs, conversations, messages, reactions, replies, unread counts |
 | `specs/04-presence.md` | Presence states (online/away/offline), typing indicators, Redis pub-sub channels, inter-IdP SSE stream, heartbeat, `PresenceStore` | Online status, typing indicators, presence propagation, inter-IdP SSE |
 | `specs/05-e2ee.md` | MLS-based E2EE: trust model (user-controlled MSK / SSK / USK / Recovery Key), key directory tables + endpoints, group lifecycle on top of `conversation_members`, MLSCiphertext wire format, encrypted attachments, multi-device pairing, account recovery | Anything touching message content, identity keys, KeyPackages, group commits/welcomes, encrypted attachments, device pairing |
+| `specs/06-federation-authentication.md` | The two credentials (Bearer JWT vs HTTP Signature), the signing scheme, the three inbound checks, the verifying-key cache, and the peer request policy | Anything server-to-server: the inbox, inter-IdP presence, peer attachment fetches, KeyPackage claims, HTTP Signatures, key rotation |
 
 ## Spec file modifications **IMPORTANT**
 

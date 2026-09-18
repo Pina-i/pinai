@@ -217,16 +217,12 @@ Authorization: (HTTP Signature — see below)
 - The remote IdP reconnects automatically on disconnect using `Last-Event-ID` + `retry:`.
 #### Authentication — HTTP Signatures
 
-The requesting IdP signs the request using its existing ActivityPub RSA key pair, identical to the scheme used for AP activity delivery.
+Both inter-IdP presence endpoints authenticate the calling instance with an HTTP Signature,
+the same scheme and the same code path as every other server-to-server endpoint. The signing
+and verification rules, the verifying-key cache and the peer URL policy are defined once in
+`06-federation-authentication.md`; nothing here is specific to presence.
 
-Required signed headers: `(request-target)`, `host`, `date`.
-
-The receiving IdP verifies by:
-1. Extracting `keyId` from the `Signature` header (e.g. `https://idp.bob.com/actor#main-key`).
-2. Fetching the public key from that URI (cached — reuses existing AP actor fetch).
-3. Verifying the signature. Reject `401` if invalid or `date` is older than 5 minutes (replay protection).
-
-No new key material — fully reuses AP infrastructure.
+No new key material — the key pair that signs JWTs signs these requests too.
 
 #### SSE event format
 

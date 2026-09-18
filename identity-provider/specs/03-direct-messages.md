@@ -493,7 +493,7 @@ Lifecycle:
 | `GET /api/dm/{conv_id}` | Bearer | Each message gains `attachments: [{ id, mime_type, byte_size, original_filename }]`. |
 | `GET /api/attachments/{id}` | Bearer | Returns `{ url, expires_at, mime_type, byte_size, original_filename }`. The `url` is a token-protected blob URL on this IdP. |
 | `GET /api/attachments/{id}/blob?token=...` | HMAC token | The actual fetch. Streams bytes through the IdP — local from the private object store, remote via an HTTP-Sig fetch to the origin. |
-| `GET /api/attachments/{id}/content` | HTTP Signature | Peer-IdP-facing source of truth. Streams bytes through the IdP after a membership check (peer must have an actor in the conversation). |
+| `GET /api/attachments/{id}/content` | HTTP Signature (see `06-federation-authentication.md`) | Peer-IdP-facing source of truth. Streams bytes through the IdP after a membership check (peer must have an actor in the conversation). |
 
 Blob URL TTL: `attachment_url_ttl` (default 1 hour). Browser caches the bytes
 once loaded; the URL only needs to live until first fetch. `<img onError>` /
