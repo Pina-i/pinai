@@ -59,6 +59,27 @@ services:
       MP_SMTP_AUTH_ACCEPT_ANY: "true"
       MP_SMTP_AUTH_ALLOW_INSECURE: "true"
 
+  # Mints the instance's Ed25519 key on first boot, then never touches it. The key
+  # signs JWTs, federation HTTP Signatures and E2EE device attestations, so it is
+  # the instance's whole identity: back up IDP_KEYS_DIR with the database, because
+  # losing it cannot be recovered from. openssl emits the PKCS#8 PEM the IdP reads.
+  idp-keygen:
+    image: alpine/openssl:3.5.8
+    restart: "no"
+    entrypoint: ["sh", "-c"]
+    command:
+      - >-
+        if [ -f /keys/ed25519.pem ]; then
+          echo "instance key present, keeping it";
+        else
+          openssl genpkey -algorithm ed25519 -out /keys/ed25519.pem &&
+          chmod 600 /keys/ed25519.pem &&
+          chown "$$(stat -c '%u:%g' /keys)" /keys/ed25519.pem &&
+          echo "generated a new instance key";
+        fi
+    volumes:
+      - ${IDP_KEYS_DIR:-./identity-provider/keys/default}:/keys
+
   idp:
     build:
       context: .
@@ -71,8 +92,10 @@ services:
       STORAGE_ENDPOINT: http://localhost:${RUSTFS_PORT:-9000}
       REDIS_URL: redis://localhost:${REDIS_PORT:-6379}
     volumes:
-      - ./identity-provider/keys:/run/secrets:ro
+      - ${IDP_KEYS_DIR:-./identity-provider/keys/default}:/run/secrets:ro
     depends_on:
+      idp-keygen:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       redis:

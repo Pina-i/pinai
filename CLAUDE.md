@@ -106,6 +106,22 @@ Run from the repo root:
 `JWT_PRIVATE_KEY_PATH` and the other paths in the env files resolve against the
 working directory, so run everything from the repo root.
 
+## Instance signing key
+
+Each instance owns one Ed25519 key, generated on first run and never
+regenerated: `make alice` mints `identity-provider/keys/alice/ed25519.pem`, and
+`docker compose up` does the same through the `idp-keygen` service. Both are
+idempotent, and `IDP_KEYS_DIR` in the env file selects the directory.
+
+Alice and Bob must not share a key. It signs JWTs, federation HTTP Signatures
+and E2EE device attestations, so a shared key makes every cross-instance
+verification pass whether or not key resolution actually works — the bug then
+only surfaces in production.
+
+There is no recovering from losing the key: device attestations carry a
+365-day TTL and verify against the issuer's JWKS, so a replacement key breaks
+every existing device. Back `IDP_KEYS_DIR` up together with the database.
+
 ## Docker
 
 `compose.yaml` is at the root and the build context is `.`, because the

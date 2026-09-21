@@ -53,6 +53,19 @@
   .emerald .node-title { color: #6ee7b7; } .emerald .node-tag { background: rgba(16,185,129,0.2); color: #6ee7b7; }
   .orange { background: rgba(249,115,22,0.1);  border-color: rgba(249,115,22,0.3); }
   .orange .node-title { color: #fdba74; } .orange .node-tag { background: rgba(249,115,22,0.2); color: #fdba74; }
+  .pink   { background: rgba(236,72,153,0.1); border-color: rgba(236,72,153,0.35); }
+  .pink .node-title { color: #f9a8d4; } .pink .node-tag { background: rgba(236,72,153,0.2); color: #f9a8d4; }
+
+  .planned { opacity: 0.5; border-style: dashed; }
+  .planned .node-tag { background: rgba(148,163,184,0.15) !important; color: #94a3b8 !important; }
+
+  .banner {
+    max-width: 900px; margin: 0 auto 40px; padding: 12px 20px;
+    border: 1px solid rgba(236,72,153,0.25); border-radius: 10px;
+    background: rgba(236,72,153,0.04); text-align: center;
+    font-size: 0.8rem; color: #94a3b8; line-height: 1.7;
+  }
+  .banner strong { color: #f9a8d4; font-weight: 600; }
 
   .arrow-down { display: flex; flex-direction: column; align-items: center; margin: 4px 0; }
   .arrow-line { width: 1px; height: 28px; background: linear-gradient(to bottom, rgba(99,102,241,0.5), rgba(6,182,212,0.5)); }
@@ -109,6 +122,11 @@
 <h1>Pina'i</h1>
 <div class="subtitle">Three-layer federated architecture · Self-Hosted Open-Source Chat Platform</div>
 
+<div class="banner">
+  Every direct message and group conversation is <strong>end-to-end encrypted with MLS (RFC 9420)</strong>.
+  The identity provider is the trust root and the delivery service &mdash; it never sees plaintext.
+</div>
+
 <div class="diagram">
 
   <!-- ═══════════════════════════════════════════ -->
@@ -120,30 +138,34 @@
     <div style="display:flex; flex-direction:column; align-items:center; gap:8px;">
       <div style="font-size:0.7rem; color:#334155; letter-spacing:0.1em; text-transform:uppercase;">Alice</div>
       <div style="display:flex; gap:8px;">
-        <div class="node blue" style="width:100px; animation-delay:0.05s">
+        <div class="node blue" style="width:118px; animation-delay:0.05s">
           <div class="node-icon">🖥️</div>
           <div class="node-title">Web</div>
-          <div class="node-sub">React + Vite</div>
+          <div class="node-sub">React + Vite<br>openmls → WASM<br>Encrypt / decrypt here</div>
+          <div class="node-tag">MLS endpoint</div>
         </div>
-        <div class="node blue" style="width:100px; animation-delay:0.1s">
+        <div class="node blue planned" style="width:118px; animation-delay:0.1s">
           <div class="node-icon">🖱️</div>
           <div class="node-title">Desktop</div>
           <div class="node-sub">Electron</div>
+          <div class="node-tag">Planned</div>
         </div>
       </div>
     </div>
     <div style="display:flex; flex-direction:column; align-items:center; gap:8px;">
       <div style="font-size:0.7rem; color:#334155; letter-spacing:0.1em; text-transform:uppercase;">Bob</div>
       <div style="display:flex; gap:8px;">
-        <div class="node blue" style="width:100px; animation-delay:0.05s">
+        <div class="node blue" style="width:118px; animation-delay:0.05s">
           <div class="node-icon">🖥️</div>
           <div class="node-title">Web</div>
-          <div class="node-sub">React + Vite</div>
+          <div class="node-sub">React + Vite<br>openmls → WASM<br>Encrypt / decrypt here</div>
+          <div class="node-tag">MLS endpoint</div>
         </div>
-        <div class="node blue" style="width:100px; animation-delay:0.1s">
+        <div class="node blue planned" style="width:118px; animation-delay:0.1s">
           <div class="node-icon">🖱️</div>
           <div class="node-title">Desktop</div>
           <div class="node-sub">Electron</div>
+          <div class="node-tag">Planned</div>
         </div>
       </div>
     </div>
@@ -171,13 +193,13 @@
         <div class="node red" style="width:130px; animation-delay:0.2s">
           <div class="node-icon">🔐</div>
           <div class="node-title">OIDC</div>
-          <div class="node-sub">Auth + JWT<br>User accounts</div>
+          <div class="node-sub">Auth + JWT · JWKS<br>Email verification<br>TOTP 2FA + recovery codes</div>
           <div class="node-tag">OAuth2</div>
         </div>
         <div class="node purple" style="width:155px; animation-delay:0.25s">
           <div class="node-icon">💬</div>
           <div class="node-title">Msg Backbone</div>
-          <div class="node-sub">Friends · DMs<br>ActivityPub inbox<br>federation_queue worker</div>
+          <div class="node-sub">Friends · DMs · Groups<br>ActivityPub inbox<br>Best-effort outbound delivery</div>
           <div class="node-tag">Federation</div>
         </div>
         <div class="node cyan" style="width:135px; animation-delay:0.28s">
@@ -185,6 +207,25 @@
           <div class="node-title">WebSocket</div>
           <div class="node-sub">Thin delivery layer<br>reads Redis Streams<br>last_event_id catch-up</div>
           <div class="node-tag">Axum + Tokio</div>
+        </div>
+      </div>
+
+      <!-- E2EE -->
+      <div class="sub-group" style="width:100%;">
+        <div class="sub-group-label" style="color:#ec4899;">E2EE — MLS (RFC 9420)</div>
+        <div style="display:flex; gap:8px;">
+          <div class="node pink" style="width:195px; animation-delay:0.29s">
+            <div class="node-icon">🔑</div>
+            <div class="node-title">Key Directory</div>
+            <div class="node-sub">KeyPackages — publish, claim, refill<br>Device Root Keys + IdP attestation<br>Per-device revocation</div>
+            <div class="node-tag">Public keys only</div>
+          </div>
+          <div class="node pink" style="width:195px; animation-delay:0.31s">
+            <div class="node-icon">📮</div>
+            <div class="node-title">Delivery Service</div>
+            <div class="node-sub">Commits — ordered append per group<br>409 on epoch race · ?since catch-up<br>Welcomes — per-device atomic claim</div>
+            <div class="node-tag">Ciphertext only</div>
+          </div>
         </div>
       </div>
 
@@ -218,26 +259,26 @@
           <div class="node green" style="width:100%; animation-delay:0.35s">
             <div class="node-icon">🐘</div>
             <div class="node-title">Identity tables</div>
-            <div class="node-sub">users (username+NanoID, display_name,<br>actor_uri, inbox_url, outbox_url)<br>remote_actors (cache, inbox_url, fetched_at)<br>friendships (friend_actor_uri,<br>friend_avatar_url, status)</div>
+            <div class="node-sub">users (username+NanoID, display_name,<br>actor_uri, inbox_url, pronouns, bio)<br>user_devices (DRK + IdP attestation)<br>remote_actors (cache, inbox_url, fetched_at)<br>friendships (friend_actor_uri, status)<br>TOTP secrets · email verification codes</div>
             <div class="node-tag">Owned by instance</div>
           </div>
           <div class="node green" style="width:100%; animation-delay:0.37s">
             <div class="node-icon">✉️</div>
-            <div class="node-title">DM tables</div>
-            <div class="node-sub">direct_messages (activity_uri,<br>federation_status, reply_to_id, soft delete)<br>dm_conversation_reads (last_read_at)<br>message_reactions (emoji · UNIQUE per user)</div>
+            <div class="node-title">Conversation tables</div>
+            <div class="node-sub">conversations · conversation_members<br>(member roles) — DMs and groups alike<br>direct_messages (MLS ciphertext,<br>activity_uri, reply_to_id, soft delete)<br>conversation_reads · message_reactions<br>message_attachments (sealed blobs)</div>
             <div class="node-tag">Keyset paginated</div>
           </div>
-          <div class="node yellow" style="width:100%; animation-delay:0.39s">
-            <div class="node-icon">📤</div>
-            <div class="node-title">federation_queue</div>
-            <div class="node-sub">activity (JSONB) · target_inbox<br>attempts · next_attempt<br>Exponential backoff: 30s→5m→30m→6h→24h<br>Profile updates &amp; non-DM activities</div>
-            <div class="node-tag">Durable outbox</div>
+          <div class="node pink" style="width:100%; animation-delay:0.39s">
+            <div class="node-icon">🔒</div>
+            <div class="node-title">E2EE tables</div>
+            <div class="node-sub">user_identity_keys · key_packages<br>mls_commits · mls_welcomes<br>history_messages (opaque archive)<br>recovery_blobs · history_archive_salt</div>
+            <div class="node-tag">Server-opaque</div>
           </div>
         </div>
         <div class="node orange" style="width:115px; animation-delay:0.4s; align-self:flex-start;">
           <div class="node-icon">🗄️</div>
           <div class="node-title">RustFS</div>
-          <div class="node-sub">Avatars<br>DM attachments<br>Presigned URLs</div>
+          <div class="node-sub">Avatars — public URL<br>Attachments — private,<br>AES-256-GCM sealed<br>by the sender's client<br>Streamed via the IdP</div>
           <div class="node-tag">S3-compatible</div>
         </div>
       </div>
@@ -253,14 +294,19 @@
           WebFinger<br>
           HTTPS<br>
           ─────────<br>
+          Follow / Accept / Reject<br>
           Create{Note}<br>
           Update{Note}<br>
           Update{Person}<br>
-          Like / Undo{Like}
+          Like / Undo{Like}<br>
+          ─────────<br>
+          MLS rides in Create{Note}<br>
+          mediaType: application/mls<br>
+          mlsKind: commit ·<br>welcome · application
         </div>
       </div>
       <div style="font-size:0.65rem; color:#475569; text-align:center; line-height:1.8; border:1px dashed rgba(234,179,8,0.15); border-radius:8px; padding:8px 10px; background:rgba(234,179,8,0.02);">
-        DMs → inline<br>tokio::spawn<br>─────<br>Profile updates →<br>federation_queue<br>(backoff retry)
+        All delivery is<br>best-effort, inline<br>tokio::spawn<br>─────<br>No durable outbox —<br>clients pull missed<br>MLS commits on<br>reconnect; other<br>activities recover<br>per-activity
       </div>
     </div>
 
@@ -273,13 +319,13 @@
         <div class="node red" style="width:130px; animation-delay:0.2s">
           <div class="node-icon">🔐</div>
           <div class="node-title">OIDC</div>
-          <div class="node-sub">Auth + JWT<br>User accounts</div>
+          <div class="node-sub">Auth + JWT · JWKS<br>Email verification<br>TOTP 2FA + recovery codes</div>
           <div class="node-tag">OAuth2</div>
         </div>
         <div class="node purple" style="width:155px; animation-delay:0.25s">
           <div class="node-icon">💬</div>
           <div class="node-title">Msg Backbone</div>
-          <div class="node-sub">Friends · DMs<br>ActivityPub inbox<br>federation_queue worker</div>
+          <div class="node-sub">Friends · DMs · Groups<br>ActivityPub inbox<br>Best-effort outbound delivery</div>
           <div class="node-tag">Federation</div>
         </div>
         <div class="node cyan" style="width:135px; animation-delay:0.28s">
@@ -287,6 +333,25 @@
           <div class="node-title">WebSocket</div>
           <div class="node-sub">Thin delivery layer<br>reads Redis Streams<br>last_event_id catch-up</div>
           <div class="node-tag">Axum + Tokio</div>
+        </div>
+      </div>
+
+      <!-- E2EE -->
+      <div class="sub-group" style="width:100%;">
+        <div class="sub-group-label" style="color:#ec4899;">E2EE — MLS (RFC 9420)</div>
+        <div style="display:flex; gap:8px;">
+          <div class="node pink" style="width:195px; animation-delay:0.29s">
+            <div class="node-icon">🔑</div>
+            <div class="node-title">Key Directory</div>
+            <div class="node-sub">KeyPackages — publish, claim, refill<br>Device Root Keys + IdP attestation<br>Per-device revocation</div>
+            <div class="node-tag">Public keys only</div>
+          </div>
+          <div class="node pink" style="width:195px; animation-delay:0.31s">
+            <div class="node-icon">📮</div>
+            <div class="node-title">Delivery Service</div>
+            <div class="node-sub">Commits — ordered append per group<br>409 on epoch race · ?since catch-up<br>Welcomes — per-device atomic claim</div>
+            <div class="node-tag">Ciphertext only</div>
+          </div>
         </div>
       </div>
 
@@ -320,26 +385,26 @@
           <div class="node green" style="width:100%; animation-delay:0.35s">
             <div class="node-icon">🐘</div>
             <div class="node-title">Identity tables</div>
-            <div class="node-sub">users (username+NanoID, display_name,<br>actor_uri, inbox_url, outbox_url)<br>remote_actors (cache, inbox_url, fetched_at)<br>friendships (friend_actor_uri,<br>friend_avatar_url, status)</div>
+            <div class="node-sub">users (username+NanoID, display_name,<br>actor_uri, inbox_url, pronouns, bio)<br>user_devices (DRK + IdP attestation)<br>remote_actors (cache, inbox_url, fetched_at)<br>friendships (friend_actor_uri, status)<br>TOTP secrets · email verification codes</div>
             <div class="node-tag">Owned by instance</div>
           </div>
           <div class="node green" style="width:100%; animation-delay:0.37s">
             <div class="node-icon">✉️</div>
-            <div class="node-title">DM tables</div>
-            <div class="node-sub">direct_messages (activity_uri,<br>federation_status, reply_to_id, soft delete)<br>dm_conversation_reads (last_read_at)<br>message_reactions (emoji · UNIQUE per user)</div>
+            <div class="node-title">Conversation tables</div>
+            <div class="node-sub">conversations · conversation_members<br>(member roles) — DMs and groups alike<br>direct_messages (MLS ciphertext,<br>activity_uri, reply_to_id, soft delete)<br>conversation_reads · message_reactions<br>message_attachments (sealed blobs)</div>
             <div class="node-tag">Keyset paginated</div>
           </div>
-          <div class="node yellow" style="width:100%; animation-delay:0.39s">
-            <div class="node-icon">📤</div>
-            <div class="node-title">federation_queue</div>
-            <div class="node-sub">activity (JSONB) · target_inbox<br>attempts · next_attempt<br>Exponential backoff: 30s→5m→30m→6h→24h<br>Profile updates &amp; non-DM activities</div>
-            <div class="node-tag">Durable outbox</div>
+          <div class="node pink" style="width:100%; animation-delay:0.39s">
+            <div class="node-icon">🔒</div>
+            <div class="node-title">E2EE tables</div>
+            <div class="node-sub">user_identity_keys · key_packages<br>mls_commits · mls_welcomes<br>history_messages (opaque archive)<br>recovery_blobs · history_archive_salt</div>
+            <div class="node-tag">Server-opaque</div>
           </div>
         </div>
         <div class="node orange" style="width:115px; animation-delay:0.4s; align-self:flex-start;">
           <div class="node-icon">🗄️</div>
           <div class="node-title">RustFS</div>
-          <div class="node-sub">Avatars<br>DM attachments<br>Presigned URLs</div>
+          <div class="node-sub">Avatars — public URL<br>Attachments — private,<br>AES-256-GCM sealed<br>by the sender's client<br>Streamed via the IdP</div>
           <div class="node-tag">S3-compatible</div>
         </div>
       </div>
@@ -356,61 +421,64 @@
   <!-- ═══════════════════════════════════════════ -->
   <!-- LAYER 3 — CHAT SERVERS                     -->
   <!-- ═══════════════════════════════════════════ -->
-  <div class="layer-title" style="margin-top:8px;">Layer 3 — Chat Servers (Communities)</div>
+  <div class="layer-title" style="margin-top:8px;">Layer 3 — Chat Servers (Communities) · Planned</div>
+  <div style="font-size:0.72rem; color:#475569; letter-spacing:0.05em; margin:-4px 0 12px; text-align:center;">
+    Specified in <code>chat-server/CLAUDE.md</code>; no implementation yet.
+  </div>
 
   <div style="display:flex; gap:16px; width:100%; justify-content:center; align-items:flex-start;">
 
     <!-- Chat server A -->
     <div class="group" style="flex-direction:column; gap:12px;">
       <div class="group-label" style="color:#06b6d4;">chat.gaming.com 🏠</div>
-      <div class="node cyan" style="width:210px; animation-delay:0.5s">
+      <div class="node cyan planned" style="width:210px; animation-delay:0.5s">
         <div class="node-icon">⚡</div>
         <div class="node-title">Chat Server</div>
-        <div class="node-sub">Axum + Tokio<br>WebSocket handler<br>JWT validation only</div>
-        <div class="node-tag">Rust — No federation</div>
+        <div class="node-sub">Axum + Tokio<br>Chat &amp; voice rooms<br>JWT validation only</div>
+        <div class="node-tag">Planned</div>
       </div>
       <div class="arrow-down"><div class="arrow-line"></div><div class="arrow-head"></div><div class="arrow-label">Persist</div></div>
-      <div class="node green" style="width:210px; animation-delay:0.55s">
+      <div class="node green planned" style="width:210px; animation-delay:0.55s">
         <div class="node-icon">🐘</div>
         <div class="node-title">PostgreSQL</div>
         <div class="node-sub">Channels, messages<br>roles, members</div>
-        <div class="node-tag">Owned by instance</div>
+        <div class="node-tag">Planned</div>
       </div>
     </div>
 
     <!-- Chat server B -->
     <div class="group" style="flex-direction:column; gap:12px;">
       <div class="group-label" style="color:#06b6d4;">chat.devs.com 🏠</div>
-      <div class="node cyan" style="width:210px; animation-delay:0.5s">
+      <div class="node cyan planned" style="width:210px; animation-delay:0.5s">
         <div class="node-icon">⚡</div>
         <div class="node-title">Chat Server</div>
-        <div class="node-sub">Axum + Tokio<br>WebSocket handler<br>JWT validation only</div>
-        <div class="node-tag">Rust — No federation</div>
+        <div class="node-sub">Axum + Tokio<br>Chat &amp; voice rooms<br>JWT validation only</div>
+        <div class="node-tag">Planned</div>
       </div>
       <div class="arrow-down"><div class="arrow-line"></div><div class="arrow-head"></div><div class="arrow-label">Persist</div></div>
-      <div class="node green" style="width:210px; animation-delay:0.55s">
+      <div class="node green planned" style="width:210px; animation-delay:0.55s">
         <div class="node-icon">🐘</div>
         <div class="node-title">PostgreSQL</div>
         <div class="node-sub">Channels, messages<br>roles, members</div>
-        <div class="node-tag">Owned by instance</div>
+        <div class="node-tag">Planned</div>
       </div>
     </div>
 
     <!-- Chat server C -->
     <div class="group" style="flex-direction:column; gap:12px;">
       <div class="group-label" style="color:#06b6d4;">chat.art.com 🏠</div>
-      <div class="node cyan" style="width:210px; animation-delay:0.5s">
+      <div class="node cyan planned" style="width:210px; animation-delay:0.5s">
         <div class="node-icon">⚡</div>
         <div class="node-title">Chat Server</div>
-        <div class="node-sub">Axum + Tokio<br>WebSocket handler<br>JWT validation only</div>
-        <div class="node-tag">Rust — No federation</div>
+        <div class="node-sub">Axum + Tokio<br>Chat &amp; voice rooms<br>JWT validation only</div>
+        <div class="node-tag">Planned</div>
       </div>
       <div class="arrow-down"><div class="arrow-line"></div><div class="arrow-head"></div><div class="arrow-label">Persist</div></div>
-      <div class="node green" style="width:210px; animation-delay:0.55s">
+      <div class="node green planned" style="width:210px; animation-delay:0.55s">
         <div class="node-icon">🐘</div>
         <div class="node-title">PostgreSQL</div>
         <div class="node-sub">Channels, messages<br>roles, members</div>
-        <div class="node-tag">Owned by instance</div>
+        <div class="node-tag">Planned</div>
       </div>
     </div>
 
@@ -437,10 +505,13 @@
       <div style="width:12px;height:12px;border-radius:3px;background:rgba(34,197,94,0.3);"></div> Persistence (PostgreSQL)
     </div>
     <div style="display:flex; align-items:center; gap:6px; font-size:0.75rem; color:#64748b;">
-      <div style="width:12px;height:12px;border-radius:3px;background:rgba(234,179,8,0.3);"></div> Federation Queue (durable outbox)
+      <div style="width:12px;height:12px;border-radius:3px;background:rgba(236,72,153,0.3);"></div> E2EE — MLS key directory &amp; delivery service
     </div>
     <div style="display:flex; align-items:center; gap:6px; font-size:0.75rem; color:#64748b;">
       <div style="width:12px;height:12px;border-radius:3px;background:rgba(249,115,22,0.3);"></div> Object Storage (RustFS · S3-compatible)
+    </div>
+    <div style="display:flex; align-items:center; gap:6px; font-size:0.75rem; color:#64748b;">
+      <div style="width:12px;height:12px;border-radius:3px;border:1px dashed rgba(148,163,184,0.5);opacity:0.6;"></div> Dashed &amp; dimmed — planned, not implemented
     </div>
   </div>
 

@@ -58,6 +58,27 @@ fn a_pkcs8_pem_loads_into_a_usable_keypair() {
     assert_eq!(kp.verifying_key_bytes.len(), 32);
 }
 
+/// Instance keys are minted by `openssl genpkey -algorithm ed25519` — in the
+/// Makefile for the host workflow, and in the `idp-keygen` compose service for
+/// `docker compose up`. Nothing else pins that output to what this loader
+/// accepts, so pin it here. Skipped where openssl is unavailable.
+#[test]
+fn an_openssl_generated_key_loads() {
+    let pem = match std::process::Command::new("openssl")
+        .args(["genpkey", "-algorithm", "ed25519"])
+        .output()
+    {
+        Ok(out) if out.status.success() => String::from_utf8(out.stdout).expect("PEM is UTF-8"),
+        _ => return,
+    };
+
+    let file = TempPem::write("openssl", &pem);
+    let kp = load_ed_keypair_from_pem(&file.0, "openssl-key")
+        .expect("openssl emits PKCS#8 PEM, which the loader must accept");
+
+    assert_eq!(kp.verifying_key_bytes.len(), 32);
+}
+
 /// The loader derives the public key rather than being handed one; check it
 /// against the key independently derived from the same seed.
 #[test]

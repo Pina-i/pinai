@@ -530,7 +530,7 @@
 
   .roadmap-item {
     display: grid;
-    grid-template-columns: 100px 1fr auto;
+    grid-template-columns: 100px 1fr auto auto;
     align-items: center;
     gap: 24px;
     padding: 24px 28px;
@@ -572,6 +572,20 @@
   .roadmap-item:nth-child(5) .phase-badge { color: #ff7c7c; border-color: #ff7c7c; }
   .roadmap-item:nth-child(6) .phase-badge { color: #9b59b6; border-color: #9b59b6; }
   .roadmap-item:nth-child(7) .phase-badge { color: #f97316; border-color: #f97316; }
+  .roadmap-item:nth-child(8) .phase-badge { color: #00d4aa; border-color: #00d4aa; }
+  .roadmap-item:nth-child(9) .phase-badge { color: #94a3b8; border-color: #94a3b8; }
+
+  .roadmap-status {
+    font-family: 'Space Mono', monospace;
+    font-size: 0.62rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    padding: 4px 9px;
+    white-space: nowrap;
+  }
+  .roadmap-status.built   { color: #57f287; background: rgba(87,242,135,0.1); }
+  .roadmap-status.planned { color: #94a3b8; background: rgba(148,163,184,0.1); }
+  .roadmap-item.is-planned { opacity: 0.6; border-style: dashed; }
 
   .roadmap-desc { font-size: 0.95rem; font-weight: 600; }
   .roadmap-tech { 
@@ -717,7 +731,7 @@
     nav { padding: 0 6vw; }
     .nav-links { display: none; }
     .code-group { grid-template-columns: 1fr; }
-    .roadmap-item { grid-template-columns: 80px 1fr; }
+    .roadmap-item { grid-template-columns: 80px 1fr auto; }
     .roadmap-tech { display: none; }
     .hero { padding: 80px 6vw; }
     footer { padding: 40px 6vw; }
@@ -743,15 +757,16 @@
   <div class="hero-grid"></div>
   <div class="hero-glow"></div>
   <div class="hero-glow2"></div>
-  <div class="badge">Architecture Document v1.1</div>
+  <div class="badge">Architecture Document v2.0</div>
   <h1>Pina'i<br><span>Federated</span><br><span class="accent2">Chat Platform</span></h1>
-  <p class="hero-sub">A self-hostable, open-source Discord alternative where every layer is independently deployable — from identity to community servers. Your identity, your data, your rules.</p>
+  <p class="hero-sub">A self-hostable, open-source Discord alternative where every layer is independently deployable — from identity to community servers. Every message is end-to-end encrypted with MLS. Your identity, your data, your rules.</p>
   <div class="hero-pills">
+    <div class="pill">🔒 E2EE · MLS (RFC 9420)</div>
     <div class="pill">🐳 Docker-first</div>
     <div class="pill">⚡ ActivityPub Federation</div>
     <div class="pill">🔐 OIDC / OAuth2</div>
     <div class="pill">🦀 Rust Backend</div>
-    <div class="pill">⚛️ React + Vite</div>
+    <div class="pill">⚛️ React + Vite · WASM</div>
     <div class="pill">📡 WebSockets</div>
     <div class="pill">🗄️ S3 Object Storage</div>
   </div>
@@ -787,9 +802,19 @@
       <p>OIDC/OAuth2 for authentication. Chat servers never store passwords — they only validate JWT tokens.</p>
     </div>
     <div class="principle-card" style="--card-accent: #ff7c7c">
-      <div class="principle-icon">🛡️</div>
-      <h3>No Password Storage</h3>
-      <p>Chat servers are stateless regarding credentials. Passwords stay with your identity provider, nowhere else.</p>
+      <div class="principle-icon">🔒</div>
+      <h3>End-to-End Encrypted</h3>
+      <p>Every DM and group conversation is encrypted with MLS (RFC 9420). Encryption happens in the client; the server stores ciphertext it cannot read.</p>
+    </div>
+    <div class="principle-card" style="--card-accent: #00d4aa">
+      <div class="principle-icon">📱</div>
+      <h3>Per-Device Identity</h3>
+      <p>Each device holds its own Ed25519 Device Root Key, attested by your IdP. A user is the set of their attested devices — revoke one without touching the rest.</p>
+    </div>
+    <div class="principle-card" style="--card-accent: #f97316">
+      <div class="principle-icon">🗝️</div>
+      <h3>Recoverable History</h3>
+      <p>A 24-word passphrase derives a History Archive Key. Past messages are re-encrypted under it and stored as an opaque server-side archive — restorable on a fresh device, unreadable by the server.</p>
     </div>
     <div class="principle-card" style="--card-accent: #9b59b6">
       <div class="principle-icon">📡</div>
@@ -814,18 +839,22 @@
       <div class="layer-components">
         <div class="component-box">
           <span class="cname">Web Client</span>
-          <span class="ctech">React + Vite · Browser</span>
+          <span class="ctech">React + Vite · TypeScript</span>
+        </div>
+        <div class="component-box">
+          <span class="cname">MLS Engine</span>
+          <span class="ctech">openmls · Rust → WebAssembly</span>
         </div>
         <div class="component-box">
           <span class="cname">Desktop App</span>
-          <span class="ctech">Electron · Cross-platform</span>
+          <span class="ctech">Electron · Planned</span>
         </div>
         <div class="component-box">
           <span class="cname">Mobile App</span>
-          <span class="ctech">Future support · PWA</span>
+          <span class="ctech">Planned · PWA</span>
         </div>
       </div>
-      <p style="margin-top:16px; font-size:0.82rem; color:var(--muted);">Clients communicate with two backends: the Identity Provider for auth & DMs, and Chat Servers for community channels.</p>
+      <p style="margin-top:16px; font-size:0.82rem; color:var(--muted);">The client is where encryption lives. It talks to the Identity Provider for auth, DMs and key material — and, once Layer 3 exists, to Chat Servers for community channels. Only the web client is built today.</p>
     </div>
 
     <div class="arch-connector">↕ JWT Tokens · OIDC Flow · WebSocket</div>
@@ -838,26 +867,38 @@
       <div class="layer-components">
         <div class="component-box">
           <span class="cname">OIDC Provider</span>
-          <span class="ctech">Rust · User auth · JWT issuance</span>
+          <span class="ctech">Rust · JWT issuance · Email verify · TOTP 2FA</span>
         </div>
         <div class="component-box">
           <span class="cname">Messaging Backbone</span>
-          <span class="ctech">Rust · Friends · Private DMs</span>
+          <span class="ctech">Rust · Friends · DMs · Group conversations</span>
+        </div>
+        <div class="component-box">
+          <span class="cname">MLS Key Directory</span>
+          <span class="ctech">KeyPackages · Device attestation</span>
+        </div>
+        <div class="component-box">
+          <span class="cname">MLS Delivery Service</span>
+          <span class="ctech">Ordered commits · Welcomes · Epochs</span>
         </div>
         <div class="component-box">
           <span class="cname">ActivityPub Federation</span>
           <span class="ctech">W3C Standard · HTTP Signatures</span>
         </div>
         <div class="component-box">
+          <span class="cname">Redis</span>
+          <span class="ctech">Streams — durable events · pub-sub — presence</span>
+        </div>
+        <div class="component-box">
           <span class="cname">PostgreSQL</span>
-          <span class="ctech">Users · Friends · DMs · Actors</span>
+          <span class="ctech">Users · Devices · Conversations · Actors</span>
         </div>
         <div class="component-box">
           <span class="cname">RustFS</span>
-          <span class="ctech">S3-compatible · Avatars · DM attachments</span>
+          <span class="ctech">S3-compatible · Avatars · Sealed attachments</span>
         </div>
       </div>
-      <p style="margin-top:16px; font-size:0.82rem; color:var(--muted);">The most important layer. Bundles OIDC + messaging + federation + object storage in a single self-hostable unit. Permanent identity: <code style="color:var(--accent)">alice@idp.alice.com</code></p>
+      <p style="margin-top:16px; font-size:0.82rem; color:var(--muted);">The most important layer. Bundles OIDC + messaging + federation + key directory + object storage in a single self-hostable unit. Permanent identity: <code style="color:var(--accent)">alice@idp.alice.com</code>. It is the <strong style="color:var(--text)">trust root and the delivery service — never the eavesdropper</strong>: it signs each device's identity and orders MLS commits, but holds no message-decryption keys.</p>
     </div>
 
     <div class="arch-connector">↕ JWT Validation via JWKS · No password sharing</div>
@@ -865,7 +906,7 @@
     <div class="arch-layer" data-layer="3">
       <div class="arch-layer-header">
         <span class="layer-number">LAYER 3</span>
-        <span class="layer-title">Chat Servers (Communities)</span>
+        <span class="layer-title">Chat Servers (Communities) — Planned</span>
       </div>
       <div class="layer-components">
         <div class="component-box">
@@ -885,7 +926,7 @@
           <span class="ctech">Channels · Messages · Members</span>
         </div>
       </div>
-      <p style="margin-top:16px; font-size:0.82rem; color:var(--muted);">Intentionally simple. No passwords. No friendships. No federation protocol. Any user from any identity provider can join any chat server.</p>
+      <p style="margin-top:16px; font-size:0.82rem; color:var(--muted);">Intentionally simple. No passwords. No friendships. No federation protocol. Any user from any identity provider can join any chat server. <strong style="color:var(--text)">Specified in <code>chat-server/CLAUDE.md</code>; not implemented yet</strong> — Layers 1 and 2 are the working system today.</p>
     </div>
 
   </div>
@@ -898,7 +939,7 @@
 
   <div class="reveal" style="margin-bottom:60px">
     <p style="font-size:1rem; color:var(--muted); max-width:700px; line-height:1.7; margin-bottom:40px;">
-      Each identity provider instance ships with its own <strong style="color:var(--text)">RustFS</strong> object storage — an S3-compatible server written in Rust. Avatars and DM attachments are owned by the sender's instance. No cross-instance data copying.
+      Each identity provider instance ships with its own <strong style="color:var(--text)">RustFS</strong> object storage — an S3-compatible server written in Rust. Avatars and DM attachments are owned by the sender's instance. The object store sits on the private network: <strong style="color:var(--text)">neither browsers nor peer instances ever talk to it directly</strong>.
     </p>
 
     <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(280px,1fr)); gap:3px; margin-bottom:48px;">
@@ -908,7 +949,7 @@
       </div>
       <div class="component-box" style="padding:24px 28px; background:var(--surface); border:1px solid var(--border)">
         <div style="color:var(--accent); font-weight:700; margin-bottom:8px; font-family:'Space Mono',monospace; font-size:0.75rem; letter-spacing:0.1em;">DM ATTACHMENTS</div>
-        <p style="font-size:0.88rem; color:var(--muted); line-height:1.6;">Uploaded to the <strong style="color:var(--text)">sender's</strong> instance storage. The IdP generates a time-limited <strong style="color:var(--text)">presigned URL</strong> delivered inside the ActivityPub Note. Bob's client fetches directly from Alice's storage — no relay.</p>
+        <p style="font-size:0.88rem; color:var(--muted); line-height:1.6;">Sealed <strong style="color:var(--text)">client-side with AES-256-GCM</strong> before upload — a fresh key per attachment, carried inside the MLS-encrypted message. The store holds ciphertext. Bob's browser fetches via a token-protected <code style="color:var(--text)">/blob</code> URL; his IdP fetches the original from Alice's <code style="color:var(--text)">/content</code> endpoint under HTTP Signature and streams the bytes on.</p>
       </div>
       <div class="component-box" style="padding:24px 28px; background:var(--surface); border:1px solid var(--border)">
         <div style="color:var(--accent2); font-weight:700; margin-bottom:8px; font-family:'Space Mono',monospace; font-size:0.75rem; letter-spacing:0.1em;">S3-COMPATIBLE API</div>
@@ -933,14 +974,14 @@
             <td>Public URL — no auth</td>
           </tr>
           <tr>
-            <td>DM image / file / video</td>
-            <td>Sender's IdP RustFS instance</td>
-            <td>Presigned URL — time-limited</td>
+            <td>DM / group attachment</td>
+            <td>Sender's IdP RustFS instance (private)</td>
+            <td>AES-256-GCM sealed — streamed through the IdP</td>
           </tr>
           <tr>
             <td>Channel attachments</td>
             <td>Chat server storage (future)</td>
-            <td>TBD — Phase 7+</td>
+            <td>TBD — with Layer 3</td>
           </tr>
         </tbody>
       </table>
@@ -971,6 +1012,14 @@
         <div style="color:var(--accent2); font-weight:700; margin-bottom:8px; font-family:'Space Mono',monospace; font-size:0.75rem; letter-spacing:0.1em;">ACTOR MODEL</div>
         <p style="font-size:0.88rem; color:var(--muted); line-height:1.6;">Remote users are stored locally as "actors" with their public key and inbox URL cached. Efficient message delivery without repeated discovery calls.</p>
       </div>
+      <div class="component-box" style="padding:24px 28px; background:var(--surface); border:1px solid var(--border)">
+        <div style="color:#ff7c7c; font-weight:700; margin-bottom:8px; font-family:'Space Mono',monospace; font-size:0.75rem; letter-spacing:0.1em;">MLS OVER ACTIVITYPUB</div>
+        <p style="font-size:0.88rem; color:var(--muted); line-height:1.6;">Every MLS payload rides inside a <code style="color:var(--text)">Create{Note}</code> with <code style="color:var(--text)">mediaType: application/mls</code> and an <code style="color:var(--text)">mlsKind</code> discriminator — commit, welcome or application. The server routes the envelope without parsing the opaque body.</p>
+      </div>
+      <div class="component-box" style="padding:24px 28px; background:var(--surface); border:1px solid var(--border)">
+        <div style="color:#fee75c; font-weight:700; margin-bottom:8px; font-family:'Space Mono',monospace; font-size:0.75rem; letter-spacing:0.1em;">BEST-EFFORT DELIVERY</div>
+        <p style="font-size:0.88rem; color:var(--muted); line-height:1.6;">Outbound activities are delivered inline on a spawned task, with no durable outbox. Recovery is per-activity: clients pull missed MLS commits with <code style="color:var(--text)">?since=&lt;epoch&gt;</code> on reconnect, cached actors re-fetch on TTL, and time-sensitive activities are allowed to drop.</p>
+      </div>
     </div>
 
     <div class="section-label" style="margin-bottom:24px">Trust Architecture</div>
@@ -985,18 +1034,28 @@
       <tbody>
         <tr>
           <td>User → IdP</td>
-          <td>User authenticates with password or passkey</td>
+          <td>User authenticates with a password, then an optional TOTP second factor</td>
           <td>OIDC / OAuth2</td>
         </tr>
         <tr>
+          <td>Device → IdP</td>
+          <td>IdP signs each device's Device Root Key; the attestation travels in the MLS leaf credential</td>
+          <td>Ed25519 + JWKS</td>
+        </tr>
+        <tr>
           <td>User → Chat Server</td>
-          <td>Chat server validates JWT issued by IdP</td>
+          <td>Chat server validates JWT issued by IdP <em>(with Layer 3)</em></td>
           <td>JWT + JWKS</td>
         </tr>
         <tr>
           <td>IdP → IdP</td>
-          <td>Servers authenticate each other for DM delivery</td>
+          <td>Servers authenticate each other for activity delivery and attachment fetches</td>
           <td>HTTP Signatures</td>
+        </tr>
+        <tr>
+          <td>Device → Device</td>
+          <td>Message content — neither IdP can read it, whichever one is compromised</td>
+          <td>MLS (RFC 9420)</td>
         </tr>
       </tbody>
     </table>
@@ -1018,16 +1077,16 @@
       </div>
       <div class="scenario-body">
         <div class="scenario-inner">
-          <p style="font-size:0.88rem; color:var(--muted); line-height:1.6; margin-bottom:16px;">Alice and Bob are on different self-hosted identity providers. Private messages never transit through any chat server.</p>
+          <p style="font-size:0.88rem; color:var(--muted); line-height:1.6; margin-bottom:16px;">Alice and Bob are on different self-hosted identity providers, and their conversation is an MLS group. Neither server can read a word of it.</p>
           <div class="flow-steps">
-            <div class="flow-step"><span class="step-num">01</span><span>Alice types a DM in her client and hits send.</span></div>
-            <div class="flow-step"><span class="step-num">02</span><span>Alice's client sends the message to <code style="color:var(--accent)">idp.alice.com</code> over WebSocket.</span></div>
-            <div class="flow-step"><span class="step-num">03</span><span><code style="color:var(--accent)">idp.alice.com</code> wraps the message in an ActivityPub activity and signs the HTTP request with its private key.</span></div>
-            <div class="flow-step"><span class="step-num">04</span><span><code style="color:var(--accent)">idp.alice.com</code> discovers Bob's inbox URL via WebFinger on <code style="color:var(--accent2)">idp.bob.com</code>.</span></div>
-            <div class="flow-step"><span class="step-num">05</span><span><code style="color:var(--accent)">idp.alice.com</code> delivers the signed activity to Bob's inbox at <code style="color:var(--accent2)">idp.bob.com</code>.</span></div>
-            <div class="flow-step"><span class="step-num">06</span><span><code style="color:var(--accent2)">idp.bob.com</code> verifies the HTTP signature using Alice's server's public key.</span></div>
-            <div class="flow-step"><span class="step-num">07</span><span><code style="color:var(--accent2)">idp.bob.com</code> pushes the message to Bob via WebSocket.</span></div>
-            <div class="flow-step"><span class="step-num">08</span><span>Bob sees the message in real time. <strong style="color:var(--accent3)">No chat server was involved.</strong></span></div>
+            <div class="flow-step"><span class="step-num">01</span><span>Alice types a DM. Her client encrypts it as an <strong>MLS application message</strong> under the group's current epoch key — inside the browser, in <code style="color:var(--accent4)">openmls</code> compiled to WebAssembly.</span></div>
+            <div class="flow-step"><span class="step-num">02</span><span>The ciphertext goes to <code style="color:var(--accent)">idp.alice.com</code>. The server stores it as an opaque blob; <strong style="color:var(--accent3)">no plaintext ever reaches it.</strong></span></div>
+            <div class="flow-step"><span class="step-num">03</span><span><code style="color:var(--accent)">idp.alice.com</code> wraps the ciphertext in a <code style="color:var(--text)">Create{Note}</code> with <code style="color:var(--text)">mediaType: application/mls</code> and signs the HTTP request with its private key.</span></div>
+            <div class="flow-step"><span class="step-num">04</span><span>It resolves Bob's inbox URL — from the <code style="color:var(--accent4)">remote_actors</code> cache, or via WebFinger on <code style="color:var(--accent2)">idp.bob.com</code> on a miss.</span></div>
+            <div class="flow-step"><span class="step-num">05</span><span>The signed activity is delivered to Bob's inbox, best-effort on a spawned task.</span></div>
+            <div class="flow-step"><span class="step-num">06</span><span><code style="color:var(--accent2)">idp.bob.com</code> verifies the HTTP signature against Alice's server's public key and appends the ciphertext to Bob's Redis stream.</span></div>
+            <div class="flow-step"><span class="step-num">07</span><span>Each of Bob's devices picks it up over WebSocket and decrypts it locally with its own MLS state.</span></div>
+            <div class="flow-step"><span class="step-num">08</span><span>Bob reads the message. <strong style="color:var(--accent3)">Two servers handled it; neither could read it.</strong></span></div>
           </div>
         </div>
       </div>
@@ -1041,11 +1100,11 @@
       </div>
       <div class="scenario-body">
         <div class="scenario-inner">
-          <p style="font-size:0.88rem; color:var(--muted); line-height:1.6; margin-bottom:16px;">Alice wants to join the gaming community at <code style="color:var(--accent)">chat.gaming.com</code>. She already has an account at <code style="color:var(--accent)">idp.alice.com</code>.</p>
+          <p style="font-size:0.88rem; color:var(--muted); line-height:1.6; margin-bottom:16px;"><strong style="color:var(--text)">Planned — Layer 3 is specified but not built.</strong> Alice wants to join the gaming community at <code style="color:var(--accent)">chat.gaming.com</code>. She already has an account at <code style="color:var(--accent)">idp.alice.com</code>.</p>
           <div class="flow-steps">
             <div class="flow-step"><span class="step-num">01</span><span>Alice navigates to <code style="color:var(--accent)">chat.gaming.com</code> in her browser.</span></div>
             <div class="flow-step"><span class="step-num">02</span><span><code style="color:var(--accent)">chat.gaming.com</code> redirects Alice to her configured IdP: <code style="color:var(--accent)">idp.alice.com</code>.</span></div>
-            <div class="flow-step"><span class="step-num">03</span><span>Alice authenticates at <code style="color:var(--accent)">idp.alice.com</code> (password, passkey, etc.).</span></div>
+            <div class="flow-step"><span class="step-num">03</span><span>Alice authenticates at <code style="color:var(--accent)">idp.alice.com</code> — password, then her TOTP second factor if enabled.</span></div>
             <div class="flow-step"><span class="step-num">04</span><span><code style="color:var(--accent)">idp.alice.com</code> issues a signed JWT token containing Alice's identity and claims.</span></div>
             <div class="flow-step"><span class="step-num">05</span><span>Alice's client presents the JWT to <code style="color:var(--accent)">chat.gaming.com</code>.</span></div>
             <div class="flow-step"><span class="step-num">06</span><span><code style="color:var(--accent)">chat.gaming.com</code> fetches <code style="color:var(--accent)">idp.alice.com</code>'s public key via the JWKS endpoint and validates the JWT.</span></div>
@@ -1079,6 +1138,29 @@
       </div>
     </div>
 
+    <div class="scenario" id="scenD">
+      <div class="scenario-header" onclick="toggleScenario('scenD')">
+        <span class="scenario-letter">D</span>
+        <span class="scenario-title">Alice adds a second device</span>
+        <span class="scenario-toggle">+</span>
+      </div>
+      <div class="scenario-body">
+        <div class="scenario-inner">
+          <p style="font-size:0.88rem; color:var(--muted); line-height:1.6; margin-bottom:16px;">A user is the set of their attested devices. Adding one is an ordinary MLS membership change — no master secret is copied between machines.</p>
+          <div class="flow-steps">
+            <div class="flow-step"><span class="step-num">01</span><span>Alice's new laptop generates its own Ed25519 <strong>Device Root Key</strong>. The private half never leaves the machine.</span></div>
+            <div class="flow-step"><span class="step-num">02</span><span>She signs in; <code style="color:var(--accent)">idp.alice.com</code> issues an <strong>attestation</strong> over the public DRK, verifiable by anyone who fetches her IdP's JWKS.</span></div>
+            <div class="flow-step"><span class="step-num">03</span><span>The laptop publishes a batch of <strong>KeyPackages</strong> to the key directory, each leaf credential carrying that attestation.</span></div>
+            <div class="flow-step"><span class="step-num">04</span><span>Alice's phone claims one and issues an MLS <strong>Add commit</strong> for every conversation she is in.</span></div>
+            <div class="flow-step"><span class="step-num">05</span><span>The Delivery Service appends each commit in epoch order, rejecting racing commits with <code style="color:var(--text)">409</code> so the group's history stays linear.</span></div>
+            <div class="flow-step"><span class="step-num">06</span><span>The laptop claims its <strong>Welcome</strong> messages and joins each group at the new epoch. Every other member ratchets forward.</span></div>
+            <div class="flow-step"><span class="step-num">07</span><span>Alice enters her 24-word passphrase. Argon2id over it and her server-stored salt derives the <strong>History Archive Key</strong>.</span></div>
+            <div class="flow-step"><span class="step-num">08</span><span>The laptop downloads the opaque archive and decrypts it locally. <strong style="color:var(--accent3)">Past messages are back — and the server still cannot read them.</strong></span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
   </div>
 </section>
 
@@ -1091,7 +1173,7 @@
     <div class="code-card">
       <div class="code-header">
         <div class="code-dot" style="background:#57f287"></div>
-        <span>docker-compose.yml — Identity Provider</span>
+        <span>compose.yaml — Identity Provider</span>
       </div>
       <pre><span class="comment"># Self-hosted Identity Provider</span>
 <span class="key">services</span>:
@@ -1100,11 +1182,18 @@
     <span class="key">environment</span>:
       <span class="key">DOMAIN</span>: <span class="str">idp.alice.com</span>
       <span class="key">STORAGE_ENDPOINT</span>: <span class="str">http://rustfs:9000</span>
+      <span class="key">REDIS_URL</span>: <span class="str">redis://redis:6379</span>
     <span class="key">ports</span>:
       - <span class="str">"443:8080"</span>
     <span class="key">depends_on</span>:
       - <span class="str">postgres</span>
+      - <span class="str">redis</span>
       - <span class="str">rustfs</span>
+
+  <span class="key">redis</span>:
+    <span class="key">image</span>: <span class="str">redis:7-alpine</span>
+    <span class="key">volumes</span>:
+      - <span class="str">redis-data:/data</span>
 
   <span class="key">rustfs</span>:
     <span class="key">image</span>: <span class="str">rustfs/rustfs:latest</span>
@@ -1121,9 +1210,9 @@
     <div class="code-card">
       <div class="code-header">
         <div class="code-dot" style="background:#5865f2"></div>
-        <span>docker-compose.yml — Chat Server</span>
+        <span>compose.yaml — Chat Server (planned)</span>
       </div>
-      <pre><span class="comment"># Self-hosted Community Chat Server</span>
+      <pre><span class="comment"># Self-hosted Community Chat Server — not yet published</span>
 <span class="key">services</span>:
   <span class="key">chat</span>:
     <span class="key">image</span>: <span class="str">ghcr.io/pina-i/chat-server</span>
@@ -1150,45 +1239,64 @@
   <div class="roadmap reveal">
     <div class="roadmap-item">
       <span class="phase-badge">Phase 1</span>
-      <span class="roadmap-desc">Chat server with local auth, channels, WebSocket</span>
-      <span class="roadmap-tech">Foundation</span>
-    </div>
-    <div class="roadmap-item">
-      <span class="phase-badge">Phase 2</span>
-      <span class="roadmap-desc">Abstract auth behind trait, add OIDC client support</span>
-      <span class="roadmap-tech">Auth Layer</span>
-    </div>
-    <div class="roadmap-item">
-      <span class="phase-badge">Phase 3</span>
-      <span class="roadmap-desc">Identity provider (OIDC + user management)</span>
+      <span class="roadmap-desc">Identity provider — OIDC, JWT issuance, JWKS, user management</span>
+      <span class="roadmap-status built">Built</span>
       <span class="roadmap-tech">IdP</span>
     </div>
     <div class="roadmap-item">
-      <span class="phase-badge">Phase 4</span>
-      <span class="roadmap-desc">Messaging backbone (friends, DMs)</span>
+      <span class="phase-badge">Phase 2</span>
+      <span class="roadmap-desc">Messaging backbone — friends, DMs, presence over Redis</span>
+      <span class="roadmap-status built">Built</span>
       <span class="roadmap-tech">Social Graph</span>
     </div>
     <div class="roadmap-item">
-      <span class="phase-badge">Phase 5</span>
-      <span class="roadmap-desc">ActivityPub federation between IdP instances</span>
+      <span class="phase-badge">Phase 3</span>
+      <span class="roadmap-desc">ActivityPub federation between IdP instances — WebFinger, HTTP Signatures</span>
+      <span class="roadmap-status built">Built</span>
       <span class="roadmap-tech">Federation</span>
     </div>
     <div class="roadmap-item">
+      <span class="phase-badge">Phase 4</span>
+      <span class="roadmap-desc">Object storage — avatars and attachments on RustFS</span>
+      <span class="roadmap-status built">Built</span>
+      <span class="roadmap-tech">Storage Layer</span>
+    </div>
+    <div class="roadmap-item">
+      <span class="phase-badge">Phase 5</span>
+      <span class="roadmap-desc">Group conversations — members, roles, reactions, replies, attachments</span>
+      <span class="roadmap-status built">Built</span>
+      <span class="roadmap-tech">Conversations</span>
+    </div>
+    <div class="roadmap-item">
       <span class="phase-badge">Phase 6</span>
-      <span class="roadmap-desc">Public instance, docs, contributor guide</span>
-      <span class="roadmap-tech">Open Source</span>
+      <span class="roadmap-desc">End-to-end encryption — MLS (RFC 9420), per-device identity, history backup</span>
+      <span class="roadmap-status built">Built</span>
+      <span class="roadmap-tech">E2EE</span>
     </div>
     <div class="roadmap-item">
       <span class="phase-badge">Phase 7</span>
-      <span class="roadmap-desc">Object storage — avatars, DM attachments, presigned URLs (RustFS)</span>
-      <span class="roadmap-tech">Storage Layer</span>
+      <span class="roadmap-desc">Account security — email verification, TOTP 2FA, recovery codes</span>
+      <span class="roadmap-status built">Built</span>
+      <span class="roadmap-tech">Hardening</span>
+    </div>
+    <div class="roadmap-item is-planned">
+      <span class="phase-badge">Phase 8</span>
+      <span class="roadmap-desc">Chat servers — channels, voice rooms, JWT-only auth</span>
+      <span class="roadmap-status planned">Planned</span>
+      <span class="roadmap-tech">Layer 3</span>
+    </div>
+    <div class="roadmap-item is-planned">
+      <span class="phase-badge">Phase 9</span>
+      <span class="roadmap-desc">Public instance, docs, contributor guide — and a license file, which neither repository has yet</span>
+      <span class="roadmap-status planned">Planned</span>
+      <span class="roadmap-tech">Open Source</span>
     </div>
   </div>
 
   <div style="margin-top:48px; background:rgba(88,101,242,0.07); border:1px solid rgba(88,101,242,0.2); padding:28px 32px; max-width:760px;" class="reveal">
     <div style="font-family:'Space Mono',monospace; font-size:0.65rem; letter-spacing:0.15em; color:var(--accent); margin-bottom:12px; text-transform:uppercase;">Key Insight</div>
     <p style="font-size:0.95rem; line-height:1.7; color:var(--text)">
-      Chat servers (Phase 1–2) and the Identity Provider (Phase 3+) are completely independent projects that can be developed in parallel by different contributors. The interface between them is a <strong style="color:var(--accent)">JWT token</strong> — nothing more.
+      The Identity Provider (Phases 1–7) and the Chat Servers (Phase 8) are completely independent projects that can be developed in parallel by different contributors. The interface between them is a <strong style="color:var(--accent)">JWT token</strong> — nothing more. The same discipline applies one layer up: the web client shares an <strong style="color:var(--accent)">HTTP and WebSocket contract</strong> with the backend, not a dependency graph, and lives in its own repository.
     </p>
   </div>
 </section>
@@ -1196,16 +1304,19 @@
 <footer>
   <div>
     <p style="color:var(--accent); font-weight:700; margin-bottom:8px;">// PINA'I</p>
-    <p>Federated Open-Source Chat Platform<br>Architecture Document v1.1 · Open Source</p>
+    <p>Federated, End-to-End Encrypted Chat Platform<br>Architecture Document v2.0 · Open Source</p>
   </div>
   <div style="display:flex; gap:3px; flex-wrap:wrap;">
+    <div style="background:var(--surface); border:1px solid var(--border); padding:8px 16px; font-size:0.7rem; color:var(--muted)">MLS · RFC 9420</div>
     <div style="background:var(--surface); border:1px solid var(--border); padding:8px 16px; font-size:0.7rem; color:var(--muted)">ActivityPub</div>
     <div style="background:var(--surface); border:1px solid var(--border); padding:8px 16px; font-size:0.7rem; color:var(--muted)">OIDC</div>
     <div style="background:var(--surface); border:1px solid var(--border); padding:8px 16px; font-size:0.7rem; color:var(--muted)">Rust</div>
     <div style="background:var(--surface); border:1px solid var(--border); padding:8px 16px; font-size:0.7rem; color:var(--muted)">React</div>
     <div style="background:var(--surface); border:1px solid var(--border); padding:8px 16px; font-size:0.7rem; color:var(--muted)">PostgreSQL</div>
     <div style="background:var(--surface); border:1px solid var(--border); padding:8px 16px; font-size:0.7rem; color:var(--muted)">RustFS</div>
-    <div style="background:var(--surface); border:1px solid var(--border); padding:8px 16px; font-size:0.7rem; color:var(--muted)">Docker
+    <div style="background:var(--surface); border:1px solid var(--border); padding:8px 16px; font-size:0.7rem; color:var(--muted)">Redis</div>
+    <div style="background:var(--surface); border:1px solid var(--border); padding:8px 16px; font-size:0.7rem; color:var(--muted)">WebAssembly</div>
+    <div style="background:var(--surface); border:1px solid var(--border); padding:8px 16px; font-size:0.7rem; color:var(--muted)">Docker</div>
   </div>
 </footer>
 

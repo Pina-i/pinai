@@ -2,6 +2,7 @@ SHELL := bash
 .SHELLFLAGS := -c
 
 .PHONY: alice bob \
+        alice-keys bob-keys \
         alice-seed bob-seed \
         alice-docker bob-docker \
         alice-docker-dev bob-docker-dev \
@@ -15,19 +16,51 @@ SHELL := bash
 # starts the IdP in the foreground. Run from the repo root: JWT_PRIVATE_KEY_PATH
 # in the env files is resolved against the working directory.
 
-alice: alice-seed
+alice: alice-keys alice-seed
 	set -a && . .env.alice && set +a && cargo run -p idp-server
 
-bob: bob-seed
+bob: bob-keys bob-seed
 	set -a && . .env.bob && set +a && cargo run -p idp-server
 
+# ── Instance signing key ─────────────────────────────────────────────────────
+# One Ed25519 key per instance. It signs JWTs, federation HTTP Signatures and
+# E2EE device attestations, so Alice and Bob must not share one: with a shared
+# key every cross-instance verification passes whether or not key resolution
+# actually works, and the bug only shows up in production.
+#
+# Idempotent — an existing key is never overwritten. There is no recovering from
+# losing it, so back the directory up alongside the database.
+#
+# Generated here on the host rather than left to the compose init service so the
+# file is owned by you, not by root, and the host and Docker workflows can share
+# an instance.
+
+define gen-instance-key
+	@mkdir -p $(dir $(1))
+	@if [ -f "$(1)" ]; then \
+		echo "instance key present, keeping it: $(1)"; \
+	else \
+		openssl genpkey -algorithm ed25519 -out "$(1)" && chmod 600 "$(1)" && \
+		echo "generated a new instance key: $(1)"; \
+	fi
+endef
+
+alice-keys:
+	$(call gen-instance-key,identity-provider/keys/alice/ed25519.pem)
+
+bob-keys:
+	$(call gen-instance-key,identity-provider/keys/bob/ed25519.pem)
+
 # ── Dev fixtures (idempotent) ────────────────────────────────────────────────
-# Inserts Alice / Bob with a fully-verified email and a known password so the
+# Inserts users with a fully-verified email and a known password so the
 # web-client can sign in without walking the signup OTP flow. See
 # identity-provider/crates/dev-inject-data/.
+#
+# Alice's instance gets Pierre too, so there are two local users to exercise
+# group conversations and same-instance E2EE without involving federation.
 
 alice-seed:
-	set -a && . .env.alice && set +a && cargo run -p dev-inject-data -- alice
+	set -a && . .env.alice && set +a && cargo run -p dev-inject-data -- alice pierre
 
 bob-seed:
 	set -a && . .env.bob && set +a && cargo run -p dev-inject-data -- bob
@@ -39,19 +72,19 @@ bob-seed:
 # stack. The IdP's own startup migration is a no-op because the seed already
 # applied them.
 
-alice-docker:
+alice-docker: alice-keys
 	cp .env.alice .env
 	docker compose -f compose.yaml -f compose.dev.yml \
 		--project-name pinai-alice up -d --wait postgres
-	set -a && . .env.alice && set +a && cargo run -p dev-inject-data -- alice
+	$(MAKE) alice-seed
 	docker compose -f compose.yaml -f compose.dev.yml \
 		--project-name pinai-alice up -d --build
 
-bob-docker:
+bob-docker: bob-keys
 	cp .env.bob .env
 	docker compose -f compose.yaml -f compose.dev.yml \
 		--project-name pinai-bob up -d --wait postgres
-	set -a && . .env.bob && set +a && cargo run -p dev-inject-data -- bob
+	$(MAKE) bob-seed
 	docker compose -f compose.yaml -f compose.dev.yml \
 		--project-name pinai-bob up -d --build
 
@@ -60,16 +93,16 @@ bob-docker:
 # container reaches its peer IdP via host.docker.internal. Seeding still
 # happens against host-mapped Postgres, same as the Linux variant.
 
-alice-docker-win:
+alice-docker-win: alice-keys
 	cp .env.alice .env
 	docker compose -f compose-win.dev.yml --project-name pinai-alice up -d --wait postgres
-	set -a && . .env.alice && set +a && cargo run -p dev-inject-data -- alice
+	$(MAKE) alice-seed
 	docker compose -f compose-win.dev.yml --project-name pinai-alice up -d --build
 
-bob-docker-win:
+bob-docker-win: bob-keys
 	cp .env.bob .env
 	docker compose -f compose-win.dev.yml --project-name pinai-bob up -d --wait postgres
-	set -a && . .env.bob && set +a && cargo run -p dev-inject-data -- bob
+	$(MAKE) bob-seed
 	docker compose -f compose-win.dev.yml --project-name pinai-bob up -d --build
 
 # ── Teardown ──────────────────────────────────────────────────────────────────

@@ -1,6 +1,9 @@
-//! Dev-only seeder. Inserts a fully-verified user (Alice or Bob) into the
-//! local IdP database so `make alice` / `make bob` come up with a sign-in
-//! ready account — no signup OTP dance required.
+//! Dev-only seeder. Inserts fully-verified users into the local IdP database
+//! so `make alice` / `make bob` come up with sign-in ready accounts — no signup
+//! OTP dance required. Takes one or more fixture names; which IdP they land in
+//! is decided by the sourced env, not by the name. Pierre seeds alongside Alice
+//! so her instance has two local users, which is what testing a group
+//! conversation without federation needs.
 //!
 //! Idempotent: re-running the seed against an existing user updates the
 //! password hash + display name + flips `email_verified_at` back to the
@@ -38,18 +41,35 @@ const BOB: Fixture = Fixture {
     password: "yonolulu",
 };
 
+const PIERRE: Fixture = Fixture {
+    display_name: "Pierre",
+    email: "pierre@test.fr",
+    password: "yonolulu",
+};
+
+fn fixture(name: &str) -> Option<Fixture> {
+    match name {
+        "alice" => Some(ALICE),
+        "bob" => Some(BOB),
+        "pierre" => Some(PIERRE),
+        _ => None,
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    let fixture = match env::args().nth(1).as_deref() {
-        Some("alice") => ALICE,
-        Some("bob") => BOB,
-        Some(other) => {
-            return Err(anyhow!(
-                "Unknown fixture: {other} (expected 'alice' or 'bob')"
-            ))
-        }
-        None => return Err(anyhow!("Usage: dev-inject-data <alice|bob>")),
-    };
+    let names: Vec<String> = env::args().skip(1).collect();
+    if names.is_empty() {
+        return Err(anyhow!("Usage: dev-inject-data <alice|bob|pierre>..."));
+    }
+    let fixtures = names
+        .iter()
+        .map(|name| {
+            fixture(name).ok_or_else(|| {
+                anyhow!("Unknown fixture: {name} (expected 'alice', 'bob' or 'pierre')")
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
 
     let database_url = env::var("DATABASE_URL")
         .context("DATABASE_URL must be set (source docker/.env.alice or .env.bob)")?;
@@ -67,13 +87,15 @@ async fn main() -> Result<()> {
         .await
         .context("applying migrations")?;
 
-    let password_hash = hash_password(fixture.password)?;
-    upsert_user(&pool, &fixture, &password_hash, &domain).await?;
+    for fixture in &fixtures {
+        let password_hash = hash_password(fixture.password)?;
+        upsert_user(&pool, fixture, &password_hash, &domain).await?;
 
-    println!(
-        "dev-inject-data: seeded {} ({}) into {}",
-        fixture.display_name, fixture.email, database_url
-    );
+        println!(
+            "dev-inject-data: seeded {} ({}) into {}",
+            fixture.display_name, fixture.email, database_url
+        );
+    }
     Ok(())
 }
 
