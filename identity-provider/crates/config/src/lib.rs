@@ -29,8 +29,8 @@ pub struct Config {
     pub jwt_private_key_path: PathBuf,
     pub jwt_key_id: String,
     pub port: u16,
-    /// Secret used to sign session cookies. Must be at least 32 bytes.
-    /// If not set, a fixed dev-only default is used (sessions invalidated on restart in prod).
+    /// Secret used to sign session cookies and attachment blob tokens. Falls back
+    /// to [`DEV_SESSION_SECRET`] in development; production requires a real one.
     pub session_secret: String,
     /// Base URL of the web-client, e.g. "http://localhost:5173".
     /// Used to redirect to the hosted login/register page instead of serving HTML.
@@ -94,6 +94,12 @@ pub struct Config {
     pub email_otp_pepper: Vec<u8>,
 }
 
+/// `SESSION_SECRET` used when development leaves it unset. Public, so production refuses it.
+pub const DEV_SESSION_SECRET: &str =
+    "dev-only-insecure-session-secret-change-in-production-00000000";
+
+const MIN_SESSION_SECRET_LEN: usize = 32;
+
 /// Built-in extension blocklist. Extended (never replaced) by
 /// `ATTACHMENT_BLOCKED_EXTENSIONS`. Stored lowercased; comparison is
 /// lowercase-vs-lowercase.
@@ -146,9 +152,7 @@ impl Config {
                 .unwrap_or_else(|_| "8080".into())
                 .parse::<u16>()
                 .map_err(|e| ConfigError::InvalidPort(e.to_string()))?,
-            session_secret: env_var("SESSION_SECRET").unwrap_or_else(|_| {
-                "dev-only-insecure-session-secret-change-in-production-00000000".into()
-            }),
+            session_secret: session_secret(environment, env_var("SESSION_SECRET").ok())?,
             frontend_url: env_var("FRONTEND_URL")
                 .unwrap_or_else(|_| "http://localhost:5173".into()),
             cors_origins: env_var("CORS_ORIGINS")
@@ -278,6 +282,36 @@ fn parse_env_u64(key: &'static str, default: u64) -> Result<u64, ConfigError> {
             .parse()
             .map_err(|_| ConfigError::InvalidAttachmentValue(key, raw)),
     }
+}
+
+/// An empty value counts as unset: the server stretches the secret to 64 bytes by
+/// repeating it, which an empty one cannot survive.
+fn session_secret(environment: Environment, raw: Option<String>) -> Result<String, ConfigError> {
+    let secret = match raw.filter(|v| !v.is_empty()) {
+        Some(secret) => secret,
+        None if environment.is_dev() => return Ok(DEV_SESSION_SECRET.into()),
+        None => return Err(ConfigError::MissingVar("SESSION_SECRET")),
+    };
+    if environment.is_dev() {
+        return Ok(secret);
+    }
+    // Both are published — the fallback above and the `.env.example` placeholder.
+    if secret == DEV_SESSION_SECRET || secret.starts_with("change-me") {
+        return Err(ConfigError::InvalidValue(
+            "SESSION_SECRET",
+            "still a published placeholder — generate one with `openssl rand -hex 32`".into(),
+        ));
+    }
+    if secret.len() < MIN_SESSION_SECRET_LEN {
+        return Err(ConfigError::InvalidValue(
+            "SESSION_SECRET",
+            format!(
+                "must be at least {MIN_SESSION_SECRET_LEN} bytes; got {}",
+                secret.len()
+            ),
+        ));
+    }
+    Ok(secret)
 }
 
 /// Hex-decoded ≥ 32-byte HMAC pepper. Required at startup so an operator can't

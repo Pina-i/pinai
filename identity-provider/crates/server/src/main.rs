@@ -5,7 +5,7 @@ use sqlx::postgres::PgPoolOptions;
 use tracing::{info, warn};
 
 use federation_transport::{KeyCache, UrlPolicy};
-use idp_config::Config;
+use idp_config::{Config, DEV_SESSION_SECRET};
 use idp_db::run_migrations;
 use idp_email::{EmailConfig, EmailSender, LettreSmtpSender};
 use idp_presence::remote::RemotePresenceRegistry;
@@ -30,8 +30,7 @@ async fn main() -> anyhow::Result<()> {
     info!(domain = %config.domain, port = config.port, "starting identity-provider");
 
     // Warn on insecure dev defaults
-    let dev_secret = "dev-only-insecure-session-secret-change-in-production-00000000";
-    if config.session_secret == dev_secret {
+    if config.session_secret == DEV_SESSION_SECRET {
         warn!("SESSION_SECRET is using the insecure dev default — set it in production");
     }
 

@@ -2,6 +2,7 @@ SHELL := bash
 .SHELLFLAGS := -c
 
 .PHONY: alice bob \
+        alice-env bob-env \
         alice-keys bob-keys \
         alice-seed bob-seed \
         alice-docker bob-docker \
@@ -16,11 +17,47 @@ SHELL := bash
 # starts the IdP in the foreground. Run from the repo root: JWT_PRIVATE_KEY_PATH
 # in the env files is resolved against the working directory.
 
-alice: alice-keys alice-seed
+alice: alice-env alice-keys alice-seed
 	set -a && . .env.alice && set +a && cargo run -p idp-server
 
-bob: bob-keys bob-seed
+bob: bob-env bob-keys bob-seed
 	set -a && . .env.bob && set +a && cargo run -p idp-server
+
+# ── Instance secrets ─────────────────────────────────────────────────────────
+# Fills SESSION_SECRET and EMAIL_OTP_PEPPER in the env file when they are unset,
+# empty or still the `change-me` placeholder; a value already set is never
+# touched. Each instance gets its own. The pepper also hashes stored TOTP
+# recovery codes, so replacing it silently breaks every one of them — back the
+# env file up like the instance key.
+#
+# The env file itself is not created from .env.example: its defaults are not an
+# instance's (production mode, ports that collide between Alice and Bob).
+
+define gen-env-secrets
+	@if [ ! -f "$(1)" ]; then \
+		echo "$(1) is missing: copy .env.example to it and set the instance's values (see README.md)" >&2; \
+		exit 1; \
+	fi
+	@for var in SESSION_SECRET EMAIL_OTP_PEPPER; do \
+		value=$$(sed -n "s/^$$var=//p" "$(1)" | tail -n 1 | tr -d '\r"'); \
+		case "$$value" in ""|change-me*) ;; *) continue ;; esac; \
+		secret=$$(openssl rand -hex 32); \
+		if grep -q "^$$var=" "$(1)"; then \
+			awk -v k="$$var" -v v="$$secret" 'index($$0, k "=") == 1 { $$0 = k "=" v } { print }' \
+				"$(1)" > "$(1).tmp" && cat "$(1).tmp" > "$(1)" && rm "$(1).tmp"; \
+		else \
+			[ -z "$$(tail -c 1 "$(1)")" ] || echo >> "$(1)"; \
+			printf '%s=%s\n' "$$var" "$$secret" >> "$(1)"; \
+		fi; \
+		echo "generated $$var in $(1)"; \
+	done
+endef
+
+alice-env:
+	$(call gen-env-secrets,.env.alice)
+
+bob-env:
+	$(call gen-env-secrets,.env.bob)
 
 # ── Instance signing key ─────────────────────────────────────────────────────
 # One Ed25519 key per instance. It signs JWTs, federation HTTP Signatures and
@@ -72,7 +109,7 @@ bob-seed:
 # stack. The IdP's own startup migration is a no-op because the seed already
 # applied them.
 
-alice-docker: alice-keys
+alice-docker: alice-env alice-keys
 	cp .env.alice .env
 	docker compose -f compose.yaml -f compose.dev.yml \
 		--project-name pinai-alice up -d --wait postgres
@@ -80,7 +117,7 @@ alice-docker: alice-keys
 	docker compose -f compose.yaml -f compose.dev.yml \
 		--project-name pinai-alice up -d --build
 
-bob-docker: bob-keys
+bob-docker: bob-env bob-keys
 	cp .env.bob .env
 	docker compose -f compose.yaml -f compose.dev.yml \
 		--project-name pinai-bob up -d --wait postgres
@@ -93,13 +130,13 @@ bob-docker: bob-keys
 # container reaches its peer IdP via host.docker.internal. Seeding still
 # happens against host-mapped Postgres, same as the Linux variant.
 
-alice-docker-win: alice-keys
+alice-docker-win: alice-env alice-keys
 	cp .env.alice .env
 	docker compose -f compose-win.dev.yml --project-name pinai-alice up -d --wait postgres
 	$(MAKE) alice-seed
 	docker compose -f compose-win.dev.yml --project-name pinai-alice up -d --build
 
-bob-docker-win: bob-keys
+bob-docker-win: bob-env bob-keys
 	cp .env.bob .env
 	docker compose -f compose-win.dev.yml --project-name pinai-bob up -d --wait postgres
 	$(MAKE) bob-seed

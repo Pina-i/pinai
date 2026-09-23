@@ -159,6 +159,80 @@ fn storage_is_disabled_when_any_credential_is_missing() {
     }
 }
 
+// ─── Session secret ──────────────────────────────────────────────────────────
+
+const REAL_SECRET: &str = "4f1c9a7e2b6d8035e1a4c7f9b2d6e8a01c3f5b7d9e2a4c6f8b0d2e4a6c8f0b2d";
+
+#[test]
+fn production_accepts_a_generated_session_secret() {
+    let secret = session_secret(Environment::Production, Some(REAL_SECRET.into())).unwrap();
+    assert_eq!(secret, REAL_SECRET);
+}
+
+#[test]
+fn production_refuses_to_start_without_a_session_secret() {
+    assert!(matches!(
+        session_secret(Environment::Production, None),
+        Err(ConfigError::MissingVar("SESSION_SECRET"))
+    ));
+}
+
+/// `SESSION_SECRET=` left blank would otherwise reach the server's 64-byte
+/// stretch and panic on a remainder by zero.
+#[test]
+fn an_empty_session_secret_counts_as_unset() {
+    assert!(matches!(
+        session_secret(Environment::Production, Some(String::new())),
+        Err(ConfigError::MissingVar("SESSION_SECRET"))
+    ));
+    assert_eq!(
+        session_secret(Environment::Development, Some(String::new())).unwrap(),
+        DEV_SESSION_SECRET
+    );
+}
+
+/// Anyone can read these values in the repository and forge session cookies
+/// with them.
+#[test]
+fn production_refuses_a_published_placeholder() {
+    for placeholder in [
+        DEV_SESSION_SECRET,
+        "change-me-to-a-random-64-char-secret-in-production-000000000000",
+    ] {
+        assert!(
+            matches!(
+                session_secret(Environment::Production, Some(placeholder.into())),
+                Err(ConfigError::InvalidValue("SESSION_SECRET", _))
+            ),
+            "production accepted the placeholder {placeholder:?}"
+        );
+    }
+}
+
+#[test]
+fn production_refuses_a_short_session_secret() {
+    assert!(matches!(
+        session_secret(Environment::Production, Some("x".repeat(31))),
+        Err(ConfigError::InvalidValue("SESSION_SECRET", _))
+    ));
+}
+
+#[test]
+fn development_falls_back_to_the_dev_secret() {
+    assert_eq!(
+        session_secret(Environment::Development, None).unwrap(),
+        DEV_SESSION_SECRET
+    );
+}
+
+#[test]
+fn development_accepts_any_session_secret() {
+    assert_eq!(
+        session_secret(Environment::Development, Some("alice-secret".into())).unwrap(),
+        "alice-secret"
+    );
+}
+
 // ─── Environment reading ─────────────────────────────────────────────────────
 
 /// A `.env` saved with CRLF endings leaves a trailing `\r` on every value a

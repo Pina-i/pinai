@@ -97,7 +97,7 @@ All variables are documented in [`.env.example`](.env.example). Copy it to `.env
 | `JWT_PRIVATE_KEY_PATH` | yes | — | Path to the Ed25519 PKCS#8 PEM private key |
 | `JWT_KEY_ID` | yes | — | Key ID included in JWTs and JWKS, e.g. `key-2025-01` |
 | `PORT` | no | `8080` | TCP port to listen on |
-| `SESSION_SECRET` | no | dev default | ≥ 32-byte secret for signing session cookies — **required in production** |
+| `SESSION_SECRET` | production | dev default | ≥ 32-byte secret for signing session cookies; production refuses to start without one, or on a published placeholder |
 | `FRONTEND_URL` | no | `http://localhost:5173` | Web-client base URL, used for login/register redirects |
 | `CORS_ORIGINS` | no | `http://localhost:5173,http://localhost:3000` | Comma-separated allowed CORS origins |
 | `RUST_LOG` | no | `info` | Log filter (e.g. `debug`, `idp_oidc=trace`) |
