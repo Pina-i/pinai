@@ -408,14 +408,14 @@ idempotent and naturally self-healing through another mechanism:
 
 | Activity | Property | Recovery on delivery failure |
 |---|---|---|
-| `Create{Note}` (DM) | Time-sensitive | A 24h-late delivery is worthless; sender retries manually if needed (ADR-0001) |
+| `Create{Note}` (1:1 DM) | Time-sensitive | Outcome recorded in `direct_messages.federation_status`; a failure is pushed to the sender (`dm_delivery_failed`), whose client sends the message again as a new one — see `identity-provider/specs/03-direct-messages.md § Delivery failure` |
 | `Update{Note}` (edit) | Time-sensitive | Same — recipients see the original until they can refetch |
 | `Like` / `Undo{Like}` (reaction) | Idempotent | Reconciles on next conversation fetch |
 | `Follow` / `Accept` / `Reject` / `Undo{Follow}` | Idempotent, low-frequency | User can re-trigger; relationships are bidirectional |
 | `Update{Person}` (profile) | Idempotent | Self-heals via `remote_actors.fetched_at` TTL re-fetch |
 
 Each activity type owns its own reconciliation story (TTL re-fetch, next
-user interaction, manual retry), so a missed delivery never produces a
+user interaction, sender-driven resend), so a missed delivery never produces a
 permanently inconsistent state. This avoids the failure modes a generic
 queue introduces (silent worker death, queue growth, attempt-counter
 overflow, mis-tuned backoff). If a future activity does require durable

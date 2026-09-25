@@ -683,18 +683,6 @@ async fn handle_remote_dm(
         None,
     );
 
-    let state_clone = state.clone();
-    let inbox = inbox_url.clone();
-    let sender_username = sender.username.clone();
-    tokio::spawn(async move {
-        if let Err(e) =
-            delivery::deliver_activity(&state_clone, &inbox, &activity_value, &sender_username)
-                .await
-        {
-            warn!(%inbox, "failed to deliver remote dm: {e:?}");
-        }
-    });
-
     let local_domain = &state.config.domain;
     let sender_display_name = Some(
         sender
@@ -715,6 +703,15 @@ async fn handle_remote_dm(
         client_id,
     });
     state.hub.send_to_user(&sender_id, event);
+
+    federation_mls::deliver_dm_to_remote(
+        state,
+        &inbox_url,
+        activity_value,
+        &sender.username,
+        sender_id,
+        &msg,
+    );
 
     info!(
         sender = %sender.federated_address(local_domain),

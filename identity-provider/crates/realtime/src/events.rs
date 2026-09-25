@@ -14,6 +14,9 @@ use uuid::Uuid;
 pub enum WsEvent {
     NewDm(DmPayload),
     MessageEdited(EditedDmPayload),
+    /// The sender's IdP could not deliver a DM to the recipient's IdP. Sent to
+    /// the sender only, always after the `NewDm` echo of the same message.
+    DmDeliveryFailed(DmDeliveryFailedPayload),
     FriendRequest(FriendshipPayload),
     FriendAccepted(FriendshipPayload),
     FriendRemoved(FriendshipPayload),
@@ -90,6 +93,12 @@ pub struct EditedDmPayload {
     pub new_mls_ciphertext: String,
     #[serde(with = "time::serde::rfc3339")]
     pub edited_at: OffsetDateTime,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DmDeliveryFailedPayload {
+    pub message_id: Uuid,
+    pub conversation_id: Uuid,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -278,3 +287,6 @@ pub struct WatchConversationPayload {
 pub struct UnwatchConversationPayload {
     pub conversation_id: Uuid,
 }
+
+#[cfg(test)]
+mod tests;

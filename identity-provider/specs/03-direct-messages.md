@@ -100,9 +100,11 @@ Alice types → WS handler resolves Bob's inbox_url
                 ├─ cache hit:  read from remote_actors.inbox_url (no WebFinger needed)
                 └─ cache miss: resolve via WebFinger → upsert into remote_actors (async)
             → persists message (federation_status = 'pending')
+            → hub.send_to_user() echoes WsEvent::NewDm to Alice only (Bob is remote)
             → builds ActivityPub Create{Note} activity
             → delivers to Bob's inbox_url via HTTP Signatures (background task)
-            → hub.send_to_user() echoes WsEvent::NewDm to Alice only (Bob is remote)
+            → records the outcome: federation_status = 'delivered' | 'failed'
+            → on failure, pushes WsEvent::DmDeliveryFailed to Alice
 
 Bob's IdP ← receives HTTP POST to /users/bob/inbox
           → verifies HTTP Signature
@@ -120,7 +122,77 @@ Bob's IdP ← receives HTTP POST to /users/bob/inbox
 > **Note on outbound delivery**: ActivityPub delivery for DMs (and every
 > other activity type) runs in a background `tokio::spawn`, best-effort.
 > No persistent outbox queue — see `identity-provider/specs/01-identity-federation.md § Federation delivery semantics`
-> for the rationale and the per-activity recovery story.
+> for the rationale and the per-activity recovery story. A 1:1 DM's story
+> is below.
+
+### Delivery failure
+
+The sender's IdP answers `POST /api/dm` (or processes `send_dm`) as soon as the
+message is stored, before it contacts the recipient's IdP. Delivery happens
+afterwards, once, and is never retried by the IdP. So a delivery failure cannot
+be an error on the send. Instead the IdP records it and tells the sender, and
+the sender decides whether to send the message again.
+
+- **Outcome on the row.** The delivery task (`federation::mls::deliver_dm_to_remote`,
+  shared by both send paths) sets `direct_messages.federation_status` to
+  `'delivered'` or `'failed'`. A peer that is unreachable, times out, or answers
+  non-2xx counts as `'failed'`. Local DMs and group messages keep `'pending'`:
+  a local DM is never delivered over federation, and a group message goes to
+  several inboxes, which one status cannot describe.
+- **`dm_delivery_failed`.** On failure the IdP pushes this event to the
+  sender's live connections:
+
+  ```json
+  { "type": "dm_delivery_failed",
+    "data": { "message_id": "uuid", "conversation_id": "uuid" } }
+  ```
+
+- **Ordering.** The sender's `new_dm` echo is sent *before* delivery starts,
+  and both travel through the same per-connection channel. So the echo, which
+  carries the sender's `client_id` and turns the optimistic row into the
+  server row, always arrives first, and `dm_delivery_failed` always finds the
+  row it names.
+- **Retry is a new message.** The failed row stays in the sender's history as
+  the record of the attempt. Sending it again re-encrypts the plaintext at the
+  current MLS ratchet position and posts it as a new message, so the retry is
+  always decryptable for the recipient. The original row is never re-delivered.
+- **Attachments move.** An attachment linked to one of the sender's own
+  `'failed'` messages may be named again in `attachment_ids`. The new message
+  takes the rows over (`repos::attachments::link_to_message`) with the same
+  ids, so the `AttachmentBlobKey.id`s in the new encrypted body stay valid and
+  nothing is uploaded again. The recipient's IdP has never seen those ids,
+  because the failed activity never reached it.
+
+```mermaid
+sequenceDiagram
+    participant C as Alice's client
+    participant A as Alice's IdP
+    participant B as Bob's IdP (down)
+
+    C->>A: POST /api/dm (client_id)
+    A->>A: persist row (federation_status = pending)
+    A-->>C: WS new_dm (client_id) — optimistic row becomes the server row
+    A-->>C: 201 Created
+    A->>B: signed Create{Note}
+    B--xA: connection refused
+    A->>A: federation_status = failed
+    A-->>C: WS dm_delivery_failed (message_id)
+    Note over C: row shows ⚠ "not delivered" + Retry
+    C->>A: Retry → POST /api/dm (new ciphertext, same attachment_ids)
+    A->>B: signed Create{Note}
+    B-->>A: 202 Accepted
+    A->>A: federation_status = delivered
+```
+
+Scenarios:
+
+| Scenario | What the sender sees |
+|---|---|
+| Recipient's IdP is down while the sender is online | The message turns undelivered within the delivery timeout; Retry sends it as a new message at the bottom of the conversation, and the original keeps its warning without a Retry button |
+| The sender's tab closed before the failure landed | Next time the conversation loads, history carries `federation_status: "failed"` and the client applies it over its cached row |
+| The failed message had attachments | Retry reuses the same attachment ids; the server moves them to the new message |
+| The failure reaches another of the sender's devices, which never held the plaintext | The row turns undelivered there too, but its Retry is disabled — only a device holding the plaintext can re-encrypt it |
+| The recipient's IdP persisted the message but answered non-2xx (or too late) | The row is marked failed although the recipient has it; a retry then gives the recipient a duplicate, whose attachment rows stay with the first copy (same ids, so the recipient's inbox skips them). The sender's IdP cannot tell this apart from a lost delivery |
 
 ### Pagination — infinite scroll upward
 
@@ -280,14 +352,16 @@ All DM API responses include resolved display names to avoid requiring clients t
 |---|---|---|
 | `GET /api/dm` | `conversation_id`, `kind`, `name`, `members[]` (`actorUri` + `displayName` + `avatarUrl`, excluding caller), `last_message_sender`, `last_message_at`, `unread_count` | Single query — see above. Client derives DM title from `members[0].displayName`, avatar from `members[0].avatarUrl`. Plaintext preview is gone with E2EE — client computes one from the decrypted MLS stream |
 | `GET /api/dm/:conversation_id` | messages with `sender_display_name`, `mls_ciphertext` (base64), `attachments[]` per row | Display name resolved from `users` or `remote_actors`; ciphertext is opaque; attachments resolved from `message_attachments` |
-| `POST /api/dm` | Bearer; body `{ recipient_address, mls_ciphertext: <base64>, reply_to_id?, attachment_ids[] }` | `mls_ciphertext` is mandatory; the server rejects 4xx without it |
+| `POST /api/dm` | Bearer; body `{ recipient_address, mls_ciphertext: <base64>, reply_to_id?, attachment_ids[], conversation_id?, client_id? }` | `mls_ciphertext` is mandatory; the server rejects 4xx without it. `client_id` is echoed on the sender's own `new_dm` (see below) |
 | WS `new_dm` event | `conversation_id`, `kind`, `sender_actor_uri`, `sender_display_name`, `mls_ciphertext` (base64), `attachments[]` | Client uses `conversation_id` to route, then decrypts `mls_ciphertext` to recover the application message. WS `send_dm` shortcut path doesn't carry `attachment_ids` — anything with attachments must use REST `POST /api/dm` |
 
 ### Optimistic-send reconciliation (`client_id`)
 
-When the client sends a DM over WebSocket (`send_dm`) it MAY include an opaque `client_id` correlation token. The server echoes that token back **only on the sender's own `new_dm`** event (never on the recipient's), so the client can swap its optimistic placeholder for the persisted message rather than appending a duplicate. Recipients never see another user's `client_id`.
+When the client sends a DM — over WebSocket (`send_dm`) or REST (`POST /api/dm`) — it MAY include an opaque `client_id` correlation token. The server echoes that token back **only on the sender's own `new_dm`** event (never on the recipient's), so the client can swap its optimistic placeholder for the persisted message rather than appending a duplicate. Recipients never see another user's `client_id`.
 
-> **REST gap (Phase 6 follow-up)**: `POST /api/dm` doesn't accept `client_id` today, so the REST echo arrives with `client_id: None`. The client treats any `isOwn` echo without a `client_id` as a no-op (the REST response already reconciled the optimistic row to `"sent"`). For the "REST succeeded but the response was lost / network blip" edge, an `isOwn` echo can still heal a `"failed"` row forward to `"sent"` via `message_id`. True symmetry with the WS path needs `client_id` propagated through `POST /api/dm`.
+On the REST path the echo and the HTTP response race; whichever lands first reconciles the row and the other is a no-op. Reconciling from the echo is what lets a `dm_delivery_failed` find the row (see **Delivery failure**), so the echo carries everything the optimistic row held, attachment keys included.
+
+Own echoes without a `client_id` — group sends (`POST /api/groups/:id/messages` doesn't take one) and broker replays — are a no-op, except that they heal a `"sending"` or `"failed"` row forward to `"sent"` via `message_id`: the "REST succeeded but the response was lost" edge.
 
 ### Send status indicator (client-side)
 
@@ -297,9 +371,15 @@ Clients render a small status icon next to each own-message timestamp, driven by
 |---|---|---|
 | `"sending"` | Optimistic push, network in flight | Clock icon |
 | `"sent"` | Server returned 201 / WS echo with matching `client_id` arrived | Check icon, auto-hides ~3 s after the transition |
-| `"failed"` | Caught error in encrypt / `POST /api/dm` / WS-send | Warning icon + retry icon-button |
+| `"failed"` | Caught error in encrypt / `POST /api/dm` / WS-send — the IdP never accepted the message | Warning icon + retry icon-button |
+| `"undelivered"` | `dm_delivery_failed`, or history reporting `federation_status: "failed"` — the IdP stored the message but couldn't reach the recipient's IdP | Warning icon + retry icon-button, hidden once the message was sent again |
 
-The status field is purely client-side state; nothing about it touches the server schema or wire format. Retry is session-scoped — the unsent payload (plaintext + attachment ids + reply target) lives in a `useRef` map on the conversation viewmodel, not in persisted storage. After a reload, `"failed"` rows still render their warning but the retry button is disabled (no payload to resend with).
+The status lives on the client's persisted `Message`; the server's side of it is `federation_status`, which only ever moves a row to `"undelivered"` (`applyFederationStatus` in `@pinai/domain/models/dm`). The two failure states retry differently:
+
+- **`"failed"`** retries in place: the same optimistic row is sent again.
+- **`"undelivered"`** retries as a new message, pushed at the bottom of the conversation; the original stays with its warning and is marked `resent`, which hides its retry button so the content can't be sent twice by accident.
+
+Both rebuild the send from the cached message when the in-memory send intent is gone (after a reload, or once the IdP accepted the message): plaintext, reply target, and attachment keys, whose ids are the attachment ids. The retry button is disabled only on a device that never held the plaintext — one that learned of the message from another device's echo.
 
 ---
 
@@ -483,13 +563,18 @@ Lifecycle:
 - `message_id IS NOT NULL` ⇒ linked; lifetime tied to its message. When the
   message is hard-deleted (or future soft-deleted), the storage object is
   deleted and the row removed.
+- Linked to one of the uploader's messages whose `federation_status` is
+  `'failed'` ⇒ still claimable by that uploader: a `POST /api/dm` naming it
+  moves it to the new message (see **Delivery failure**). The uploader keeps
+  access to it from the failed row, since `GET /api/attachments/{id}` always
+  admits the uploader.
 
 ### API
 
 | Endpoint | Auth | Purpose |
 |---|---|---|
 | `POST /api/attachments` | Bearer | Upload up to 5 multipart files; returns orphan IDs. |
-| `POST /api/dm` | Bearer | New `attachment_ids: [Uuid]` field. Empty `content` is allowed iff `attachment_ids` is non-empty. |
+| `POST /api/dm` | Bearer | New `attachment_ids: [Uuid]` field — each an orphan, or linked to one of the caller's `'failed'` messages. Empty `content` is allowed iff `attachment_ids` is non-empty. |
 | `GET /api/dm/{conv_id}` | Bearer | Each message gains `attachments: [{ id, mime_type, byte_size, original_filename }]`. |
 | `GET /api/attachments/{id}` | Bearer | Returns `{ url, expires_at, mime_type, byte_size, original_filename }`. The `url` is a token-protected blob URL on this IdP. |
 | `GET /api/attachments/{id}/blob?token=...` | HMAC token | The actual fetch. Streams bytes through the IdP — local from the private object store, remote via an HTTP-Sig fetch to the origin. |

@@ -9,3 +9,6 @@ time    = { workspace = true }
 tokio   = { workspace = true }
 uuid    = { workspace = true }
 dashmap = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

@@ -68,11 +68,13 @@ pub async fn insert_remote(
     .await
 }
 
-/// Atomically link a list of orphan attachments to a freshly-created message.
+/// Atomically link a list of attachments to a freshly-created message.
 ///
-/// Updates only rows that (a) match an ID in `attachment_ids`, (b) are still
-/// orphan (`message_id IS NULL`), and (c) are owned by `uploader_actor_uri`.
-/// The third condition prevents a sender from claiming someone else's orphan.
+/// Updates only rows that (a) match an ID in `attachment_ids`, (b) are
+/// linkable — orphan, or linked to one of the uploader's messages whose
+/// federated delivery failed, which is how sending that message again carries
+/// its attachments over — and (c) are owned by `uploader_actor_uri`. The third
+/// condition prevents a sender from claiming someone else's attachment.
 ///
 /// Returns the number of rows actually linked. Callers should compare against
 /// `attachment_ids.len()` and treat a mismatch as an integrity error.
@@ -87,8 +89,14 @@ pub async fn link_to_message(
         UPDATE message_attachments
         SET message_id = $1
         WHERE id = ANY($2)
-          AND message_id IS NULL
           AND uploaded_by_actor_uri = $3
+          AND (
+              message_id IS NULL
+              OR message_id IN (
+                  SELECT id FROM direct_messages
+                  WHERE sender_actor_uri = $3 AND federation_status = 'failed'
+              )
+          )
         "#,
     )
     .bind(message_id)
@@ -106,11 +114,12 @@ pub async fn find_by_id(pool: &PgPool, id: Uuid) -> Result<Option<Attachment>, s
         .await
 }
 
-/// Fetch the rows matching `(ids, owner)` that are still orphan. Used by
-/// `send_message` as a precheck — the caller compares the returned length
-/// against the input length to detect missing/owned-by-someone-else/already-linked
-/// attachments before creating a message it'd then have to clean up.
-pub async fn find_orphans_owned_by(
+/// Fetch the rows matching `(ids, owner)` that [`link_to_message`] would
+/// link. Used by `send_message` as a precheck — the caller compares the
+/// returned length against the input length to detect missing, foreign or
+/// already-delivered attachments before creating a message it'd then have to
+/// clean up.
+pub async fn find_linkable_owned_by(
     pool: &PgPool,
     ids: &[Uuid],
     owner_actor_uri: &str,
@@ -119,8 +128,14 @@ pub async fn find_orphans_owned_by(
         r#"
         SELECT * FROM message_attachments
         WHERE id = ANY($1)
-          AND message_id IS NULL
           AND uploaded_by_actor_uri = $2
+          AND (
+              message_id IS NULL
+              OR message_id IN (
+                  SELECT id FROM direct_messages
+                  WHERE sender_actor_uri = $2 AND federation_status = 'failed'
+              )
+          )
         "#,
     )
     .bind(ids)

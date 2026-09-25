@@ -150,7 +150,7 @@ db, broker, storage, config ──► (leaves)
 | `POST /users/:handle/inbox` | ActivityPub inbox (Follow/Accept/Create{Note,MLS}/Update{Note,MLS}/MLS commits+welcomes) |
 | `GET /users/:handle` | ActivityPub actor profile (JSON-LD) |
 | `GET /ws?token=<jwt>` | WebSocket upgrade (DMs + presence + events) |
-| `POST /api/dm` | Send a DM. Body carries `mls_ciphertext` (base64, mandatory after Phase 3); creates conversation if first message; supports `attachment_ids` and `reply_to_id` |
+| `POST /api/dm` | Send a DM. Body carries `mls_ciphertext` (base64, mandatory after Phase 3); creates conversation if first message; supports `attachment_ids` (orphans, or ids linked to the caller's own `federation_status = 'failed'` message, which move over), `reply_to_id` and `client_id` (echoed on the sender's `new_dm`). A remote DM's delivery outcome lands in `federation_status`; a failure is pushed to the sender as `dm_delivery_failed` |
 | `GET /api/dm` | List conversations (`kind`, `name`, `members[]` with `avatarUrl`, `unread_count`, `last_message_at`, `last_message_sender`). No plaintext preview — clients compute it from the decrypted MLS stream |
 | `GET /api/dm/:conversation_id` | Conversation history (keyset cursor) — every row carries `mls_ciphertext`; marks as read on initial load |
 | `PATCH /api/dm/:message_id/edit` | Replace the row's `mls_ciphertext` and stamp `edited_at`; sender-only |
@@ -229,7 +229,7 @@ Don't mention any "phase" development or what is currently being worked on. The 
 - **Streams** → durable events (DMs, profile updates, friend requests). Must survive disconnect.
 
 ### Federation
-- **Outbound AP delivery** is best-effort, inline `tokio::spawn` per remote inbox — no persistent outbox queue. Each activity owns its own reconciliation story (TTL re-fetch, idempotent retry, time-sensitive drop). See `identity-provider/specs/01-identity-federation.md § Federation delivery semantics`.
+- **Outbound AP delivery** is best-effort, inline `tokio::spawn` per remote inbox — no persistent outbox queue. Each activity owns its own reconciliation story (TTL re-fetch, idempotent retry, a failed 1:1 DM reported to its sender). See `identity-provider/specs/01-identity-federation.md § Federation delivery semantics`.
 - **`remote_actors.inbox_url`** is cached on first WebFinger resolution. `remote_actors::upsert()` uses `COALESCE(EXCLUDED.inbox_url, remote_actors.inbox_url)` — never overwrite a cached value with `None`.
 - **HTTP Signatures** are mandatory on all incoming ActivityPub activities and on inter-IdP presence SSE auth. Reuses the AP RSA key pair — no separate key material.
 

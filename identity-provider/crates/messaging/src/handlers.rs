@@ -45,9 +45,10 @@ pub struct SendMessageRequest {
     /// Optional: reply to an existing message. The plaintext preview lives
     /// inside the encrypted body; only the parent ID is server-visible.
     pub reply_to_id: Option<Uuid>,
-    /// Optional: orphan attachment IDs returned by `POST /api/attachments`.
-    /// Caller must own each one (matching `uploaded_by_actor_uri`) and they
-    /// must still be unlinked.
+    /// Optional: attachment IDs returned by `POST /api/attachments`. Caller
+    /// must own each one (matching `uploaded_by_actor_uri`), and each must be
+    /// unlinked or linked to one of the caller's messages that failed
+    /// federated delivery — sending such a message again moves them over.
     #[serde(default)]
     pub attachment_ids: Vec<Uuid>,
     /// Phase 5b: client-supplied UUID for the conversation. Required
@@ -56,6 +57,10 @@ pub struct SendMessageRequest {
     /// already used. Omitted on subsequent sends — the server reuses
     /// the existing conversation it finds via `find_dm_between`.
     pub conversation_id: Option<Uuid>,
+    /// Optional sender-side correlation token, echoed on the sender's own
+    /// `new_dm` so the client reconciles its optimistic message from the echo.
+    #[serde(default)]
+    pub client_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -138,7 +143,7 @@ pub async fn send_message(
     // Pre-validate attachments BEFORE creating the message so a 400 here
     // doesn't leave a content-less message in the DB.
     if !body.attachment_ids.is_empty() {
-        let owned = attachments_repo::find_orphans_owned_by(
+        let owned = attachments_repo::find_linkable_owned_by(
             &state.pool,
             &body.attachment_ids,
             sender_actor_uri,
@@ -147,7 +152,7 @@ pub async fn send_message(
         .map_err(|e| OidcError::server_error(e.to_string()))?;
         if owned.len() != body.attachment_ids.len() {
             return Err(OidcError::invalid_request(
-                "one or more attachment IDs are missing, already linked, or not owned by sender",
+                "one or more attachment IDs are missing, linked to a delivered message, or not owned by sender",
             ));
         }
     }
@@ -256,9 +261,22 @@ pub async fn send_message(
             link_message_attachments(&state, &body.attachment_ids, msg.id, sender_actor_uri)
                 .await?;
 
-        // Build the MLS-flavored Create{Note} envelope and deliver in the
-        // background. A missed delivery self-heals via the recipient's
-        // catch-up pull on reconnect, so no durable outbox is needed.
+        // Echo to sender only — recipient's IdP will push them their own copy
+        // when the inbox handler persists it on the other side.
+        let event = WsEvent::NewDm(DmPayload {
+            message_id: msg.id,
+            conversation_id,
+            kind: "dm".to_string(),
+            sender_address: sender.federated_address(&local_domain),
+            sender_display_name: sender_display_name.clone(),
+            mls_ciphertext: B64.encode(&msg.mls_ciphertext),
+            created_at: msg.created_at,
+            reply_to_id: body.reply_to_id,
+            attachments: attachments_metadata.iter().map(Into::into).collect(),
+            client_id: body.client_id.clone(),
+        });
+        state.hub.send_to_user(&sender_id, event);
+
         let mut activity = federation_mls::build_application_create_activity(
             &activity_uri,
             &activity_uri,
@@ -274,37 +292,14 @@ pub async fn send_message(
             &state.config.issuer(),
             &attachments_metadata,
         );
-        let state_clone = state.clone();
-        let sender_username = sender.username.clone();
-        let inbox_for_task = inbox_url.clone();
-        tokio::spawn(async move {
-            if let Err(e) = delivery::deliver_activity(
-                &state_clone,
-                &inbox_for_task,
-                &activity,
-                &sender_username,
-            )
-            .await
-            {
-                tracing::warn!(%inbox_for_task, "failed to deliver remote dm: {e:?}");
-            }
-        });
-
-        // Echo to sender only — recipient's IdP will push them their own copy
-        // when the inbox handler persists it on the other side.
-        let event = WsEvent::NewDm(DmPayload {
-            message_id: msg.id,
-            conversation_id,
-            kind: "dm".to_string(),
-            sender_address: sender.federated_address(&local_domain),
-            sender_display_name: sender_display_name.clone(),
-            mls_ciphertext: B64.encode(&msg.mls_ciphertext),
-            created_at: msg.created_at,
-            reply_to_id: body.reply_to_id,
-            attachments: attachments_metadata.iter().map(Into::into).collect(),
-            client_id: None,
-        });
-        state.hub.send_to_user(&sender_id, event);
+        federation_mls::deliver_dm_to_remote(
+            &state,
+            &inbox_url,
+            activity,
+            &sender.username,
+            sender_id,
+            &msg,
+        );
 
         tracing::info!(
             sender = %sender.federated_address(&local_domain),
@@ -379,7 +374,7 @@ pub async fn send_message(
             link_message_attachments(&state, &body.attachment_ids, msg.id, sender_actor_uri)
                 .await?;
 
-        let event = WsEvent::NewDm(DmPayload {
+        let payload = DmPayload {
             message_id: msg.id,
             conversation_id,
             kind: "dm".to_string(),
@@ -390,7 +385,8 @@ pub async fn send_message(
             reply_to_id: body.reply_to_id,
             attachments: attachments_metadata.iter().map(Into::into).collect(),
             client_id: None,
-        });
+        };
+        let event = WsEvent::NewDm(payload.clone());
 
         if let Ok(json) = serde_json::to_string(&event) {
             let broker = state.broker.clone();
@@ -406,8 +402,15 @@ pub async fn send_message(
             });
         }
 
-        state.hub.send_to_user(&recipient.id, event.clone());
-        state.hub.send_to_user(&sender_id, event);
+        state.hub.send_to_user(&recipient.id, event);
+        // Recipient never sees the sender's correlation token.
+        state.hub.send_to_user(
+            &sender_id,
+            WsEvent::NewDm(DmPayload {
+                client_id: body.client_id.clone(),
+                ..payload
+            }),
+        );
 
         tracing::info!(
             sender = %sender.federated_address(&local_domain),
@@ -434,8 +437,8 @@ pub async fn send_message(
     }
 }
 
-/// Link the given orphan attachments to a message and return metadata for the
-/// response. Pre-validation of ownership/orphan status has already happened at
+/// Link the given attachments to a message and return metadata for the
+/// response. Pre-validation of ownership/linkability has already happened at
 /// the top of `send_message`; this is the side effect plus a fresh read for
 /// the response shape.
 async fn link_message_attachments(

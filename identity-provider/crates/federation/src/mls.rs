@@ -17,13 +17,14 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-use idp_db::models::ConversationMember;
+use idp_db::models::{ConversationMember, DirectMessage};
 use idp_db::repos::{
     attachments as attachments_repo, conversations, messages, mls_commits, mls_welcomes,
     remote_actors, users,
 };
 use idp_realtime::{
-    DmPayload, GroupCreatedPayload, MlsCommitPayload, MlsWelcomeReadyPayload, WsAttachment, WsEvent,
+    DmDeliveryFailedPayload, DmPayload, GroupCreatedPayload, MlsCommitPayload,
+    MlsWelcomeReadyPayload, WsAttachment, WsEvent,
 };
 use idp_state::{AppState, OidcError};
 
@@ -377,6 +378,56 @@ pub fn deliver_welcome_to_remote(
                 %recipient_inbox_url,
                 error = ?e,
                 "MLS welcome delivery failed (recipient must retry pairing)"
+            );
+        }
+    });
+}
+
+/// Deliver a 1:1 application message and record the outcome in its
+/// `federation_status`. The send has already returned 201 and this IdP never
+/// retries, so a failure is pushed to the sender, whose client can send the
+/// message again.
+///
+/// Call it after the sender's `NewDm` echo: the failure event names the row
+/// by its server id, which the client only learns from that echo.
+pub fn deliver_dm_to_remote(
+    state: &AppState,
+    inbox_url: &str,
+    activity: Value,
+    sender_username: &str,
+    sender_id: Uuid,
+    message: &DirectMessage,
+) {
+    let state = state.clone();
+    let inbox_url = inbox_url.to_string();
+    let sender_username = sender_username.to_string();
+    let message_id = message.id;
+    let conversation_id = message.conversation_id;
+    let activity_uri = message.activity_uri.clone();
+
+    tokio::spawn(async move {
+        let status =
+            match delivery::deliver_activity(&state, &inbox_url, &activity, &sender_username).await
+            {
+                Ok(()) => "delivered",
+                Err(e) => {
+                    tracing::warn!(%inbox_url, error = ?e, "DM delivery failed");
+                    "failed"
+                }
+            };
+
+        if let Err(e) = messages::update_federation_status(&state.pool, &activity_uri, status).await
+        {
+            tracing::warn!(%message_id, "failed to record DM delivery status: {e}");
+        }
+
+        if status == "failed" {
+            state.hub.send_to_user(
+                &sender_id,
+                WsEvent::DmDeliveryFailed(DmDeliveryFailedPayload {
+                    message_id,
+                    conversation_id,
+                }),
             );
         }
     });
