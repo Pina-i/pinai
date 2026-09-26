@@ -132,6 +132,8 @@ async fn friend_request_local(
         .as_deref()
         .ok_or_else(|| OidcError::server_error("Caller has no actor_uri"))?;
 
+    ensure_not_friends(state, caller_id, target_actor_uri).await?;
+
     // Both rows persist as `pending`. The caller's `outgoing` row is the
     // placeholder for "I asked them"; the target's `incoming` row is what
     // `get_pending_requests` and `accept_friendship` operate on.
@@ -211,6 +213,8 @@ async fn friend_request_remote(
         .actor_uri
         .as_deref()
         .ok_or_else(|| OidcError::server_error("Caller has no actor_uri"))?;
+
+    ensure_not_friends(state, caller_id, &remote.actor_url).await?;
 
     let activity_id = format!("{}/friendships/{}", caller_actor_uri, Uuid::new_v4(),);
 
@@ -621,6 +625,24 @@ pub async fn get_friends(
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+/// Refuse a friend request to someone the caller is already friends with.
+/// The repo would keep the friendship intact anyway; this spares the target
+/// a request they cannot act on.
+async fn ensure_not_friends(
+    state: &AppState,
+    caller_id: Uuid,
+    friend_actor_uri: &str,
+) -> Result<(), OidcError> {
+    let existing = friendships::find_by_owner_and_uri(&state.pool, caller_id, friend_actor_uri)
+        .await
+        .map_err(|e| OidcError::server_error(e.to_string()))?;
+
+    if existing.is_some_and(|f| f.status == "accepted") {
+        return Err(OidcError::invalid_request("Already friends"));
+    }
+    Ok(())
+}
 
 /// Resolve an actor_uri to a (username, display_name) pair.
 /// Checks local users first, then the remote_actors cache.

@@ -128,6 +128,17 @@ async fn handle_follow(
         .as_deref()
         .ok_or_else(|| OidcError::server_error("Recipient has no actor_uri"))?;
 
+    // A Follow for an existing friendship changes nothing: the recipient
+    // already consented, and reopening it as a request would let a peer
+    // quietly take the friendship back to pending.
+    let existing = friendships::find_by_owner_and_uri(&state.pool, recipient.id, actor_url)
+        .await
+        .map_err(|e| OidcError::server_error(e.to_string()))?;
+    if existing.is_some_and(|f| f.status == "accepted") {
+        tracing::debug!(actor = %actor_url, recipient = %recipient.username, "Follow for an existing friendship ignored");
+        return Ok(());
+    }
+
     // Check if this is a local actor.
     let base = state.config.issuer();
     if let Some(follower) = local_actor(actor_url, &base, &state.pool).await {

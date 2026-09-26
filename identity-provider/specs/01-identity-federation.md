@@ -85,8 +85,13 @@ CREATE TABLE friendships (
 > it: `GET /api/friends/incoming` lists incoming pending rows only, `POST /api/friends/:id/accept`
 > and `DELETE /api/friends/:id/reject` refuse any other row, and an inbound `Accept` or `Reject`
 > only applies to an `outgoing` row. Without it a pending row reads the same to both parties, and
-> the requester could accept their own request. A repeated request takes over both rows, so the
-> latest request decides who answers.
+> the requester could accept their own request. A repeated request takes over both pending rows,
+> so the latest request decides who answers.
+>
+> A request never reopens an accepted friendship. `POST /api/friends/request` to an existing
+> friend is refused (`Already friends`), an inbound `Follow` for one is ignored, and
+> `friendships::create_friendship` returns an accepted row untouched — otherwise a peer could
+> quietly take a friendship back to `pending`. Ending a friendship goes through unfriend only.
 
 > **Federated address format**
 >

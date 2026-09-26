@@ -6,8 +6,9 @@ use crate::models::{FriendListEntry, Friendship};
 /// Create a friendship row (status defaults to 'pending').
 ///
 /// `direction` is `"outgoing"` when the owner sent the request, `"incoming"`
-/// when they received it. A repeated request takes over the row, so the
-/// latest one decides who may accept.
+/// when they received it. A repeated request takes over a pending row, so
+/// the latest one decides who may accept. An accepted row is returned
+/// untouched: a request never turns an existing friendship back into one.
 pub async fn create_friendship(
     pool: &PgPool,
     owner_user_id: Uuid,
@@ -15,12 +16,13 @@ pub async fn create_friendship(
     friend_avatar_url: Option<&str>,
     direction: &str,
 ) -> Result<Friendship, sqlx::Error> {
-    sqlx::query_as::<_, Friendship>(
+    let upserted = sqlx::query_as::<_, Friendship>(
         r#"
         INSERT INTO friendships (owner_user_id, friend_actor_uri, friend_avatar_url, direction)
         VALUES ($1, $2, $3, $4)
         ON CONFLICT (owner_user_id, friend_actor_uri)
         DO UPDATE SET status = 'pending', direction = EXCLUDED.direction, updated_at = now()
+        WHERE friendships.status = 'pending'
         RETURNING *
         "#,
     )
@@ -28,8 +30,16 @@ pub async fn create_friendship(
     .bind(friend_actor_uri)
     .bind(friend_avatar_url)
     .bind(direction)
-    .fetch_one(pool)
-    .await
+    .fetch_optional(pool)
+    .await?;
+
+    match upserted {
+        Some(row) => Ok(row),
+        // The conflict hit an accepted row, which the WHERE left alone.
+        None => find_by_owner_and_uri(pool, owner_user_id, friend_actor_uri)
+            .await?
+            .ok_or(sqlx::Error::RowNotFound),
+    }
 }
 
 /// Update a friendship's status ('pending' → 'accepted').
