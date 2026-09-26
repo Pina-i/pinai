@@ -147,7 +147,14 @@ db, broker, storage, config ──► (leaves)
 | `POST /api/totp/enroll/verify` | Bearer auth. Verify first code, commit secret, return 10 one-time recovery codes |
 | `POST /api/totp/disable` | Bearer auth + current TOTP code. Clears secret + recovery codes |
 | `POST /api/totp/recovery-codes/regenerate` | Bearer auth + current TOTP code. Replaces the user's 10 recovery codes |
-| `POST /users/:handle/inbox` | ActivityPub inbox (Follow/Accept/Create{Note,MLS}/Update{Note,MLS}/MLS commits+welcomes) |
+| `GET /api/users/search?q=` | Search local users by username (Bearer) |
+| `POST /api/friends/request` | Send a friend request. Body: `{ address }` — local, or `Follow` to a remote IdP. Both sides start `pending` |
+| `GET /api/friends/incoming` | Pending friend requests |
+| `POST /api/friends/:id/accept` | Accept a request; mints the DM conversation and sends `friend_accepted` (local) or `Accept{Follow}` with `conversationId` (remote) |
+| `DELETE /api/friends/:id/reject` | Decline a pending request, silently. Clears the requester's side: their row (local) or `Reject{Follow}` (remote) |
+| `DELETE /api/friends/:actor_uri` | Unfriend (`actor_uri` percent-encoded; 404 when not a friend). Deletes both sides — the friend's row plus a refresh-only `friend_removed` (local) or `Undo{Follow}` (remote). The DM conversation is kept |
+| `GET /api/friends` | Accepted friends, local and remote |
+| `POST /users/:handle/inbox` | ActivityPub inbox (Follow/Accept/Reject/Undo{Follow}/Create{Note,MLS}/Update{Note,MLS}/MLS commits+welcomes) |
 | `GET /users/:handle` | ActivityPub actor profile (JSON-LD) |
 | `GET /ws?token=<jwt>` | WebSocket upgrade (DMs + presence + events) |
 | `POST /api/dm` | Send a DM. Body carries `mls_ciphertext` (base64, mandatory after Phase 3); creates conversation if first message; supports `attachment_ids` (orphans, or ids linked to the caller's own `federation_status = 'failed'` message, which move over), `reply_to_id` and `client_id` (echoed on the sender's `new_dm`). A remote DM's delivery outcome lands in `federation_status`; a failure is pushed to the sender as `dm_delivery_failed` |

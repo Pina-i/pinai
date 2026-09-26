@@ -114,10 +114,57 @@ WHERE f.owner_user_id = $1     -- pass the caller's local user id
 
 When a friendship transitions to `accepted` (via `POST /api/friends/:id/accept` for both same-IdP and cross-IdP recipients, or `handle_accept` when a remote peer's IdP accepts a request our user sent), the accepter's IdP creates the DM conversation in the same logical transaction. Same-IdP and cross-IdP requests share one model: both rows land in `pending` at request time, and the recipient must explicitly accept — there is no auto-accept path. The new id flows out two ways:
 
-- **Locally**: the WS `friend_accepted` payload carries it on `FriendshipPayload.conversation_id` (`Option<Uuid>`, absent on `friend_request`/`friend_removed`). Web clients invalidate the `dm-conversations` query on this event so `localDmConvos` populates with the new row immediately.
+- **Locally**: the WS `friend_accepted` payload carries it on `FriendshipPayload.conversation_id` (`Option<Uuid>`, absent on `friend_request`/`friend_removed` — the conversation outlives an unfriend). Web clients invalidate the `dm-conversations` query on this event so `localDmConvos` populates with the new row immediately.
 - **Cross-IdP**: the outbound AP `Accept{Follow}` activity carries it in a non-standard `conversationId` field on the activity body (a sibling of `id`/`type`/`actor`/`object`). The peer IdP's `handle_accept` reads it and calls `conversations::get_or_create_dm_with_id` so both sides persist the row under the same UUID. A pre-refactor peer omits the field; the receiver falls back to `get_or_create_dm`, ending up with a divergent id — exactly matching the pre-refactor state. This is a safe degradation.
 
 The migration `20260512000001_backfill_friendship_conversations.sql` retroactively creates a DM for every accepted friendship that doesn't yet have one (deduplicated by ordering the actor pair lexicographically so the two friendship rows don't each get their own conversation).
+
+### Declining a request and ending a friendship
+
+Both are silent for the other person: neither raises a notification. A declined request
+simply stops existing, and an ended friendship drops out of the friends list. Neither
+touches the DM conversation — its row, members and history stay, and re-friending the
+same person reuses it (`get_or_create_dm` finds the pair's existing row).
+
+| Action | Endpoint | Caller's row | Other side, same IdP | Other side, remote IdP |
+|---|---|---|---|---|
+| Decline | `DELETE /api/friends/:id/reject` (pending rows only) | Deleted | Requester's pending row deleted, no event | `Reject{Follow}` to the requester's inbox |
+| Unfriend | `DELETE /api/friends/:actor_uri` (percent-encoded; 404 when no row) | Deleted | Friend's row deleted; `friend_removed` WS event | `Undo{Follow}` to the friend's inbox |
+
+`DELETE /api/friends/:actor_uri` also withdraws a pending request the caller sent, through
+the same paths.
+
+The `friend_removed` event carries the friend's own `friendship_id` and exists so their
+clients refresh the friends and DM lists; clients do not surface it as a notification.
+
+```mermaid
+sequenceDiagram
+    participant A as alice's client
+    participant IA as IdP alice.com
+    participant IB as IdP bob.com
+    participant B as bob's clients
+
+    A->>IA: DELETE /api/friends/https%3A%2F%2Fidp.bob.com%2Fusers%2Fbob
+    IA->>IA: delete alice → bob row
+    IA->>IB: Undo{Follow} (HTTP-signed, to bob's inbox)
+    IB->>IB: delete bob → alice row
+    IB-->>B: WS friend_removed (refresh only)
+    IA->>IA: stop polling bob's presence if no local user is still his friend
+    IA-->>A: 204
+```
+
+**Inbound `Accept` and `Reject`** act on exactly one row: the one owned by the inbox the
+activity was delivered to, whose friend is the activity's `actor`. The embedded Follow is
+not trusted to name the local user, so a peer cannot accept or drop anyone else's request.
+`Reject` only deletes a row that is still `pending`.
+
+**Delivery** of `Reject` and `Undo{Follow}` is best-effort: the local change is committed
+first and the request succeeds even if the peer is unreachable. A peer that missed the
+activity keeps its row until either side touches the relationship again — its user
+unfriending sends an `Undo{Follow}` back, which is a no-op here.
+
+**Remote presence polling** is registered per IdP, not per user. It is only released when
+no local user still has the remote actor as an accepted friend.
 
 ---
 
@@ -411,7 +458,8 @@ idempotent and naturally self-healing through another mechanism:
 | `Create{Note}` (1:1 DM) | Time-sensitive | Outcome recorded in `direct_messages.federation_status`; a failure is pushed to the sender (`dm_delivery_failed`), whose client sends the message again as a new one — see `identity-provider/specs/03-direct-messages.md § Delivery failure` |
 | `Update{Note}` (edit) | Time-sensitive | Same — recipients see the original until they can refetch |
 | `Like` / `Undo{Like}` (reaction) | Idempotent | Reconciles on next conversation fetch |
-| `Follow` / `Accept` / `Reject` / `Undo{Follow}` | Idempotent, low-frequency | User can re-trigger; relationships are bidirectional |
+| `Follow` / `Accept` | Idempotent, low-frequency | User can re-trigger; relationships are bidirectional |
+| `Reject` / `Undo{Follow}` | Idempotent, low-frequency | The peer keeps its row until either side touches the relationship again — see § Declining a request and ending a friendship |
 | `Update{Person}` (profile) | Idempotent | Self-heals via `remote_actors.fetched_at` TTL re-fetch |
 
 Each activity type owns its own reconciliation story (TTL re-fetch, next

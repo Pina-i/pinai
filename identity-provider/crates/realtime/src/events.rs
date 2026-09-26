@@ -113,7 +113,7 @@ pub struct FriendshipPayload {
     /// receiving client can route to the conversation immediately).
     /// `None` on `FriendRequest` (no DM until accepted) and
     /// `FriendRemoved` (the conversation row stays, but the event
-    /// doesn't need to mention it).
+    /// doesn't need to mention it — clients only refresh on it).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub conversation_id: Option<Uuid>,
 }

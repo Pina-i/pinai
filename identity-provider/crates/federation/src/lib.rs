@@ -13,10 +13,10 @@
 //! **REST API (Bearer-auth required, for the local web-client)**
 //! - `GET    /api/users/search`             — Search users
 //! - `POST   /api/friends/request`          — Send friend request
-//! - `DELETE /api/friends/{actor_uri}`       — Unfriend
+//! - `DELETE /api/friends/{actor_uri}`       — Unfriend (both sides; Undo{Follow} to a remote IdP)
 //! - `GET    /api/friends/incoming`          — Pending friend requests aimed at me
 //! - `POST   /api/friends/{id}/accept`       — Accept a friend request
-//! - `DELETE /api/friends/{id}/reject`       — Reject (delete) a friend request
+//! - `DELETE /api/friends/{id}/reject`       — Decline a pending request (Reject{Follow} to a remote IdP)
 //! - `GET    /api/friends`                   — My friends list
 //! - `POST   /api/dm`                        — Send a direct message (supports replies via reply_to_id)
 //! - `GET    /api/dm`                        — List DM conversations
