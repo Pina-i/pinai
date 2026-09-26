@@ -23,6 +23,7 @@ use idp_auth::{
     presence::sse::get_presence_stream,
     profile::update_profile,
     register::{post_register, post_register_and_login},
+    settings::update_settings,
     token::post_token,
     totp::{
         post_disable as post_totp_disable, post_enroll as post_totp_enroll,
@@ -186,6 +187,8 @@ pub fn build(state: AppState) -> Router {
         .route("/api/avatar", put(put_avatar).delete(delete_avatar))
         // ── Profile API (Bearer-auth) ───────────────────────────────────
         .route("/api/profile", patch(update_profile))
+        // ── Account settings (Bearer-auth; read back on /userinfo) ──────
+        .route("/api/settings", patch(update_settings))
         // ── E2EE key directory ──────────────────────────────────────────
         // KeyPackages: POST + status are Bearer (own device);
         // claim accepts Bearer (local cross-add) or HTTP-Sig (peer cross-add).

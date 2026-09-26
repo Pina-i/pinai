@@ -134,8 +134,9 @@ db, broker, storage, config ──► (leaves)
 | `GET /.well-known/webfinger` | ActivityPub actor discovery |
 | `GET /authorize` | Authorization endpoint (PKCE flow) |
 | `POST /token` | Token exchange |
-| `GET /userinfo` | UserInfo endpoint |
+| `GET /userinfo` | UserInfo endpoint — also carries the account `settings` document |
 | `PATCH /api/profile` | Update display_name / pronouns / bio (Bearer-auth); fans out via `propagate_profile_update` |
+| `PATCH /api/settings` | Bearer-auth. Replace the account-settings sections the body names (`{ appearance: {…} }`), keep the others; returns the merged document and pushes it to the user's sessions as `settings_updated`. Read back on `GET /userinfo` (`settings`). Device-scoped settings never reach the IdP — see `identity-provider/specs/01-identity-federation.md § 1.6` |
 | `PUT /api/avatar` | Replace the user's avatar (raw image bytes; ≤2 MiB; jpeg/png/webp/gif). URL is cache-busted with `?v=<unix_secs>` |
 | `DELETE /api/avatar` | Clear the user's avatar |
 | `POST /register` | User self-registration — dispatches signup OTP, no session |
@@ -257,6 +258,8 @@ pending_totp_enrollments — in-flight 2FA secret awaiting first-code verify
 pending_totp_logins      — short-lived "passed password, need TOTP" tickets carrying OIDC params
 recovery_codes           — 10 per user, single-use, peppered HMAC
 remote_actors            — cache of federated users (inbox_url, avatar_url, fetched_at TTL)
+user_settings            — account settings, one client-owned JSONB document per user
+                            (sections replaced whole by PATCH /api/settings; ≤ 16 KiB)
 friendships              — friend graph (friend_actor_uri, friend_avatar_url, status,
                             direction: outgoing|incoming — only the incoming side may answer)
 conversations            — anchor for every conversation (kind: dm|group, name)

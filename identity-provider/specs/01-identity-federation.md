@@ -379,6 +379,81 @@ version param forces a fresh fetch and propagates verbatim through the AP
 
 ---
 
+## 1.6. User settings
+
+A user's settings come in two scopes, and only one of them reaches the IdP:
+
+| Scope | Examples | Kept |
+|---|---|---|
+| Account | palette, motif | `user_settings` on the home IdP; every device follows it |
+| Device | light / dark / system | the device only (the client's local storage) — never sent |
+
+The palette is an identity choice that should look the same everywhere; light or dark depends on the
+screen and the time of day. A device paints the account's palette in its own mode.
+
+### Data model
+
+```sql
+CREATE TABLE user_settings (
+  user_id    UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  settings   JSONB NOT NULL DEFAULT '{}'::jsonb
+      CHECK (jsonb_typeof(settings) = 'object')
+      CHECK (octet_length(settings::text) <= 16384),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+```
+
+The document belongs to the client. Each top-level key is a **section** — `appearance` today:
+
+```json
+{ "appearance": { "family": "lagoon", "motif": "raranga" } }
+```
+
+The IdP checks the shape (an object of objects, within 16 KiB) and never interprets a section. A client
+that doesn't know a section therefore never drops it, and a client validates whatever it reads back,
+falling back to its defaults for a value it doesn't recognise.
+
+Settings are not federated and not end-to-end encrypted: they live on the user's home IdP only and say
+nothing about anyone else.
+
+### Endpoints
+
+| Endpoint | Behaviour |
+|---|---|
+| `GET /userinfo` | Carries the document as `settings` (`{}` if never saved), so a client has it from its first request without a fetch of its own. `PATCH /api/profile`, which answers with the same shape, carries it too. |
+| `PATCH /api/settings` | Bearer-auth. Body: an object of sections. Each section named **replaces** the stored one whole; the others are kept — a single `settings \|\| $change` upsert. Answers with the merged document, and pushes it to every session of the user as a `settings_updated` WebSocket event. 400 on a body that isn't an object of objects, or that would take the document past the cap. |
+
+There is no `GET /api/settings`: a client reads its settings on `/userinfo`, which it fetches on every
+sign-in — including the silent one each page load goes through, since access tokens live in memory only
+— and follows changes from its other sessions through `settings_updated`.
+
+### Scenarios
+
+```mermaid
+sequenceDiagram
+    participant A as Laptop
+    participant IdP as IdP
+    participant B as Phone
+
+    Note over A: paints its local copy of the account settings before sign-in
+    A->>IdP: GET /userinfo
+    IdP-->>A: { …, settings: { appearance: { family: "pearl", … } } }
+    Note over A: adopts them, cross-fading if they differ from its copy
+    A->>IdP: PATCH /api/settings { appearance: { family: "lagoon", … } }
+    IdP-->>A: merged document
+    IdP-->>B: WS settings_updated { settings }
+    Note over B: switches to Lagoon, in its own mode
+```
+
+- **Change on one device.** The client applies and caches the change at once, then sends it. The other
+  sessions switch live on `settings_updated`; the originating session receives the same document back.
+- **Change while the IdP is unreachable.** The client keeps its change marked unsynced and sends it
+  again on its next sign-in, where it wins over the IdP's copy instead of being overwritten by it.
+- **Several devices changing concurrently.** The last `PATCH` for a section wins; sections don't
+  interfere with one another.
+- **Before sign-in, or before `/userinfo` answers.** The client paints its local copy of the account
+  settings — those of the last account signed in on it — so pages never flash the default.
+
 ## 2. Real-time profile propagation when a friend updates their profile
 
 Regardless of whether the friend is local or remote, the downstream propagation is always the same. The only difference is *how the update is triggered*.

@@ -115,6 +115,8 @@ pub async fn update_profile(
         .actor_uri
         .clone()
         .unwrap_or_else(|| format!("{}/users/{}", state.config.issuer(), updated.username));
+    let settings = crate::settings::load_settings(&state, user_id).await?;
+
     Ok(Json(UserinfoResponse {
         sub: updated.id.to_string(),
         email: updated.email,
@@ -127,5 +129,6 @@ pub async fn update_profile(
         avatar_url: updated.avatar_url,
         pronouns: updated.pronouns,
         bio: updated.bio,
+        settings,
     }))
 }

@@ -24,6 +24,10 @@ pub struct UserinfoResponse {
     pub avatar_url: Option<String>,
     pub pronouns: Option<String>,
     pub bio: Option<String>,
+    /// The account's settings document (`{}` if never saved) — delivered
+    /// here so a client has them from its first request, without a fetch of
+    /// its own. See [`crate::settings`].
+    pub settings: serde_json::Value,
 }
 
 /// GET /userinfo
@@ -66,6 +70,8 @@ pub async fn get_userinfo(
         .actor_uri
         .clone()
         .unwrap_or_else(|| format!("{}/users/{}", state.config.issuer(), user.username));
+    let settings = crate::settings::load_settings(&state, user.id).await?;
+
     Ok(Json(UserinfoResponse {
         sub: user.id.to_string(),
         email: user.email,
@@ -78,6 +84,7 @@ pub async fn get_userinfo(
         avatar_url: user.avatar_url,
         pronouns: user.pronouns,
         bio: user.bio,
+        settings,
     }))
 }
 

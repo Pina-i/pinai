@@ -5,10 +5,8 @@ edition = "2021"
 
 [dependencies]
 serde   = { workspace = true }
+serde_json = { workspace = true }
 time    = { workspace = true }
 tokio   = { workspace = true }
 uuid    = { workspace = true }
 dashmap = { workspace = true }
-
-[dev-dependencies]
-serde_json = { workspace = true }

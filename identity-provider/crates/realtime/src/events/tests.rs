@@ -51,3 +51,21 @@ fn friend_removed_serializes_without_a_conversation() {
         })
     );
 }
+
+/// Clients replace their copy of the account settings with this document.
+#[test]
+fn settings_updated_carries_the_whole_document() {
+    let event = WsEvent::SettingsUpdated(SettingsPayload {
+        settings: serde_json::json!({ "appearance": { "family": "lagoon", "motif": "raranga" } }),
+    });
+
+    let json = serde_json::to_value(&event).unwrap();
+
+    assert_eq!(
+        json,
+        serde_json::json!({
+            "type": "settings_updated",
+            "data": { "settings": { "appearance": { "family": "lagoon", "motif": "raranga" } } },
+        })
+    );
+}
