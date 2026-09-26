@@ -29,6 +29,7 @@ pub mod actors;
 pub mod attachments;
 pub mod auth;
 pub mod delivery;
+pub mod friendship;
 pub mod http_signature;
 pub mod inbox;
 pub mod mls;
