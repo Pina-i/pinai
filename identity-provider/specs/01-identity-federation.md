@@ -69,12 +69,24 @@ CREATE TABLE friendships (
   friend_actor_uri  TEXT NOT NULL,   -- e.g. "https://idp.bob.com/users/bob" (local or remote)
   friend_avatar_url TEXT,            -- cached to avoid extra S3/RustFS lookup at render time
   status            TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'accepted')),
+  direction         TEXT NOT NULL CHECK (direction IN ('outgoing', 'incoming')),  -- who sent the request
   created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
 
   UNIQUE (owner_user_id, friend_actor_uri)
 );
 ```
+
+> **Who sent the request**
+>
+> Each side of a friendship has its own row — both in this database for a local pair, one on each
+> IdP for a cross-IdP pair — and `direction` says which side the owner is on: `outgoing` when the
+> owner sent the request, `incoming` when they received it. Only the `incoming` side may answer
+> it: `GET /api/friends/incoming` lists incoming pending rows only, `POST /api/friends/:id/accept`
+> and `DELETE /api/friends/:id/reject` refuse any other row, and an inbound `Accept` or `Reject`
+> only applies to an `outgoing` row. Without it a pending row reads the same to both parties, and
+> the requester could accept their own request. A repeated request takes over both rows, so the
+> latest request decides who answers.
 
 > **Federated address format**
 >
@@ -128,7 +140,7 @@ same person reuses it (`get_or_create_dm` finds the pair's existing row).
 
 | Action | Endpoint | Caller's row | Other side, same IdP | Other side, remote IdP |
 |---|---|---|---|---|
-| Decline | `DELETE /api/friends/:id/reject` (pending rows only) | Deleted | Requester's pending row deleted, no event | `Reject{Follow}` to the requester's inbox |
+| Decline | `DELETE /api/friends/:id/reject` (pending `incoming` rows only) | Deleted | Requester's pending row deleted, no event | `Reject{Follow}` to the requester's inbox |
 | Unfriend | `DELETE /api/friends/:actor_uri` (percent-encoded; 404 when no row) | Deleted | Friend's row deleted; `friend_removed` WS event | `Undo{Follow}` to the friend's inbox |
 
 `DELETE /api/friends/:actor_uri` also withdraws a pending request the caller sent, through
@@ -154,9 +166,9 @@ sequenceDiagram
 ```
 
 **Inbound `Accept` and `Reject`** act on exactly one row: the one owned by the inbox the
-activity was delivered to, whose friend is the activity's `actor`. The embedded Follow is
-not trusted to name the local user, so a peer cannot accept or drop anyone else's request.
-`Reject` only deletes a row that is still `pending`.
+activity was delivered to, whose friend is the activity's `actor`, and only while it is a
+`pending` `outgoing` request. The embedded Follow is not trusted to name the local user, so a
+peer can neither answer anyone else's request nor accept a request it sent itself.
 
 **Delivery** of `Reject` and `Undo{Follow}` is best-effort: the local change is committed
 first and the request succeeds even if the peer is unreachable. A peer that missed the

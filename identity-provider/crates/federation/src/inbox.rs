@@ -145,6 +145,7 @@ async fn handle_follow(
             follower.id,
             recipient_actor_uri,
             recipient.avatar_url.as_deref(),
+            "outgoing",
         )
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?;
@@ -155,6 +156,7 @@ async fn handle_follow(
             recipient.id,
             follower_uri,
             follower.avatar_url.as_deref(),
+            "incoming",
         )
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?;
@@ -195,9 +197,10 @@ async fn handle_follow(
         .map_err(|e| OidcError::server_error(e.to_string()))?;
 
         // Create pending friendship: recipient → remote actor.
-        let friendship = friendships::create_friendship(&state.pool, recipient.id, actor_url, None)
-            .await
-            .map_err(|e| OidcError::server_error(e.to_string()))?;
+        let friendship =
+            friendships::create_friendship(&state.pool, recipient.id, actor_url, None, "incoming")
+                .await
+                .map_err(|e| OidcError::server_error(e.to_string()))?;
 
         // Notify inbox owner of pending friend request. No conversation
         // yet — created on accept.
@@ -220,7 +223,7 @@ async fn handle_follow(
 
 // ─── Accept ──────────────────────────────────────────────────────────────────
 
-/// The accepter answered the inbox owner's friend request. The row is keyed
+/// The accepter answered a friend request the inbox owner sent. The row is keyed
 /// on the inbox the Accept was delivered to, never on a field of the
 /// activity, so a peer cannot accept on behalf of other local users.
 async fn handle_accept(
@@ -246,12 +249,16 @@ async fn handle_accept(
         .as_deref()
         .ok_or_else(|| OidcError::server_error("Recipient has no actor_uri"))?;
 
+    // Only a request the recipient sent: an Accept for one the peer sent
+    // would let it consent on the recipient's behalf.
+    let friendship = friendships::find_by_owner_and_uri(&state.pool, recipient.id, accepter_uri)
+        .await
+        .map_err(|e| OidcError::server_error(e.to_string()))?;
+
     let Some(friendship) =
-        friendships::find_by_owner_and_uri(&state.pool, recipient.id, accepter_uri)
-            .await
-            .map_err(|e| OidcError::server_error(e.to_string()))?
+        friendship.filter(|f| f.status == "pending" && f.direction == "outgoing")
     else {
-        tracing::debug!(accepter = %accepter_uri, recipient = %recipient.username, "Accept with no friend request");
+        tracing::debug!(accepter = %accepter_uri, recipient = %recipient.username, "Accept with no outgoing request");
         return Ok(());
     };
 
@@ -306,7 +313,7 @@ async fn create_local_dm_for_accept(
 
 // ─── Reject ──────────────────────────────────────────────────────────────────
 
-/// The rejecter declined the inbox owner's pending request. Only that one
+/// The rejecter declined a friend request the inbox owner sent. Only that one
 /// row is touched: it is keyed on the inbox the Reject was delivered to,
 /// never on a field of the activity, so a peer cannot drop other users'
 /// requests. The owner is not notified — a declined request just stops
@@ -322,8 +329,10 @@ async fn handle_reject(
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?;
 
-    let Some(friendship) = friendship.filter(|f| f.status == "pending") else {
-        tracing::debug!(rejecter = %rejecter_uri, recipient = %recipient.username, "Reject with no pending request");
+    let Some(friendship) =
+        friendship.filter(|f| f.status == "pending" && f.direction == "outgoing")
+    else {
+        tracing::debug!(rejecter = %rejecter_uri, recipient = %recipient.username, "Reject with no outgoing request");
         return Ok(());
     };
 

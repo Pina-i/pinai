@@ -145,6 +145,9 @@ pub struct Friendship {
     pub friend_avatar_url: Option<String>,
     /// "pending" | "accepted"
     pub status: String,
+    /// "outgoing" (the owner sent the request) | "incoming" (the owner
+    /// received it — only this side may accept or decline)
+    pub direction: String,
     pub created_at: OffsetDateTime,
     pub updated_at: OffsetDateTime,
 }

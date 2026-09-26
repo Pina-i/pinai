@@ -4,24 +4,30 @@ use uuid::Uuid;
 use crate::models::{FriendListEntry, Friendship};
 
 /// Create a friendship row (status defaults to 'pending').
+///
+/// `direction` is `"outgoing"` when the owner sent the request, `"incoming"`
+/// when they received it. A repeated request takes over the row, so the
+/// latest one decides who may accept.
 pub async fn create_friendship(
     pool: &PgPool,
     owner_user_id: Uuid,
     friend_actor_uri: &str,
     friend_avatar_url: Option<&str>,
+    direction: &str,
 ) -> Result<Friendship, sqlx::Error> {
     sqlx::query_as::<_, Friendship>(
         r#"
-        INSERT INTO friendships (owner_user_id, friend_actor_uri, friend_avatar_url)
-        VALUES ($1, $2, $3)
+        INSERT INTO friendships (owner_user_id, friend_actor_uri, friend_avatar_url, direction)
+        VALUES ($1, $2, $3, $4)
         ON CONFLICT (owner_user_id, friend_actor_uri)
-        DO UPDATE SET status = 'pending', updated_at = now()
+        DO UPDATE SET status = 'pending', direction = EXCLUDED.direction, updated_at = now()
         RETURNING *
         "#,
     )
     .bind(owner_user_id)
     .bind(friend_actor_uri)
     .bind(friend_avatar_url)
+    .bind(direction)
     .fetch_one(pool)
     .await
 }
@@ -82,13 +88,14 @@ pub async fn get_friends(
     .await
 }
 
-/// Pending friend requests for this user.
+/// Pending friend requests this user received. Requests they sent are
+/// pending too, but are not theirs to answer.
 pub async fn get_pending_requests(
     pool: &PgPool,
     owner_user_id: Uuid,
 ) -> Result<Vec<Friendship>, sqlx::Error> {
     sqlx::query_as::<_, Friendship>(
-        "SELECT * FROM friendships WHERE owner_user_id = $1 AND status = 'pending' ORDER BY created_at DESC",
+        "SELECT * FROM friendships WHERE owner_user_id = $1 AND status = 'pending' AND direction = 'incoming' ORDER BY created_at DESC",
     )
     .bind(owner_user_id)
     .fetch_all(pool)

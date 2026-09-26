@@ -257,7 +257,8 @@ pending_totp_enrollments — in-flight 2FA secret awaiting first-code verify
 pending_totp_logins      — short-lived "passed password, need TOTP" tickets carrying OIDC params
 recovery_codes           — 10 per user, single-use, peppered HMAC
 remote_actors            — cache of federated users (inbox_url, avatar_url, fetched_at TTL)
-friendships              — friend graph (friend_actor_uri, friend_avatar_url, status)
+friendships              — friend graph (friend_actor_uri, friend_avatar_url, status,
+                            direction: outgoing|incoming — only the incoming side may answer)
 conversations            — anchor for every conversation (kind: dm|group, name)
 conversation_members     — participants (actor_uri, joined_at, left_at, role: member|admin —
                             role is meaningful only for groups; DMs leave both at 'member')

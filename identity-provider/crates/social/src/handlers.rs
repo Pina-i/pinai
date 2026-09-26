@@ -132,14 +132,15 @@ async fn friend_request_local(
         .as_deref()
         .ok_or_else(|| OidcError::server_error("Caller has no actor_uri"))?;
 
-    // Both rows persist as `pending`. The caller's row is the placeholder
-    // for "I asked them"; the target's row is what `get_pending_requests`
-    // and `accept_friendship` operate on.
+    // Both rows persist as `pending`. The caller's `outgoing` row is the
+    // placeholder for "I asked them"; the target's `incoming` row is what
+    // `get_pending_requests` and `accept_friendship` operate on.
     let caller_row = friendships::create_friendship(
         &state.pool,
         caller_id,
         target_actor_uri,
         target.avatar_url.as_deref(),
+        "outgoing",
     )
     .await
     .map_err(|e| OidcError::server_error(e.to_string()))?;
@@ -149,6 +150,7 @@ async fn friend_request_local(
         target.id,
         caller_actor_uri,
         caller.avatar_url.as_deref(),
+        "incoming",
     )
     .await
     .map_err(|e| OidcError::server_error(e.to_string()))?;
@@ -221,6 +223,7 @@ async fn friend_request_remote(
         caller_id,
         &remote.actor_url,
         remote.avatar_url.as_deref(),
+        "outgoing",
     )
     .await
     .map_err(|e| OidcError::server_error(e.to_string()))?;
@@ -398,6 +401,12 @@ pub async fn accept_friendship(
         ));
     }
 
+    // Only a request the caller received — accepting one they sent would
+    // form the friendship without the other side consenting.
+    if friendship.status != "pending" || friendship.direction != "incoming" {
+        return Err(OidcError::invalid_request("Not an incoming friend request"));
+    }
+
     friendships::set_status(&state.pool, friendship.id, "accepted")
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?;
@@ -539,9 +548,10 @@ pub async fn reject_friendship(
         ));
     }
 
-    // An accepted friendship is ended through `DELETE /api/friends/{actor_uri}`.
-    if friendship.status != "pending" {
-        return Err(OidcError::invalid_request("Friend request is not pending"));
+    // An accepted friendship is ended, and a sent request withdrawn,
+    // through `DELETE /api/friends/{actor_uri}`.
+    if friendship.status != "pending" || friendship.direction != "incoming" {
+        return Err(OidcError::invalid_request("Not an incoming friend request"));
     }
 
     let caller = users::find_by_id(&state.pool, caller_id)
