@@ -171,14 +171,27 @@ The seed (`identity-provider/crates/dev-inject-data`) upserts users with a
 verified email and a known password, so the web client can sign in without the
 signup OTP flow:
 
-| Instance | User | Email | Password |
-|---|---|---|---|
-| Alice | Alice | `akasatana83@hotmail.fr` | `yonolulu` |
-| Alice | Pierre | `pierre@test.fr` | `yonolulu` |
-| Bob | Bob | `bob@test.fr` | `yonolulu` |
+| Instance | User | Handle | Email | Password |
+|---|---|---|---|---|
+| Alice | Alice | `Alice_dev` | `akasatana83@hotmail.fr` | `yonolulu` |
+| Alice | Pierre | `Pierre_dev` | `pierre@test.fr` | `yonolulu` |
+| Bob | Bob | `Bob_dev` | `bob@test.fr` | `yonolulu` |
 
 Pierre lives on Alice's instance so group conversations and same-instance E2EE
 can be tested without federation.
+
+**Alice and Bob are already friends after seeding**, with the DM between them
+ready to open — no friend request, no accept, no federation round-trip. That
+only works because the fixture handles are fixed rather than suffixed with a
+NanoID: each instance seeds its own half of the pair and has to be able to name
+the other's `actor_uri` without ever talking to it. The DM's `conversation_id`
+is pinned for the same reason. Add a pair by extending `SEEDED_FRIENDSHIPS` in
+the seeder.
+
+Seeding a database created before the handles were pinned rewrites them in
+place and drops the friendships and conversations left behind by the old ones —
+existing DM history between the dev users does not survive that. Restart the
+IdP afterwards so the remote-presence registry reloads the new URIs.
 
 ### Local URLs
 
@@ -186,7 +199,7 @@ can be tested without federation.
 |---|---|---|
 | Identity provider | http://localhost:8080 | http://localhost:8081 |
 | Mailpit (captured emails) | http://localhost:8025 | http://localhost:8026 |
-| RustFS console | http://localhost:9005 | http://localhost:9003 |
+| RustFS console | http://localhost:9001 | http://localhost:9003 |
 | Web client (`FRONTEND_URL`) | http://localhost:5173 | http://localhost:5173 |
 
 ---
