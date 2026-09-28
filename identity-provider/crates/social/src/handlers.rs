@@ -14,6 +14,7 @@ use activitypub::Activity;
 use idp_db::repos::{conversations, friendships, remote_actors, users};
 use idp_federation::auth::require_auth;
 use idp_federation::delivery;
+use idp_federation::friendship::{deliver_best_effort, release_remote_presence, remote_inbox};
 use idp_realtime::{FriendshipPayload, WsEvent};
 use idp_state::{AppState, OidcError};
 
@@ -131,14 +132,17 @@ async fn friend_request_local(
         .as_deref()
         .ok_or_else(|| OidcError::server_error("Caller has no actor_uri"))?;
 
-    // Both rows persist as `pending`. The caller's row is the placeholder
-    // for "I asked them"; the target's row is what `get_pending_requests`
-    // and `accept_friendship` operate on.
+    ensure_not_friends(state, caller_id, target_actor_uri).await?;
+
+    // Both rows persist as `pending`. The caller's `outgoing` row is the
+    // placeholder for "I asked them"; the target's `incoming` row is what
+    // `get_pending_requests` and `accept_friendship` operate on.
     let caller_row = friendships::create_friendship(
         &state.pool,
         caller_id,
         target_actor_uri,
         target.avatar_url.as_deref(),
+        "outgoing",
     )
     .await
     .map_err(|e| OidcError::server_error(e.to_string()))?;
@@ -148,6 +152,7 @@ async fn friend_request_local(
         target.id,
         caller_actor_uri,
         caller.avatar_url.as_deref(),
+        "incoming",
     )
     .await
     .map_err(|e| OidcError::server_error(e.to_string()))?;
@@ -209,6 +214,8 @@ async fn friend_request_remote(
         .as_deref()
         .ok_or_else(|| OidcError::server_error("Caller has no actor_uri"))?;
 
+    ensure_not_friends(state, caller_id, &remote.actor_url).await?;
+
     let activity_id = format!("{}/friendships/{}", caller_actor_uri, Uuid::new_v4(),);
 
     // Build the Follow activity (AP Follow = friend request).
@@ -220,6 +227,7 @@ async fn friend_request_remote(
         caller_id,
         &remote.actor_url,
         remote.avatar_url.as_deref(),
+        "outgoing",
     )
     .await
     .map_err(|e| OidcError::server_error(e.to_string()))?;
@@ -248,7 +256,11 @@ async fn friend_request_remote(
 // ─── Unfriend ────────────────────────────────────────────────────────────────
 
 /// DELETE /api/friends/{friend_actor_uri}
-/// The actor_uri is URL-encoded in the path.
+/// The actor_uri is percent-encoded in the path; `Path` decodes it.
+///
+/// Removes both sides of the friendship: the peer row directly when the
+/// friend is local, through an `Undo{Follow}` to their IdP when remote. The
+/// DM conversation is kept.
 #[tracing::instrument(skip_all)]
 pub async fn delete_friendship(
     State(state): State<AppState>,
@@ -257,50 +269,74 @@ pub async fn delete_friendship(
 ) -> Result<StatusCode, OidcError> {
     let caller_id = require_auth(&state, &headers).await?;
 
-    // URL-decode the actor_uri from the path.
-    let friend_actor_uri = urlencoding::decode(&friend_actor_uri)
-        .map_err(|_| OidcError::invalid_request("Invalid actor URI encoding"))?;
+    let caller = users::find_by_id(&state.pool, caller_id)
+        .await
+        .map_err(|e| OidcError::server_error(e.to_string()))?
+        .ok_or_else(|| OidcError::server_error("Caller not found"))?;
 
-    friendships::delete_friendship(&state.pool, caller_id, &friend_actor_uri)
+    let caller_actor_uri = caller
+        .actor_uri
+        .as_deref()
+        .ok_or_else(|| OidcError::server_error("Caller has no actor_uri"))?;
+
+    let removed = friendships::delete_friendship(&state.pool, caller_id, &friend_actor_uri)
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?;
 
-    // If the friend is local, also remove the reciprocal friendship.
+    if !removed {
+        return Err(OidcError::not_found("Friendship not found"));
+    }
+
     if let Some(friend_user) = users::find_by_actor_uri(&state.pool, &friend_actor_uri)
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?
     {
-        let caller = users::find_by_id(&state.pool, caller_id)
-            .await
-            .map_err(|e| OidcError::server_error(e.to_string()))?;
+        // Local friend — the reciprocal row lives in this DB too.
+        let reverse =
+            friendships::find_by_owner_and_uri(&state.pool, friend_user.id, caller_actor_uri)
+                .await
+                .map_err(|e| OidcError::server_error(e.to_string()))?;
 
-        if let Some(caller) = caller {
-            if let Some(caller_uri) = &caller.actor_uri {
-                friendships::delete_friendship(&state.pool, friend_user.id, caller_uri)
-                    .await
-                    .map_err(|e| OidcError::server_error(e.to_string()))?;
-            }
+        if let Some(reverse) = reverse {
+            friendships::delete_friendship(&state.pool, friend_user.id, caller_actor_uri)
+                .await
+                .map_err(|e| OidcError::server_error(e.to_string()))?;
 
-            // Notify the friend.
+            // Lets the friend's clients drop us from their list. Clients
+            // refresh on it silently — an unfriend is never announced.
             state.hub.send_to_user(
                 &friend_user.id,
                 WsEvent::FriendRemoved(FriendshipPayload {
-                    friendship_id: Uuid::nil(),
-                    actor_uri: caller.actor_uri.unwrap_or_default(),
-                    username: caller.username,
-                    display_name: caller.display_name,
+                    friendship_id: reverse.id,
+                    actor_uri: caller_actor_uri.to_string(),
+                    username: caller.username.clone(),
+                    display_name: caller.display_name.clone(),
                     conversation_id: None,
                 }),
             );
         }
+    } else if let Some(remote) = remote_actors::find_by_actor_uri(&state.pool, &friend_actor_uri)
+        .await
+        .map_err(|e| OidcError::server_error(e.to_string()))?
+    {
+        // Remote friend — their IdP holds its own row, which only an
+        // `Undo{Follow}` removes.
+        let follow = Activity::follow(
+            &format!("{}/follows/{}", caller_actor_uri, Uuid::new_v4()),
+            caller_actor_uri,
+            &friend_actor_uri,
+        );
+        let follow_value =
+            serde_json::to_value(&follow).map_err(|e| OidcError::server_error(e.to_string()))?;
+        let undo = Activity::undo_follow(
+            &format!("{}/undos/{}", caller_actor_uri, Uuid::new_v4()),
+            caller_actor_uri,
+            follow_value,
+        );
+        deliver_best_effort(&state, &remote, &undo, &caller.username).await;
     }
 
-    // Drop the friend from batch presence polling. Best-effort — if
-    // they were never registered (e.g. local friend), `unregister_friend`
-    // short-circuits via the `starts_with(local_issuer)` guard.
-    if let Some(registry) = &state.remote_registry {
-        registry.unregister_friend(&friend_actor_uri, &state.config.issuer());
-    }
+    release_remote_presence(&state, &friend_actor_uri).await;
 
     tracing::info!(caller = %caller_id, friend = %friend_actor_uri, "unfriended");
     Ok(StatusCode::NO_CONTENT)
@@ -367,6 +403,12 @@ pub async fn accept_friendship(
         return Err(OidcError::invalid_request(
             "Not authorised to accept this request",
         ));
+    }
+
+    // Only a request the caller received — accepting one they sent would
+    // form the friendship without the other side consenting.
+    if friendship.status != "pending" || friendship.direction != "incoming" {
+        return Err(OidcError::invalid_request("Not an incoming friend request"));
     }
 
     friendships::set_status(&state.pool, friendship.id, "accepted")
@@ -438,7 +480,7 @@ pub async fn accept_friendship(
             .map_err(|e| OidcError::server_error(e.to_string()))?;
 
         if let Some(remote) = remote {
-            let inbox_url = format!("{}/inbox", remote.actor_uri);
+            let inbox_url = remote_inbox(&remote);
 
             let accept_id = format!("{}/accepts/{}", caller_actor_uri, Uuid::new_v4());
             let follow_activity = Activity::follow(
@@ -510,10 +552,56 @@ pub async fn reject_friendship(
         ));
     }
 
+    // An accepted friendship is ended, and a sent request withdrawn,
+    // through `DELETE /api/friends/{actor_uri}`.
+    if friendship.status != "pending" || friendship.direction != "incoming" {
+        return Err(OidcError::invalid_request("Not an incoming friend request"));
+    }
+
+    let caller = users::find_by_id(&state.pool, caller_id)
+        .await
+        .map_err(|e| OidcError::server_error(e.to_string()))?
+        .ok_or_else(|| OidcError::server_error("Caller not found"))?;
+
+    let caller_actor_uri = caller
+        .actor_uri
+        .as_deref()
+        .ok_or_else(|| OidcError::server_error("Caller has no actor_uri"))?;
+
     // Rejecting = deleting the friendship row (no "rejected" state in the new model).
     friendships::delete_friendship(&state.pool, caller_id, &friendship.friend_actor_uri)
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?;
+
+    // Clear the requester's side too. Neither branch notifies them: a
+    // declined request is never announced, it just stops existing.
+    if let Some(requester) = users::find_by_actor_uri(&state.pool, &friendship.friend_actor_uri)
+        .await
+        .map_err(|e| OidcError::server_error(e.to_string()))?
+    {
+        friendships::delete_friendship(&state.pool, requester.id, caller_actor_uri)
+            .await
+            .map_err(|e| OidcError::server_error(e.to_string()))?;
+    } else if let Some(remote) =
+        remote_actors::find_by_actor_uri(&state.pool, &friendship.friend_actor_uri)
+            .await
+            .map_err(|e| OidcError::server_error(e.to_string()))?
+    {
+        // Same reconstructed Follow as `accept_friendship` answers.
+        let follow = Activity::follow(
+            &format!("{}/follows/{}", friendship.friend_actor_uri, friendship.id),
+            &friendship.friend_actor_uri,
+            caller_actor_uri,
+        );
+        let follow_value =
+            serde_json::to_value(&follow).map_err(|e| OidcError::server_error(e.to_string()))?;
+        let reject = Activity::reject(
+            &format!("{}/rejects/{}", caller_actor_uri, Uuid::new_v4()),
+            caller_actor_uri,
+            follow_value,
+        );
+        deliver_best_effort(&state, &remote, &reject, &caller.username).await;
+    }
 
     tracing::info!(friendship_id = %friendship_id, "friend request rejected (deleted)");
     Ok(StatusCode::NO_CONTENT)
@@ -537,6 +625,24 @@ pub async fn get_friends(
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+/// Refuse a friend request to someone the caller is already friends with.
+/// The repo would keep the friendship intact anyway; this spares the target
+/// a request they cannot act on.
+async fn ensure_not_friends(
+    state: &AppState,
+    caller_id: Uuid,
+    friend_actor_uri: &str,
+) -> Result<(), OidcError> {
+    let existing = friendships::find_by_owner_and_uri(&state.pool, caller_id, friend_actor_uri)
+        .await
+        .map_err(|e| OidcError::server_error(e.to_string()))?;
+
+    if existing.is_some_and(|f| f.status == "accepted") {
+        return Err(OidcError::invalid_request("Already friends"));
+    }
+    Ok(())
+}
 
 /// Resolve an actor_uri to a (username, display_name) pair.
 /// Checks local users first, then the remote_actors cache.

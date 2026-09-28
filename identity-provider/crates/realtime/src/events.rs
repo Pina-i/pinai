@@ -44,6 +44,9 @@ pub enum WsEvent {
     MemberRoleChanged(MemberRoleChangedPayload),
     /// A group was renamed.
     GroupRenamed(GroupRenamedPayload),
+    /// The account's settings changed, from one of the user's sessions. Sent
+    /// to all of them, the one that made the change included.
+    SettingsUpdated(SettingsPayload),
 }
 
 /// Slim attachment projection carried on the wire alongside DM events.
@@ -113,7 +116,7 @@ pub struct FriendshipPayload {
     /// receiving client can route to the conversation immediately).
     /// `None` on `FriendRequest` (no DM until accepted) and
     /// `FriendRemoved` (the conversation row stays, but the event
-    /// doesn't need to mention it).
+    /// doesn't need to mention it — clients only refresh on it).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub conversation_id: Option<Uuid>,
 }
@@ -290,3 +293,10 @@ pub struct UnwatchConversationPayload {
 
 #[cfg(test)]
 mod tests;
+
+/// The account's whole settings document after a change — see
+/// `identity-provider/specs/01-identity-federation.md § 1.6`.
+#[derive(Debug, Clone, Serialize)]
+pub struct SettingsPayload {
+    pub settings: serde_json::Value,
+}

@@ -9,6 +9,7 @@ pub mod logout;
 pub mod presence;
 pub mod profile;
 pub mod register;
+pub mod settings;
 pub mod signup_reaper;
 pub mod token;
 pub mod totp;

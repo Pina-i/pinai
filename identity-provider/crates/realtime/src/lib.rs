@@ -10,7 +10,8 @@ pub use events::{
     DeviceJoinedPayload, DmDeliveryFailedPayload, DmPayload, EditedDmPayload, FriendshipPayload,
     GroupCreatedPayload, GroupRenamedPayload, HeartbeatAckPayload, MemberAddedPayload,
     MemberRemovedPayload, MemberRoleChangedPayload, MlsCommitPayload, MlsWelcomeReadyPayload,
-    PresenceUpdatePayload, ProfileUpdatePayload, SendDmPayload, TypingPayload, TypingStartPayload,
-    UnwatchConversationPayload, WatchConversationPayload, WsAttachment, WsClientMessage, WsEvent,
+    PresenceUpdatePayload, ProfileUpdatePayload, SendDmPayload, SettingsPayload, TypingPayload,
+    TypingStartPayload, UnwatchConversationPayload, WatchConversationPayload, WsAttachment,
+    WsClientMessage, WsEvent,
 };
 pub use hub::{ConnectionHandle, WsHub};

@@ -69,12 +69,29 @@ CREATE TABLE friendships (
   friend_actor_uri  TEXT NOT NULL,   -- e.g. "https://idp.bob.com/users/bob" (local or remote)
   friend_avatar_url TEXT,            -- cached to avoid extra S3/RustFS lookup at render time
   status            TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'accepted')),
+  direction         TEXT NOT NULL CHECK (direction IN ('outgoing', 'incoming')),  -- who sent the request
   created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
 
   UNIQUE (owner_user_id, friend_actor_uri)
 );
 ```
+
+> **Who sent the request**
+>
+> Each side of a friendship has its own row — both in this database for a local pair, one on each
+> IdP for a cross-IdP pair — and `direction` says which side the owner is on: `outgoing` when the
+> owner sent the request, `incoming` when they received it. Only the `incoming` side may answer
+> it: `GET /api/friends/incoming` lists incoming pending rows only, `POST /api/friends/:id/accept`
+> and `DELETE /api/friends/:id/reject` refuse any other row, and an inbound `Accept` or `Reject`
+> only applies to an `outgoing` row. Without it a pending row reads the same to both parties, and
+> the requester could accept their own request. A repeated request takes over both pending rows,
+> so the latest request decides who answers.
+>
+> A request never reopens an accepted friendship. `POST /api/friends/request` to an existing
+> friend is refused (`Already friends`), an inbound `Follow` for one is ignored, and
+> `friendships::create_friendship` returns an accepted row untouched — otherwise a peer could
+> quietly take a friendship back to `pending`. Ending a friendship goes through unfriend only.
 
 > **Federated address format**
 >
@@ -114,10 +131,57 @@ WHERE f.owner_user_id = $1     -- pass the caller's local user id
 
 When a friendship transitions to `accepted` (via `POST /api/friends/:id/accept` for both same-IdP and cross-IdP recipients, or `handle_accept` when a remote peer's IdP accepts a request our user sent), the accepter's IdP creates the DM conversation in the same logical transaction. Same-IdP and cross-IdP requests share one model: both rows land in `pending` at request time, and the recipient must explicitly accept — there is no auto-accept path. The new id flows out two ways:
 
-- **Locally**: the WS `friend_accepted` payload carries it on `FriendshipPayload.conversation_id` (`Option<Uuid>`, absent on `friend_request`/`friend_removed`). Web clients invalidate the `dm-conversations` query on this event so `localDmConvos` populates with the new row immediately.
+- **Locally**: the WS `friend_accepted` payload carries it on `FriendshipPayload.conversation_id` (`Option<Uuid>`, absent on `friend_request`/`friend_removed` — the conversation outlives an unfriend). Web clients invalidate the `dm-conversations` query on this event so `localDmConvos` populates with the new row immediately.
 - **Cross-IdP**: the outbound AP `Accept{Follow}` activity carries it in a non-standard `conversationId` field on the activity body (a sibling of `id`/`type`/`actor`/`object`). The peer IdP's `handle_accept` reads it and calls `conversations::get_or_create_dm_with_id` so both sides persist the row under the same UUID. A pre-refactor peer omits the field; the receiver falls back to `get_or_create_dm`, ending up with a divergent id — exactly matching the pre-refactor state. This is a safe degradation.
 
 The migration `20260512000001_backfill_friendship_conversations.sql` retroactively creates a DM for every accepted friendship that doesn't yet have one (deduplicated by ordering the actor pair lexicographically so the two friendship rows don't each get their own conversation).
+
+### Declining a request and ending a friendship
+
+Both are silent for the other person: neither raises a notification. A declined request
+simply stops existing, and an ended friendship drops out of the friends list. Neither
+touches the DM conversation — its row, members and history stay, and re-friending the
+same person reuses it (`get_or_create_dm` finds the pair's existing row).
+
+| Action | Endpoint | Caller's row | Other side, same IdP | Other side, remote IdP |
+|---|---|---|---|---|
+| Decline | `DELETE /api/friends/:id/reject` (pending `incoming` rows only) | Deleted | Requester's pending row deleted, no event | `Reject{Follow}` to the requester's inbox |
+| Unfriend | `DELETE /api/friends/:actor_uri` (percent-encoded; 404 when no row) | Deleted | Friend's row deleted; `friend_removed` WS event | `Undo{Follow}` to the friend's inbox |
+
+`DELETE /api/friends/:actor_uri` also withdraws a pending request the caller sent, through
+the same paths.
+
+The `friend_removed` event carries the friend's own `friendship_id` and exists so their
+clients refresh the friends and DM lists; clients do not surface it as a notification.
+
+```mermaid
+sequenceDiagram
+    participant A as alice's client
+    participant IA as IdP alice.com
+    participant IB as IdP bob.com
+    participant B as bob's clients
+
+    A->>IA: DELETE /api/friends/https%3A%2F%2Fidp.bob.com%2Fusers%2Fbob
+    IA->>IA: delete alice → bob row
+    IA->>IB: Undo{Follow} (HTTP-signed, to bob's inbox)
+    IB->>IB: delete bob → alice row
+    IB-->>B: WS friend_removed (refresh only)
+    IA->>IA: stop polling bob's presence if no local user is still his friend
+    IA-->>A: 204
+```
+
+**Inbound `Accept` and `Reject`** act on exactly one row: the one owned by the inbox the
+activity was delivered to, whose friend is the activity's `actor`, and only while it is a
+`pending` `outgoing` request. The embedded Follow is not trusted to name the local user, so a
+peer can neither answer anyone else's request nor accept a request it sent itself.
+
+**Delivery** of `Reject` and `Undo{Follow}` is best-effort: the local change is committed
+first and the request succeeds even if the peer is unreachable. A peer that missed the
+activity keeps its row until either side touches the relationship again — its user
+unfriending sends an `Undo{Follow}` back, which is a no-op here.
+
+**Remote presence polling** is registered per IdP, not per user. It is only released when
+no local user still has the remote actor as an accepted friend.
 
 ---
 
@@ -315,6 +379,81 @@ version param forces a fresh fetch and propagates verbatim through the AP
 
 ---
 
+## 1.6. User settings
+
+A user's settings come in two scopes, and only one of them reaches the IdP:
+
+| Scope | Examples | Kept |
+|---|---|---|
+| Account | palette, motif | `user_settings` on the home IdP; every device follows it |
+| Device | light / dark / system | the device only (the client's local storage) — never sent |
+
+The palette is an identity choice that should look the same everywhere; light or dark depends on the
+screen and the time of day. A device paints the account's palette in its own mode.
+
+### Data model
+
+```sql
+CREATE TABLE user_settings (
+  user_id    UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  settings   JSONB NOT NULL DEFAULT '{}'::jsonb
+      CHECK (jsonb_typeof(settings) = 'object')
+      CHECK (octet_length(settings::text) <= 16384),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+```
+
+The document belongs to the client. Each top-level key is a **section** — `appearance` today:
+
+```json
+{ "appearance": { "family": "lagoon", "motif": "raranga" } }
+```
+
+The IdP checks the shape (an object of objects, within 16 KiB) and never interprets a section. A client
+that doesn't know a section therefore never drops it, and a client validates whatever it reads back,
+falling back to its defaults for a value it doesn't recognise.
+
+Settings are not federated and not end-to-end encrypted: they live on the user's home IdP only and say
+nothing about anyone else.
+
+### Endpoints
+
+| Endpoint | Behaviour |
+|---|---|
+| `GET /userinfo` | Carries the document as `settings` (`{}` if never saved), so a client has it from its first request without a fetch of its own. `PATCH /api/profile`, which answers with the same shape, carries it too. |
+| `PATCH /api/settings` | Bearer-auth. Body: an object of sections. Each section named **replaces** the stored one whole; the others are kept — a single `settings \|\| $change` upsert. Answers with the merged document, and pushes it to every session of the user as a `settings_updated` WebSocket event. 400 on a body that isn't an object of objects, or that would take the document past the cap. |
+
+There is no `GET /api/settings`: a client reads its settings on `/userinfo`, which it fetches on every
+sign-in — including the silent one each page load goes through, since access tokens live in memory only
+— and follows changes from its other sessions through `settings_updated`.
+
+### Scenarios
+
+```mermaid
+sequenceDiagram
+    participant A as Laptop
+    participant IdP as IdP
+    participant B as Phone
+
+    Note over A: paints its local copy of the account settings before sign-in
+    A->>IdP: GET /userinfo
+    IdP-->>A: { …, settings: { appearance: { family: "pearl", … } } }
+    Note over A: adopts them, cross-fading if they differ from its copy
+    A->>IdP: PATCH /api/settings { appearance: { family: "lagoon", … } }
+    IdP-->>A: merged document
+    IdP-->>B: WS settings_updated { settings }
+    Note over B: switches to Lagoon, in its own mode
+```
+
+- **Change on one device.** The client applies and caches the change at once, then sends it. The other
+  sessions switch live on `settings_updated`; the originating session receives the same document back.
+- **Change while the IdP is unreachable.** The client keeps its change marked unsynced and sends it
+  again on its next sign-in, where it wins over the IdP's copy instead of being overwritten by it.
+- **Several devices changing concurrently.** The last `PATCH` for a section wins; sections don't
+  interfere with one another.
+- **Before sign-in, or before `/userinfo` answers.** The client paints its local copy of the account
+  settings — those of the last account signed in on it — so pages never flash the default.
+
 ## 2. Real-time profile propagation when a friend updates their profile
 
 Regardless of whether the friend is local or remote, the downstream propagation is always the same. The only difference is *how the update is triggered*.
@@ -411,7 +550,8 @@ idempotent and naturally self-healing through another mechanism:
 | `Create{Note}` (1:1 DM) | Time-sensitive | Outcome recorded in `direct_messages.federation_status`; a failure is pushed to the sender (`dm_delivery_failed`), whose client sends the message again as a new one — see `identity-provider/specs/03-direct-messages.md § Delivery failure` |
 | `Update{Note}` (edit) | Time-sensitive | Same — recipients see the original until they can refetch |
 | `Like` / `Undo{Like}` (reaction) | Idempotent | Reconciles on next conversation fetch |
-| `Follow` / `Accept` / `Reject` / `Undo{Follow}` | Idempotent, low-frequency | User can re-trigger; relationships are bidirectional |
+| `Follow` / `Accept` | Idempotent, low-frequency | User can re-trigger; relationships are bidirectional |
+| `Reject` / `Undo{Follow}` | Idempotent, low-frequency | The peer keeps its row until either side touches the relationship again — see § Declining a request and ending a friendship |
 | `Update{Person}` (profile) | Idempotent | Self-heals via `remote_actors.fetched_at` TTL re-fetch |
 
 Each activity type owns its own reconciliation story (TTL re-fetch, next

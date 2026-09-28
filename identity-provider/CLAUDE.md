@@ -134,8 +134,9 @@ db, broker, storage, config ──► (leaves)
 | `GET /.well-known/webfinger` | ActivityPub actor discovery |
 | `GET /authorize` | Authorization endpoint (PKCE flow) |
 | `POST /token` | Token exchange |
-| `GET /userinfo` | UserInfo endpoint |
+| `GET /userinfo` | UserInfo endpoint — also carries the account `settings` document |
 | `PATCH /api/profile` | Update display_name / pronouns / bio (Bearer-auth); fans out via `propagate_profile_update` |
+| `PATCH /api/settings` | Bearer-auth. Replace the account-settings sections the body names (`{ appearance: {…} }`), keep the others; returns the merged document and pushes it to the user's sessions as `settings_updated`. Read back on `GET /userinfo` (`settings`). Device-scoped settings never reach the IdP — see `identity-provider/specs/01-identity-federation.md § 1.6` |
 | `PUT /api/avatar` | Replace the user's avatar (raw image bytes; ≤2 MiB; jpeg/png/webp/gif). URL is cache-busted with `?v=<unix_secs>` |
 | `DELETE /api/avatar` | Clear the user's avatar |
 | `POST /register` | User self-registration — dispatches signup OTP, no session |
@@ -147,7 +148,14 @@ db, broker, storage, config ──► (leaves)
 | `POST /api/totp/enroll/verify` | Bearer auth. Verify first code, commit secret, return 10 one-time recovery codes |
 | `POST /api/totp/disable` | Bearer auth + current TOTP code. Clears secret + recovery codes |
 | `POST /api/totp/recovery-codes/regenerate` | Bearer auth + current TOTP code. Replaces the user's 10 recovery codes |
-| `POST /users/:handle/inbox` | ActivityPub inbox (Follow/Accept/Create{Note,MLS}/Update{Note,MLS}/MLS commits+welcomes) |
+| `GET /api/users/search?q=` | Search local users by username (Bearer) |
+| `POST /api/friends/request` | Send a friend request. Body: `{ address }` — local, or `Follow` to a remote IdP. Both sides start `pending` |
+| `GET /api/friends/incoming` | Pending friend requests |
+| `POST /api/friends/:id/accept` | Accept a request; mints the DM conversation and sends `friend_accepted` (local) or `Accept{Follow}` with `conversationId` (remote) |
+| `DELETE /api/friends/:id/reject` | Decline a pending request, silently. Clears the requester's side: their row (local) or `Reject{Follow}` (remote) |
+| `DELETE /api/friends/:actor_uri` | Unfriend (`actor_uri` percent-encoded; 404 when not a friend). Deletes both sides — the friend's row plus a refresh-only `friend_removed` (local) or `Undo{Follow}` (remote). The DM conversation is kept |
+| `GET /api/friends` | Accepted friends, local and remote |
+| `POST /users/:handle/inbox` | ActivityPub inbox (Follow/Accept/Reject/Undo{Follow}/Create{Note,MLS}/Update{Note,MLS}/MLS commits+welcomes) |
 | `GET /users/:handle` | ActivityPub actor profile (JSON-LD) |
 | `GET /ws?token=<jwt>` | WebSocket upgrade (DMs + presence + events) |
 | `POST /api/dm` | Send a DM. Body carries `mls_ciphertext` (base64, mandatory after Phase 3); creates conversation if first message; supports `attachment_ids` (orphans, or ids linked to the caller's own `federation_status = 'failed'` message, which move over), `reply_to_id` and `client_id` (echoed on the sender's `new_dm`). A remote DM's delivery outcome lands in `federation_status`; a failure is pushed to the sender as `dm_delivery_failed` |
@@ -250,7 +258,10 @@ pending_totp_enrollments — in-flight 2FA secret awaiting first-code verify
 pending_totp_logins      — short-lived "passed password, need TOTP" tickets carrying OIDC params
 recovery_codes           — 10 per user, single-use, peppered HMAC
 remote_actors            — cache of federated users (inbox_url, avatar_url, fetched_at TTL)
-friendships              — friend graph (friend_actor_uri, friend_avatar_url, status)
+user_settings            — account settings, one client-owned JSONB document per user
+                            (sections replaced whole by PATCH /api/settings; ≤ 16 KiB)
+friendships              — friend graph (friend_actor_uri, friend_avatar_url, status,
+                            direction: outgoing|incoming — only the incoming side may answer)
 conversations            — anchor for every conversation (kind: dm|group, name)
 conversation_members     — participants (actor_uri, joined_at, left_at, role: member|admin —
                             role is meaningful only for groups; DMs leave both at 'member')

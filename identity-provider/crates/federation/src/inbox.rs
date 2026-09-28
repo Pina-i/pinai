@@ -4,7 +4,7 @@
 //! Supported activities:
 //!   - Follow         → creates a pending friendship
 //!   - Accept{Follow} → marks a friendship as accepted
-//!   - Reject{Follow} → deletes the friendship row
+//!   - Reject{Follow} → deletes the inbox owner's pending request
 //!   - Undo{Follow}   → deletes the friendship
 //!   - Create{Note}   → MLS-only after Phase 3: routes to `mls::handle_inbound_mls_note`
 //!     (any Note without `mediaType: application/mls` is rejected)
@@ -72,8 +72,8 @@ pub async fn post_inbox(
 
     match activity_type.as_str() {
         "Follow" => handle_follow(&state, &body, &recipient).await?,
-        "Accept" => handle_accept(&state, &body).await?,
-        "Reject" => handle_reject(&state, &body).await?,
+        "Accept" => handle_accept(&state, &body, &recipient).await?,
+        "Reject" => handle_reject(&state, &body, &recipient).await?,
         "Undo" => handle_undo(&state, &body, &recipient).await?,
         "Create" => handle_create(&state, &body, &recipient).await?,
         "Update" => handle_update(&state, &body, &recipient).await?,
@@ -128,6 +128,17 @@ async fn handle_follow(
         .as_deref()
         .ok_or_else(|| OidcError::server_error("Recipient has no actor_uri"))?;
 
+    // A Follow for an existing friendship changes nothing: the recipient
+    // already consented, and reopening it as a request would let a peer
+    // quietly take the friendship back to pending.
+    let existing = friendships::find_by_owner_and_uri(&state.pool, recipient.id, actor_url)
+        .await
+        .map_err(|e| OidcError::server_error(e.to_string()))?;
+    if existing.is_some_and(|f| f.status == "accepted") {
+        tracing::debug!(actor = %actor_url, recipient = %recipient.username, "Follow for an existing friendship ignored");
+        return Ok(());
+    }
+
     // Check if this is a local actor.
     let base = state.config.issuer();
     if let Some(follower) = local_actor(actor_url, &base, &state.pool).await {
@@ -145,6 +156,7 @@ async fn handle_follow(
             follower.id,
             recipient_actor_uri,
             recipient.avatar_url.as_deref(),
+            "outgoing",
         )
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?;
@@ -155,6 +167,7 @@ async fn handle_follow(
             recipient.id,
             follower_uri,
             follower.avatar_url.as_deref(),
+            "incoming",
         )
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?;
@@ -195,9 +208,10 @@ async fn handle_follow(
         .map_err(|e| OidcError::server_error(e.to_string()))?;
 
         // Create pending friendship: recipient → remote actor.
-        let friendship = friendships::create_friendship(&state.pool, recipient.id, actor_url, None)
-            .await
-            .map_err(|e| OidcError::server_error(e.to_string()))?;
+        let friendship =
+            friendships::create_friendship(&state.pool, recipient.id, actor_url, None, "incoming")
+                .await
+                .map_err(|e| OidcError::server_error(e.to_string()))?;
 
         // Notify inbox owner of pending friend request. No conversation
         // yet — created on accept.
@@ -220,7 +234,14 @@ async fn handle_follow(
 
 // ─── Accept ──────────────────────────────────────────────────────────────────
 
-async fn handle_accept(state: &AppState, body: &Value) -> Result<(), OidcError> {
+/// The accepter answered a friend request the inbox owner sent. The row is keyed
+/// on the inbox the Accept was delivered to, never on a field of the
+/// activity, so a peer cannot accept on behalf of other local users.
+async fn handle_accept(
+    state: &AppState,
+    body: &Value,
+    recipient: &idp_db::models::User,
+) -> Result<(), OidcError> {
     let accepter_uri = body.get("actor").and_then(|v| v.as_str()).unwrap_or("");
 
     // Pina'i extension: the accepter's IdP minted the DM conversation
@@ -234,108 +255,50 @@ async fn handle_accept(state: &AppState, body: &Value) -> Result<(), OidcError> 
         .and_then(|v| v.as_str())
         .and_then(|s| Uuid::parse_str(s).ok());
 
-    // Find the local user who sent the follow by looking at the object's actor.
-    let follow_actor = body.get("object").and_then(|o| {
-        if o.is_string() {
-            None
-        } else {
-            o.get("actor").and_then(|a| a.as_str())
-        }
-    });
+    let recipient_actor_uri = recipient
+        .actor_uri
+        .as_deref()
+        .ok_or_else(|| OidcError::server_error("Recipient has no actor_uri"))?;
 
-    if let Some(local_actor_uri) = follow_actor {
-        if let Ok(Some(local_user)) = users::find_by_actor_uri(&state.pool, local_actor_uri).await {
-            if let Ok(Some(friendship)) =
-                friendships::find_by_owner_and_uri(&state.pool, local_user.id, accepter_uri).await
-            {
-                friendships::set_status(&state.pool, friendship.id, "accepted")
-                    .await
-                    .map_err(|e| OidcError::server_error(e.to_string()))?;
+    // Only a request the recipient sent: an Accept for one the peer sent
+    // would let it consent on the recipient's behalf.
+    let friendship = friendships::find_by_owner_and_uri(&state.pool, recipient.id, accepter_uri)
+        .await
+        .map_err(|e| OidcError::server_error(e.to_string()))?;
 
-                let conversation_id = create_local_dm_for_accept(
-                    state,
-                    advertised_conv_id,
-                    local_actor_uri,
-                    accepter_uri,
-                )
-                .await?;
+    let Some(friendship) =
+        friendship.filter(|f| f.status == "pending" && f.direction == "outgoing")
+    else {
+        tracing::debug!(accepter = %accepter_uri, recipient = %recipient.username, "Accept with no outgoing request");
+        return Ok(());
+    };
 
-                let (username, display_name) = resolve_remote_name(state, accepter_uri).await;
-                state.hub.send_to_user(
-                    &local_user.id,
-                    WsEvent::FriendAccepted(FriendshipPayload {
-                        friendship_id: friendship.id,
-                        actor_uri: accepter_uri.to_string(),
-                        username,
-                        display_name,
-                        conversation_id: Some(conversation_id),
-                    }),
-                );
+    friendships::set_status(&state.pool, friendship.id, "accepted")
+        .await
+        .map_err(|e| OidcError::server_error(e.to_string()))?;
 
-                // Wire the new remote friend into batch presence polling.
-                if let Some(registry) = &state.remote_registry {
-                    registry.register_friend(accepter_uri, &state.config.issuer());
-                }
+    let conversation_id =
+        create_local_dm_for_accept(state, advertised_conv_id, recipient_actor_uri, accepter_uri)
+            .await?;
 
-                tracing::info!(user = %local_user.username, accepter = %accepter_uri, %conversation_id, "friend request accepted via AP");
-                return Ok(());
-            }
-        }
+    let (username, display_name) = resolve_remote_name(state, accepter_uri).await;
+    state.hub.send_to_user(
+        &recipient.id,
+        WsEvent::FriendAccepted(FriendshipPayload {
+            friendship_id: friendship.id,
+            actor_uri: accepter_uri.to_string(),
+            username,
+            display_name,
+            conversation_id: Some(conversation_id),
+        }),
+    );
+
+    // Wire the new remote friend into batch presence polling.
+    if let Some(registry) = &state.remote_registry {
+        registry.register_friend(accepter_uri, &state.config.issuer());
     }
 
-    // Fallback: find any pending friendship with this accepter_uri.
-    let base = state.config.issuer();
-    let prefix = format!("{}/users/", base);
-
-    let rows = sqlx::query_as::<_, idp_db::models::Friendship>(
-        "SELECT * FROM friendships WHERE friend_actor_uri = $1 AND status = 'pending'",
-    )
-    .bind(accepter_uri)
-    .fetch_all(&state.pool)
-    .await
-    .map_err(|e| OidcError::server_error(e.to_string()))?;
-
-    for friendship in rows {
-        if let Ok(Some(owner)) = users::find_by_id(&state.pool, friendship.owner_user_id).await {
-            if owner
-                .actor_uri
-                .as_deref()
-                .is_some_and(|u| u.starts_with(&prefix))
-            {
-                friendships::set_status(&state.pool, friendship.id, "accepted")
-                    .await
-                    .map_err(|e| OidcError::server_error(e.to_string()))?;
-
-                let owner_uri = match owner.actor_uri.as_deref() {
-                    Some(u) => u,
-                    None => continue,
-                };
-                let conversation_id =
-                    create_local_dm_for_accept(state, advertised_conv_id, owner_uri, accepter_uri)
-                        .await?;
-
-                let (username, display_name) = resolve_remote_name(state, accepter_uri).await;
-                state.hub.send_to_user(
-                    &owner.id,
-                    WsEvent::FriendAccepted(FriendshipPayload {
-                        friendship_id: friendship.id,
-                        actor_uri: accepter_uri.to_string(),
-                        username,
-                        display_name,
-                        conversation_id: Some(conversation_id),
-                    }),
-                );
-
-                // Wire the new remote friend into batch presence polling.
-                if let Some(registry) = &state.remote_registry {
-                    registry.register_friend(accepter_uri, &state.config.issuer());
-                }
-
-                tracing::info!(friendship_id = %friendship.id, %conversation_id, "friend accepted via AP (fallback)");
-            }
-        }
-    }
-
+    tracing::info!(user = %recipient.username, accepter = %accepter_uri, %conversation_id, "friend request accepted via AP");
     Ok(())
 }
 
@@ -361,42 +324,34 @@ async fn create_local_dm_for_accept(
 
 // ─── Reject ──────────────────────────────────────────────────────────────────
 
-async fn handle_reject(state: &AppState, body: &Value) -> Result<(), OidcError> {
+/// The rejecter declined a friend request the inbox owner sent. Only that one
+/// row is touched: it is keyed on the inbox the Reject was delivered to,
+/// never on a field of the activity, so a peer cannot drop other users'
+/// requests. The owner is not notified — a declined request just stops
+/// existing.
+async fn handle_reject(
+    state: &AppState,
+    body: &Value,
+    recipient: &idp_db::models::User,
+) -> Result<(), OidcError> {
     let rejecter_uri = body.get("actor").and_then(|v| v.as_str()).unwrap_or("");
 
-    let rows = sqlx::query_as::<_, idp_db::models::Friendship>(
-        "SELECT * FROM friendships WHERE friend_actor_uri = $1 AND status = 'pending'",
-    )
-    .bind(rejecter_uri)
-    .fetch_all(&state.pool)
-    .await
-    .map_err(|e| OidcError::server_error(e.to_string()))?;
+    let friendship = friendships::find_by_owner_and_uri(&state.pool, recipient.id, rejecter_uri)
+        .await
+        .map_err(|e| OidcError::server_error(e.to_string()))?;
 
-    for friendship in rows {
-        friendships::delete_friendship(&state.pool, friendship.owner_user_id, rejecter_uri)
-            .await
-            .map_err(|e| OidcError::server_error(e.to_string()))?;
+    let Some(friendship) =
+        friendship.filter(|f| f.status == "pending" && f.direction == "outgoing")
+    else {
+        tracing::debug!(rejecter = %rejecter_uri, recipient = %recipient.username, "Reject with no outgoing request");
+        return Ok(());
+    };
 
-        state.hub.send_to_user(
-            &friendship.owner_user_id,
-            WsEvent::FriendRemoved(FriendshipPayload {
-                friendship_id: friendship.id,
-                actor_uri: rejecter_uri.to_string(),
-                username: String::new(),
-                display_name: None,
-                conversation_id: None,
-            }),
-        );
+    friendships::delete_friendship(&state.pool, recipient.id, rejecter_uri)
+        .await
+        .map_err(|e| OidcError::server_error(e.to_string()))?;
 
-        // Drop from batch presence polling — we no longer have a
-        // friendship to track for this remote actor.
-        if let Some(registry) = &state.remote_registry {
-            registry.unregister_friend(rejecter_uri, &state.config.issuer());
-        }
-
-        tracing::info!(friendship_id = %friendship.id, "friend request rejected via AP");
-    }
-
+    tracing::info!(friendship_id = %friendship.id, "friend request rejected via AP");
     Ok(())
 }
 
@@ -429,6 +384,13 @@ async fn handle_undo_follow(
     let recipient_actor_uri = recipient.actor_uri.as_deref().unwrap_or("");
 
     // Remove the friendship: recipient → actor.
+    let Some(friendship) = friendships::find_by_owner_and_uri(&state.pool, recipient.id, actor_url)
+        .await
+        .map_err(|e| OidcError::server_error(e.to_string()))?
+    else {
+        tracing::debug!(actor = %actor_url, recipient = %recipient.username, "Undo{{Follow}} with no friendship");
+        return Ok(());
+    };
     friendships::delete_friendship(&state.pool, recipient.id, actor_url)
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?;
@@ -441,12 +403,13 @@ async fn handle_undo_follow(
             .map_err(|e| OidcError::server_error(e.to_string()))?;
     }
 
-    // Notify recipient.
+    // Lets the recipient's clients drop the actor from their list. Clients
+    // refresh on it silently — an unfriend is never announced.
     let (username, display_name) = resolve_remote_name(state, actor_url).await;
     state.hub.send_to_user(
         &recipient.id,
         WsEvent::FriendRemoved(FriendshipPayload {
-            friendship_id: Uuid::nil(),
+            friendship_id: friendship.id,
             actor_uri: actor_url.to_string(),
             username,
             display_name,
@@ -454,11 +417,7 @@ async fn handle_undo_follow(
         }),
     );
 
-    // Drop from batch presence polling — we no longer have a
-    // friendship to track for this remote actor.
-    if let Some(registry) = &state.remote_registry {
-        registry.unregister_friend(actor_url, &state.config.issuer());
-    }
+    crate::friendship::release_remote_presence(state, actor_url).await;
 
     tracing::info!(actor = %actor_url, recipient = %recipient.username, "unfriended via AP Undo");
     Ok(())

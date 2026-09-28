@@ -16,4 +16,5 @@ pub mod pending_totp_logins;
 pub mod recovery_codes;
 pub mod remote_actors;
 pub mod user_devices;
+pub mod user_settings;
 pub mod users;
