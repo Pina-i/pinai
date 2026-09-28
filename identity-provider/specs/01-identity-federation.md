@@ -385,7 +385,7 @@ A user's settings come in two scopes, and only one of them reaches the IdP:
 
 | Scope | Examples | Kept |
 |---|---|---|
-| Account | palette, motif | `user_settings` on the home IdP; every device follows it |
+| Account | palette, motif, notification mutes | `user_settings` on the home IdP; every device follows it |
 | Device | light / dark / system | the device only (the client's local storage) — never sent |
 
 The palette is an identity choice that should look the same everywhere; light or dark depends on the
@@ -403,10 +403,14 @@ CREATE TABLE user_settings (
 );
 ```
 
-The document belongs to the client. Each top-level key is a **section** — `appearance` today:
+The document belongs to the client. Each top-level key is a **section** — `appearance` and
+`notifications` today:
 
 ```json
-{ "appearance": { "family": "lagoon", "motif": "raranga" } }
+{
+  "appearance": { "family": "lagoon", "motif": "raranga" },
+  "notifications": { "muteAll": false, "mutedConversations": ["<conversation id>"] }
+}
 ```
 
 The IdP checks the shape (an object of objects, within 16 KiB) and never interprets a section. A client
@@ -450,7 +454,8 @@ sequenceDiagram
 - **Change while the IdP is unreachable.** The client keeps its change marked unsynced and sends it
   again on its next sign-in, where it wins over the IdP's copy instead of being overwritten by it.
 - **Several devices changing concurrently.** The last `PATCH` for a section wins; sections don't
-  interfere with one another.
+  interfere with one another, because a client sends only the sections it changed — a whole document
+  would put its stale copy of the others back.
 - **Before sign-in, or before `/userinfo` answers.** The client paints its local copy of the account
   settings — those of the last account signed in on it — so pages never flash the default.
 
