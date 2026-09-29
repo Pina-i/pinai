@@ -12,16 +12,25 @@ thiserror  = "2"
 tokio      = { version = "1", features = ["full"] }
 tracing    = "0.1"
 uuid       = { version = "1", features = ["v4", "serde"] }
-time       = { version = "0.3", features = ["serde", "formatting"] }
+time       = { version = "0.3", features = ["serde", "formatting", "parsing"] }
+base64     = "0.22"
+ed25519-dalek = "2"
 sqlx       = { version = "0.8", features = ["postgres", "runtime-tokio", "uuid", "time", "macros"] }
 axum       = { version = "0.8", features = ["macros", "form", "ws"] }
 dashmap    = "6"
 futures-util  = "0.3"
+futures-core  = "0.3"
+bytes         = "1"
 tokio-stream  = "0.1"
 reqwest    = { version = "0.12", features = ["json"] }
 axum-extra = { version = "0.10", features = ["cookie-signed"] }
 nanoid     = "0.4"
 async-trait = "0.1"
+anyhow     = "1"
+http-body-util = "0.1"
+tower      = { version = "0.5", features = ["util"] }
+url        = "2"
+proptest   = "1"
 lettre     = { version = "0.11", default-features = false, features = ["smtp-transport", "tokio1-rustls-tls", "builder"] }
 totp-rs    = { version = "5", features = ["otpauth"] }
 hmac       = "0.12"

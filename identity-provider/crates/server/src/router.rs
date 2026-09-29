@@ -1,14 +1,13 @@
 use axum::http::HeaderName;
 use axum::{
-    extract::DefaultBodyLimit,
     http::{HeaderValue, Method},
-    routing::{delete, get, patch, post, put},
+    routing::{get, patch, post, put},
     Json, Router,
 };
 use serde_json::json;
 use tower_http::{
     cors::CorsLayer,
-    trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer},
+    trace::{DefaultOnResponse, TraceLayer},
 };
 use tracing::Level;
 
@@ -19,11 +18,8 @@ use idp_auth::{
     discovery::{jwks, openid_configuration},
     login::post_login,
     logout::get_logout,
-    presence::handlers::{get_presence, post_presence_batch},
-    presence::sse::get_presence_stream,
     profile::update_profile,
     register::{post_register, post_register_and_login},
-    settings::update_settings,
     token::post_token,
     totp::{
         post_disable as post_totp_disable, post_enroll as post_totp_enroll,
@@ -32,12 +28,6 @@ use idp_auth::{
     },
     userinfo::get_userinfo,
     verify_email::{post_resend_verification, post_verify_email_and_login},
-    ws::ws_upgrade,
-};
-use idp_e2ee::{
-    delete_history, get_commits_since, get_devices, get_history_page, get_history_salt,
-    get_packages_status, get_welcomes, post_commit, post_history_batch, post_history_salt,
-    post_packages, post_packages_claim, post_welcome, register_device, revoke_device,
 };
 use idp_federation::{
     actor::{get_actor, get_instance_actor},
@@ -46,34 +36,17 @@ use idp_federation::{
     outbox::{get_followers as get_ap_followers, get_following as get_ap_following, get_outbox},
     webfinger::get_webfinger,
 };
-use idp_messaging::{
-    add_group_member,
-    attachments::{get_attachment, upload_attachments},
-    blob::get_attachment_blob,
-    create_group, edit_message, get_conversation, list_conversations, list_group_members,
-    mark_read, remove_group_member, rename_group, send_group_message, send_message,
-    set_member_role,
-};
-use idp_social::{
-    accept_friendship, delete_friendship, get_friends, get_incoming_requests, post_friend_request,
-    reject_friendship, search_users,
-};
+use idp_social::search_users;
 use idp_state::AppState;
 
-pub fn build(state: AppState) -> Router {
+/// `api` carries the routes already moved to the layer crates; see `idp_api::router`.
+pub fn build(state: AppState, api: Router) -> Router {
     let origins: Vec<HeaderValue> = state
         .config
         .cors_origins
         .iter()
         .filter_map(|o| o.parse::<HeaderValue>().ok())
         .collect();
-
-    // Body-size cap for the attachment-upload endpoint:
-    // (max files per request) * (max bytes per file) + 1 MiB headroom for
-    // multipart-boundary overhead.
-    let attachment_body_limit: usize = (state.config.attachment_max_files_per_message as u64
-        * state.config.attachment_max_byte_size
-        + 1024 * 1024) as usize;
 
     // Explicit header allowlist — Firefox/Gecko treats `Access-Control-Allow-Headers: *`
     // as not covering `Authorization`, so the wildcard would silently drop our
@@ -100,7 +73,14 @@ pub fn build(state: AppState) -> Router {
 
     // HTTP request/response tracing — one span per request with method, path, status, latency.
     let trace_layer = TraceLayer::new_for_http()
-        .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
+        .make_span_with(|request: &axum::http::Request<axum::body::Body>| {
+            tracing::info_span!(
+                "request",
+                method = %request.method(),
+                uri = %logged_uri(request.uri()),
+                version = ?request.version(),
+            )
+        })
         .on_response(DefaultOnResponse::new().level(Level::INFO));
 
     let is_dev = state.config.environment.is_dev();
@@ -139,102 +119,17 @@ pub fn build(state: AppState) -> Router {
         .route("/users/{username}/outbox", get(get_outbox))
         .route("/users/{username}/followers", get(get_ap_followers))
         .route("/users/{username}/following", get(get_ap_following))
-        // ── Friendship REST API (Bearer-auth) ───────────────────────────────
+        // ── User search (Bearer-auth); the friend routes are in `api` ────────
         .route("/api/users/search", get(search_users))
-        .route("/api/friends/request", post(post_friend_request))
-        .route("/api/friends/incoming", get(get_incoming_requests))
-        .route("/api/friends/{actor_uri}", delete(delete_friendship))
-        .route(
-            "/api/friends/{friendship_id}/accept",
-            post(accept_friendship),
-        )
-        .route(
-            "/api/friends/{friendship_id}/reject",
-            delete(reject_friendship),
-        )
-        .route("/api/friends", get(get_friends))
-        // ── Direct Messages REST API (Bearer-auth) ────────────────────────────
-        // Reactions are gone — they're MLS application messages of
-        // `kind = "reaction"`, indistinguishable from text on the wire and
-        // computed client-side from the decrypted MLS stream (Phase 3).
-        .route("/api/dm", post(send_message).get(list_conversations))
-        .route("/api/dm/{conversation_id}", get(get_conversation))
-        .route("/api/dm/{conversation_id}/read", post(mark_read))
-        .route("/api/dm/{message_id}/edit", patch(edit_message))
-        // ── Group conversations REST API (Bearer-auth) ────────────────────────
-        // Membership + roles live in `conversation_members`; MLS key material
-        // (commits/welcomes) flows separately through the Delivery Service.
-        // `{actor_uri}` segments are percent-encoded by the client.
-        .route("/api/groups", post(create_group))
-        .route("/api/groups/{conversation_id}", patch(rename_group))
-        .route(
-            "/api/groups/{conversation_id}/messages",
-            post(send_group_message),
-        )
-        .route(
-            "/api/groups/{conversation_id}/members",
-            get(list_group_members).post(add_group_member),
-        )
-        .route(
-            "/api/groups/{conversation_id}/members/{actor_uri}",
-            delete(remove_group_member),
-        )
-        .route(
-            "/api/groups/{conversation_id}/members/{actor_uri}/role",
-            post(set_member_role),
-        )
         // ── Avatar API (Bearer-auth) ────────────────────────────────────
         .route("/api/avatar", put(put_avatar).delete(delete_avatar))
         // ── Profile API (Bearer-auth) ───────────────────────────────────
         .route("/api/profile", patch(update_profile))
-        // ── Account settings (Bearer-auth; read back on /userinfo) ──────
-        .route("/api/settings", patch(update_settings))
-        // ── E2EE key directory ──────────────────────────────────────────
-        // KeyPackages: POST + status are Bearer (own device);
-        // claim accepts Bearer (local cross-add) or HTTP-Sig (peer cross-add).
-        .route("/api/keys/packages", post(post_packages))
-        .route("/api/keys/packages/claim", post(post_packages_claim))
-        .route("/api/keys/packages/status", get(get_packages_status))
-        // Devices — list, register/renew/rotate Device Root Key, revoke.
-        .route("/api/keys/devices", get(get_devices).post(register_device))
-        .route("/api/keys/devices/{device_id}/revoke", post(revoke_device))
-        // ── History backup ─────────────────────────────────────────────
-        .route(
-            "/api/history/messages",
-            post(post_history_batch)
-                .get(get_history_page)
-                .delete(delete_history),
-        )
-        .route(
-            "/api/history/salt",
-            get(get_history_salt).post(post_history_salt),
-        )
-        // ── MLS Delivery Service (Bearer-auth) ──────────────────────────
-        // Commits: ordered append per group with `409` on epoch race;
-        // catch-up via `?since=<epoch>`. Welcomes: per-device atomic claim.
-        .route(
-            "/api/mls/groups/{conversation_id}/commits",
-            post(post_commit).get(get_commits_since),
-        )
-        .route("/api/mls/welcomes", get(get_welcomes).post(post_welcome))
-        // ── DM Attachments API ──────────────────────────────────────────
-        // Upload: per-route body limit overrides Axum's 2 MiB default.
-        .route(
-            "/api/attachments",
-            post(upload_attachments).layer(DefaultBodyLimit::max(attachment_body_limit)),
-        )
-        // Bearer auth — returns the token-protected blob URL.
-        .route("/api/attachments/{id}", get(get_attachment))
-        // Token auth (token in query string) — redirects to RustFS or proxies remote.
-        .route("/api/attachments/{id}/blob", get(get_attachment_blob))
+        // ── E2EE — key directory, Delivery Service, history archive — is in `api` ──
+        // ── Attachments: upload, open and blob are in `api` ─────────────
         // HTTP-Signature auth — peer-IdP-facing source of truth for local attachments.
         .route("/api/attachments/{id}/content", get(get_attachment_content))
-        // ── Presence API ────────────────────────────────────────────────────
-        .route("/api/presence", get(get_presence))
-        .route("/api/presence/stream", get(get_presence_stream))
-        .route("/api/presence/batch", post(post_presence_batch))
         // ── WebSocket ────────────────────────────────────────────────────────
-        .route("/ws", get(ws_upgrade))
         // ── Health check ──────────────────────────────────────────────────────
         .route("/health", get(|| async { Json(json!({ "ok": true })) }));
 
@@ -245,5 +140,18 @@ pub fn build(state: AppState) -> Router {
         router
     };
 
-    router.with_state(state).layer(cors).layer(trace_layer)
+    router
+        .with_state(state)
+        .merge(api)
+        .layer(cors)
+        .layer(trace_layer)
 }
+
+/// A request's URI as logged: the path only — a query can carry a credential (`/ws?token=`, a
+/// blob URL's token).
+fn logged_uri(uri: &axum::http::Uri) -> String {
+    uri.path().to_owned()
+}
+
+#[cfg(test)]
+mod tests;

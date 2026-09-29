@@ -9,7 +9,8 @@ SHELL := bash
         alice-docker-dev bob-docker-dev \
         alice-docker-win bob-docker-win \
         alice-down bob-down alice-down-v bob-down-v \
-        fmt fmt-check lint check
+        fmt fmt-check lint check \
+        test-integration test-integration-down check-all
 
 # ── Local dev (cargo run on host) ─────────────────────────────────────────────
 # Fastest inner loop. Requires the Rust toolchain locally. Each target seeds
@@ -169,8 +170,26 @@ fmt:
 fmt-check:
 	cargo fmt --all --check
 
+# `--all-features` compiles and lints the Docker-gated tests too, without Docker.
 lint:
-	cargo clippy --workspace --all-targets -- -D warnings
+	cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 check: fmt-check lint
 	cargo test --workspace
+
+# ── Integration tests (Docker) ────────────────────────────────────────────────
+# Tests behind the `integration` feature need Postgres: a throwaway one from
+# compose.test.yml. DATABASE_URL is exported explicitly because sqlx::test would
+# otherwise read the repo-root .env — Alice's development database.
+
+TEST_PG_PORT ?= 55432
+TEST_DATABASE_URL := postgres://test:test@localhost:$(TEST_PG_PORT)/test
+
+test-integration:
+	TEST_PG_PORT=$(TEST_PG_PORT) docker compose -f compose.test.yml --project-name pinai-test up -d --wait
+	DATABASE_URL=$(TEST_DATABASE_URL) cargo test --workspace --all-features
+
+test-integration-down:
+	docker compose -f compose.test.yml --project-name pinai-test down
+
+check-all: check test-integration

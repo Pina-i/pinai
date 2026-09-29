@@ -19,5 +19,5 @@ pub use actor::{resolve_remote_actor, RemoteActor};
 pub use error::TransportError;
 pub use http::UrlPolicy;
 pub use keycache::KeyCache;
-pub use sign::{signed_post, Signer};
+pub use sign::{send_signed_post, signed_get, signed_post, Signer};
 pub use verify::{verify_body_digest, verify_http_signature};

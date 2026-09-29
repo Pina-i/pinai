@@ -1,0 +1,50 @@
+[package]
+name    = "idp-infrastructure"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "infrastructure"
+
+# Adapters implementing the domain's ports: SQLx, Redis, outbound HTTP.
+[dependencies]
+activitypub          = { workspace = true }
+anyhow               = { workspace = true }
+async-trait          = { workspace = true }
+base64               = { workspace = true }
+domain               = { package = "idp-domain", path = "../domain" }
+ed25519-dalek        = { workspace = true }
+federation-transport = { workspace = true }
+futures-core         = { workspace = true }
+futures-util         = { workspace = true }
+hmac                 = { workspace = true }
+jwt-utils            = { workspace = true }
+reqwest              = { workspace = true, features = ["stream"] }
+serde_json           = { workspace = true }
+sha2                 = { workspace = true }
+serde                = { workspace = true }
+sqlx                 = { workspace = true }
+time                 = { workspace = true }
+tokio                = { workspace = true }
+tracing              = { workspace = true }
+url                  = { workspace = true }
+uuid                 = { workspace = true }
+
+# Legacy components wrapped by adapters until their context migrates.
+idp-broker   = { path = "../broker", package = "idp-broker" }
+idp-realtime = { path = "../realtime", package = "idp-realtime" }
+idp-storage  = { path = "../storage", package = "idp-storage" }
+
+[dev-dependencies]
+domain = { package = "idp-domain", path = "../domain", features = ["test-utils"] }
+tokio  = { workspace = true }
+uuid   = { workspace = true }
+
+[features]
+# Tests that need Docker (Postgres); run by `make test-integration`.
+integration = []
+
+[[test]]
+name              = "postgres"
+path              = "tests/postgres/main.rs"
+required-features = ["integration"]

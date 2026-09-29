@@ -36,7 +36,8 @@ struct Fixture {
     /// Name accepted on the command line.
     key: &'static str,
     display_name: &'static str,
-    /// Fixed, unlike the `Name_<nanoid>` handle real signup mints. The peer
+    /// Fixed, unlike the random suffix real signup mints, and valid under the handle rules
+    /// (`domain::identity::Handle`): lowercase chosen name, `_`, 5 of `a–z0–9`. The peer
     /// instance has to be able to name this user's `actor_uri` without ever
     /// having seen the database it lives in, which a random suffix makes
     /// impossible. Fixtures trade collision-resistance for predictability;
@@ -54,7 +55,7 @@ struct Fixture {
 const ALICE: Fixture = Fixture {
     key: "alice",
     display_name: "Alice",
-    username: "Alice_dev",
+    username: "alice_dev01",
     email: "akasatana83@hotmail.fr",
     password: "yonolulu",
     home_domain: "localhost:8080",
@@ -63,7 +64,7 @@ const ALICE: Fixture = Fixture {
 const BOB: Fixture = Fixture {
     key: "bob",
     display_name: "Bob",
-    username: "Bob_dev",
+    username: "bob_dev01",
     email: "bob@test.fr",
     password: "yonolulu",
     home_domain: "localhost:8081",
@@ -72,7 +73,7 @@ const BOB: Fixture = Fixture {
 const PIERRE: Fixture = Fixture {
     key: "pierre",
     display_name: "Pierre",
-    username: "Pierre_dev",
+    username: "pierre_dev01",
     email: "pierre@test.fr",
     password: "yonolulu",
     home_domain: "localhost:8080",
@@ -179,8 +180,9 @@ async fn main() -> Result<()> {
 /// that handle — so the friend list would show a live Bob next to a dead one.
 ///
 /// A superseded handle is one on the fixture's own instance, prefixed with the
-/// fixture's display name, that isn't the handle the fixture holds now. In a
-/// dev database those are by construction earlier generations of this seed.
+/// fixture's display name in any case (`Alice_dev` before the handle rules,
+/// `alice_dev01` after), that isn't the handle the fixture holds now. In a dev
+/// database those are by construction earlier generations of this seed.
 async fn prune_superseded_fixture_rows(pool: &PgPool) -> Result<()> {
     for fixture in FIXTURES {
         let canonical = actor_uri(fixture.username, fixture.home_domain);
@@ -200,7 +202,7 @@ async fn prune_superseded_fixture_rows(pool: &PgPool) -> Result<()> {
             DELETE FROM conversations
             WHERE id IN (
                 SELECT conversation_id FROM conversation_members
-                WHERE actor_uri LIKE $1 AND actor_uri <> $2
+                WHERE actor_uri ILIKE $1 AND actor_uri <> $2
             )
             "#,
         )
@@ -211,7 +213,7 @@ async fn prune_superseded_fixture_rows(pool: &PgPool) -> Result<()> {
         .context("pruning conversations with a superseded fixture member")?;
 
         let friendships = sqlx::query(
-            "DELETE FROM friendships WHERE friend_actor_uri LIKE $1 AND friend_actor_uri <> $2",
+            "DELETE FROM friendships WHERE friend_actor_uri ILIKE $1 AND friend_actor_uri <> $2",
         )
         .bind(&superseded)
         .bind(&canonical)
@@ -219,7 +221,7 @@ async fn prune_superseded_fixture_rows(pool: &PgPool) -> Result<()> {
         .await
         .context("pruning superseded fixture friendships")?;
 
-        sqlx::query("DELETE FROM remote_actors WHERE actor_uri LIKE $1 AND actor_uri <> $2")
+        sqlx::query("DELETE FROM remote_actors WHERE actor_uri ILIKE $1 AND actor_uri <> $2")
             .bind(&superseded)
             .bind(&canonical)
             .execute(pool)

@@ -3,7 +3,7 @@ use http_signatures::{http_date_now, sha256_digest, sign_request, SignParams};
 use tracing::{debug, warn};
 
 use crate::error::TransportError;
-use crate::http::{client, screen_url, UrlPolicy};
+use crate::http::{client, download_client, screen_url, UrlPolicy};
 
 /// The identity a signed request is made under.
 pub struct Signer<'a> {
@@ -12,12 +12,33 @@ pub struct Signer<'a> {
     pub signing_key: &'a SigningKey,
 }
 
-/// POST a signed body to a peer and return the response.
+/// POST a signed body to a peer and return the response; a non-2xx answer is an error.
 ///
 /// Callers choose the content type (`application/activity+json` for AP
 /// delivery, `application/json` for direct peer APIs) and decide what to do
 /// with the body.
 pub async fn signed_post(
+    signer: &Signer<'_>,
+    target_url: &str,
+    body: &[u8],
+    content_type: &str,
+    policy: UrlPolicy,
+) -> Result<reqwest::Response, TransportError> {
+    let resp = send_signed_post(signer, target_url, body, content_type, policy).await?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        warn!(%target_url, %status, %text, "peer rejected signed POST");
+        return Err(TransportError::Upstream(format!(
+            "peer returned {status}: {text}"
+        )));
+    }
+    Ok(resp)
+}
+
+/// [`signed_post`], answering whatever status the peer chose — for callers that tell a
+/// peer's refusals apart.
+pub async fn send_signed_post(
     signer: &Signer<'_>,
     target_url: &str,
     body: &[u8],
@@ -53,7 +74,7 @@ pub async fn signed_post(
 
     debug!(%target_url, "sending signed POST");
 
-    let resp = client()
+    client()
         .post(target_url)
         .header("Content-Type", content_type)
         .header("Date", &date)
@@ -63,16 +84,54 @@ pub async fn signed_post(
         .body(body.to_vec())
         .send()
         .await
-        .map_err(|e| TransportError::Upstream(format!("signed POST failed: {e}")))?;
+        .map_err(|e| TransportError::Upstream(format!("signed POST failed: {e}")))
+}
 
+/// GET a peer's resource as the signer, to download it: the URL is screened like any peer
+/// request, and no redirect is followed, as its target would not be.
+pub async fn signed_get(
+    signer: &Signer<'_>,
+    target_url: &str,
+    policy: UrlPolicy,
+) -> Result<reqwest::Response, TransportError> {
+    let url = screen_url(target_url, policy).await?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| TransportError::BadRequest("target URL missing host".into()))?;
+    let host_with_port = match url.port() {
+        Some(port) => format!("{host}:{port}"),
+        None => host.to_string(),
+    };
+    let path_and_query = match url.query() {
+        Some(q) => format!("{}?{}", url.path(), q),
+        None => url.path().to_string(),
+    };
+    let date = http_date_now();
+    let signature = sign_request(SignParams {
+        method: "get",
+        path: &path_and_query,
+        host: &host_with_port,
+        date: &date,
+        digest: None,
+        key_id: signer.key_id,
+        signing_key: signer.signing_key,
+    })
+    .map_err(|e| TransportError::Upstream(format!("HTTP Signature failed: {e}")))?;
+
+    debug!(%target_url, "sending signed GET");
+    let resp = download_client()
+        .get(url)
+        .header("Date", &date)
+        .header("Host", &host_with_port)
+        .header("Signature", &signature)
+        .send()
+        .await
+        .map_err(|e| TransportError::Upstream(format!("signed GET failed: {e}")))?;
     if !resp.status().is_success() {
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
-        warn!(%target_url, %status, %text, "peer rejected signed POST");
         return Err(TransportError::Upstream(format!(
-            "peer returned {status}: {text}"
+            "peer returned {}",
+            resp.status()
         )));
     }
-
     Ok(resp)
 }

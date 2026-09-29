@@ -65,8 +65,8 @@ verifiable by publishing an actor document, which it must do anyway to federate.
 
 ## Outbound
 
-`signed_post` covers `(request-target)`, `host`, `date` and `digest`; GET requests, which
-have no body, cover the first three.
+`signed_post` covers `(request-target)`, `host`, `date` and `digest`; `signed_get`, which
+has no body, covers the first three.
 
 ```
 (request-target): post /users/bob/inbox
@@ -216,6 +216,17 @@ by the caller. One shared client applies the same bounds to all of them.
 
 The body cap is enforced as bytes arrive rather than by trusting `Content-Length`, which a
 hostile peer can omit.
+
+Downloads — attachment bytes fetched from a peer's `/content` endpoint through `signed_get` —
+use a second client with the same screen and download-sized bounds:
+
+| Bound | Value | Why it differs |
+|---|---|---|
+| Connect timeout | 3 s | — |
+| Total timeout | none | A large file takes what it takes |
+| Read timeout | 30 s | A stalled peer still releases the task |
+| Redirects | none | The redirect target would not be screened |
+| Body cap | the size the peer announced | The caller caps the stream as bytes arrive (`identity-provider/specs/03-direct-messages.md` § 9) |
 
 Peer URLs are screened before the request is made:
 

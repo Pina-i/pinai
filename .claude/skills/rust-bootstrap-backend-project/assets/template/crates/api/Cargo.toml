@@ -1,0 +1,22 @@
+[package]
+name    = "__SERVICE__-api"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "api"
+
+# Axum: routes, handlers, DTOs, ApiError, AppState. Never SQLx.
+[dependencies]
+anyhow      = { workspace = true }
+application = { package = "__SERVICE__-application", path = "../application" }
+axum        = { workspace = true }
+domain      = { package = "__SERVICE__-domain", path = "../domain" }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+tracing     = { workspace = true }
+
+[dev-dependencies]
+http-body-util = { workspace = true }
+tokio          = { workspace = true }
+tower          = { workspace = true }

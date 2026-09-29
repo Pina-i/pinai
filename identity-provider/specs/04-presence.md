@@ -7,9 +7,11 @@ The presence system is split into two fully independent subsystems with separate
 | Subsystem | Redis channel | Fan-out target | Replay on reconnect |
 |---|---|---|---|
 | **Presence** | `presence:<domain>` | All friends of the actor | Yes — last known state |
-| **Typing** | `typing:<convId>` | One recipient only | Never |
+| **Typing** | `typing:<convId>` | The conversation's other local members | Never |
 
-Both are **ephemeral** — never persisted to PostgreSQL. Redis pub-sub is the sole transport. Losing any event is always acceptable.
+Both are **ephemeral** — never persisted to PostgreSQL. Redis pub-sub is the local transport. Losing any event is always acceptable.
+
+Each instance speaks for its own accounts only. Other instances learn about them by polling and streaming from it (§ Cross-instance presence), and republish what they learn on their own bus.
 
 ---
 
@@ -98,24 +100,27 @@ The server responds immediately:
 { "type": "heartbeat_ack" }
 ```
 
-The server keeps a `last_heartbeat: Instant` per connection. A background task runs every 60 seconds and marks any connection whose `last_heartbeat` is older than 10 minutes as `away` by publishing an `away` event to Redis. The connection is **not closed** — the user is still connected, just idle.
+The server keeps a `last_heartbeat` per connection. A background task runs every 60 seconds and marks an account `away` — by publishing an `away` event to Redis — once **every one** of its connections has been silent for 10 minutes: a tab or a device left idle does not make an account in use elsewhere idle. Only `online` turns `away`; a state picked by hand stays. The connections are **not closed** — the user is still connected, just idle.
 
 #### Fan-out logic
 
 When the WebSocket worker receives a presence event from Redis:
 
-1. Looks up the actor's friends list from an in-memory cache (refreshed on connect, invalidated on `friend_accepted` events).
-2. For each friend with an active **local** connection, calls `hub.send_to_user()`.
-3. Remote friends are served via the inter-IdP SSE stream — the local worker does not handle them.
+1. Records the state on the presence board (§ Presence board).
+2. Looks up the local accounts that count the actor among their accepted friends (in the database, on every event).
+3. For each one with an active **local** connection, calls `hub.send_to_user()`.
+4. Remote friends hear of it from their own instance, which polls or streams it from this one (§ Cross-instance presence) — the local worker does not handle them.
 
 #### WebSocket event pushed to clients
 
 ```json
 {
-  "event": "presence_update",
-  "actorUri": "https://idp.alice.com/users/alice_xK9mP",
-  "state": "online" | "away" | "offline" | "dnd",
-  "timestamp": "2026-03-24T12:00:00Z"
+  "type": "presence_update",
+  "data": {
+    "actorUri": "https://idp.alice.com/users/alice_xK9mP",
+    "state": "online" | "away" | "offline" | "dnd",
+    "timestamp": "2026-03-24T12:00:00Z"
+  }
 }
 ```
 
@@ -148,23 +153,25 @@ The `conversation_id` is the UUID assigned at conversation creation (see §5). I
 }
 ```
 
-`conversationId` is the raw (pre-hash) conversation ID string. Recipients use it to match the typing event to the correct conversation in their local state.
+`conversationId` is the conversation's UUID. Recipients use it to match the typing event to the correct conversation in their local state.
 
 #### Client → server message
 
 The client sends over WebSocket when the user starts typing:
 
 ```json
-{ "type": "typing_start", "conversationId": "<conversation_id>" }
+{ "type": "typing_start", "data": { "conversationId": "<conversation_id>" } }
 ```
 
 There is no `typing_stop` — the recipient clears the indicator after a **3-second timeout** with no new `typing` event for that conversation.
+
+Only an **active member** of the conversation types in it: anyone else's `typing_start` is ignored, and a typing event heard on the bus from an actor who is not a member here — a peer's stream republishes what it receives — reaches nobody. Otherwise anyone could show as typing in any conversation whose id they know.
 
 #### Publishing rules
 
 | Trigger | Action |
 |---|---|
-| Client sends `typing_start` | Publish to `typing:<conversation_id>` |
+| An active member sends `typing_start` | Publish to `typing:<conversation_id>` |
 | No further `typing_start` from client | Channel goes silent; recipients time out after 3s |
 
 Rate-limit: the server ignores `typing_start` messages sent more than once per second per user, to avoid flooding Redis.
@@ -173,9 +180,10 @@ Rate-limit: the server ignores `typing_start` messages sent more than once per s
 
 When the WebSocket worker receives a typing event from Redis:
 
-1. Looks up the conversation's member list (from in-memory cache for active conversations).
-2. For each member **except the sender** who has an active local connection, calls `hub.send_to_user()`.
-3. The sender is **never** echoed the typing event back.
+1. Looks up the conversation's active members (in the database).
+2. Drops the event if its actor is not one of them.
+3. For each member **except the sender** who has an active local connection, calls `hub.send_to_user()`.
+4. The sender is **never** echoed the typing event back.
 
 For DMs the member list always has exactly one entry, making this identical in cost to the previous single-recipient lookup. For future group conversations the same logic fans out to all local members without any structural change.
 
@@ -183,97 +191,231 @@ For DMs the member list always has exactly one entry, making this identical in c
 
 ```json
 {
-  "event": "typing",
-  "actorUri": "https://idp.alice.com/users/alice_xK9mP",
-  "conversationId": "<conversation_id>",
-  "timestamp": "2026-03-24T12:00:05Z"
+  "type": "typing",
+  "data": {
+    "actorUri": "https://idp.alice.com/users/alice_xK9mP",
+    "conversationId": "<conversation_id>",
+    "timestamp": "2026-03-24T12:00:05Z"
+  }
 }
 ```
 
 ---
 
-### Cross-instance — inter-IdP SSE stream
-
-Both presence states and typing indicators are propagated cross-instance via a single authenticated SSE endpoint. The two subsystems are distinguished by the SSE `event:` field.
+### Cross-instance presence
 
 #### Principle
 
-Each IdP exposes an SSE endpoint that proxies its local Redis channels (both `presence:<domain>` and relevant `typing:<convId>` channels), filtered to a requested set of actors. A remote IdP connects once per domain and receives a real-time filtered stream for all actors it cares about.
+An instance tells other instances about **its own accounts only**, and believes a peer only
+about **the peer's own accounts**. What it learns from a peer goes onto its local bus like a local
+event, so the WebSocket fan-out never tells local and remote apart.
+
+A peer learns about this instance's accounts through two transports, chosen by what its users
+are looking at:
+
+| Context | Transport | What it carries | Latency |
+|---|---|---|---|
+| Friends list | Batch poll, every 10 s per peer instance | The presence of every remote friend of a local account | ≤ 10 s |
+| Open conversation | One SSE stream per peer instance, while a local account has a conversation with its members open | Presence **and typing** of those members | Real-time |
+| Neither | Nothing | — | — |
+
+With no cross-instance conversation open, an instance holds no stream at all; the polls run on
+their own.
+
+```mermaid
+sequenceDiagram
+    participant AC as alice's client
+    participant A as IdP alice.com
+    participant B as IdP bob.com
+    participant BC as carol's client
+
+    Note over A: startup: every remote friend of a local account, by instance
+    loop every 10 s, every peer at once
+        A->>B: POST /api/presence/batch {actors: [carol]} (HTTP-signed as alice.com)
+        B-->>A: {presence: [{carol, online}]}
+        A->>A: board: carol online → PUBLISH presence:alice.com
+        A-->>AC: WS presence_update carol=online
+    end
+    AC->>A: WS watch_conversation {DM with carol}
+    A->>B: GET /api/presence/stream?actors[]=carol (HTTP-signed)
+    B-->>A: event: presence (carol's last state)
+    BC->>B: WS typing_start {DM}
+    B->>B: PUBLISH typing:<DM>
+    B-->>A: event: typing (carol, DM)
+    A->>A: carol is bob.com's own → PUBLISH typing:<DM>
+    A-->>AC: WS typing carol
+```
+
+#### What a peer is told
+
+A peer is the instance whose key signed its request: the actor its `keyId` names, reduced to
+its domain. It is told about an account of this instance only when **one of the peer's accounts
+knows it**:
+
+- the account counts one of the peer's accounts among its accepted friends, or
+- the account shares an active conversation with one of the peer's accounts, both still in it.
+
+| Asked about | Batch poll answers | Stream carries |
+|---|---|---|
+| A local account a peer's account knows | Its state | Its presence, and its typing in the conversations it shares with the peer's accounts |
+| A local account none of the peer's accounts knows | `offline` | Nothing |
+| Another instance's actor | `offline` | Nothing — that instance speaks for it |
+| A string that is not an actor URI | `offline` | Nothing |
+
+Typing in a conversation with no member on the peer's instance is never streamed to it, even
+from an account it follows: the peer has no one to show it to, and would learn the conversation
+exists.
+
+#### What is taken from a peer
+
+- A presence state or a typing indicator from a peer's stream is kept only for an actor **on
+  that peer's domain**; anything else is dropped. Otherwise a peer could put any account online
+  here, or show it typing in any conversation.
+- A poll answer counts only for the actors it was asked about — the peer's own remote friends.
+- A typing indicator from an actor who is not an active member of the conversation here reaches
+  nobody (Part B).
+
+#### Batch poll — `POST /api/presence/batch`
 
 ```
-idp.bob.com  ──SSE──▶  GET idp.alice.com/api/presence/stream
-                        ?actors[]=alice_xK9mP
+POST /api/presence/batch
+Signature: (HTTP Signature — see below)
+Content-Type: application/json
+
+{ "actors": ["https://idp.alice.com/users/alice_xK9mP", "https://idp.alice.com/users/bob_aB3cD"] }
 ```
 
-#### Endpoint
+```json
+{
+  "presence": [
+    { "actorUri": "https://idp.alice.com/users/alice_xK9mP", "state": "online" },
+    { "actorUri": "https://idp.alice.com/users/bob_aB3cD",   "state": "offline" }
+  ]
+}
+```
+
+Every actor asked about is answered, in the order asked, from the presence board — no
+persistence. An actor never heard of reads `offline`, like one the peer may not see.
+
+The polling side keeps the **poll targets**: the remote friends of its local accounts, by
+instance. They are loaded from the accepted friendships at startup and kept by the social
+context after — an accepted friendship adds the friend, and the friend is released once no
+local account still counts them among its friends
+(`identity-provider/specs/01-identity-federation.md` § 1.3). Local friends are never polled.
+
+Every 10 seconds, **every instance is polled at once**, so a slow peer delays only its own
+friends' states. A state that differs from the board's is recorded and published on the local
+`presence:<domain>` channel, from where it reaches the local friends. A peer that fails to
+answer is logged and asked again at the next round.
+
+#### Stream — `GET /api/presence/stream`
 
 ```
-GET /api/presence/stream?actors[]=<username>&actors[]=...
-Content-Type: text/event-stream
-Authorization: (HTTP Signature — see below)
+GET /api/presence/stream?actors[]=<actor URI>&actors[]=...
+Signature: (HTTP Signature over the path and query — see below)
+Accept: text/event-stream
 ```
 
-- Response is a persistent SSE stream.
-- The remote IdP reconnects automatically on disconnect using `Last-Event-ID` + `retry:`.
-#### Authentication — HTTP Signatures
+- `actors[]` is required: a request naming no actor URI is `400`.
+- The response is a persistent SSE stream. A comment (`: keep-alive`) is sent every 15 seconds.
+- On **every connect**, the stream first replays the last known state of each followed actor
+  heard of since the instance started; typing is **never** replayed — a stale "is typing" would
+  be worse than none. There is no `Last-Event-ID`: a reconnecting peer starts over and gets the
+  replay again.
+- It then carries every presence change of the followed actors, and their typing in the
+  conversations they share with the peer's accounts, as they are published on the local bus.
 
-Both inter-IdP presence endpoints authenticate the calling instance with an HTTP Signature,
-the same scheme and the same code path as every other server-to-server endpoint. The signing
-and verification rules, the verifying-key cache and the peer URL policy are defined once in
-`specs/06-federation-authentication.md`; nothing here is specific to presence.
+What the stream follows is settled **when it opens**: each stream listens to the whole local
+bus through its own subscription and filters it with the actors and conversations computed at
+connect. The requesting side opens a new stream whenever it starts watching a conversation, so
+a conversation created after a stream opened is followed from its first watch.
 
-No new key material — the key pair that signs JWTs signs these requests too.
-
-#### SSE event format
-
-The two subsystems use distinct SSE `event:` names so the receiving IdP can route them without inspecting the payload:
+SSE event format — the `event:` field names the subsystem, and `data:` carries the same JSON
+as the local bus:
 
 ```
-// Presence state event
 id: <uuid>
 event: presence
 data: {"type":"presence","event":"online","actorUri":"https://idp.alice.com/users/alice_xK9mP","timestamp":"2026-03-24T12:00:00Z"}
 
-// Typing event
 id: <uuid>
 event: typing
-data: {"type":"typing","actorUri":"https://idp.alice.com/users/alice_xK9mP","conversationId":"alice_xK9mP@idp.alice.com:bob_aB3cD@idp.bob.com","timestamp":"2026-03-24T12:00:05Z"}
+data: {"type":"typing","actorUri":"https://idp.alice.com/users/alice_xK9mP","conversationId":"018e1b2c-3d4f-7a8b-9c0d-1e2f3a4b5c6d","timestamp":"2026-03-24T12:00:05Z"}
 ```
 
-On SSE reconnect (`Last-Event-ID`), the server replays the **last known presence state** for each requested actor. Typing events are **never replayed** — a stale "is typing" indicator would be worse than no indicator.
+#### Following on the requesting side
 
-#### Which typing channels does Alice's IdP subscribe to?
+A client sends, over its WebSocket:
 
-Alice's IdP subscribes to `typing:<conversation_id>` channels only for conversations where **at least one participant is local** and the other is the requesting remote instance's actor. It derives the relevant channel IDs by joining `conversation_members` against the `actors[]` query parameter.
-
-#### Connection management on Bob's IdP
-
-Bob's IdP maintains one outbound SSE connection per remote domain:
-
-```
-RemotePresenceRegistry:
-  HashMap<domain, SSEConnection>
+```json
+{ "type": "watch_conversation",   "data": { "conversationId": "<conversation_id>" } }
+{ "type": "unwatch_conversation", "data": { "conversationId": "<conversation_id>" } }
 ```
 
-When Bob's IdP receives an SSE event:
-- `event: presence` → publishes to local `presence:idp.bob.com` Redis channel → fans out to all Bob's friends who need it.
-- `event: typing` → publishes to local `typing:<convId>` Redis channel → fans out to all local conversation members except the sender.
+Watching a conversation groups its remote members by instance; each instance gets **one**
+stream asking for the union of the remote members of every conversation watched there. The
+stream is opened again when a conversation is added or the union changes, and closed once no
+watched conversation has a member there. A dropped stream is opened again after 2 s, backing
+off to 30 s.
 
-The cross-instance path is fully transparent to the WebSocket layer, which always reads from local Redis regardless of event origin.
+What arrives is checked (§ What is taken from a peer), then published on the local bus: a
+presence state on `presence:<domain>`, a typing indicator on `typing:<convId>`.
 
+#### Authentication — HTTP Signatures
+
+Both inter-IdP presence endpoints authenticate the calling instance with an HTTP Signature,
+signed as the instance (`{issuer}/actor#main-key`), the same scheme and the same code path as
+every other server-to-server endpoint. The signing and verification rules, the verifying-key
+cache and the peer URL policy are defined once in `specs/06-federation-authentication.md`;
+nothing here is specific to presence. A request without a signature is `400`, one whose
+signature does not verify `403`.
+
+No new key material — the key pair that signs JWTs signs these requests too.
+
+#### Bounds on the requesting side
+
+Both requests go through the shared federation transport, so the peer's URL is screened
+before it is fetched (`specs/06-federation-authentication.md` § Peer request policy):
+
+| | Batch poll | Stream |
+|---|---|---|
+| Client | the shared peer client | the download client |
+| Connect timeout | 3 s | 3 s |
+| Total timeout | 5 s | none — a stream stays open |
+| Read timeout | — | 30 s: two missed keep-alives end the stream, which is then opened again |
+| Redirects | ≤ 2 | none |
+| Body cap | 256 KiB | frames are read one at a time |
+
+#### Scenarios
+
+- **Carol, on bob.com, comes online; alice on alice.com is her friend.** Within 10 s alice.com's
+  poll reads `online`, records it and publishes it; alice's clients get `presence_update`.
+- **Alice opens her DM with carol.** alice.com opens a stream from bob.com for carol and gets
+  carol's last state at once. Carol typing in the DM reaches alice in real time; carol typing in
+  a group with only bob.com members does not leave bob.com.
+- **A peer asks about someone none of its accounts knows.** The poll reads `offline`, and the
+  stream carries nothing for them.
+- **A peer claims another instance's account is offline.** alice.com drops it: only that
+  instance speaks for its accounts.
+- **A peer stops answering.** Its poll fails after 5 s, the other peers' answers are applied
+  without waiting, and it is asked again 10 s later. A stream that goes silent ends after 30 s
+  and is opened again.
+
+---
+
+### Presence board
+
+Each IdP keeps the last state heard for every actor, local or remote, in memory:
+
+```rust
+struct PresenceBoard {
+    states: Mutex<HashMap<ActorUri, PresenceState>>,
+}
 ```
-Alice comes online
-  → idp.alice.com: PUBLISH presence:idp.alice.com
-  → SSE stream (event: presence) → idp.bob.com
-  → idp.bob.com: PUBLISH presence:idp.bob.com
-  → Bob's WS worker → hub.send_to_user() → Bob's clients
 
-Alice types in DM with Bob
-  → idp.alice.com: PUBLISH typing:<convId>
-  → SSE stream (event: typing) → idp.bob.com
-  → idp.bob.com: PUBLISH typing:<convId>
-  → Bob's WS worker → looks up conversation members → hub.send_to_user() → all local members except Alice
-```
+It is updated from the local bus — local transitions and what peer streams republish — and by
+the polls, and read by `GET /api/presence`, the batch poll and the stream replay. No
+persistence: after a restart every actor reads `offline` until it is heard of again.
 
 ---
 
@@ -282,7 +424,7 @@ Alice types in DM with Bob
 When a user opens the friends list or a DM conversation, their IdP serves current presence states immediately from the in-memory store:
 
 ```
-GET /api/presence?actors[]=alice_xK9mP@idp.alice.com&actors[]=...
+GET /api/presence?actors[]=https://idp.alice.com/users/alice_xK9mP&actors[]=...
 Authorization: Bearer <access_token>
 ```
 
@@ -298,79 +440,11 @@ Response:
 }
 ```
 
-For remote actors, the state reflects the last event received via the inter-IdP SSE stream. If the SSE connection to that domain is currently down, `offline` is returned as the safe fallback.
+`actors[]` are actor URIs, percent-encoded. For remote actors, the state reflects the last event received through a peer's stream or the batch poll. An actor never heard of reads `offline`.
+
+The answer is real only for the caller itself, its accepted friends, and the active members of its active conversations; **anyone else reads `offline`**, so presence never tells a stranger who is around. A value that is not an actor URI reads `offline` too.
 
 Typing state is **not** included in this endpoint — it is too ephemeral to be meaningful as a snapshot.
-
----
-
-### In-memory presence state store
-
-Each IdP maintains one store, updated by the Redis `presence:<domain>` subscriber:
-
-```rust
-struct PresenceStore {
-    states: DashMap<ActorUri, (PresenceState, Instant)>,
-}
-```
-
-`Instant` records the time of the last state change. Used for `GET /api/presence` responses and for SSE reconnect replay. No persistence — on server restart all actors are `offline` until clients reconnect and heartbeat.
-
----
-
-### Scaling strategy — tiered hybrid
-
-The baseline design (one persistent SSE connection per remote domain for all friends) works well at small-to-medium scale. As the number of remote friendships grows, the system transitions to a **tiered hybrid** model that splits presence and typing across two transport modes based on context:
-
-| Context | Transport | What it carries | Latency |
-|---|---|---|---|
-| Active conversation | SSE (1 connection per involved remote domain) | Typing + presence for that conversation's remote members only | Real-time |
-| Friends list sidebar | Batch poll every ~10s | Presence snapshot for all remote friends | ≤10s |
-| No conversation open, no sidebar visible | Nothing | — | — |
-
-#### Why this works
-
-- **Typing is already scoped.** The SSE stream only subscribes to `typing:<convId>` channels for conversations with active local participants (§ "Which typing channels does Alice's IdP subscribe to?"). No change needed — typing is already "tiered."
-- **Presence is the expensive part.** The domain-wide `presence:<domain>` channel streams all requested actors continuously, even for friends the user hasn't interacted with in weeks. Batch polling replaces this for the sidebar, where 10s staleness is imperceptible.
-- **The `PresenceStore` is transparent.** Whether state arrives via SSE or batch poll, the `DashMap` is updated the same way. Downstream consumers (`GET /api/presence`, WS fan-out) are unaffected.
-- **Connection count drops dramatically.** With no active cross-domain conversations open, an IdP maintains zero outbound SSE connections — compared to one per remote domain in the baseline.
-
-#### Batch presence endpoint (server-to-server)
-
-The existing `GET /api/presence` endpoint uses Bearer token auth (client-facing). For server-to-server batch polling, a separate endpoint uses HTTP Signatures:
-
-```
-POST /api/presence/batch
-Authorization: (HTTP Signature — same scheme as AP activity delivery)
-
-{ "actors": ["alice_xK9mP", "bob_aB3cD", ...] }
-```
-
-Response:
-
-```json
-{
-  "presence": [
-    { "actorUri": "https://idp.alice.com/users/alice_xK9mP", "state": "online" },
-    { "actorUri": "https://idp.alice.com/users/bob_aB3cD",   "state": "offline" }
-  ]
-}
-```
-
-State is read directly from the `PresenceStore`. No database access, no persistence. If the requesting IdP asks about an actor not in the store, `offline` is returned as the safe fallback.
-
-#### SSE connection lifecycle under the tiered model
-
-Under the tiered model, the `RemotePresenceRegistry` changes behavior:
-
-- **Baseline**: one persistent SSE connection per remote domain, created on first friendship, kept alive indefinitely.
-- **Tiered**: SSE connections are opened on-demand when a user opens a conversation with a remote participant, and closed when no local user has an active conversation involving that remote domain. The batch poller runs independently on a fixed interval for all remote domains that have friends.
-
-```
-RemotePresenceRegistry:
-  batch_poll_domains: HashSet<domain>          -- polled every ~10s
-  active_sse: HashMap<domain, SSEConnection>   -- only for active conversations
-```
 
 ---
 
@@ -378,36 +452,30 @@ RemotePresenceRegistry:
 
 ```
 ── Local presence ──────────────────────────────────────────────────
-Client connect / disconnect / heartbeat timeout
-  → Msg Backbone updates PresenceStore
+Client connect / disconnect / heartbeat timeout / set_presence
   → PUBLISH presence:<domain>
-  → WS worker: hub.send_to_user() → all local friends
+  → WS worker: board + hub.send_to_user() → all local friends
 
 ── Local typing ────────────────────────────────────────────────────
-Client typing_start (rate-limited: 1/s)
+Client typing_start (active members only, rate-limited: 1/s)
   → PUBLISH typing:<convId>
-  → WS worker: hub.send_to_user() → recipient only (never sender)
-  → recipient clears indicator after 3s silence
+  → WS worker: hub.send_to_user() → the other local members (never the sender)
+  → recipients clear the indicator after 3s silence
 
-── Cross-instance presence (active conversation) ──────────────────
-PUBLISH presence:idp.alice.com
-  → SSE stream (event: presence) → idp.bob.com
-  → PUBLISH presence:idp.bob.com
-  → WS worker → all local friends of Alice on Bob's instance
+── Cross-instance presence (friends list / batch poll) ────────────
+idp.bob.com → POST idp.alice.com/api/presence/batch (every 10 s, every peer at once)
+  ← { presence: [ { actorUri, state }, ... ] }   (offline for whoever bob.com's users don't know)
+  → a changed state: board + PUBLISH presence:idp.bob.com
+  → WS worker → Alice's friends on Bob's instance
 
-── Cross-instance presence (sidebar / batch poll) ─────────────────
-idp.bob.com → POST idp.alice.com/api/presence/batch (every ~10s)
-  ← { presence: [ { actorUri, state }, ... ] }
-  → update local PresenceStore
-  → WS worker → push presence_update to relevant local users
-
-── Cross-instance typing ───────────────────────────────────────────
-PUBLISH typing:<convId>
-  → SSE stream (event: typing) → idp.bob.com
-  → PUBLISH typing:<convId> (local)
-  → WS worker → Bob's client only
+── Cross-instance presence and typing (open conversation) ─────────
+Bob's client watch_conversation
+  → idp.bob.com → GET idp.alice.com/api/presence/stream?actors[]=...
+  ← replay of the last states, then presence and typing as published on idp.alice.com
+  → only idp.alice.com's own actors kept → PUBLISH on idp.bob.com's bus
+  → WS worker → Bob's clients
 
 ── Initial state on page load ──────────────────────────────────────
 Client → GET /api/presence?actors[]=...
-       ← PresenceStore snapshot (typing excluded)
+       ← board snapshot (typing excluded; offline for strangers)
 ```

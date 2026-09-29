@@ -14,6 +14,7 @@ use serde::Deserialize;
 use activitypub::WebFingerResponse;
 use idp_db::repos::users;
 
+use domain::identity::Recipient;
 use idp_state::{AppState, OidcError};
 
 #[derive(Debug, Deserialize)]
@@ -34,10 +35,13 @@ pub async fn get_webfinger(
         .strip_prefix("acct:")
         .unwrap_or(&query.resource);
 
-    // Username can be `alice` or `alice@domain`.
-    let username = acct.split('@').next().unwrap_or(acct);
+    // Only our own accounts: a bare name, or an address on our domain.
+    let handle = match state.origin.resolve(acct) {
+        Ok(Recipient::Local(handle)) => handle,
+        _ => return Err(OidcError::not_found("User not found")),
+    };
 
-    let user = users::find_by_username(&state.pool, username)
+    let user = users::find_by_username(&state.pool, handle.as_str())
         .await
         .map_err(|e| OidcError::server_error(e.to_string()))?
         .ok_or_else(|| OidcError::not_found("User not found"))?;

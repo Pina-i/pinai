@@ -16,6 +16,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_REDIRECTS: usize = 2;
 const MAX_BODY_BYTES: usize = 256 * 1024;
+const READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// What a peer URL is allowed to be.
 #[derive(Clone, Copy, Debug)]
@@ -37,6 +38,21 @@ impl UrlPolicy {
             allow_private_networks: !https,
         }
     }
+}
+
+/// For downloads: never follows a redirect — the target was screened, a hop would not be — and has
+/// no total timeout, as a file takes what it takes; a stalled read still times out.
+pub fn download_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .read_timeout(READ_TIMEOUT)
+            .redirect(reqwest::redirect::Policy::none())
+            .user_agent("pinai-federation/0.1")
+            .build()
+            .expect("failed to build the download HTTP client")
+    })
 }
 
 /// One client for the whole process, so the connection pool is actually reused.
@@ -133,9 +149,6 @@ pub async fn screen_url(raw: &str, policy: UrlPolicy) -> Result<url::Url, Transp
 }
 
 /// GET a screened URL and decode JSON, refusing a body over [`MAX_BODY_BYTES`].
-///
-/// Streams rather than using `Response::json`, which would buffer a body of any
-/// size a hostile peer cared to send.
 pub async fn get_json_screened(
     raw_url: &str,
     accept: &str,
@@ -157,6 +170,16 @@ pub async fn get_json_screened(
         )));
     }
 
+    let buf = read_capped(resp).await?;
+    serde_json::from_slice(&buf)
+        .map_err(|e| TransportError::Upstream(format!("peer returned invalid JSON: {e}")))
+}
+
+/// A peer's whole answer, refusing a body over [`MAX_BODY_BYTES`].
+///
+/// Streams rather than using `Response::bytes`, which would buffer a body of any
+/// size a hostile peer cared to send.
+pub async fn read_capped(resp: reqwest::Response) -> Result<Vec<u8>, TransportError> {
     if let Some(len) = resp.content_length() {
         if len as usize > MAX_BODY_BYTES {
             return Err(TransportError::Denied(format!(
@@ -178,9 +201,7 @@ pub async fn get_json_screened(
         }
         buf.extend_from_slice(&chunk);
     }
-
-    serde_json::from_slice(&buf)
-        .map_err(|e| TransportError::Upstream(format!("peer returned invalid JSON: {e}")))
+    Ok(buf)
 }
 
 #[cfg(test)]

@@ -1,0 +1,36 @@
+[package]
+name    = "__SERVICE__-app"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "app"
+
+[[bin]]
+name = "__SERVICE__"
+path = "src/main.rs"
+
+# Composition root: builds adapters, use cases and the router; owns startup.
+[dependencies]
+anyhow             = { workspace = true }
+api                = { package = "__SERVICE__-api", path = "../api" }
+application        = { package = "__SERVICE__-application", path = "../application" }
+axum               = { workspace = true }
+domain             = { package = "__SERVICE__-domain", path = "../domain" }
+infrastructure     = { package = "__SERVICE__-infrastructure", path = "../infrastructure" }
+sqlx               = { workspace = true }
+tokio              = { workspace = true }
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+reqwest = { workspace = true }
+
+[features]
+# End-to-end tests that need Docker (Postgres); run by `make test-integration`.
+integration = []
+
+[[test]]
+name              = "api"
+path              = "tests/api/main.rs"
+required-features = ["integration"]

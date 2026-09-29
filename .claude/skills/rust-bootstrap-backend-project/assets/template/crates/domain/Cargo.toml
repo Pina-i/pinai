@@ -1,0 +1,19 @@
+[package]
+name    = "__SERVICE__-domain"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "domain"
+
+# Entities, value objects, port traits, domain errors. No I/O crate may appear here.
+[dependencies]
+anyhow      = { workspace = true }
+async-trait = { workspace = true }
+serde       = { workspace = true }
+thiserror   = { workspace = true }
+uuid        = { workspace = true }
+
+[features]
+# In-memory fakes of the ports and their contract suites, for other crates' tests.
+test-utils = []

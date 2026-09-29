@@ -173,9 +173,9 @@ signup OTP flow:
 
 | Instance | User | Handle | Email | Password |
 |---|---|---|---|---|
-| Alice | Alice | `Alice_dev` | `akasatana83@hotmail.fr` | `yonolulu` |
-| Alice | Pierre | `Pierre_dev` | `pierre@test.fr` | `yonolulu` |
-| Bob | Bob | `Bob_dev` | `bob@test.fr` | `yonolulu` |
+| Alice | Alice | `alice_dev01` | `akasatana83@hotmail.fr` | `yonolulu` |
+| Alice | Pierre | `pierre_dev01` | `pierre@test.fr` | `yonolulu` |
+| Bob | Bob | `bob_dev01` | `bob@test.fr` | `yonolulu` |
 
 Pierre lives on Alice's instance so group conversations and same-instance E2EE
 can be tested without federation.

@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+application = { path = "../application", package = "idp-application" }
+domain = { path = "../domain", package = "idp-domain" }
 serde        = { workspace = true }
 serde_json   = { workspace = true }
 thiserror    = { workspace = true }
@@ -16,21 +18,14 @@ axum-extra   = { workspace = true }
 sqlx         = { workspace = true }
 common-types = { workspace = true }
 jwt-utils    = { workspace = true }
-idp-broker     = { path = "../broker",     package = "idp-broker" }
 idp-config     = { path = "../config",     package = "idp-config" }
 idp-db         = { path = "../db",         package = "idp-db" }
 idp-federation = { path = "../federation", package = "idp-federation" }
-idp-presence   = { path = "../presence",   package = "idp-presence" }
-idp-realtime   = { path = "../realtime",   package = "idp-realtime" }
 idp-state      = { path = "../state",      package = "idp-state" }
 idp-storage    = { path = "../storage",    package = "idp-storage" }
-dashmap      = { workspace = true }
-futures-util  = { workspace = true }
-tokio-stream  = { workspace = true }
 argon2    = "0.5"
 rand      = "0.8"
 base64ct  = { version = "1", features = ["alloc"] }
-base64    = "0.22"
 hmac      = { workspace = true }
 sha2      = { workspace = true }
 subtle    = { workspace = true }
@@ -39,6 +34,5 @@ idp-totp  = { path = "../totp",  package = "idp-totp" }
 activitypub     = { workspace = true }
 http-signatures = { workspace = true }
 reqwest         = { workspace = true }
-url             = "2"
 urlencoding     = "2"
 nanoid          = { workspace = true }

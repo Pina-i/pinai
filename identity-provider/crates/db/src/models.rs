@@ -165,14 +165,6 @@ pub struct FriendListEntry {
 // ─── Conversation ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, sqlx::FromRow, Serialize)]
-pub struct Conversation {
-    pub id: Uuid,
-    pub kind: String,
-    pub name: Option<String>,
-    pub created_at: OffsetDateTime,
-}
-
-#[derive(Debug, Clone, sqlx::FromRow, Serialize)]
 pub struct ConversationMember {
     pub conversation_id: Uuid,
     pub actor_uri: String,
@@ -184,71 +176,6 @@ pub struct ConversationMember {
 
 // ─── DirectMessage ────────────────────────────────────────────────────────────
 
-/// Every DM row carries an opaque MLS ciphertext after Phase 3. The plaintext
-/// `content` column was dropped; replies, reactions, and edits now travel as
-/// MLS application messages inside the encrypted body.
-#[derive(Debug, Clone, sqlx::FromRow, Serialize)]
-pub struct DirectMessage {
-    pub id: Uuid,
-    pub conversation_id: Uuid,
-    pub sender_actor_uri: String,
-    /// TLS-encoded MLSMessage. Server never decrypts or inspects.
-    pub mls_ciphertext: Vec<u8>,
-    pub activity_uri: String,
-    pub federation_status: String,
-    pub created_at: OffsetDateTime,
-    pub edited_at: Option<OffsetDateTime>,
-    pub deleted_at: Option<OffsetDateTime>,
-    pub reply_to_id: Option<Uuid>,
-}
-
 // ─── Attachment ───────────────────────────────────────────────────────────────
 
-/// An attachment on a direct message. Two phases:
-///
-/// - **Orphan** (`message_id IS NULL`) — uploaded but not yet linked to a message;
-///   reaped by the orphan-sweep task after the configured TTL.
-/// - **Linked** (`message_id IS NOT NULL`) — attached to a message, lifecycle
-///   tied to that message (hard-deleted when the message is soft-deleted).
-///
-/// For remote attachments received via federation, `remote_origin_url` is set
-/// and `storage_key` exists for uniformity but no object lives in this IdP's bucket.
-#[derive(Debug, Clone, sqlx::FromRow, Serialize)]
-pub struct Attachment {
-    pub id: Uuid,
-    pub message_id: Option<Uuid>,
-    pub uploaded_by_actor_uri: String,
-    pub storage_key: String,
-    pub mime_type: String,
-    pub byte_size: i64,
-    pub original_filename: String,
-    pub remote_origin_url: Option<String>,
-    pub created_at: OffsetDateTime,
-}
-
 // ─── User device (Phase 6b) ───────────────────────────────────────────────────
-
-/// Per-device metadata for the Settings → Devices view. One row per
-/// `device_id` UUID the user has ever published a KeyPackage from. The
-/// `display_name` + `kind` are auto-detected from the User-Agent header
-/// at first publish; `last_seen_at` is touched on every subsequent
-/// KP publish from that device. `revoked_at` is set by the Devices UI's
-/// per-device "Sign out" action and is the directory-level flag —
-/// actual exclusion from MLS groups happens client-side via Remove commits.
-#[derive(Debug, Clone, sqlx::FromRow, Serialize)]
-pub struct UserDevice {
-    pub device_id: Uuid,
-    pub user_id: Uuid,
-    pub display_name: String,
-    /// `'laptop' | 'phone' | 'tablet' | 'unknown'` — DB-CHECK enforced.
-    pub kind: String,
-    pub paired_at: OffsetDateTime,
-    pub last_seen_at: OffsetDateTime,
-    pub revoked_at: Option<OffsetDateTime>,
-    // IdP-attested Device Root Key. NULL until first `POST /api/keys/devices`.
-    pub drk_public_key: Option<Vec<u8>>,
-    pub attestation_signature: Option<Vec<u8>>,
-    pub attestation_kid: Option<String>,
-    pub attestation_issued_at: Option<OffsetDateTime>,
-    pub attestation_expires_at: Option<OffsetDateTime>,
-}

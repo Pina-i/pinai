@@ -1,0 +1,31 @@
+[package]
+name    = "idp-api"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "api"
+
+# Axum: routes, handlers, DTOs, ApiError, AppState. Never SQLx.
+[dependencies]
+anyhow      = { workspace = true }
+application = { package = "idp-application", path = "../application" }
+axum        = { workspace = true, features = ["multipart"] }
+base64      = { workspace = true }
+domain      = { package = "idp-domain", path = "../domain" }
+futures-core = { workspace = true }
+futures-util = { workspace = true }
+# The connection registry: transport shared with the outbound notifiers, knowing no business rule.
+idp-realtime = { path = "../realtime", package = "idp-realtime" }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+time        = { workspace = true }
+tokio       = { workspace = true, features = ["time"] }
+tracing     = { workspace = true }
+url         = { workspace = true }
+uuid        = { workspace = true }
+
+[dev-dependencies]
+domain         = { package = "idp-domain", path = "../domain", features = ["test-utils"] }
+http-body-util = { workspace = true }
+tower          = { workspace = true }

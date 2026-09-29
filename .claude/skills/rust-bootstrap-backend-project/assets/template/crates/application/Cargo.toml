@@ -1,0 +1,15 @@
+[package]
+name    = "__SERVICE__-application"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "application"
+
+# Use cases: concrete structs holding `Arc<dyn Port>`s, one flow each.
+[dependencies]
+domain = { package = "__SERVICE__-domain", path = "../domain" }
+
+[dev-dependencies]
+domain = { package = "__SERVICE__-domain", path = "../domain", features = ["test-utils"] }
+tokio  = { workspace = true }

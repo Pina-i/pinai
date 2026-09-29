@@ -11,6 +11,7 @@ path = "src/main.rs"
 serde      = { workspace = true }
 serde_json = { workspace = true }
 tokio      = { workspace = true }
+time       = { workspace = true }
 tracing    = { workspace = true }
 axum       = { workspace = true }
 axum-extra = { workspace = true }
@@ -22,15 +23,17 @@ tower-http = { version = "0.6", features = ["cors", "trace"] }
 dotenvy    = "0.15"
 anyhow     = "1"
 
+api            = { path = "../api",            package = "idp-api" }
+application    = { path = "../application",    package = "idp-application" }
+domain         = { path = "../domain",         package = "idp-domain" }
+infrastructure = { path = "../infrastructure", package = "idp-infrastructure" }
+
 idp-auth       = { path = "../auth",       package = "idp-auth" }
 idp-broker     = { path = "../broker",     package = "idp-broker" }
 idp-config     = { path = "../config",     package = "idp-config" }
 idp-db         = { path = "../db",         package = "idp-db" }
-idp-e2ee       = { path = "../e2ee",       package = "idp-e2ee" }
 idp-email      = { path = "../email",      package = "idp-email" }
 idp-federation = { path = "../federation", package = "idp-federation" }
-idp-messaging  = { path = "../messaging",  package = "idp-messaging" }
-idp-presence   = { path = "../presence",   package = "idp-presence" }
 idp-realtime   = { path = "../realtime",   package = "idp-realtime" }
 idp-social     = { path = "../social",     package = "idp-social" }
 idp-state      = { path = "../state",      package = "idp-state" }

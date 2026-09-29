@@ -91,13 +91,20 @@ src/verify/tests.rs  # starts with `use super::*;`
 A crate root (`lib.rs`, `mod.rs`) puts its tests beside it at `src/tests.rs`.
 Integration tests that drive a crate from outside still belong in `tests/`.
 
+A test that needs Docker (Postgres) sits in a `[[test]]` target with
+`required-features = ["integration"]`, so `make check` never needs Docker; `make
+test-integration` runs it against the throwaway database of `compose.test.yml`.
+The test tiers and how to write each are in `.claude/skills/rust-backend-architecture`.
+
 ## Commands
 
 Run from the repo root:
 
 | Command | Effect |
 |---|---|
-| `make check` | fmt-check + clippy `-D warnings` + tests, all 21 crates |
+| `make check` | fmt-check + clippy `-D warnings` (every target, every feature) + tests — no Docker |
+| `make test-integration` | throwaway Postgres (`compose.test.yml`, port 55432), then every test including the Docker-gated ones |
+| `make check-all` | both — the gate before merging |
 | `make fmt` | rustfmt the workspace |
 | `make alice` / `make bob` | run a full dev instance |
 | `cargo run -p idp-server` | run a single binary |

@@ -1,0 +1,17 @@
+# Throwaway services for integration tests — never the development database.
+# `make test-integration` starts them; data lives in RAM and is gone on `down`.
+services:
+  postgres-test:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: test
+      POSTGRES_PASSWORD: test
+      POSTGRES_DB: test
+    command: ["postgres", "-c", "fsync=off", "-c", "full_page_writes=off", "-c", "max_connections=500"]
+    ports: ["${TEST_PG_PORT:-55432}:5432"]
+    tmpfs: ["/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U test"]
+      interval: 1s
+      timeout: 3s
+      retries: 30

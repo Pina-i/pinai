@@ -1,0 +1,29 @@
+[package]
+name    = "idp-domain"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "domain"
+
+# Entities, value objects, port traits, domain errors — see
+# .claude/skills/rust-backend-architecture. No I/O crate may appear here.
+[dependencies]
+anyhow      = { workspace = true }
+async-trait = { workspace = true }
+bytes       = { workspace = true }
+futures-core = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+thiserror   = { workspace = true }
+time        = { workspace = true }
+url         = { workspace = true }
+uuid        = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+tokio    = { workspace = true }
+
+[features]
+# In-memory fakes of the ports and their contract suites, for other crates' tests.
+test-utils = []

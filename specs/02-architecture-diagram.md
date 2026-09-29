@@ -96,6 +96,10 @@ flowchart TD
     MSG_B -->|"update remote_actors cache\n+ friendships.friend_avatar_url"| REMOTE_B
     MSG_B -->|"update remote_actors cache\n+ friendships.friend_avatar_url"| FRIENDS_B
 
+    %% Presence crosses instances by poll and stream, never by ActivityPub.
+    %% See identity-provider/specs/04-presence.md § Cross-instance presence.
+    MSG_A <-->|"presence: batch poll every 10 s,\nSSE stream while a conversation is open\nHTTP-signed, each instance speaks for its own accounts"| MSG_B
+
     %% ── Styles ────────────────────────────────────────────────────────
     classDef client   fill:#1e3a5f,stroke:#3b82f6,color:#bfdbfe
     classDef oidc     fill:#3b1f1f,stroke:#ef4444,color:#fca5a5

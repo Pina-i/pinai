@@ -1,0 +1,26 @@
+[package]
+name    = "__SERVICE__-infrastructure"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "infrastructure"
+
+# Adapters implementing the domain's ports: SQLx, Redis, outbound HTTP.
+[dependencies]
+anyhow = { workspace = true }
+domain = { package = "__SERVICE__-domain", path = "../domain" }
+sqlx   = { workspace = true }
+
+[dev-dependencies]
+domain = { package = "__SERVICE__-domain", path = "../domain", features = ["test-utils"] }
+tokio  = { workspace = true }
+
+[features]
+# Tests that need Docker (Postgres); run by `make test-integration`.
+integration = []
+
+[[test]]
+name              = "postgres"
+path              = "tests/postgres/main.rs"
+required-features = ["integration"]

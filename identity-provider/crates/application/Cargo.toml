@@ -1,0 +1,22 @@
+[package]
+name    = "idp-application"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "application"
+
+# Use cases: concrete structs holding `Arc<dyn Port>`s, one flow each.
+[dependencies]
+anyhow      = { workspace = true }
+domain      = { package = "idp-domain", path = "../domain" }
+futures-core = { workspace = true }
+futures-util = { workspace = true }
+time        = { workspace = true }
+tracing     = { workspace = true }
+
+[dev-dependencies]
+async-trait = { workspace = true }
+domain     = { package = "idp-domain", path = "../domain", features = ["test-utils"] }
+serde_json = { workspace = true }
+tokio      = { workspace = true, features = ["test-util"] }

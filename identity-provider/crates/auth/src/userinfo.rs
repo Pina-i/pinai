@@ -26,7 +26,7 @@ pub struct UserinfoResponse {
     pub bio: Option<String>,
     /// The account's settings document (`{}` if never saved) — delivered
     /// here so a client has them from its first request, without a fetch of
-    /// its own. See [`crate::settings`].
+    /// its own. See identity-provider/specs/01-identity-federation.md § 1.6.
     pub settings: serde_json::Value,
 }
 
@@ -70,7 +70,16 @@ pub async fn get_userinfo(
         .actor_uri
         .clone()
         .unwrap_or_else(|| format!("{}/users/{}", state.config.issuer(), user.username));
-    let settings = crate::settings::load_settings(&state, user.id).await?;
+    let settings = state
+        .load_settings
+        .execute(domain::UserId::from(user.id))
+        .await
+        .map_err(|e| {
+            tracing::error!(error = ?e, "load settings");
+            OidcError::server_error("internal error")
+        })?
+        .as_value()
+        .clone();
 
     Ok(Json(UserinfoResponse {
         sub: user.id.to_string(),

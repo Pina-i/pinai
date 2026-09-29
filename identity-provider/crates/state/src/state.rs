@@ -10,9 +10,6 @@ use idp_email::EmailSender;
 use idp_storage::StorageClient;
 use jwt_utils::EdKeyPair;
 
-use idp_presence::remote::RemotePresenceRegistry;
-use idp_presence::store::PresenceStore;
-use idp_presence::sweep::HeartbeatTracker;
 use idp_realtime::WsHub;
 
 /// Shared application state injected into every Axum handler via `State<AppState>`.
@@ -29,12 +26,6 @@ pub struct AppState {
     pub hub: Arc<WsHub>,
     /// Event broker for durable event delivery (Redis Streams) and presence (pub-sub).
     pub broker: Arc<dyn EventBroker>,
-    /// In-memory presence state store (online/away/offline per actor).
-    pub presence_store: Option<Arc<PresenceStore>>,
-    /// Per-connection heartbeat tracker for idle detection.
-    pub heartbeat_tracker: Option<Arc<HeartbeatTracker>>,
-    /// Outbound presence connections to remote IdPs (batch poll + per-domain SSE).
-    pub remote_registry: Option<Arc<RemotePresenceRegistry>>,
     /// Outbound email transport (signup OTPs, future password resets).
     pub email: Arc<dyn EmailSender>,
     /// HMAC pepper for email OTP code hashes. Never logged or stored.
@@ -43,6 +34,32 @@ pub struct AppState {
     pub url_policy: UrlPolicy,
     /// Verifying keys for inbound HTTP Signatures.
     pub key_cache: Arc<KeyCache>,
+    /// This instance's scheme and domain — owns every local actor URI.
+    pub origin: domain::identity::InstanceOrigin,
+    /// The account's settings document, read by `/userinfo` and the profile endpoint.
+    pub load_settings: Arc<application::settings::LoadSettings>,
+    /// The friendship activities the inbox receives.
+    pub receive_follow: Arc<application::social::ReceiveFollow>,
+    pub receive_accept: Arc<application::social::ReceiveAccept>,
+    pub receive_reject: Arc<application::social::ReceiveReject>,
+    pub receive_undo_follow: Arc<application::social::ReceiveUndoFollow>,
+    /// The WebSocket `send_dm`, and the second half of a message to another instance.
+    pub send_direct_message: Arc<application::messaging::SendDirectMessage>,
+    pub deliver_direct_message: Arc<application::messaging::DeliverDirectMessage>,
+    /// The MLS messages the inbox receives.
+    pub receive_message: Arc<application::messaging::ReceiveMessage>,
+    pub receive_edit: Arc<application::messaging::ReceiveEdit>,
+    pub receive_commit: Arc<application::e2ee::ReceiveCommit>,
+    pub receive_welcome: Arc<application::e2ee::ReceiveWelcome>,
+    /// A peer's fetch of an attachment uploaded here.
+    pub serve_peer_content: Arc<application::messaging::ServePeerContent>,
+}
+
+impl AppState {
+    /// Whether a raw actor URI names an account on this instance.
+    pub fn is_local_actor(&self, uri: &str) -> bool {
+        domain::identity::ActorUri::parse(uri).is_ok_and(|uri| self.origin.owns(&uri))
+    }
 }
 
 /// Allow `SignedCookieJar` to extract the key from `AppState`.

@@ -26,8 +26,15 @@ CREATE TABLE conversations (
                                               -- Required for groups; defaults at creation to
                                               -- the joined display_names of all initial members
                                               -- e.g. "Alice, Bob, Harry" — editable afterwards
-  created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  dm_low       TEXT,                          -- a DM's pair of actor URIs, the smaller first;
+  dm_high      TEXT,                          -- NULL for groups
+  CHECK ((dm_low IS NULL AND dm_high IS NULL) OR (kind = 'dm' AND dm_low < dm_high))
 );
+
+-- One DM per pair: concurrent first messages or accepts share it
+CREATE UNIQUE INDEX conversations_dm_pair ON conversations (dm_low, dm_high)
+  WHERE dm_low IS NOT NULL;
 
 -- Members of a conversation — local or remote actors
 -- left_at IS NULL means the member is still active
@@ -79,7 +86,9 @@ CREATE INDEX idx_dm_conversation_cursor
   ON direct_messages (conversation_id, created_at DESC, id DESC);
 ```
 
-> **Conversation ID ownership**: DM `conversation_id` is decided at **friendship-accept time** by the accepter's IdP, not by the first-message sender. `accept_friendship` calls `conversations::get_or_create_dm` in the same logical transaction as `set_status('accepted')`, then surfaces the new id in the WS `friend_accepted` payload (`conversation_id` field, `None` on `friend_request`/`friend_removed`). For cross-IdP accepts the id rides on the outbound AP `Accept{Follow}` activity in a non-standard `conversationId` field; the receiving inbox reads it and calls `get_or_create_dm_with_id` so both IdPs persist the row under the same UUID. A peer running pre-refactor code is a safe degradation — the field is absent, the local IdP falls back to `get_or_create_dm`, and the two sides end up with different ids (the same pre-refactor state). Same-IdP and cross-IdP requests share one model — both leave the friendship `pending` until the recipient POSTs `/api/friends/:id/accept`, and `accept_friendship` is the single place where the conversation is minted. Clients then always read `dmData.id` from `localDmConvos` and pin it on `POST /api/dm`; the WS `dm-conversations` query is invalidated on `friend_accepted` so the new row appears immediately.
+> **Conversation ID ownership**: DM `conversation_id` is decided at **friendship-accept time** by the accepter's IdP, not by the first-message sender, and both IdPs of a cross-IdP pair file the DM under the same id — see `identity-provider/specs/01-identity-federation.md § Friendship-accept also creates the DM conversation`. Clients always read `dmData.id` from `localDmConvos` and pin it on `POST /api/dm`; the WS `dm-conversations` query is invalidated on `friend_accepted` so the new row appears immediately.
+
+> **One DM per pair, and whose id**: a pair of actors has exactly one DM — its pair is a unique key, so two concurrent first messages or accepts open the same one. An id a client pins (`POST /api/dm`'s `conversation_id`, the MLS group it already bootstrapped) or a peer advertises (a Note's `context`, an Accept's `conversationId`) is used only when the pair has no DM yet, and only if it names no conversation, or a DM none but the pair ever belonged to. Any other id — a group's, another pair's DM — is ignored and the DM opens under a fresh one: honouring it would add the pair to someone else's conversation.
 
 > **Group name**: optional at creation. When the client sends a blank/absent name the server stores `NULL`, and clients derive the title from the member `display_name` values (e.g. `"Bob, Harry"`) — the list is shown from the local user's perspective, so their own name is omitted. A stored name can be changed via `PATCH /api/groups/:conversation_id` (admin only). See **§9 Group conversation management**.
 
@@ -108,16 +117,17 @@ Alice types → WS handler resolves Bob's inbox_url
 
 Bob's IdP ← receives HTTP POST to /users/bob/inbox
           → verifies HTTP Signature
-          → persists its own copy of the message
+          → persists its own copy of the message (a redelivered activity — same
+            activity URI — is answered 202 without a second copy or event)
           → hub.send_to_user() pushes WsEvent::NewDm to Bob's live connections
           → broker.publish() writes event to Redis Streams for Bob's catch-up
 ```
 
-> **Note on `sender_address`**: the `DmPayload.sender_address` field sent over WebSocket contains
-> the raw actor URI (e.g. `https://idp.alice.com/users/alice`). The client normalises it to
-> `username@domain` format using `actorUriToAddress()` for display purposes.
-> The `conversation_id` UUID is the stable key used for all conversation routing — the client
-> no longer needs to derive a conversation key from actor URIs.
+> **Note on `sender_address`**: the `DmPayload.sender_address` field sent over WebSocket is the
+> sender's `username@domain`, for local and delivered messages alike — the actor URI only when
+> the sender's URI is not of the `…/users/{username}` form. `kind` is the conversation's (`dm` or
+> `group`), delivered messages included. The `conversation_id` UUID is the stable key used for
+> all conversation routing — the client never derives a conversation key from actor URIs.
 
 > **Note on outbound delivery**: ActivityPub delivery for DMs (and every
 > other activity type) runs in a background `tokio::spawn`, best-effort.
@@ -133,7 +143,7 @@ afterwards, once, and is never retried by the IdP. So a delivery failure cannot
 be an error on the send. Instead the IdP records it and tells the sender, and
 the sender decides whether to send the message again.
 
-- **Outcome on the row.** The delivery task (`federation::mls::deliver_dm_to_remote`,
+- **Outcome on the row.** The delivery task (`application::messaging::DeliverDirectMessage`,
   shared by both send paths) sets `direct_messages.federation_status` to
   `'delivered'` or `'failed'`. A peer that is unreachable, times out, or answers
   non-2xx counts as `'failed'`. Local DMs and group messages keep `'pending'`:
@@ -158,7 +168,7 @@ the sender decides whether to send the message again.
   always decryptable for the recipient. The original row is never re-delivered.
 - **Attachments move.** An attachment linked to one of the sender's own
   `'failed'` messages may be named again in `attachment_ids`. The new message
-  takes the rows over (`repos::attachments::link_to_message`) with the same
+  takes the rows over, in the transaction that stores it, with the same
   ids, so the `AttachmentBlobKey.id`s in the new encrypted body stay valid and
   nothing is uploaded again. The recipient's IdP has never seen those ids,
   because the failed activity never reached it.
@@ -192,6 +202,7 @@ Scenarios:
 | The sender's tab closed before the failure landed | Next time the conversation loads, history carries `federation_status: "failed"` and the client applies it over its cached row |
 | The failed message had attachments | Retry reuses the same attachment ids; the server moves them to the new message |
 | The failure reaches another of the sender's devices, which never held the plaintext | The row turns undelivered there too, but its Retry is disabled — only a device holding the plaintext can re-encrypt it |
+| The sender's IdP stopped before the delivery ended (a crash, a restart) | The row would stay `pending` for good: a sweep, every minute, marks `failed` each DM to another IdP still `pending` five minutes after it was stored — well past the delivery timeout — and pushes `dm_delivery_failed` to its sender |
 | The recipient's IdP persisted the message but answered non-2xx (or too late) | The row is marked failed although the recipient has it; a retry then gives the recipient a duplicate, whose attachment rows stay with the first copy (same ids, so the recipient's inbox skips them). The sender's IdP cannot tell this apart from a lost delivery |
 
 ### Pagination — infinite scroll upward
@@ -217,7 +228,7 @@ ORDER BY created_at DESC, id DESC
 LIMIT 50;
 ```
 
-The client keeps track of the oldest `(created_at, id)` it has received and passes it as the cursor for the next page request.
+The client keeps track of the oldest `(created_at, id)` it has received and passes it as the cursor for the next page request: `GET /api/dm/:conversation_id?cursor_created_at=<RFC 3339>&cursor_id=<uuid>&limit=<≤ 100>`, `cursor_created_at` exactly as the message's `created_at` was returned. Both halves are needed — either alone reads the first page, which also marks the conversation read.
 
 ---
 
@@ -352,7 +363,7 @@ All DM API responses include resolved display names to avoid requiring clients t
 |---|---|---|
 | `GET /api/dm` | `conversation_id`, `kind`, `name`, `members[]` (`actorUri` + `displayName` + `avatarUrl`, excluding caller), `last_message_sender`, `last_message_at`, `unread_count` | Single query — see above. Client derives DM title from `members[0].displayName`, avatar from `members[0].avatarUrl`. Plaintext preview is gone with E2EE — client computes one from the decrypted MLS stream |
 | `GET /api/dm/:conversation_id` | messages with `sender_display_name`, `mls_ciphertext` (base64), `attachments[]` per row | Display name resolved from `users` or `remote_actors`; ciphertext is opaque; attachments resolved from `message_attachments` |
-| `POST /api/dm` | Bearer; body `{ recipient_address, mls_ciphertext: <base64>, reply_to_id?, attachment_ids[], conversation_id?, client_id? }` | `mls_ciphertext` is mandatory; the server rejects 4xx without it. `client_id` is echoed on the sender's own `new_dm` (see below) |
+| `POST /api/dm` | Bearer; body `{ recipient_address, mls_ciphertext: <base64>, reply_to_id?, attachment_ids[], conversation_id?, client_id? }` | `mls_ciphertext` is mandatory, non-empty and at most 64 KiB decoded — on every path: REST, WebSocket `send_dm`, group sends, edits, and what the inbox receives. `client_id` is echoed on the sender's own `new_dm` (see below) |
 | WS `new_dm` event | `conversation_id`, `kind`, `sender_actor_uri`, `sender_display_name`, `mls_ciphertext` (base64), `attachments[]` | Client uses `conversation_id` to route, then decrypts `mls_ciphertext` to recover the application message. WS `send_dm` shortcut path doesn't carry `attachment_ids` — anything with attachments must use REST `POST /api/dm` |
 
 ### Optimistic-send reconciliation (`client_id`)
@@ -407,6 +418,8 @@ WHERE conversation_id = $1
 ORDER BY created_at DESC, id DESC
 LIMIT 50;
 ```
+
+A reply names a message of **its own conversation**. `POST /api/dm` and `POST /api/groups/:id/messages` answer 404 `Parent message not found` for a parent that is unknown or belongs to another conversation; an inbound `inReplyTo` naming one is dropped, and the message is stored unthreaded.
 
 The conversation remains a **flat list** — no recursive thread fetching. Threads (a sub-conversation branching off a message) would require a separate `thread_id` column + table, deferred until needed.
 
@@ -548,10 +561,11 @@ CREATE TABLE message_attachments (
 > `direct_messages.id` is. On a **local** upload the client supplies the
 > UUID up front via the `attachment_id` multipart form field (it's also
 > the AAD bound to the AES-GCM ciphertext, so it has to exist before
-> the encrypt). On a **remote** ingress (`federation::inbox::persist_inbound_attachments`)
-> the receiver extracts the same UUID from the activity's `attachment.url`
+> the encrypt). On a **remote** ingress the receiver extracts the same UUID from the activity's `attachment.url`
 > field of shape `<issuer>/api/attachments/<uuid>/content` and uses it
-> as the local row id. Both IdPs therefore agree on `message_attachments.id`,
+> as the local row id. An id is recorded once: a local upload naming an id
+> that already exists is refused with `409`, never written over the existing
+> row. Both IdPs therefore agree on `message_attachments.id`,
 > which is what `AttachmentBlobKey.id` (carried in the encrypted MLS
 > body) references — without this bridging the receiver's
 > `attachmentKeys[a.id]` lookup misses and images render as a "FILE"
@@ -573,11 +587,11 @@ Lifecycle:
 
 | Endpoint | Auth | Purpose |
 |---|---|---|
-| `POST /api/attachments` | Bearer | Upload up to 5 multipart files; returns orphan IDs. |
+| `POST /api/attachments` | Bearer | Upload up to 5 multipart files; returns orphan IDs. An `attachment_id` already taken answers `409 conflict`. |
 | `POST /api/dm` | Bearer | New `attachment_ids: [Uuid]` field — each an orphan, or linked to one of the caller's `'failed'` messages. Empty `content` is allowed iff `attachment_ids` is non-empty. |
 | `GET /api/dm/{conv_id}` | Bearer | Each message gains `attachments: [{ id, mime_type, byte_size, original_filename }]`. |
 | `GET /api/attachments/{id}` | Bearer | Returns `{ url, expires_at, mime_type, byte_size, original_filename }`. The `url` is a token-protected blob URL on this IdP. |
-| `GET /api/attachments/{id}/blob?token=...` | HMAC token | The actual fetch. Streams bytes through the IdP — local from the private object store, remote via an HTTP-Sig fetch to the origin. |
+| `GET /api/attachments/{id}/blob?token=...` | HMAC token | The actual fetch. Streams bytes through the IdP — local from the private object store, remote via a signed download from the origin (`specs/06-federation-authentication.md` § Peer request policy), cut off past the `byte_size` the origin announced. |
 | `GET /api/attachments/{id}/content` | HTTP Signature (see `specs/06-federation-authentication.md`) | Peer-IdP-facing source of truth. Streams bytes through the IdP after a membership check (peer must have an actor in the conversation). |
 
 Blob URL TTL: `attachment_url_ttl` (default 1 hour). Browser caches the bytes
@@ -616,6 +630,13 @@ Headers on the blob response:
 `url` points at the origin IdP's HTTP-Signature-protected `/content` endpoint.
 The recipient IdP persists a `message_attachments` row with `remote_origin_url`
 set to that URL — bytes are not fetched at inbox time, only on first read.
+
+The recipient later fetches that URL as itself, so it only accepts the
+sender's own content endpoint: the same scheme and host as the sender's actor,
+and the path `/api/attachments/<uuid>/content`. Any other `url` is dropped and
+the message is recorded without that attachment — otherwise a peer could point
+the recipient at any address, private ones included. `size` becomes the row's
+`byte_size`, and a read stops once that many bytes have arrived.
 
 ### Validation
 
@@ -665,17 +686,29 @@ admins may add/remove members, rename the group, or change roles. Any member
 may leave (self-removal). Removal and leaving are soft — `left_at` is set, never
 a hard delete, so earlier messages stay attached to the conversation.
 
+- **A group always keeps an admin.** Its last admin can neither leave nor be demoted while
+  other members remain — `409 conflict`; they promote someone first. The last member of all
+  may leave.
+- **Groups only.** Every route below answers `404 Conversation not found` for a DM, exactly as
+  for someone outside the group: a DM has no admin, no name and no leaving.
+- **Outsiders see nothing.** A non-member is told the group does not exist (404); a member who
+  is not an admin is refused management (`403 Only group admins can do this`).
+- **Names** are trimmed and 1–100 characters (400 otherwise). A blank name at creation leaves
+  the group unnamed, and clients title it by its members.
+- **Actor URIs** in a request are validated (400 for one that is not an actor URI); a group is
+  created with its whole roster in one step, never half.
+
 ### Endpoints (Bearer-auth)
 
 | Endpoint | Gate | Behaviour |
 |---|---|---|
-| `POST /api/groups` | member | Body `{ name?, member_actor_uris[] }`. Creates a `kind='group'` row, adds the caller as `admin` and each URI as `member`. Returns the group view (`conversationId`, `name`, `members[]` with roles). Emits `group_created`. |
+| `POST /api/groups` | member | Body `{ name?, member_actor_uris[] }` — at least one URI (400 otherwise). Creates a `kind='group'` row with the caller as `admin` and each other URI once as `member`, in one transaction. Returns the group view (`conversationId`, `kind`, `name`, `members[]` with roles, `createdAt`). Emits `group_created`. |
 | `GET /api/groups/:id/members` | member | Members with `role`, `displayName`, `avatarUrl`. |
-| `POST /api/groups/:id/members` | **admin** | Body `{ actor_uri }`. Upserts the member (role `member`, idempotent). Emits `member_added`. |
-| `DELETE /api/groups/:id/members/:actor_uri` | **admin** or self | Sets `left_at`. `actor_uri` is percent-encoded. Emits `member_removed` (`removed_by_actor_uri` is `null` on self-leave). |
-| `PATCH /api/groups/:id` | **admin** | Body `{ name }`. Renames the group. Emits `group_renamed`. |
-| `POST /api/groups/:id/members/:actor_uri/role` | **admin** | Body `{ role }`. Promote/demote. Emits `member_role_changed`. |
-| `POST /api/groups/:id/messages` | member | Body `{ mls_ciphertext, reply_to_id?, attachment_ids? }`. See **Message fan-out** below. |
+| `POST /api/groups/:id/members` | **admin** | Body `{ actor_uri }`. Adds the member as `member`; a member who left rejoins. Someone already in the group: `409 Already a member`, their role untouched. Emits `member_added`. |
+| `DELETE /api/groups/:id/members/:actor_uri` | **admin** or self | Sets `left_at`. `actor_uri` is percent-encoded; 404 `Member not found` when not a member. Emits `member_removed` to everyone who was a member, the removed one included (`removed_by_actor_uri` is `null` on self-leave). |
+| `PATCH /api/groups/:id` | **admin** | Body `{ name }` (1–100 characters). Renames the group and returns its view. Emits `group_renamed`. |
+| `POST /api/groups/:id/members/:actor_uri/role` | **admin** | Body `{ role: "admin" \| "member" }`. Promote/demote — never the last admin. Emits `member_role_changed`. |
+| `POST /api/groups/:id/messages` | member | Body `{ mls_ciphertext, reply_to_id?, attachment_ids? }`. Attachments follow the DM rules — as many as a DM may carry, each the sender's own upload, unlinked or linked to one of its `'failed'` messages — or the message is refused (400) and nothing is stored. See **Message fan-out** below. |
 
 ### Message fan-out
 
@@ -743,8 +776,14 @@ converges on the hosting IdP alone. That costs nothing in confidentiality: the
 roster only routes ciphertext, and the MLS Remove commit has already cut the
 member off cryptographically.
 
+Only a **member asserts a roster**. A group Note or Welcome is accepted from an actor this IdP
+holds as an active member of the group, or — for a group new here — one the snapshot itself
+lists; anything else is refused (400) and nothing is mirrored or stored. A snapshot is never
+applied to a DM. Without this, any federated peer could add itself — or anyone — to a group
+by sending a Note that lists it.
+
 An inbound group `Create{Note}` is filed under its `context` UUID directly.
-The DM lazy-create (`get_or_create_dm_with_id`) is reserved for `kind = 'dm'`:
+Opening a DM is reserved for `kind = 'dm'`:
 it matches on the two actors before the id, so routing a group through it
 would file the group's ciphertext into the sender's existing 1:1 with the
 recipient.
@@ -777,7 +816,7 @@ sequenceDiagram
   IdP-->>C: { conversationId, members[] } + group_created WS
   loop per member
     C->>IdP: claim KeyPackage + POST commit + POST welcome (MLS)
-    IdP-->>C: welcome added to recipient; keys delivered
+    IdP-->>C: the Welcome waits for the member's device
   end
 ```
 

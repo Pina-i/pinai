@@ -115,7 +115,16 @@ pub async fn update_profile(
         .actor_uri
         .clone()
         .unwrap_or_else(|| format!("{}/users/{}", state.config.issuer(), updated.username));
-    let settings = crate::settings::load_settings(&state, user_id).await?;
+    let settings = state
+        .load_settings
+        .execute(domain::UserId::from(user_id))
+        .await
+        .map_err(|e| {
+            tracing::error!(error = ?e, "load settings");
+            OidcError::server_error("internal error")
+        })?
+        .as_value()
+        .clone();
 
     Ok(Json(UserinfoResponse {
         sub: updated.id.to_string(),
