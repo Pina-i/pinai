@@ -15,8 +15,8 @@ use application::social::{
     ReceiveFollow, ReceiveReject, ReceiveUndoFollow, SendFriendRequest, Unfriend,
 };
 use axum::Router;
+use connections::Hub;
 use federation_transport::{KeyCache, UrlPolicy};
-use idp_realtime::WsHub;
 use jwt_utils::load_ed_keypair_from_pem;
 use sqlx::postgres::PgPoolOptions;
 use tokio::net::TcpListener;
@@ -73,7 +73,7 @@ impl Application {
 
         // Initialize S3-compatible storage (optional — skipped if env vars not set)
         let storage = if config.storage_enabled() {
-            use idp_storage::{StorageClient, StorageConfig};
+            use infrastructure::storage::{StorageClient, StorageConfig};
 
             let scfg = StorageConfig {
                 endpoint: config.storage_endpoint.clone().unwrap(),
@@ -102,15 +102,15 @@ impl Application {
         };
 
         // Connect to Redis (event broker)
-        let broker = idp_broker::RedisBroker::connect(&config.redis_url)
+        let broker = infrastructure::broker::RedisBroker::connect(&config.redis_url)
             .await
             .map_err(|e| anyhow::anyhow!("redis connection failed: {e}"))?;
         info!("redis broker connected");
 
-        let hub = Arc::new(WsHub::new());
+        let hub = Arc::new(Hub::new());
         let keypair = Arc::new(keypair);
         let config = Arc::new(config);
-        let broker_arc: Arc<dyn idp_broker::EventBroker> = Arc::new(broker);
+        let broker_arc = Arc::new(broker);
 
         // Connects on the first send: the IdP boots even when the relay is not up yet.
         let mailer: Arc<dyn domain::auth::SignupMailer> = Arc::new(

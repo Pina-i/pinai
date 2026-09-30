@@ -99,7 +99,7 @@ CREATE INDEX idx_dm_conversation_cursor
 ```
 Alice types → WS handler persists message
             → publishes JSON event to Redis Streams (broker) for both users
-            → hub.send_to_user() pushes WsEvent::NewDm to both Alice and Bob's live connections
+            → pushes `new_dm` to both Alice's and Bob's live connections
 ```
 
 **Remote DM** (sender and recipient on different IdPs):
@@ -109,18 +109,18 @@ Alice types → WS handler resolves Bob's inbox_url
                 ├─ cache hit:  read from remote_actors.inbox_url (no WebFinger needed)
                 └─ cache miss: resolve via WebFinger → upsert into remote_actors (async)
             → persists message (federation_status = 'pending')
-            → hub.send_to_user() echoes WsEvent::NewDm to Alice only (Bob is remote)
+            → echoes `new_dm` to Alice only (Bob is remote)
             → builds ActivityPub Create{Note} activity
             → delivers to Bob's inbox_url via HTTP Signatures (background task)
             → records the outcome: federation_status = 'delivered' | 'failed'
-            → on failure, pushes WsEvent::DmDeliveryFailed to Alice
+            → on failure, pushes `dm_delivery_failed` to Alice
 
 Bob's IdP ← receives HTTP POST to /users/bob/inbox
           → verifies HTTP Signature
           → persists its own copy of the message (a redelivered activity — same
             activity URI — is answered 202 without a second copy or event)
-          → hub.send_to_user() pushes WsEvent::NewDm to Bob's live connections
-          → broker.publish() writes event to Redis Streams for Bob's catch-up
+          → pushes `new_dm` to Bob's live connections
+          → writes the event to Bob's Redis stream, for his catch-up
 ```
 
 > **Note on `sender_address`**: the `DmPayload.sender_address` field sent over WebSocket is the

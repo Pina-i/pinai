@@ -1,10 +1,38 @@
+//! Redis as the event broker: each account's durable events on a stream of its own
+//! (`user:{id}:events`), replayed on reconnect, and the presence bus on pub-sub.
+
 use futures_util::StreamExt;
 use redis::aio::ConnectionManager;
 use redis::{AsyncCommands, Client};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use crate::traits::{BrokerError, EventBroker, PubSubMessage, StreamEntry};
+/// A message received from a Redis pub-sub channel.
+#[derive(Debug, Clone)]
+pub struct PubSubMessage {
+    /// The channel name the message was received on.
+    pub channel: String,
+    /// The message payload (JSON string).
+    pub payload: String,
+}
+
+/// A durable event read from a user's stream.
+#[derive(Debug, Clone)]
+pub struct StreamEntry {
+    /// Redis Stream entry ID (e.g. "1678886400000-0").
+    /// Clients send this back on reconnect so the server can replay missed events.
+    pub id: String,
+    /// JSON-serialized event payload.
+    pub payload: String,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum BrokerError {
+    #[error("Redis error: {0}")]
+    Redis(#[from] redis::RedisError),
+    #[error("Serialization error: {0}")]
+    Serialization(String),
+}
 
 /// Maximum number of entries kept per user stream (approximate trimming).
 const STREAM_MAXLEN: usize = 10_000;
@@ -28,6 +56,61 @@ impl RedisBroker {
 
     fn stream_key(user_id: Uuid) -> String {
         format!("user:{user_id}:events")
+    }
+
+    /// A durable event onto the account's stream; answers its entry id.
+    pub async fn publish(&self, user_id: Uuid, payload: &str) -> Result<String, BrokerError> {
+        let key = Self::stream_key(user_id);
+        let mut conn = self.conn.clone();
+
+        // XADD user:{id}:events MAXLEN ~ 10000 * payload <json>
+        let id: String = redis::cmd("XADD")
+            .arg(&key)
+            .arg("MAXLEN")
+            .arg("~")
+            .arg(STREAM_MAXLEN)
+            .arg("*")
+            .arg("payload")
+            .arg(payload)
+            .query_async(&mut conn)
+            .await?;
+
+        tracing::debug!(%user_id, %id, "event published to stream");
+        Ok(id)
+    }
+
+    /// The account's events after `last_id`, for a client catching up on reconnect.
+    pub async fn read_after(
+        &self,
+        user_id: Uuid,
+        last_id: &str,
+    ) -> Result<Vec<StreamEntry>, BrokerError> {
+        let key = Self::stream_key(user_id);
+        let mut conn = self.conn.clone();
+
+        // XRANGE user:{id}:events (last_id +  COUNT 1000
+        // The "(" prefix makes the start exclusive (entries strictly after last_id).
+        let exclusive_start = format!("({last_id}");
+
+        let results: Vec<redis::Value> = redis::cmd("XRANGE")
+            .arg(&key)
+            .arg(&exclusive_start)
+            .arg("+")
+            .arg("COUNT")
+            .arg(1000)
+            .query_async(&mut conn)
+            .await?;
+
+        let entries = parse_stream_entries(results);
+        tracing::debug!(%user_id, count = entries.len(), "read events from stream");
+        Ok(entries)
+    }
+
+    /// An ephemeral event onto a pub-sub channel: presence and typing.
+    pub async fn publish_presence(&self, channel: &str, payload: &str) -> Result<(), BrokerError> {
+        let mut conn = self.conn.clone();
+        conn.publish::<_, _, ()>(channel, payload).await?;
+        Ok(())
     }
 }
 
@@ -80,61 +163,6 @@ pub async fn subscribe_channels(
     Ok(rx)
 }
 
-#[async_trait::async_trait]
-impl EventBroker for RedisBroker {
-    async fn publish(&self, user_id: Uuid, payload: &str) -> Result<String, BrokerError> {
-        let key = Self::stream_key(user_id);
-        let mut conn = self.conn.clone();
-
-        // XADD user:{id}:events MAXLEN ~ 10000 * payload <json>
-        let id: String = redis::cmd("XADD")
-            .arg(&key)
-            .arg("MAXLEN")
-            .arg("~")
-            .arg(STREAM_MAXLEN)
-            .arg("*")
-            .arg("payload")
-            .arg(payload)
-            .query_async(&mut conn)
-            .await?;
-
-        tracing::debug!(%user_id, %id, "event published to stream");
-        Ok(id)
-    }
-
-    async fn read_after(
-        &self,
-        user_id: Uuid,
-        last_id: &str,
-    ) -> Result<Vec<StreamEntry>, BrokerError> {
-        let key = Self::stream_key(user_id);
-        let mut conn = self.conn.clone();
-
-        // XRANGE user:{id}:events (last_id +  COUNT 1000
-        // The "(" prefix makes the start exclusive (entries strictly after last_id).
-        let exclusive_start = format!("({last_id}");
-
-        let results: Vec<redis::Value> = redis::cmd("XRANGE")
-            .arg(&key)
-            .arg(&exclusive_start)
-            .arg("+")
-            .arg("COUNT")
-            .arg(1000)
-            .query_async(&mut conn)
-            .await?;
-
-        let entries = parse_stream_entries(results);
-        tracing::debug!(%user_id, count = entries.len(), "read events from stream");
-        Ok(entries)
-    }
-
-    async fn publish_presence(&self, channel: &str, payload: &str) -> Result<(), BrokerError> {
-        let mut conn = self.conn.clone();
-        conn.publish::<_, _, ()>(channel, payload).await?;
-        Ok(())
-    }
-}
-
 /// Parse the raw Redis XRANGE response into typed StreamEntry values.
 ///
 /// XRANGE returns an array of [id, [field, value, ...]] pairs. Each entry
@@ -179,10 +207,10 @@ fn extract_payload(fields: &[redis::Value]) -> Option<String> {
             redis::Value::BulkString(b) => String::from_utf8_lossy(b),
             _ => continue,
         };
-        if key == "payload" {
-            if let redis::Value::BulkString(b) = &chunk[1] {
-                return Some(String::from_utf8_lossy(b).into_owned());
-            }
+        if key == "payload"
+            && let redis::Value::BulkString(b) = &chunk[1]
+        {
+            return Some(String::from_utf8_lossy(b).into_owned());
         }
     }
     None

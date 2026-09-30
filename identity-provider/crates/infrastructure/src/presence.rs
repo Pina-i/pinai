@@ -4,22 +4,22 @@ mod wire;
 
 use std::sync::Arc;
 
+use crate::broker::RedisBroker;
 use anyhow::Context;
 use domain::UserId;
 use domain::presence::{MissedEvent, MissedEvents, PresenceError, Signal, SignalBus, SignalFeed};
 use futures_core::stream::BoxStream;
-use idp_broker::EventBroker;
 
 pub(crate) use wire::{decode_presence, decode_typing, encode as encode_json};
 
 /// `presence:<domain>` and `typing:<conversation>`, in the JSON a peer's stream carries too.
 pub struct RedisSignalBus {
-    broker: Arc<dyn EventBroker>,
+    broker: Arc<RedisBroker>,
     domain: String,
 }
 
 impl RedisSignalBus {
-    pub fn new(broker: Arc<dyn EventBroker>, domain: String) -> Self {
+    pub fn new(broker: Arc<RedisBroker>, domain: String) -> Self {
         Self { broker, domain }
     }
 }
@@ -61,7 +61,7 @@ fn decode(channel: &str, payload: &str) -> Option<Signal> {
 pub async fn signals(redis_url: &str, domain: &str) -> anyhow::Result<BoxStream<'static, Signal>> {
     let presence = format!("presence:{domain}");
     let mut messages =
-        idp_broker::subscribe_channels(redis_url, &[presence.as_str()], &["typing:*"])
+        crate::broker::subscribe_channels(redis_url, &[presence.as_str()], &["typing:*"])
             .await
             .context("subscribe to the presence bus")?;
     Ok(Box::pin(futures_util::stream::poll_fn(move |cx| {
@@ -102,11 +102,11 @@ impl SignalFeed for RedisSignalFeed {
 
 /// A user's durable event stream, which its WebSocket replays after a given event.
 pub struct BrokerMissedEvents {
-    broker: Arc<dyn EventBroker>,
+    broker: Arc<RedisBroker>,
 }
 
 impl BrokerMissedEvents {
-    pub fn new(broker: Arc<dyn EventBroker>) -> Self {
+    pub fn new(broker: Arc<RedisBroker>) -> Self {
         Self { broker }
     }
 }

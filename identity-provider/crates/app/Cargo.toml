@@ -35,10 +35,7 @@ tokio                = { workspace = true }
 tokio-util           = { workspace = true }
 tracing              = { workspace = true }
 
-# Transports the adapters wrap.
-idp-broker   = { path = "../broker", package = "idp-broker" }
-idp-realtime = { path = "../realtime", package = "idp-realtime" }
-idp-storage  = { path = "../storage", package = "idp-storage" }
+connections = { package = "idp-connections", path = "../connections" }
 
 [features]
 # End-to-end journeys against the test Postgres and Redis; run by `make test-integration`.

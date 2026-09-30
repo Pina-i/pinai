@@ -1,6 +1,8 @@
 //! `GET /ws?token=` — a client's live connection: events out, frames in. See
 //! identity-provider/specs/04-presence.md.
 
+mod frames;
+
 use application::messaging::DirectMessageCommand;
 use application::presence::Session;
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade, close_code};
@@ -9,19 +11,20 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
+use connections::Frame;
 use domain::identity::TokenError;
 use domain::messaging::{MessagingError, MlsCiphertext};
 use domain::presence::{PresenceError, PresenceState};
 use domain::{ConnectionId, UserId};
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
-use idp_realtime::{HeartbeatAckPayload, SendDmPayload, WsClientMessage, WsEvent};
 use serde::Deserialize;
 use time::OffsetDateTime;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::AppState;
+use frames::{HEARTBEAT_ACK, SendDmPayload, WsClientMessage};
 
 #[derive(Deserialize)]
 pub struct WsQuery {
@@ -119,15 +122,15 @@ async fn replay(
     true
 }
 
-/// The account's events to the socket, until the instance stops: the socket is then closed as
-/// going away.
+/// The frames pushed to the account, to the socket, until the instance stops: the socket is
+/// then closed as going away.
 async fn forward(
-    mut events: mpsc::UnboundedReceiver<WsEvent>,
+    mut frames: mpsc::UnboundedReceiver<Frame>,
     mut sink: SplitSink<WebSocket, Message>,
     stop: CancellationToken,
 ) {
     loop {
-        let event = tokio::select! {
+        let frame = tokio::select! {
             () = stop.cancelled() => {
                 let _ = sink
                     .send(Message::Close(Some(CloseFrame {
@@ -137,17 +140,10 @@ async fn forward(
                     .await;
                 return;
             }
-            event = events.recv() => event,
+                        frame = frames.recv() => frame,
         };
-        let Some(event) = event else { return };
-        let json = match serde_json::to_string(&event) {
-            Ok(json) => json,
-            Err(e) => {
-                tracing::warn!(error = %e, "ws event not serialisable");
-                continue;
-            }
-        };
-        if sink.send(Message::Text(json.into())).await.is_err() {
+        let Some(frame) = frame else { return };
+        if sink.send(Message::Text((*frame).into())).await.is_err() {
             break;
         }
     }
@@ -188,10 +184,9 @@ async fn handle(
     match message {
         WsClientMessage::Heartbeat => {
             state.heartbeat.execute(session, now).await?;
-            state.hub.send_to_user(
-                &session.user.as_uuid(),
-                WsEvent::HeartbeatAck(HeartbeatAckPayload {}),
-            );
+            state
+                .hub
+                .send_to_user(&session.user.as_uuid(), Frame::from(HEARTBEAT_ACK));
         }
         WsClientMessage::TypingStart(typing) => {
             // At most one a second an account: more would only flood the bus.

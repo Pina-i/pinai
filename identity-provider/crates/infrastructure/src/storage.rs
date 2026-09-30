@@ -1,10 +1,15 @@
-//! The object stores for attachment bytes and avatars, over the legacy S3 client (`idp-storage`).
+//! The object stores for attachment bytes and avatars, over an S3-compatible server (RustFS).
+
+mod client;
+mod error;
+
+pub use client::{StorageClient, StorageConfig};
+pub use error::StorageError;
 
 use anyhow::Context;
 use domain::messaging::{ByteStream, ObjectStore, ObjectStoreError};
 use domain::profile::{AvatarImage, AvatarStore, ImageKind, ProfileError};
 use domain::{AttachmentId, UserId};
-use idp_storage::StorageClient;
 
 /// `None` when no object storage is configured: every call then fails, as uploads cannot work.
 pub struct S3ObjectStore {

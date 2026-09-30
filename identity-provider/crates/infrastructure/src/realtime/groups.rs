@@ -1,26 +1,28 @@
 use std::sync::Arc;
 
+use connections::Hub;
 use domain::identity::ActorUri;
 use domain::messaging::{Conversation, GroupNotifier, Member};
 use domain::{ConversationId, UserId};
-use idp_realtime::{
+
+use super::events::{
     GroupCreatedPayload, GroupRenamedPayload, MemberAddedPayload, MemberRemovedPayload,
-    MemberRoleChangedPayload, WsEvent, WsHub,
+    MemberRoleChangedPayload, WsEvent,
 };
 
 /// Pushes membership events to an account's live sessions; clients refetch the group on
 /// reconnect.
 pub struct HubGroupNotifier {
-    hub: Arc<WsHub>,
+    hub: Arc<Hub>,
 }
 
 impl HubGroupNotifier {
-    pub fn new(hub: Arc<WsHub>) -> Self {
+    pub fn new(hub: Arc<Hub>) -> Self {
         Self { hub }
     }
 
     fn push(&self, to: UserId, event: WsEvent) {
-        self.hub.send_to_user(&to.as_uuid(), event);
+        super::push(&self.hub, &to.as_uuid(), event);
     }
 }
 

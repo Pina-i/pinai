@@ -2,25 +2,28 @@ use std::sync::Arc;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
+use connections::Hub;
 use domain::UserId;
 use domain::e2ee::{Commit, MlsNotifier, Welcome};
-use idp_realtime::{MlsCommitPayload, MlsWelcomeReadyPayload, WsEvent, WsHub};
+
+use super::events::{MlsCommitPayload, MlsWelcomeReadyPayload, WsEvent};
 
 /// Pushes commits and Welcome notices to an account's live sessions; a client that missed one
 /// catches up through the log, or polls its Welcomes on login.
 pub struct HubMlsNotifier {
-    hub: Arc<WsHub>,
+    hub: Arc<Hub>,
 }
 
 impl HubMlsNotifier {
-    pub fn new(hub: Arc<WsHub>) -> Self {
+    pub fn new(hub: Arc<Hub>) -> Self {
         Self { hub }
     }
 }
 
 impl MlsNotifier for HubMlsNotifier {
     fn committed(&self, to: UserId, commit: &Commit) {
-        self.hub.send_to_user(
+        super::push(
+            &self.hub,
             &to.as_uuid(),
             WsEvent::MlsCommit(MlsCommitPayload {
                 conversation_id: commit.conversation.as_uuid(),
@@ -33,7 +36,8 @@ impl MlsNotifier for HubMlsNotifier {
     }
 
     fn welcome_ready(&self, to: UserId, welcome: &Welcome) {
-        self.hub.send_to_user(
+        super::push(
+            &self.hub,
             &to.as_uuid(),
             WsEvent::MlsWelcomeReady(MlsWelcomeReadyPayload {
                 conversation_id: welcome.conversation.as_uuid(),

@@ -4,15 +4,16 @@ use dashmap::DashMap;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use super::events::WsEvent;
+/// A text frame as it goes out: shared, not copied, between an account's connections.
+pub type Frame = Arc<str>;
 
-type ConnectionTx = mpsc::UnboundedSender<WsEvent>;
+type ConnectionTx = mpsc::UnboundedSender<Frame>;
 
 /// Handle returned when subscribing. Auto-unregisters from the hub on drop.
 pub struct ConnectionHandle {
     conn_id: Uuid,
     user_id: Uuid,
-    hub: Arc<WsHub>,
+    hub: Arc<Hub>,
 }
 
 impl ConnectionHandle {
@@ -28,21 +29,21 @@ impl Drop for ConnectionHandle {
     }
 }
 
-/// In-memory registry of active WebSocket connections, keyed by user UUID.
+/// In-memory registry of the live connections, keyed by user UUID.
 ///
 /// Each user can have multiple connections (multi-device). Each connection
 /// is identified by a unique `conn_id` for removal.
-pub struct WsHub {
+pub struct Hub {
     connections: DashMap<Uuid, Vec<(Uuid, ConnectionTx)>>,
 }
 
-impl Default for WsHub {
+impl Default for Hub {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl WsHub {
+impl Hub {
     pub fn new() -> Self {
         Self {
             connections: DashMap::new(),
@@ -62,7 +63,7 @@ impl WsHub {
     pub fn subscribe(
         self: &Arc<Self>,
         user_id: Uuid,
-    ) -> (mpsc::UnboundedReceiver<WsEvent>, ConnectionHandle, bool) {
+    ) -> (mpsc::UnboundedReceiver<Frame>, ConnectionHandle, bool) {
         let conn_id = Uuid::new_v4();
         let (tx, rx) = mpsc::unbounded_channel();
 
@@ -81,11 +82,11 @@ impl WsHub {
         (rx, handle, is_first)
     }
 
-    /// Send an event to all connections for a given user.
+    /// Send a frame to all connections for a given user.
     /// Dead senders are pruned automatically.
-    pub fn send_to_user(&self, user_id: &Uuid, event: WsEvent) {
+    pub fn send_to_user(&self, user_id: &Uuid, frame: Frame) {
         if let Some(mut senders) = self.connections.get_mut(user_id) {
-            senders.retain(|(_, tx)| tx.send(event.clone()).is_ok());
+            senders.retain(|(_, tx)| tx.send(Arc::clone(&frame)).is_ok());
             if senders.is_empty() {
                 drop(senders);
                 self.connections.remove(user_id);
@@ -111,3 +112,6 @@ impl WsHub {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

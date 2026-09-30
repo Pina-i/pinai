@@ -69,3 +69,17 @@ fn settings_updated_carries_the_whole_document() {
         })
     );
 }
+
+/// The heartbeat ack is `api::ws`'s own frame; the rest of the wire format is here.
+#[test]
+fn every_event_is_a_type_and_its_data() {
+    let event = WsEvent::DmDeliveryFailed(DmDeliveryFailedPayload {
+        message_id: Uuid::nil(),
+        conversation_id: Uuid::nil(),
+    });
+
+    let json: serde_json::Value = serde_json::from_str(&super::super::frame(&event)).unwrap();
+
+    assert_eq!(json["type"], "dm_delivery_failed");
+    assert!(json["data"].is_object());
+}

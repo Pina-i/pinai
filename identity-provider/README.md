@@ -25,10 +25,10 @@ identity-provider/
 ├── crates/
 │   ├── domain/          # entities, rules, port traits, typed errors
 │   ├── application/     # the use cases
-│   ├── infrastructure/  # outbound adapters: Postgres, other instances, SMTP, object storage
+│   ├── infrastructure/  # outbound adapters: Postgres, Redis, other instances, SMTP, S3
 │   ├── api/             # inbound adapters: every route, the inbox, the WebSocket
 │   ├── app/             # the composition root and the `idp-server` binary
-│   ├── realtime/  broker/  storage/   # transports the adapters wrap
+│   ├── connections/     # the live connections, shared by `api` and `infrastructure`
 │   └── dev-inject-data/ # seeds a development instance
 └── docker/
     ├── Dockerfile

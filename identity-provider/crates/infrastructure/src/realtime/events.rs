@@ -1,3 +1,5 @@
+//! What the server pushes over a WebSocket: each event a frame `{ "type", "data" }`.
+
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -23,7 +25,6 @@ pub enum WsEvent {
     FriendProfileUpdated(ProfileUpdatePayload),
     PresenceUpdate(PresenceUpdatePayload),
     Typing(TypingPayload),
-    HeartbeatAck(HeartbeatAckPayload),
     /// New MLS commit landed for a conversation the recipient is in.
     /// Clients pull missing commits via REST when this event arrives ahead
     /// of their cached epoch.
@@ -49,11 +50,8 @@ pub enum WsEvent {
     SettingsUpdated(SettingsPayload),
 }
 
-/// Slim attachment projection carried on the wire alongside DM events.
-///
-/// Mirrors `messaging::AttachmentMetadata` so the realtime crate can stay
-/// dependency-free of `messaging`. The shape is intentionally identical to
-/// the REST response for client parsing parity.
+/// Slim attachment projection carried on the wire alongside DM events, shaped as the REST
+/// response is so clients parse both alike.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WsAttachment {
     pub id: Uuid,
@@ -147,9 +145,6 @@ pub struct TypingPayload {
     pub timestamp: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct HeartbeatAckPayload {}
-
 // ─── MLS Delivery Service payloads ───────────────────────────────────────────
 //
 // Both payloads carry the blob inline as base64 so a client whose local MLS
@@ -236,59 +231,6 @@ pub struct GroupRenamedPayload {
     pub conversation_id: Uuid,
     pub name: Option<String>,
     pub renamed_by_actor_uri: String,
-}
-
-// ─── Client-to-server messages ───────────────────────────────────────────────
-
-/// Client-to-server messages received over WebSocket.
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type", content = "data")]
-#[serde(rename_all = "snake_case")]
-pub enum WsClientMessage {
-    SendDm(SendDmPayload),
-    Heartbeat,
-    TypingStart(TypingStartPayload),
-    /// User opened a conversation; ensure outbound SSE for any remote member's domain.
-    WatchConversation(WatchConversationPayload),
-    /// User closed a conversation; release outbound SSE if no other watchers.
-    UnwatchConversation(UnwatchConversationPayload),
-    /// User explicitly chose a presence state from the UI (online / away / dnd / offline).
-    SetPresence(SetPresencePayload),
-}
-
-#[derive(Debug, Deserialize)]
-pub struct SetPresencePayload {
-    /// Lower-case wire form: `"online" | "away" | "offline" | "dnd"`.
-    pub state: String,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct SendDmPayload {
-    pub recipient_address: String,
-    /// Pre-encrypted MLSMessage body, base64-encoded. Server never inspects.
-    pub mls_ciphertext: String,
-    /// Optional sender-side correlation token. Echoed back to the sender on the
-    /// resulting `new_dm` event so the client can reconcile its optimistic message.
-    #[serde(default)]
-    pub client_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TypingStartPayload {
-    pub conversation_id: Uuid,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WatchConversationPayload {
-    pub conversation_id: Uuid,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UnwatchConversationPayload {
-    pub conversation_id: Uuid,
 }
 
 #[cfg(test)]

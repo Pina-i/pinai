@@ -14,6 +14,8 @@ anyhow               = { workspace = true }
 async-trait          = { workspace = true }
 base32               = { workspace = true }
 base64               = { workspace = true }
+bytes                = { workspace = true }
+
 
 domain               = { package = "idp-domain", path = "../domain" }
 ed25519-dalek        = { workspace = true }
@@ -32,15 +34,21 @@ serde                = { workspace = true }
 sqlx                 = { workspace = true }
 time                 = { workspace = true }
 totp-rs              = { workspace = true }
+thiserror            = { workspace = true }
 tokio                = { workspace = true }
+tokio-util           = { workspace = true, features = ["io"] }
 tracing              = { workspace = true }
 url                  = { workspace = true }
 uuid                 = { workspace = true }
 
-# Legacy components wrapped by adapters until their context migrates.
-idp-broker   = { path = "../broker", package = "idp-broker" }
-idp-realtime = { path = "../realtime", package = "idp-realtime" }
-idp-storage  = { path = "../storage", package = "idp-storage" }
+# The live connections, shared with `api`.
+connections = { package = "idp-connections", path = "../connections" }
+
+# Redis, and the S3-compatible object store.
+aws-config           = { version = "1", features = ["behavior-version-latest"] }
+aws-credential-types = "1"
+aws-sdk-s3           = "1"
+redis                = { version = "0.27", features = ["aio", "tokio-comp", "connection-manager"] }
 
 [dev-dependencies]
 domain          = { package = "idp-domain", path = "../domain", features = ["test-utils"] }

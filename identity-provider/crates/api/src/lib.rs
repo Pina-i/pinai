@@ -58,10 +58,10 @@ use axum::extract::{DefaultBodyLimit, FromRef};
 use axum::routing::{delete, get, patch, post, put};
 use axum::{Json, Router};
 use axum_extra::extract::cookie::Key;
+use connections::Hub;
 use domain::identity::{InstanceOrigin, SignatureVerifier, TokenVerifier};
 use domain::messaging::AttachmentLimits;
 use domain::presence::MissedEvents;
-use idp_realtime::WsHub;
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
@@ -162,7 +162,7 @@ pub struct AppState {
     pub load_archive_salt: Arc<LoadArchiveSalt>,
     pub set_archive_salt: Arc<SetArchiveSalt>,
     /// The live connections, which the WebSocket registers with.
-    pub hub: Arc<WsHub>,
+    pub hub: Arc<Hub>,
     pub missed_events: Arc<dyn MissedEvents>,
     pub connect: Arc<Connect>,
     pub disconnect: Arc<Disconnect>,

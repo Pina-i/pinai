@@ -17,8 +17,8 @@ base64      = { workspace = true }
 domain      = { package = "idp-domain", path = "../domain" }
 futures-core = { workspace = true }
 futures-util = { workspace = true }
-# The connection registry: transport shared with the outbound notifiers, knowing no business rule.
-idp-realtime = { path = "../realtime", package = "idp-realtime" }
+# The live connections: a registry shared with the outbound notifiers, knowing no business rule.
+connections = { package = "idp-connections", path = "../connections" }
 serde       = { workspace = true }
 serde_json  = { workspace = true }
 time        = { workspace = true }

@@ -524,7 +524,7 @@ impl TestApp {
             clear_archive: Arc::new(ClearArchive::new(archive.clone())),
             load_archive_salt: Arc::new(LoadArchiveSalt::new(archive.clone())),
             set_archive_salt: Arc::new(SetArchiveSalt::new(archive)),
-            hub: Arc::new(idp_realtime::WsHub::new()),
+            hub: Arc::new(connections::Hub::new()),
             missed_events: Arc::new(InMemoryMissedEvents::default()),
             connect: Arc::new(Connect::new(accounts.clone(), tracker.clone(), bus.clone())),
             disconnect: Arc::new(Disconnect::new(tracker.clone(), bus.clone())),

@@ -1,16 +1,18 @@
 use std::sync::Arc;
 
+use connections::Hub;
 use domain::UserId;
 use domain::social::{FriendshipEvent, SocialNotifier};
-use idp_realtime::{FriendshipPayload, WsEvent, WsHub};
+
+use super::events::{FriendshipPayload, WsEvent};
 
 /// Pushes `friend_request` / `friend_accepted` / `friend_removed` to the account's live sessions.
 pub struct HubSocialNotifier {
-    hub: Arc<WsHub>,
+    hub: Arc<Hub>,
 }
 
 impl HubSocialNotifier {
-    pub fn new(hub: Arc<WsHub>) -> Self {
+    pub fn new(hub: Arc<Hub>) -> Self {
         Self { hub }
     }
 }
@@ -27,17 +29,26 @@ fn payload(event: &FriendshipEvent) -> FriendshipPayload {
 
 impl SocialNotifier for HubSocialNotifier {
     fn friend_request(&self, to: UserId, event: &FriendshipEvent) {
-        self.hub
-            .send_to_user(&to.as_uuid(), WsEvent::FriendRequest(payload(event)));
+        super::push(
+            &self.hub,
+            &to.as_uuid(),
+            WsEvent::FriendRequest(payload(event)),
+        );
     }
 
     fn friend_accepted(&self, to: UserId, event: &FriendshipEvent) {
-        self.hub
-            .send_to_user(&to.as_uuid(), WsEvent::FriendAccepted(payload(event)));
+        super::push(
+            &self.hub,
+            &to.as_uuid(),
+            WsEvent::FriendAccepted(payload(event)),
+        );
     }
 
     fn friend_removed(&self, to: UserId, event: &FriendshipEvent) {
-        self.hub
-            .send_to_user(&to.as_uuid(), WsEvent::FriendRemoved(payload(event)));
+        super::push(
+            &self.hub,
+            &to.as_uuid(),
+            WsEvent::FriendRemoved(payload(event)),
+        );
     }
 }

@@ -2,19 +2,21 @@ use std::sync::Arc;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
+use connections::Hub;
 use domain::e2ee::{DeviceNotifier, DeviceRootKey};
 use domain::identity::ActorUri;
 use domain::{DeviceId, UserId};
-use idp_realtime::{DeviceJoinedPayload, WsEvent, WsHub};
+
+use super::events::{DeviceJoinedPayload, WsEvent};
 
 /// Tells the owner's live sessions, which add the new device to their groups; an offline
 /// device reconciles from the device list when it connects.
 pub struct HubDeviceNotifier {
-    hub: Arc<WsHub>,
+    hub: Arc<Hub>,
 }
 
 impl HubDeviceNotifier {
-    pub fn new(hub: Arc<WsHub>) -> Self {
+    pub fn new(hub: Arc<Hub>) -> Self {
         Self { hub }
     }
 }
@@ -27,7 +29,8 @@ impl DeviceNotifier for HubDeviceNotifier {
         device: DeviceId,
         key: &DeviceRootKey,
     ) {
-        self.hub.send_to_user(
+        super::push(
+            &self.hub,
             &owner.as_uuid(),
             WsEvent::DeviceJoined(DeviceJoinedPayload {
                 actor_uri: actor.to_string(),

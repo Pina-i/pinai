@@ -66,8 +66,11 @@ every Rust change: layers as crates, each organised by bounded context (`auth`, 
   everything by hand and starts the background tasks, and `run_until_stopped`; the binary
   `idp-server`. Its `tests/api` are the end-to-end journeys.
 
-Three transports stay crates of their own, wrapped by the adapters: `realtime` (the connection
-registry, shared by `api` and `infrastructure`), `broker` and `storage`.
+One crate sits beside the layers: `connections`, the registry of the accounts' live connections.
+The WebSocket's two adapters share it — `api::ws` registers a connection and writes its frames out,
+`infrastructure::realtime` pushes to an account's connections — so it lies below both, and carries
+frames without knowing what they say: the pushed events are `infrastructure::realtime::events`,
+what a client sends `api::ws::frames`.
 
 ```
 identity-provider/
@@ -75,10 +78,11 @@ identity-provider/
 ├── crates/
 │   ├── domain/             # idp-domain — entities, value objects, port traits, domain errors
 │   ├── application/        # idp-application — use cases over the ports
-│   ├── infrastructure/     # idp-infrastructure — port adapters: SQLx, AP delivery + WebFinger,
-│   │                       #   signed downloads and claims, object storage, blob tokens, JWT and
-│   │                       #   HTTP Signature verification, device attestation, WS hub, the
-│   │                       #   presence bus and the peers' presence polls and streams, the
+│   ├── infrastructure/     # idp-infrastructure — port adapters: SQLx, Redis (`broker`: the
+│   │                       #   event streams and the presence bus), S3 (`storage`), AP delivery +
+│   │                       #   WebFinger, signed downloads and claims, blob tokens, JWT and HTTP
+│   │                       #   Signature verification, device attestation, WebSocket pushes and
+│   │                       #   their wire format, the peers' presence polls and streams, the
 │   │                       #   sign-in, sign-up and second-factor stores, Argon2, TOTP, token
 │   │                       #   signing, SMTP mail; `MIGRATOR`
 │   ├── api/                # idp-api — Axum routes (the inbox, the actor documents and
@@ -87,10 +91,8 @@ identity-provider/
 │   │                       #   presence bus relay and polls
 │   ├── app/                # idp-app — `Config`, `Application` (the composition root), the
 │   │                       #   session keys, the `idp-server` binary; `tests/api`: the journeys
-│   ├── realtime/           # WS connection registry (WsHub), typed WsEvent / WsClientMessage.
-│   │                       #   Pure transport — knows no domain logic.
-│   ├── broker/             # Redis pub-sub + Streams abstraction (EventBroker trait).
-│   ├── storage/            # S3-compatible (RustFS) object storage client
+│   ├── connections/        # idp-connections — the live connections by account, each a queue
+│   │                       #   of frames; knows neither the wire format nor any rule
 │   └── dev-inject-data/    # seeds a development instance with accounts (`make alice-seed`)
 ├── migrations/             # SQLx migrations (numbered, applied on startup)
 ├── specs/                  # Feature specifications (see routing table below)
@@ -106,10 +108,10 @@ identity-provider/
 ```
 domain  ──► (no internal deps)
 application ──► domain
-infrastructure ──► domain (+ realtime, broker, storage: the transports it wraps)
-api     ──► application, domain, realtime (the connection registry, a transport)
+infrastructure ──► domain, connections
+api     ──► application, domain, connections
 app     ──► every crate (composition root)
-realtime, broker, storage ──► (leaves)
+connections ──► (no internal deps)
 ```
 
 > The inbox dispatches friendship activities to `application::social`, MLS application

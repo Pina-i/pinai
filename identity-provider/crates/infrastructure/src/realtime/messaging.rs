@@ -1,43 +1,39 @@
 use std::sync::Arc;
 
+use crate::broker::RedisBroker;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
+use connections::Hub;
 use domain::UserId;
 use domain::messaging::{Message, MessageEvent, MessageNotifier};
-use idp_broker::EventBroker;
-use idp_realtime::{
-    DmDeliveryFailedPayload, DmPayload, EditedDmPayload, WsAttachment, WsEvent, WsHub,
-};
+
+use super::events::{DmDeliveryFailedPayload, DmPayload, EditedDmPayload, WsAttachment, WsEvent};
 
 /// Pushes message events to an account's live sessions; the durable ones also go to its event
 /// stream, which a client replays on reconnect.
 pub struct HubMessageNotifier {
-    hub: Arc<WsHub>,
-    broker: Arc<dyn EventBroker>,
+    hub: Arc<Hub>,
+    broker: Arc<RedisBroker>,
 }
 
 impl HubMessageNotifier {
-    pub fn new(hub: Arc<WsHub>, broker: Arc<dyn EventBroker>) -> Self {
+    pub fn new(hub: Arc<Hub>, broker: Arc<RedisBroker>) -> Self {
         Self { hub, broker }
     }
 
     fn live(&self, to: UserId, event: WsEvent) {
-        self.hub.send_to_user(&to.as_uuid(), event);
+        super::push(&self.hub, &to.as_uuid(), event);
     }
 
     fn durable(&self, to: UserId, event: WsEvent) {
-        match serde_json::to_string(&event) {
-            Ok(json) => {
-                let broker = Arc::clone(&self.broker);
-                tokio::spawn(async move {
-                    if let Err(e) = broker.publish(to.as_uuid(), &json).await {
-                        tracing::warn!(user_id = %to, "broker publish failed: {e}");
-                    }
-                });
+        let frame = super::frame(&event);
+        let (broker, stored) = (Arc::clone(&self.broker), frame.to_string());
+        tokio::spawn(async move {
+            if let Err(e) = broker.publish(to.as_uuid(), &stored).await {
+                tracing::warn!(user_id = %to, "broker publish failed: {e}");
             }
-            Err(e) => tracing::warn!(user_id = %to, error = %e, "event not serialisable"),
-        }
-        self.live(to, event);
+        });
+        self.hub.send_to_user(&to.as_uuid(), frame);
     }
 }
 

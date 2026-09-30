@@ -1,11 +1,11 @@
 use aws_credential_types::Credentials;
-use aws_sdk_s3::{config::Region, primitives::ByteStream, Client};
+use aws_sdk_s3::{Client, config::Region, primitives::ByteStream};
 use bytes::Bytes;
 use futures_util::stream::Stream;
 use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 
-use crate::StorageError;
+use super::StorageError;
 
 /// Configuration needed to build a [`StorageClient`].
 pub struct StorageConfig {
