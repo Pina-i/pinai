@@ -292,10 +292,13 @@ impl SocialGraph for PgSocialGraph {
     }
 
     async fn friends(&self, owner: UserId) -> Result<Vec<FriendView>, SocialStoreError> {
+        // A local friend is read from `users`, the avatar as the name: the friendship's copy is
+        // kept up to date for remote friends only. Not `COALESCE`: a cleared avatar stays cleared.
         let rows: Vec<FriendViewRow> = sqlx::query_as(
             "SELECT u.username AS username, \
                     COALESCE(u.display_name, ra.display_name) AS display_name, \
-                    f.friend_avatar_url AS avatar_url, \
+                    CASE WHEN u.id IS NULL THEN f.friend_avatar_url ELSE u.avatar_url END \
+                        AS avatar_url, \
                     f.friend_actor_uri, \
                     COALESCE(ra.instance, 'local') AS instance \
              FROM friendships f \
@@ -316,9 +319,17 @@ impl SocialGraph for PgSocialGraph {
         &self,
         owner: UserId,
         friend: &ActorUri,
+        friend_avatar_url: Option<&str>,
     ) -> Result<Friendship, SocialStoreError> {
         let mut c = self.pool.acquire().await.context("acquire a connection")?;
-        request_side(&mut c, owner, friend, None, Direction::Incoming).await
+        request_side(
+            &mut c,
+            owner,
+            friend,
+            friend_avatar_url,
+            Direction::Incoming,
+        )
+        .await
     }
 
     async fn accept_outgoing(

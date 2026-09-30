@@ -1,5 +1,5 @@
 use axum::Json;
-use axum::http::StatusCode;
+use axum::http::{HeaderName, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use domain::ValidationError;
 use serde_json::{Map, Value};
@@ -13,6 +13,7 @@ pub struct ApiError {
     description: String,
     source: Option<anyhow::Error>,
     extra: Map<String, Value>,
+    headers: Vec<(HeaderName, HeaderValue)>,
 }
 
 impl ApiError {
@@ -23,6 +24,7 @@ impl ApiError {
             description: description.into(),
             source: None,
             extra: Map::new(),
+            headers: Vec::new(),
         }
     }
 
@@ -34,10 +36,23 @@ impl ApiError {
         Self::new(StatusCode::NOT_FOUND, "not_found", description)
     }
 
-    /// A 401 for a missing or unusable bearer token — the code the IdP answered before
-    /// `invalid_token` (RFC 6750); it changes with the auth context.
+    /// A 401 for a client this instance does not know — RFC 6749 § 5.2.
     pub fn invalid_client(description: impl Into<String>) -> Self {
         Self::new(StatusCode::UNAUTHORIZED, "invalid_client", description)
+    }
+
+    /// A 401 for a bearer token that is missing (`presented: false`) or unusable, with the
+    /// challenge RFC 6750 § 3 asks for.
+    pub fn invalid_token(description: impl Into<String>, presented: bool) -> Self {
+        let challenge = if presented {
+            r#"Bearer error="invalid_token""#
+        } else {
+            "Bearer"
+        };
+        Self::new(StatusCode::UNAUTHORIZED, "invalid_token", description).with_header(
+            header::WWW_AUTHENTICATE,
+            HeaderValue::from_static(challenge),
+        )
     }
 
     /// A 500 whose cause goes to the logs, never to the client.
@@ -64,6 +79,15 @@ impl ApiError {
         }
     }
 
+    pub fn description(&self) -> &str {
+        &self.description
+    }
+
+    pub fn with_header(mut self, name: HeaderName, value: HeaderValue) -> Self {
+        self.headers.push((name, value));
+        self
+    }
+
     /// An extra top-level body field, e.g. the winning commit of a 409.
     pub fn with(mut self, key: &str, value: impl Into<Value>) -> Self {
         self.extra.insert(key.to_owned(), value.into());
@@ -83,7 +107,9 @@ impl IntoResponse for ApiError {
         let mut body = self.extra;
         body.insert("error".into(), self.code.into());
         body.insert("error_description".into(), self.description.into());
-        (self.status, Json(body)).into_response()
+        let mut response = (self.status, Json(body)).into_response();
+        response.headers_mut().extend(self.headers);
+        response
     }
 }
 

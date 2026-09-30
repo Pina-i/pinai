@@ -18,7 +18,9 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 use crate::ApiError;
-use crate::auth::{Authenticated, SignedPeer};
+use tokio_util::sync::CancellationToken;
+
+use crate::auth::{Authenticated, SignedJson, SignedPeer};
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -101,8 +103,7 @@ pub struct BatchBody {
 /// signing key belongs to is the peer.
 pub async fn batch(
     State(serve): State<Arc<ServePeerPresence>>,
-    SignedPeer(peer): SignedPeer,
-    Json(body): Json<BatchBody>,
+    SignedJson(peer, body): SignedJson<BatchBody>,
 ) -> Result<Json<PresenceBody>, ApiError> {
     let states = serve.execute(peer.domain(), &parsed(&body.actors)).await?;
     Ok(Json(answer(body.actors, states)))
@@ -160,8 +161,10 @@ fn event(signal: &Signal) -> Option<Event> {
 
 /// `GET /api/presence/stream?actors[]=` — a peer following the accounts of a conversation open
 /// there: the states heard first, then every change and typing indicator as it comes.
+/// It ends when the instance stops, so the peer reopens it elsewhere.
 pub async fn stream(
     State(open): State<Arc<OpenPeerStream>>,
+    State(stop): State<CancellationToken>,
     SignedPeer(peer): SignedPeer,
     RawQuery(raw): RawQuery,
 ) -> Result<impl IntoResponse, ApiError> {
@@ -174,6 +177,7 @@ pub async fn stream(
         .await?;
     let events = futures_util::stream::iter(stream.replay.into_iter().map(Signal::Presence))
         .chain(stream.live)
+        .take_until(stop.cancelled_owned())
         .filter_map(|signal| std::future::ready(event(&signal).map(Ok::<_, Infallible>)));
     Ok(Sse::new(events).keep_alive(
         KeepAlive::new()
@@ -181,3 +185,6 @@ pub async fn stream(
             .text("keep-alive"),
     ))
 }
+
+#[cfg(test)]
+mod tests;

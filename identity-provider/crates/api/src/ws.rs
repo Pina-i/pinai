@@ -3,7 +3,7 @@
 
 use application::messaging::DirectMessageCommand;
 use application::presence::Session;
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade, close_code};
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -19,6 +19,7 @@ use idp_realtime::{HeartbeatAckPayload, SendDmPayload, WsClientMessage, WsEvent}
 use serde::Deserialize;
 use time::OffsetDateTime;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 use crate::AppState;
 
@@ -68,9 +69,14 @@ async fn run(socket: WebSocket, user: UserId, last_event_id: Option<String>, sta
         None => true,
     };
     if replayed {
-        let forwarding = tokio::spawn(forward(events, sink));
+        let forwarding = tokio::spawn(forward(events, sink, state.shutdown.clone()));
         receive(stream, &state, &session).await;
-        forwarding.abort();
+        if state.shutdown.is_cancelled() {
+            // It closes the socket, telling the client to reconnect.
+            let _ = forwarding.await;
+        } else {
+            forwarding.abort();
+        }
     }
     // Out of the hub first, so the count below no longer holds this connection.
     drop(handle);
@@ -113,11 +119,27 @@ async fn replay(
     true
 }
 
+/// The account's events to the socket, until the instance stops: the socket is then closed as
+/// going away.
 async fn forward(
     mut events: mpsc::UnboundedReceiver<WsEvent>,
     mut sink: SplitSink<WebSocket, Message>,
+    stop: CancellationToken,
 ) {
-    while let Some(event) = events.recv().await {
+    loop {
+        let event = tokio::select! {
+            () = stop.cancelled() => {
+                let _ = sink
+                    .send(Message::Close(Some(CloseFrame {
+                        code: close_code::AWAY,
+                        reason: "the instance is stopping".into(),
+                    })))
+                    .await;
+                return;
+            }
+            event = events.recv() => event,
+        };
+        let Some(event) = event else { return };
         let json = match serde_json::to_string(&event) {
             Ok(json) => json,
             Err(e) => {
@@ -132,7 +154,12 @@ async fn forward(
 }
 
 async fn receive(mut stream: SplitStream<WebSocket>, state: &AppState, session: &Session) {
-    while let Some(Ok(frame)) = stream.next().await {
+    loop {
+        let frame = tokio::select! {
+            () = state.shutdown.cancelled() => return,
+            frame = stream.next() => frame,
+        };
+        let Some(Ok(frame)) = frame else { return };
         let text = match frame {
             Message::Text(text) => text,
             Message::Close(_) => break,

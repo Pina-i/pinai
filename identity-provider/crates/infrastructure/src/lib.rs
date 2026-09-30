@@ -1,6 +1,7 @@
 pub mod attestation;
 pub mod auth;
 pub mod blob_tokens;
+pub mod email;
 pub mod federation;
 pub mod postgres;
 pub mod presence;

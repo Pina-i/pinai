@@ -1,4 +1,4 @@
-# Throwaway services for the Docker-gated tests — never an instance's database.
+# Throwaway services for the Docker-gated tests — never an instance's database or Redis.
 # `make test-integration` starts them under the `pinai-test` project; data lives in RAM.
 # The default port stays clear of Alice's (5432) and Bob's (5433) dev Postgres.
 services:
@@ -13,6 +13,16 @@ services:
     tmpfs: ["/var/lib/postgresql/data"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U test"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+
+  redis-test:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports: ["${TEST_REDIS_PORT:-56479}:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
       interval: 1s
       timeout: 3s
       retries: 30

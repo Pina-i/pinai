@@ -152,3 +152,30 @@ async fn a_follow_from_a_local_account_records_both_sides() {
     assert_eq!(alice_side.direction, Direction::Outgoing);
     assert_eq!(notifier.sent().len(), 1);
 }
+
+#[tokio::test]
+async fn a_follower_is_recorded_with_the_avatar_it_was_discovered_with() {
+    let bob = account("bob");
+    let carol = RemoteActor {
+        avatar_url: Some("https://cdn.carol.test/carol.png?v=1".to_owned()),
+        ..remote_actor("carol_k2m9x@idp.carol.test")
+    };
+    let graph = Arc::new(InMemorySocialGraph::default());
+    let receive = ReceiveFollow::new(
+        Arc::new(InMemoryAccounts::with([bob.clone()])),
+        Arc::new(InMemoryRemoteActors::with([carol.clone()])),
+        graph.clone(),
+        Arc::new(RecordingSocialNotifier::default()),
+        Arc::new(RecordingSocialFederation::default()),
+    );
+
+    receive
+        .execute(bob.id, carol.actor_uri.clone())
+        .await
+        .unwrap();
+    let request = graph.incoming_requests(bob.id).await.unwrap().remove(0);
+    graph.accept(&request, &bob).await.unwrap();
+
+    let friends = graph.friends(bob.id).await.unwrap();
+    assert_eq!(friends[0].avatar_url, carol.avatar_url);
+}

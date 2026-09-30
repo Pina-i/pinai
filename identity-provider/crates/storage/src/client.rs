@@ -92,9 +92,18 @@ impl StorageClient {
         Ok(url)
     }
 
-    /// Delete avatar(s) for a user. Tries all known extensions (idempotent).
-    pub async fn delete_avatar(&self, user_id: Uuid) -> Result<(), StorageError> {
-        for ext in ["jpg", "png", "webp", "gif"] {
+    /// Delete a user's avatars, but for the one of the `keep` content type. Tries all known
+    /// extensions (idempotent).
+    pub async fn delete_avatar(
+        &self,
+        user_id: Uuid,
+        keep: Option<&str>,
+    ) -> Result<(), StorageError> {
+        let kept = keep.map(extension_from_content_type).transpose()?;
+        for ext in ["jpg", "png", "webp", "gif"]
+            .into_iter()
+            .filter(|ext| Some(*ext) != kept)
+        {
             let key = format!("{user_id}.{ext}");
             let _ = self
                 .client

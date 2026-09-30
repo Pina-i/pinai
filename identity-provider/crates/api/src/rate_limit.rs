@@ -17,6 +17,10 @@ struct Bucket {
 }
 
 impl RateLimiter {
+    /// Past this many keys, the buckets back to full are dropped: a full bucket is the same as
+    /// none, and keys can be anything a request sends.
+    pub const MAX_KEYS: usize = 10_000;
+
     pub fn new(capacity: u32, per_second: f64) -> Self {
         Self {
             capacity: f64::from(capacity),
@@ -29,6 +33,14 @@ impl RateLimiter {
     pub fn allow(&self, key: &str) -> bool {
         let now = Instant::now();
         let mut buckets = self.buckets.lock().unwrap();
+        if buckets.len() >= Self::MAX_KEYS {
+            buckets.retain(|_, bucket| {
+                let elapsed = now
+                    .saturating_duration_since(bucket.refilled_at)
+                    .as_secs_f64();
+                bucket.tokens + elapsed * self.per_second < self.capacity
+            });
+        }
         let bucket = buckets.entry(key.to_owned()).or_insert(Bucket {
             tokens: self.capacity,
             refilled_at: now,
@@ -45,3 +57,6 @@ impl RateLimiter {
         true
     }
 }
+
+#[cfg(test)]
+mod tests;

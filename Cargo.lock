@@ -848,15 +848,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "common-types"
-version = "0.1.0"
-dependencies = [
- "serde",
- "thiserror",
- "uuid",
-]
-
-[[package]]
 name = "const-oid"
 version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1340,6 +1331,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "url",
 ]
 
@@ -2017,8 +2009,10 @@ dependencies = [
 name = "idp-api"
 version = "0.1.0"
 dependencies = [
+ "activitypub",
  "anyhow",
  "axum",
+ "axum-extra",
  "base64 0.22.1",
  "futures-core",
  "futures-util",
@@ -2030,8 +2024,49 @@ dependencies = [
  "serde_json",
  "time",
  "tokio",
+ "tokio-util",
  "tower",
+ "tower-http",
  "tracing",
+ "tracing-subscriber",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "idp-app"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "axum-extra",
+ "base64 0.22.1",
+ "dotenvy",
+ "ed25519-dalek",
+ "federation-transport",
+ "futures-util",
+ "hex",
+ "hkdf",
+ "idp-api",
+ "idp-application",
+ "idp-broker",
+ "idp-domain",
+ "idp-infrastructure",
+ "idp-realtime",
+ "idp-storage",
+ "jwt-utils",
+ "observability",
+ "rand 0.8.8",
+ "reqwest",
+ "serde_json",
+ "sha2 0.10.9",
+ "sqlx",
+ "thiserror",
+ "time",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
  "url",
  "uuid",
 ]
@@ -2042,6 +2077,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "bytes",
  "futures-core",
  "futures-util",
  "idp-domain",
@@ -2049,44 +2085,6 @@ dependencies = [
  "time",
  "tokio",
  "tracing",
-]
-
-[[package]]
-name = "idp-auth"
-version = "0.1.0"
-dependencies = [
- "activitypub",
- "argon2",
- "axum",
- "axum-extra",
- "base64ct",
- "common-types",
- "hmac 0.12.1",
- "http-signatures",
- "idp-application",
- "idp-config",
- "idp-db",
- "idp-domain",
- "idp-email",
- "idp-federation",
- "idp-state",
- "idp-storage",
- "idp-totp",
- "jwt-utils",
- "nanoid",
- "rand 0.8.8",
- "reqwest",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "sqlx",
- "subtle",
- "thiserror",
- "time",
- "tokio",
- "tracing",
- "urlencoding",
- "uuid",
 ]
 
 [[package]]
@@ -2105,85 +2103,22 @@ dependencies = [
 ]
 
 [[package]]
-name = "idp-config"
-version = "0.1.0"
-dependencies = [
- "dotenvy",
- "hex",
- "thiserror",
-]
-
-[[package]]
-name = "idp-db"
-version = "0.1.0"
-dependencies = [
- "common-types",
- "serde",
- "serde_json",
- "sqlx",
- "thiserror",
- "time",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
 name = "idp-domain"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64 0.22.1",
  "bytes",
  "futures-core",
  "proptest",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "thiserror",
  "time",
  "tokio",
  "url",
- "uuid",
-]
-
-[[package]]
-name = "idp-email"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "lettre",
- "thiserror",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "idp-federation"
-version = "0.1.0"
-dependencies = [
- "activitypub",
- "axum",
- "base64 0.22.1",
- "federation-transport",
- "http-signatures",
- "idp-application",
- "idp-broker",
- "idp-config",
- "idp-db",
- "idp-domain",
- "idp-realtime",
- "idp-state",
- "idp-storage",
- "jwt-utils",
- "reqwest",
- "serde",
- "serde_json",
- "sqlx",
- "time",
- "tokio",
- "tracing",
- "url",
- "urlencoding",
  "uuid",
 ]
 
@@ -2193,18 +2128,23 @@ version = "0.1.0"
 dependencies = [
  "activitypub",
  "anyhow",
+ "argon2",
  "async-trait",
+ "base32",
  "base64 0.22.1",
  "ed25519-dalek",
  "federation-transport",
  "futures-core",
  "futures-util",
  "hmac 0.12.1",
+ "http-signatures",
  "idp-broker",
  "idp-domain",
  "idp-realtime",
  "idp-storage",
  "jwt-utils",
+ "lettre",
+ "rand 0.8.8",
  "reqwest",
  "serde",
  "serde_json",
@@ -2212,6 +2152,7 @@ dependencies = [
  "sqlx",
  "time",
  "tokio",
+ "totp-rs",
  "tracing",
  "url",
  "uuid",
@@ -2230,72 +2171,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "idp-server"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "axum-extra",
- "dotenvy",
- "federation-transport",
- "idp-api",
- "idp-application",
- "idp-auth",
- "idp-broker",
- "idp-config",
- "idp-db",
- "idp-domain",
- "idp-email",
- "idp-federation",
- "idp-infrastructure",
- "idp-realtime",
- "idp-social",
- "idp-state",
- "idp-storage",
- "jwt-utils",
- "observability",
- "serde",
- "serde_json",
- "sqlx",
- "time",
- "tokio",
- "tower-http",
- "tracing",
-]
-
-[[package]]
-name = "idp-social"
-version = "0.1.0"
-dependencies = [
- "axum",
- "idp-db",
- "idp-federation",
- "idp-state",
- "serde",
- "tracing",
-]
-
-[[package]]
-name = "idp-state"
-version = "0.1.0"
-dependencies = [
- "axum",
- "axum-extra",
- "federation-transport",
- "idp-application",
- "idp-broker",
- "idp-config",
- "idp-db",
- "idp-domain",
- "idp-email",
- "idp-realtime",
- "idp-storage",
- "jwt-utils",
- "serde",
- "tracing",
-]
-
-[[package]]
 name = "idp-storage"
 version = "0.1.0"
 dependencies = [
@@ -2310,19 +2185,6 @@ dependencies = [
  "tokio-util",
  "tracing",
  "uuid",
-]
-
-[[package]]
-name = "idp-totp"
-version = "0.1.0"
-dependencies = [
- "base32",
- "hmac 0.12.1",
- "rand 0.8.8",
- "sha2 0.10.9",
- "subtle",
- "thiserror",
- "totp-rs",
 ]
 
 [[package]]
@@ -2635,15 +2497,6 @@ name = "multiversion_no_op"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "743fb55ba31b18fb1ecef6bdc9aa2743314978ac084044301a7eee33fb99a20d"
-
-[[package]]
-name = "nanoid"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3ffa00dec017b5b1a8b7cf5e2c008bfda1aa7e0697ac1508b491fdf2622fb4d8"
-dependencies = [
- "rand 0.8.8",
-]
 
 [[package]]
 name = "native-tls"

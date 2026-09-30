@@ -56,6 +56,7 @@ pub async fn resolve_remote_actor(
     let actor: Actor = serde_json::from_value(actor_doc)
         .map_err(|e| TransportError::Upstream(format!("Actor parse failed: {e}")))?;
 
+    let avatar_url = actor.icon_url().map(str::to_owned);
     Ok(RemoteActor {
         actor_url: actor.id,
         inbox: actor.inbox,
@@ -65,6 +66,9 @@ pub async fn resolve_remote_actor(
         } else {
             Some(actor.name)
         },
-        avatar_url: None, // Actor struct doesn't have icon field yet
+        avatar_url,
     })
 }
+
+#[cfg(test)]
+mod tests;

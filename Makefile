@@ -19,10 +19,10 @@ SHELL := bash
 # in the env files is resolved against the working directory.
 
 alice: alice-env alice-keys alice-seed
-	set -a && . .env.alice && set +a && cargo run -p idp-server
+	set -a && . .env.alice && set +a && cargo run -p idp-app
 
 bob: bob-env bob-keys bob-seed
-	set -a && . .env.bob && set +a && cargo run -p idp-server
+	set -a && . .env.bob && set +a && cargo run -p idp-app
 
 # ── Instance secrets ─────────────────────────────────────────────────────────
 # Fills SESSION_SECRET and EMAIL_OTP_PEPPER in the env file when they are unset,
@@ -178,16 +178,18 @@ check: fmt-check lint
 	cargo test --workspace
 
 # ── Integration tests (Docker) ────────────────────────────────────────────────
-# Tests behind the `integration` feature need Postgres: a throwaway one from
-# compose.test.yml. DATABASE_URL is exported explicitly because sqlx::test would
-# otherwise read the repo-root .env — Alice's development database.
+# Tests behind the `integration` feature need Postgres, and the end-to-end journeys Redis too:
+# throwaway ones from compose.test.yml. DATABASE_URL is exported explicitly because sqlx::test
+# would otherwise read the repo-root .env — Alice's development database.
 
 TEST_PG_PORT ?= 55432
+TEST_REDIS_PORT ?= 56479
 TEST_DATABASE_URL := postgres://test:test@localhost:$(TEST_PG_PORT)/test
+TEST_REDIS_URL := redis://localhost:$(TEST_REDIS_PORT)
 
 test-integration:
-	TEST_PG_PORT=$(TEST_PG_PORT) docker compose -f compose.test.yml --project-name pinai-test up -d --wait
-	DATABASE_URL=$(TEST_DATABASE_URL) cargo test --workspace --all-features
+	TEST_PG_PORT=$(TEST_PG_PORT) TEST_REDIS_PORT=$(TEST_REDIS_PORT) docker compose -f compose.test.yml --project-name pinai-test up -d --wait
+	DATABASE_URL=$(TEST_DATABASE_URL) TEST_REDIS_URL=$(TEST_REDIS_URL) cargo test --workspace --all-features
 
 test-integration-down:
 	docker compose -f compose.test.yml --project-name pinai-test down

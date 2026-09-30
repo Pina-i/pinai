@@ -67,6 +67,21 @@ impl Accounts for InMemoryAccounts {
             .find(|a| a.username == handle.as_str())
             .cloned())
     }
+
+    async fn search(&self, fragment: &str, limit: i64) -> Result<Vec<Account>, AccountsError> {
+        let fragment = fragment.to_lowercase();
+        let mut found: Vec<Account> = self
+            .accounts
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|a| a.username.to_lowercase().contains(&fragment))
+            .cloned()
+            .collect();
+        found.sort_by(|a, b| a.username.cmp(&b.username));
+        found.truncate(usize::try_from(limit).unwrap_or(0));
+        Ok(found)
+    }
 }
 
 /// A remote account at `address`, with the conventional Pina'i URI and inbox.
@@ -151,7 +166,8 @@ impl TokenVerifier for InMemoryTokens {
     }
 }
 
-/// Takes a request's `signature` header for the actor that signed it — no cryptography.
+/// Takes a request's `signature` header for the actor that signed it, and a body's `digest`
+/// header for its SHA-256 — no signature cryptography.
 #[derive(Default)]
 pub struct TrustedSignatures;
 
@@ -159,6 +175,17 @@ impl TrustedSignatures {
     /// The header a test sends to sign a request as `actor`.
     pub fn header(actor: &ActorUri) -> (&'static str, String) {
         ("signature", actor.to_string())
+    }
+
+    /// The `digest` header value of `body`, as a peer sends it.
+    pub fn digest(body: &[u8]) -> String {
+        use base64::Engine as _;
+        use sha2::Digest as _;
+        let hash = sha2::Sha256::digest(body);
+        format!(
+            "SHA-256={}",
+            base64::engine::general_purpose::STANDARD.encode(hash)
+        )
     }
 }
 
@@ -170,6 +197,66 @@ impl SignatureVerifier for TrustedSignatures {
             .iter()
             .find(|(name, _)| name == "signature")
             .ok_or_else(|| SignatureError::Malformed("missing Signature header".into()))?;
-        ActorUri::parse(value).map_err(|_| SignatureError::Refused("unknown signer".into()))
+        let signer =
+            ActorUri::parse(value).map_err(|_| SignatureError::Refused("unknown signer".into()))?;
+        if let Some(body) = &request.body {
+            let (_, digest) = request
+                .headers
+                .iter()
+                .find(|(name, _)| name == "digest")
+                .ok_or_else(|| SignatureError::Malformed("missing Digest header".into()))?;
+            if *digest != Self::digest(body) {
+                return Err(SignatureError::Refused(
+                    "Digest does not match request body".into(),
+                ));
+            }
+        }
+        Ok(signer)
     }
 }
+
+/// What every `Accounts` store must do. Each check takes accounts already in the store — the
+/// Postgres ones are real `users` rows.
+pub mod contract {
+    use crate::identity::{Account, Accounts};
+
+    /// `alice` and `bob` are named so: `lic` is in the first handle only.
+    pub async fn a_search_finds_the_handles_holding_the_query(
+        accounts: &dyn Accounts,
+        alice: &Account,
+        bob: &Account,
+    ) {
+        let both = vec![alice.clone(), bob.clone()];
+
+        assert_eq!(
+            accounts.search("lic", 20).await.unwrap(),
+            vec![alice.clone()]
+        );
+        assert_eq!(
+            accounts.search("LIC", 20).await.unwrap(),
+            vec![alice.clone()],
+            "in any case"
+        );
+        assert_eq!(accounts.search("_", 20).await.unwrap(), both, "by handle");
+        assert_eq!(
+            accounts.search("_", 1).await.unwrap(),
+            vec![alice.clone()],
+            "at most the limit"
+        );
+        assert!(accounts.search("zzz", 20).await.unwrap().is_empty());
+    }
+
+    /// `%` and `_` are no wildcards: `alice` holds `lic`, not `l_c` nor `%e`.
+    pub async fn a_search_takes_its_query_literally(accounts: &dyn Accounts, alice: &Account) {
+        for query in ["l_c", "%e", "\\"] {
+            assert!(
+                accounts.search(query, 20).await.unwrap().is_empty(),
+                "{query:?} matched {}",
+                alice.username
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests;

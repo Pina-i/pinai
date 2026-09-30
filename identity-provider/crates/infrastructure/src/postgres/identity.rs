@@ -72,4 +72,29 @@ impl Accounts for PgAccounts {
             .context("find an account by actor URI")?;
         account(row)
     }
+
+    async fn search(&self, fragment: &str, limit: i64) -> Result<Vec<Account>, AccountsError> {
+        let rows: Vec<AccountRow> = sqlx::query_as(&format!(
+            "SELECT {COLUMNS} FROM users \
+             WHERE username ILIKE $1 ESCAPE '\\' AND actor_uri IS NOT NULL \
+             ORDER BY username LIMIT $2"
+        ))
+        .bind(format!("%{}%", literal(fragment)))
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .context("search accounts")?;
+        Ok(rows
+            .into_iter()
+            .map(Account::try_from)
+            .collect::<Result<_, _>>()?)
+    }
+}
+
+/// `fragment` as a `LIKE` pattern that matches only itself.
+fn literal(fragment: &str) -> String {
+    fragment
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
 }

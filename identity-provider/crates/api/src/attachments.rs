@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use application::messaging::{Blob, OpenAttachment, ReadBlob, UploadAttachments};
+use application::messaging::{Blob, OpenAttachment, ReadBlob, ServePeerContent, UploadAttachments};
 use axum::Json;
 use axum::body::Body;
 use axum::extract::{Multipart, Path, Query, State};
@@ -16,7 +16,7 @@ use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
 
 use crate::ApiError;
-use crate::auth::Authenticated;
+use crate::auth::{Authenticated, SignedPeer};
 
 #[derive(Serialize)]
 pub struct AttachmentBody {
@@ -165,6 +165,36 @@ pub async fn blob(
     blob_response(blob)
 }
 
+/// `GET /api/attachments/{id}/content` — the source of an attachment uploaded here, for a peer
+/// with a member in its conversation.
+pub async fn content(
+    State(serve): State<Arc<ServePeerContent>>,
+    SignedPeer(peer): SignedPeer,
+    Path(id): Path<Uuid>,
+) -> Result<Response, ApiError> {
+    let blob = serve
+        .execute(&peer, id.into())
+        .await
+        .map_err(peer_refused)?;
+    blob_response(blob)
+}
+
+/// The peer-facing answers, which differ from the client's in places.
+fn peer_refused(error: AttachmentError) -> ApiError {
+    let denied = |description| ApiError::new(StatusCode::FORBIDDEN, "access_denied", description);
+    match error {
+        AttachmentError::NotFound => ApiError::not_found("Attachment not found"),
+        AttachmentError::NotHostedHere => ApiError::not_found("Attachment is not hosted here"),
+        AttachmentError::Unlinked => denied("Attachment is unlinked"),
+        AttachmentError::MessageMissing => ApiError::not_found("Linked message missing"),
+        AttachmentError::PeerNotInConversation => {
+            denied("Requesting peer has no actor in this conversation")
+        }
+        AttachmentError::Unexpected(e) => ApiError::internal(e),
+        other => ApiError::bad_request(other.to_string()),
+    }
+}
+
 /// The bytes as a download: `nosniff` and `attachment` keep a browser from rendering them.
 pub fn blob_response(blob: Blob) -> Result<Response, ApiError> {
     let disposition = format!(
@@ -212,3 +242,6 @@ impl From<AttachmentError> for ApiError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

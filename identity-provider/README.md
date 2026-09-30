@@ -22,17 +22,14 @@ identity-provider/
 ├── Cargo.toml                  # Workspace root
 ├── .env.example                # All supported environment variables
 ├── migrations/                 # SQLx migrations (run automatically on startup)
-│   ├── 000001_create_users.sql
-│   ├── 000002_create_oauth_clients.sql
-│   ├── 000003_create_authorization_codes.sql
-│   ├── 000004_add_handle_suffix.sql
-│   ├── 000005_create_follows.sql
-│   └── 000006_create_direct_messages.sql
 ├── crates/
-│   ├── config/     # Config struct — loads all env vars
-│   ├── db/         # SQLx models, repos (users, clients, auth_codes, follows, messages)
-│   ├── oidc/       # All HTTP handlers (OIDC + federation)
-│   └── server/     # Binary — main.rs + router.rs
+│   ├── domain/          # entities, rules, port traits, typed errors
+│   ├── application/     # the use cases
+│   ├── infrastructure/  # outbound adapters: Postgres, other instances, SMTP, object storage
+│   ├── api/             # inbound adapters: every route, the inbox, the WebSocket
+│   ├── app/             # the composition root and the `idp-server` binary
+│   ├── realtime/  broker/  storage/   # transports the adapters wrap
+│   └── dev-inject-data/ # seeds a development instance
 └── docker/
     ├── Dockerfile
     └── docker-compose.yml
@@ -79,7 +76,7 @@ createdb identity_provider
 ### 5. Run the server
 
 ```bash
-cargo run -p idp-server
+cargo run -p idp-app
 ```
 
 Migrations are applied automatically on startup. The server listens on `http://localhost:8080` by default.
@@ -97,7 +94,7 @@ All variables are documented in [`.env.example`](.env.example). Copy it to `.env
 | `JWT_PRIVATE_KEY_PATH` | yes | — | Path to the Ed25519 PKCS#8 PEM private key |
 | `JWT_KEY_ID` | yes | — | Key ID included in JWTs and JWKS, e.g. `key-2025-01` |
 | `PORT` | no | `8080` | TCP port to listen on |
-| `SESSION_SECRET` | production | dev default | ≥ 32-byte secret for signing session cookies; production refuses to start without one, or on a published placeholder |
+| `SESSION_SECRET` | production | dev default | ≥ 32-byte secret the session-cookie and attachment-link keys are derived from; production refuses to start without one, or on a published placeholder |
 | `FRONTEND_URL` | no | `http://localhost:5173` | Web-client base URL, used for login/register redirects |
 | `CORS_ORIGINS` | no | `http://localhost:5173,http://localhost:3000` | Comma-separated allowed CORS origins |
 | `RUST_LOG` | no | `info` | Log filter (e.g. `debug`, `idp_oidc=trace`) |
@@ -214,10 +211,10 @@ make bob     # Terminal 2 — Bob on :8081
 
 ```bash
 # Terminal 1 — Alice on :8080
-set -a && source docker/.env.alice && set +a && cargo run -p idp-server
+set -a && source docker/.env.alice && set +a && cargo run -p idp-app
 
 # Terminal 2 — Bob on :8081
-set -a && source docker/.env.bob && set +a && cargo run -p idp-server
+set -a && source docker/.env.bob && set +a && cargo run -p idp-app
 ```
 
 Each process runs its own migrations automatically and connects to its own database.

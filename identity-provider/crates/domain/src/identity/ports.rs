@@ -8,6 +8,8 @@ pub trait Accounts: Send + Sync {
     async fn find(&self, id: UserId) -> Result<Option<Account>, AccountsError>;
     async fn find_by_handle(&self, handle: &Handle) -> Result<Option<Account>, AccountsError>;
     async fn find_by_uri(&self, uri: &ActorUri) -> Result<Option<Account>, AccountsError>;
+    /// The accounts whose handle holds `fragment`, in any case, by handle; at most `limit`.
+    async fn search(&self, fragment: &str, limit: i64) -> Result<Vec<Account>, AccountsError>;
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -66,6 +68,9 @@ pub struct SignedRequest {
     /// Path and query.
     pub target: String,
     pub headers: Vec<(String, String)>,
+    /// The body as received, when the request has one: the signature must then cover a
+    /// `Digest` of it.
+    pub body: Option<Vec<u8>>,
 }
 
 /// Checks the HTTP Signature of a request another instance sent, and names the actor whose

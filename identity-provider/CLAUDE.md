@@ -50,33 +50,24 @@ across all chat servers in the network.
 
 ## Workspace structure (Cargo)
 
-**Migration in progress.** The service is moving, one bounded context at a time, to hexagonal
-layer crates — `domain`, `application`, `infrastructure`, `api` — following
-`.claude/skills/rust-backend-architecture`, which applies to every Rust change. New code goes in
-the layer crates; legacy crates only shrink. A legacy handler may call a new use case; a layer crate
-reaches a legacy crate only from an `infrastructure` adapter wrapping a component not migrated yet.
-Migrated so far: **account settings** (`PATCH /api/settings`, and the `settings` that `/userinfo`
-and `PATCH /api/profile` return); **identity & addressing** — `domain::identity` (`Handle`,
-`FederatedAddress`, `ActorUri`, `InstanceOrigin`, `Recipient`) is the only parser of addresses and
-actor URIs, and legacy code reaches it through `AppState::origin` / `AppState::is_local_actor`;
-**social graph** — the `/api/friends` routes (`api::social`) and the inbox's
-`Follow` / `Accept` / `Reject` / `Undo{Follow}`, which call the `Receive*` use cases through
-`AppState`; **messages** — `/api/dm*` and `POST /api/groups/:id/messages` (`api::messaging`), the
-WebSocket `send_dm`, and the inbox's MLS application messages, edits and group rosters, which call
-`application::messaging` use cases through `AppState`; **group management** —
-`/api/groups*` (`api::groups`); **attachments** — `/api/attachments*` (`api::attachments`), the
-peer-facing `/content` endpoint, which calls `ServePeerContent` through `AppState`, and the orphan
-sweep (`api::background`); **E2EE** — the key directory `/api/keys/*` (`api::key_directory`),
-with a `Caller` extractor that takes a bearer token or else a peer's HTTP Signature; the MLS
-Delivery Service `/api/mls/*` (`api::mls`) and the inbox's commits and Welcomes
-(`ReceiveCommit`, `ReceiveWelcome` through `AppState`); the history archive `/api/history/*`
-(`api::history`); and the KeyPackage and Welcome sweeps; **local realtime** — the `/ws` upgrade
-and read loop (`api::ws`: heartbeats, `set_presence`, typing, `send_dm`, watching a conversation),
-`GET /api/presence` (`api::presence`), the presence bus relayed to the sessions and the idle
-sweep (`api::background`); **cross-instance presence** — the peer endpoints
-`POST /api/presence/batch` and `GET /api/presence/stream` (`api::presence`, behind a `SignedPeer`
-extractor), the polls of the remote friends' instances and the relay of the peers' streams
-(`api::background`). The new `api::router` is merged into the legacy router in `server`.
+The service is hexagonal, as `.claude/skills/rust-backend-architecture` describes, which applies to
+every Rust change: layers as crates, each organised by bounded context (`auth`, `identity`,
+`profile`, `settings`, `social`, `messaging`, `e2ee`, `presence`).
+
+- **`domain`** — entities, value objects, the rules, the port traits, typed errors; the in-memory
+  fakes and each port's contract suite behind `test-utils`.
+- **`application`** — one use case per flow, holding `Arc<dyn Port>`s.
+- **`infrastructure`** — the outbound adapters: SQL, other instances, mail, object storage,
+  WebSocket push, the presence bus.
+- **`api`** — the inbound ones: every route, the inbox (`api::inbox`: the three inbound checks,
+  then each activity to its use case), the WebSocket's upgrade and read loop (`api::ws`), the
+  background timers and relays (`api::background`).
+- **`app`** — the composition root: `Config`, `Application::build(config, listener)`, which wires
+  everything by hand and starts the background tasks, and `run_until_stopped`; the binary
+  `idp-server`. Its `tests/api` are the end-to-end journeys.
+
+Three transports stay crates of their own, wrapped by the adapters: `realtime` (the connection
+registry, shared by `api` and `infrastructure`), `broker` and `storage`.
 
 ```
 identity-provider/
@@ -87,37 +78,22 @@ identity-provider/
 │   ├── infrastructure/     # idp-infrastructure — port adapters: SQLx, AP delivery + WebFinger,
 │   │                       #   signed downloads and claims, object storage, blob tokens, JWT and
 │   │                       #   HTTP Signature verification, device attestation, WS hub, the
-│   │                       #   presence bus and the peers' presence polls and streams; `MIGRATOR`
-│   ├── api/                # idp-api — Axum routes, the `/ws` upgrade and read loop, DTOs,
-│   │                       #   `ApiError`, background sweeps, the presence bus relay and polls
-│   ├── server/             # main Axum application: entrypoint + router (wires every crate)
-│   ├── auth/               # OIDC/OAuth2 flows, JWT issuance, JWKS, registration, cookies,
-│   │                       #   avatar profile, login/logout, signup OTP + reaper.
-│   ├── email/              # Outbound SMTP (lettre). `EmailSender` trait + LettreSmtpSender +
-│   │                       #   InMemoryEmailSender (test-utils). One method per template kind.
-│   ├── totp/               # Pure TOTP + recovery-code primitives (RFC 6238, no DB / no HTTP).
-│   │                       #   Used by auth's enrollment + login challenge (Phase 3).
-│   ├── federation/         # ActivityPub: WebFinger, actor, inbox, outbox, delivery,
-│   │                       #   HTTP Signatures, Bearer-auth helper, actor-name lookup.
-│   ├── social/             # User search (`GET /api/users/search`); the friend graph is in the
-│   │                       #   layer crates.
+│   │                       #   presence bus and the peers' presence polls and streams, the
+│   │                       #   sign-in, sign-up and second-factor stores, Argon2, TOTP, token
+│   │                       #   signing, SMTP mail; `MIGRATOR`
+│   ├── api/                # idp-api — Axum routes (the inbox, the actor documents and
+│   │                       #   WebFinger included), the `/ws` upgrade and read loop, DTOs,
+│   │                       #   `ApiError`, the CORS and trace layers, background sweeps, the
+│   │                       #   presence bus relay and polls
+│   ├── app/                # idp-app — `Config`, `Application` (the composition root), the
+│   │                       #   session keys, the `idp-server` binary; `tests/api`: the journeys
 │   ├── realtime/           # WS connection registry (WsHub), typed WsEvent / WsClientMessage.
 │   │                       #   Pure transport — knows no domain logic.
-│   ├── state/              # Shared AppState + OidcError (integration seam consumed by
-│   │                       #   every domain crate; constructed in `server`).
 │   ├── broker/             # Redis pub-sub + Streams abstraction (EventBroker trait).
-│   ├── db/                 # SQLx models, repositories (migrations run by `infrastructure::MIGRATOR`)
-│   │   └── repos/          # auth_codes, clients, conversations, email_verification_codes,
-│   │                       #   friendships, history_messages, history_salt,
-│   │                       #   pending_totp_enrollments, pending_totp_logins,
-│   │                       #   recovery_codes, remote_actors, users
-│   │                       #   (reactions repo dropped in Phase 3; user_identity_keys
-│   │                       #   + recovery_blobs dropped in Phase 7)
 │   ├── storage/            # S3-compatible (RustFS) object storage client
-│   └── config/             # Configuration loading, env vars
+│   └── dev-inject-data/    # seeds a development instance with accounts (`make alice-seed`)
 ├── migrations/             # SQLx migrations (numbered, applied on startup)
 ├── specs/                  # Feature specifications (see routing table below)
-├── docs/adr/               # Architecture Decision Records (ADR-0001: bounded contexts)
 ├── docker/
 │   ├── Dockerfile
 │   └── docker-compose.yml
@@ -130,21 +106,15 @@ identity-provider/
 ```
 domain  ──► (no internal deps)
 application ──► domain
-infrastructure ──► domain (+ realtime, broker, storage: wrapped until they migrate)
+infrastructure ──► domain (+ realtime, broker, storage: the transports it wraps)
 api     ──► application, domain, realtime (the connection registry, a transport)
-server  ──► every crate (composition root)
-auth    ──► application, domain, state, federation, db, storage, config, email, totp
-social     ──► state, federation, db
-federation ──► application, domain, state, db, broker, config, realtime
-realtime   ──► (no internal deps)
-state      ──► application, domain, realtime, db, broker, email, storage, config
-db, broker, storage, config ──► (leaves)
+app     ──► every crate (composition root)
+realtime, broker, storage ──► (leaves)
 ```
 
 > The inbox dispatches friendship activities to `application::social`, MLS application
-> messages to `application::messaging`, and MLS commits and Welcomes to `application::e2ee`.
-> ADR-0001 plans to route this dispatch through the broker (Federation publishes
-> typed events; messaging/social subscribe).
+> messages to `application::messaging`, MLS commits and Welcomes to `application::e2ee`, and
+> `Update{Person}` to `application::profile`.
 
 ---
 
@@ -154,24 +124,30 @@ db, broker, storage, config ──► (leaves)
 |---|---|
 | `GET /.well-known/openid-configuration` | OIDC Discovery document |
 | `GET /.well-known/jwks.json` | Public keys for JWT validation |
-| `GET /.well-known/webfinger` | ActivityPub actor discovery |
-| `GET /authorize` | Authorization endpoint (PKCE flow) |
-| `POST /token` | Token exchange |
-| `GET /userinfo` | UserInfo endpoint — also carries the account `settings` document |
-| `PATCH /api/profile` | Update display_name / pronouns / bio (Bearer-auth); fans out via `propagate_profile_update` |
+| `GET /.well-known/webfinger` | ActivityPub actor discovery — an account of this instance only |
+| `GET /users/:handle` · `GET /actor` | The account's `Person` (name, inbox, `icon`, the instance key) · the instance's `Application` actor, whose key signs inter-instance requests |
+| `POST /users/:handle/inbox` | Peers' activities: signature, `Digest` and actor binding checked first; `Follow`/`Accept`/`Reject`/`Undo{Follow}`, MLS `Create`/`Update{Note}`, `Update{Person}` |
+| `GET /users/:handle/outbox` · `/followers` · `/following` | Always empty collections: nothing is published, and friend lists are not public |
+| `GET /authorize` | Authorization endpoint (code + PKCE `S256`). An unknown client or unregistered `redirect_uri` is answered here (401 / 400); a bad flow goes back to the client with `error` and `state`. A live session cookie gets a code at once, else the web client's `/login` page |
+| `POST /login` | The login form: the request checked again (401 / 400), 10 guesses per email then 1/min, an unknown email costs a decoy hash check. A code + session cookie, or on to `/verify-email` (a code is mailed) or `/login/totp?ticket=` |
+| `POST /token` | Code exchange (single use, spent even when refused): access + ID token, 1 h, `Cache-Control: no-store`. `unsupported_grant_type`, `invalid_client`, `invalid_grant` |
+| `GET /logout` | Drops the session cookie; `post_logout_redirect_uri` only to the origin of a registered redirect URI, else `/` |
+| `GET /userinfo` | The account (handle, `address`, `actor_uri`, name, avatar, pronouns, bio, `email_verified`, `totp_enabled`) and its `settings` document. A token outliving its account is `401 invalid_token` |
+| `PATCH /api/profile` | Bearer-auth. Every field on every save: `display_name` trimmed 1–50, `pronouns` ∈ {he, she, non-binary} or empty, `bio` ≤ 190 or empty; `400` names the rule broken. Answers the new userinfo; the friends are told (`friend_profile_updated` here, `Update{Person}` elsewhere) |
 | `PATCH /api/settings` | Bearer-auth. Replace the account-settings sections the body names (`{ appearance: {…} }`), keep the others; returns the merged document and pushes it to the user's sessions as `settings_updated`. Read back on `GET /userinfo` (`settings`). Device-scoped settings never reach the IdP — see `identity-provider/specs/01-identity-federation.md § 1.6` |
-| `PUT /api/avatar` | Replace the user's avatar (raw image bytes; ≤2 MiB; jpeg/png/webp/gif). URL is cache-busted with `?v=<unix_secs>` |
-| `DELETE /api/avatar` | Clear the user's avatar |
-| `POST /register` | User self-registration — dispatches signup OTP, no session |
-| `POST /register-and-login` | Form submit from web client; same as `/register` plus carries OIDC params through to the verify page |
-| `POST /verify-email-and-login` | Consume signup OTP, mark `email_verified_at`, issue auth code + session, redirect to OIDC `redirect_uri` |
-| `POST /verify-email/resend` | Re-issue a signup OTP for an unverified user (rate-limited: 5 per 10 min) |
-| `POST /login/totp` | Consume TOTP-challenge ticket (or recovery code), issue auth code + session, redirect to `redirect_uri`. Failures redirect back with `?error=...`. |
+| `PUT /api/avatar` | Replace the avatar (raw image bytes; 1 byte–2 MiB; jpeg/png/webp/gif): stored, shown, then the other types removed; URL cache-busted with `?v=<unix_secs>`; the friends are told |
+| `DELETE /api/avatar` | Clear the avatar, then remove its images; the friends are told |
+| `POST /register` | JSON self-registration: `201` with the account, a code mailed, no session. `400` names the rule broken (the handle rules, an address, 8-byte passwords) or `Email already registered` — whatever its case, races included |
+| `POST /register-and-login` | The web client's sign-up form: the same, carrying the OIDC request on to `/verify-email`; a broken rule goes back to `/login?tab=register&error=` |
+| `POST /verify-email-and-login` | The mailed code: 5 guesses a code, counted under a row lock; the right one confirms the address, issues an auth code + session, redirects to `redirect_uri` |
+| `POST /verify-email/resend` | Another code: `204`, `410` once confirmed, `429` past 5 codes in 10 min — a sign-in on the unconfirmed address counts too |
+| `POST /dev/send-test-email` | Development instances only: a signup mail with a fixed code, to check SMTP |
+| `POST /login/totp` | The code page: the authenticator's code — good once, for a step later than the last used — or a recovery code, against the ticket the password step opened (5 attempts, reserved atomically). An auth code + session, or back with `?error=...` |
 | `POST /api/totp/enroll` | Bearer auth. Start TOTP enrollment — returns `{ secret_base32, provisioning_url }` |
-| `POST /api/totp/enroll/verify` | Bearer auth. Verify first code, commit secret, return 10 one-time recovery codes |
-| `POST /api/totp/disable` | Bearer auth + current TOTP code. Clears secret + recovery codes |
-| `POST /api/totp/recovery-codes/regenerate` | Bearer auth + current TOTP code. Replaces the user's 10 recovery codes |
-| `GET /api/users/search?q=` | Search local users by username (Bearer) |
+| `POST /api/totp/enroll/verify` | Bearer auth. The first code: in one transaction the secret committed, its step recorded, the enrollment forgotten and 10 one-time recovery codes minted and returned |
+| `POST /api/totp/disable` | Bearer auth + a current, unused TOTP code. Clears the secret, its last step, the recovery codes and any enrollment in one transaction |
+| `POST /api/totp/recovery-codes/regenerate` | Bearer auth + a current, unused TOTP code. Replaces the user's 10 recovery codes |
+| `GET /api/users/search?q=&limit=` | Accounts whose handle holds `q`, taken literally (`%`, `_` are no wildcards); `q` of 2+ characters, else `400`; at most 50 (Bearer) |
 | `POST /api/friends/request` | Send a friend request. Body: `{ address }` — local, or `Follow` to a remote IdP (sent in the background: an unreachable peer never fails the request). Both sides start `pending` |
 | `GET /api/friends/incoming` | Pending friend requests |
 | `POST /api/friends/:id/accept` | Accept a request; mints the DM conversation and sends `friend_accepted` (local) or `Accept{Follow}` with `conversationId` (remote) |
@@ -243,15 +219,22 @@ Don't mention any "phase" development or what is currently being worked on. The 
 ## Cross-cutting rules (always apply)
 
 ### Identity & addressing
-- **`username`** = user input + NanoID suffix (e.g. `alice_xK9mP`). Used for federation and `actor_uri`. **Never shown in the UI.**
-- **`display_name`** = user input only (e.g. `alice`). Freeform, not unique. **Only name shown client-side.**
-- **Federated address format**: `username@domain` — **no** leading `@`. Produced by `User::federated_address(&self, domain)`. Clients receive raw actor URIs in some WS events and normalise to this format via `actorUriToAddress()`.
-- **`actor_uri`** is the universal federation key (e.g. `https://idp.alice.com/users/alice_xK9mP`).
+- **`username`** = the handle: the chosen name + `_` + 5 of `a–z0–9` (e.g. `alice_xk9mp`). Used for federation and `actor_uri`. **Never shown in the UI.**
+- **`display_name`** = user input only (e.g. `alice`): trimmed, 1–50 characters (`DisplayName`), not unique. **Only name shown client-side.** A peer's is taken within the same rules, or not at all.
+- **Federated address format**: `username@domain` — **no** leading `@`; `/userinfo` answers it as `address`. Clients receive raw actor URIs in some WS events and normalise to this format via `actorUriToAddress()`.
+- **`actor_uri`** is the universal federation key (e.g. `https://idp.alice.com/users/alice_xk9mp`).
 - **Parsing** an address or an actor URI, or deciding whether one is local, goes through
   `domain::identity` — never `split('@')`, `starts_with("{issuer}/users/")` or path slicing. A bare
   name means a local account; our own domain matches in any case. The handle rules
   (`Handle`, `UsernameChoice`: 2–32 of `a–z0–9_.` + `_` + 5 of `a–z0–9`) are enforced at
-  registration once the auth context migrates.
+  registration.
+
+### Profile
+- An inbound `Update{Person}` changes only its signer's own account, never one of this instance
+  (`ReceiveProfileUpdate`), and keeps only a name and an `http(s)` avatar URL within
+  `PublicProfile::within_limits` — every friend's client loads that URL.
+- An avatar is replaced upload → `users.avatar_url` → removal of the other types, and cleared
+  `users.avatar_url` → removal: the account never points at a removed object.
 
 ### Conversations
 - Every conversation (DM or group) has a stable **`conversation_id UUID`** that never changes regardless of participant count.
@@ -263,12 +246,13 @@ Don't mention any "phase" development or what is currently being worked on. The 
 
 ### Redis
 - **pub-sub** → ephemeral events (presence states, typing indicators). Loss is acceptable.
-- **Streams** → durable events (DMs, profile updates, friend requests). Must survive disconnect.
+- **Streams** → durable events (DMs). Must survive disconnect. Profile and friendship events go
+  to the live sessions only.
 
 ### Federation
-- **Outbound AP delivery** is best-effort, inline `tokio::spawn` per remote inbox — no persistent outbox queue. A delivery never fails the request that caused it: friendship activities go through the fire-and-forget `SocialFederation` port. Each activity owns its own reconciliation story (TTL re-fetch, idempotent retry, a failed 1:1 DM reported to its sender). See `identity-provider/specs/01-identity-federation.md § Federation delivery semantics`.
+- **Outbound AP delivery** is best-effort, inline `tokio::spawn` per remote inbox — no persistent outbox queue. A delivery never fails the request that caused it: friendship activities go through the fire-and-forget `SocialFederation` port. Each activity owns its own reconciliation story (the next profile change, idempotent retry, a failed 1:1 DM reported to its sender). See `identity-provider/specs/01-identity-federation.md § Federation delivery semantics`.
 - **`remote_actors.inbox_url`** is cached on first WebFinger resolution. Every writer (`remote_actors::upsert()`, `FederatedRemoteActors`) uses `COALESCE(EXCLUDED.inbox_url, remote_actors.inbox_url)` — never overwrite a cached value with `None`.
-- **HTTP Signatures** are mandatory on all incoming ActivityPub activities and on the inter-IdP presence endpoints. Reuses the instance's key pair — no separate key material.
+- **HTTP Signatures** are mandatory on all incoming ActivityPub activities and on the inter-IdP endpoints. Reuses the instance's key pair — no separate key material. A signed request with a body goes through `SignedBody` / `SignedJson` / `CallerJson`, which check its `Digest` before the body is read; `SignedPeer` is for bodyless requests only.
 
 ### Database
 - **Soft deletes**: messages use `deleted_at TIMESTAMPTZ` — never hard-delete.
@@ -279,18 +263,22 @@ Don't mention any "phase" development or what is currently being worked on. The 
 ## Database schema — quick reference
 
 ```
-users                    — local accounts (actor_uri, inbox_url, display_name, username+NanoID,
-                            avatar_url, pronouns ∈ {he, she, non-binary}, bio, email_verified_at,
-                            totp_secret, totp_enabled)
-email_verification_codes — signup OTPs (peppered HMAC, 10-min expiry, 5-attempt limit)
+users                    — local accounts (actor_uri, inbox_url, display_name, username (the handle),
+                            email lowercase and unique whatever its case,
+                                                        avatar_url, pronouns ∈ {he, she, non-binary}, bio, email_verified_at,
+                            totp_secret, totp_enabled, totp_last_step — a code is good once)
+email_verification_codes — signup codes (peppered HMAC, 10-min expiry, 5 attempts, 5 codes / 10 min)
 pending_totp_enrollments — in-flight 2FA secret awaiting first-code verify
 pending_totp_logins      — short-lived "passed password, need TOTP" tickets carrying OIDC params
+                            (5 attempts)
 recovery_codes           — 10 per user, single-use, peppered HMAC
-remote_actors            — cache of federated users (inbox_url, avatar_url, fetched_at TTL)
+remote_actors            — cache of federated users (inbox_url, display_name, avatar_url — as the
+                            actor's own `Update{Person}` last said, within the profile limits)
 user_settings            — account settings, one client-owned JSONB document per user
                             (sections replaced whole by PATCH /api/settings; ≤ 16 KiB)
-friendships              — friend graph (friend_actor_uri, friend_avatar_url, status,
-                            direction: outgoing|incoming — only the incoming side may answer)
+friendships              — friend graph (friend_actor_uri, status, direction: outgoing|incoming —
+                            only the incoming side may answer; friend_avatar_url, read for a
+                            remote friend only — a local one is shown from `users`)
 conversations            — anchor for every conversation (kind: dm|group, name; dm_low/dm_high:
                             a DM's actor pair, unique — one DM per pair)
 conversation_members     — participants (actor_uri, joined_at, left_at, role: member|admin —
@@ -325,7 +313,7 @@ mls_welcomes             — outbound queue for offline device adds (recipient_u
 
 Dropped in Phase 7: `user_identity_keys` (user-level MSK/SSK/USK trust → per-device
 IdP-attested DRK) and `recovery_blobs` (passphrase-wrapped MSK → encrypted plaintext
-archive under HAK). See `docs/plans/2026-05-14-per-device-identity-design.md`.
+archive under HAK).
 ```
 
 ---
@@ -349,6 +337,18 @@ archive under HAK). See `docs/plans/2026-05-14-per-device-identity-design.md`.
 - Reject PKCE `plain` challenge method
 - HTTP Signature verification is mandatory on all incoming ActivityPub activities
 - Private keys must never be stored in the database — use filesystem or secrets manager
+- `SESSION_SECRET` is never a key itself: `app::keys::SessionKeys` derives one per purpose from
+  all of it (HKDF-SHA256) — the session cookie's, the attachment links'. A new purpose takes a
+  new label, never an existing key
+
+## Running and stopping
+
+`Application::build` connects to Postgres, Redis and the object store, runs the migrations and
+starts the background tasks; `run_until_stopped` serves until its stop token is cancelled — by
+`SIGTERM` or Ctrl-C in the binary. It then takes no new connection, answers the requests under
+way, closes each WebSocket with `1001` and ends the peers' presence streams, lets every background
+task finish its run under way, and drops what is still open ten seconds on
+(`identity-provider/specs/04-presence.md` § When the instance stops).
 
 ---
 

@@ -1,10 +1,57 @@
 use domain::ConversationId;
+use domain::identity::Account;
 use domain::social::SocialGraph;
-use domain::social::testing::contract;
+use domain::social::testing::{AccountEdits, contract};
 use infrastructure::postgres::PgSocialGraph;
 use sqlx::PgPool;
 
 use crate::an_account;
+
+struct PgAccountEdits(PgPool);
+
+#[async_trait::async_trait]
+impl AccountEdits for PgAccountEdits {
+    async fn save(&self, account: &Account) {
+        sqlx::query("UPDATE users SET display_name = $2, avatar_url = $3 WHERE id = $1")
+            .bind(account.id.as_uuid())
+            .bind(&account.display_name)
+            .bind(&account.avatar_url)
+            .execute(&self.0)
+            .await
+            .expect("edit an account");
+    }
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn a_remote_friend_is_listed_with_the_avatar_it_was_met_with(pool: PgPool) {
+    let (alice, bob) = (
+        an_account(&pool, "alice").await,
+        an_account(&pool, "bob").await,
+    );
+
+    contract::a_remote_friend_is_listed_with_the_avatar_it_was_met_with(
+        &PgSocialGraph::new(pool),
+        &alice,
+        &bob,
+    )
+    .await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn a_local_friend_is_listed_as_it_now_is(pool: PgPool) {
+    let (alice, bob) = (
+        an_account(&pool, "alice").await,
+        an_account(&pool, "bob").await,
+    );
+
+    contract::a_local_friend_is_listed_as_it_now_is(
+        &PgSocialGraph::new(pool.clone()),
+        &PgAccountEdits(pool),
+        &alice,
+        &bob,
+    )
+    .await;
+}
 
 #[sqlx::test(migrator = "infrastructure::MIGRATOR")]
 async fn a_local_request_records_both_sides_pending(pool: PgPool) {

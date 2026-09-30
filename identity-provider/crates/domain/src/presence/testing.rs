@@ -333,25 +333,41 @@ impl PeerStreams for RecordingPeerStreams {
     }
 }
 
-/// The bus as one listener hears it: the signals queued so far, then its end.
+/// The bus as one listener hears it: the signals queued so far, then its end — or, held open,
+/// nothing more.
 #[derive(Default)]
 pub struct QueuedFeed {
     queued: Mutex<Vec<Signal>>,
+    held_open: bool,
 }
 
 impl QueuedFeed {
+    /// A feed whose streams, once drained, stay open as a live bus does.
+    pub fn held_open() -> Self {
+        Self {
+            held_open: true,
+            ..Self::default()
+        }
+    }
+
     pub fn queue(&self, signal: Signal) {
         self.queued.lock().unwrap().push(signal);
     }
 }
 
-struct Drain(VecDeque<Signal>);
+struct Drain {
+    queued: VecDeque<Signal>,
+    held_open: bool,
+}
 
 impl Stream for Drain {
     type Item = Signal;
 
     fn poll_next(mut self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Option<Signal>> {
-        Poll::Ready(self.0.pop_front())
+        match self.queued.pop_front() {
+            None if self.held_open => Poll::Pending,
+            next => Poll::Ready(next),
+        }
     }
 }
 
@@ -359,7 +375,10 @@ impl Stream for Drain {
 impl SignalFeed for QueuedFeed {
     async fn subscribe(&self) -> Result<BoxStream<'static, Signal>, PresenceError> {
         let queued = std::mem::take(&mut *self.queued.lock().unwrap());
-        Ok(Box::pin(Drain(queued.into())))
+        Ok(Box::pin(Drain {
+            queued: queued.into(),
+            held_open: self.held_open,
+        }))
     }
 }
 

@@ -20,7 +20,7 @@ use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
 
 use crate::ApiError;
-use crate::auth::{Authenticated, Caller};
+use crate::auth::{Authenticated, CallerJson};
 use crate::rate_limit::RateLimiter;
 
 #[derive(Serialize)]
@@ -232,8 +232,7 @@ pub async fn upload(
 pub async fn claim(
     State(claim): State<Arc<ClaimKeyPackage>>,
     State(limiter): State<Arc<RateLimiter>>,
-    Caller(requester): Caller,
-    Json(body): Json<ClaimRequest>,
+    CallerJson(requester, body): CallerJson<ClaimRequest>,
 ) -> Result<Json<ClaimedBody>, ApiError> {
     let bucket = match &requester {
         Requester::User(user) => format!("user:{user}"),

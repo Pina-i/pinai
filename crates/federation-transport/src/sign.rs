@@ -1,6 +1,6 @@
 use ed25519_dalek::SigningKey;
 use http_signatures::{http_date_now, sha256_digest, sign_request, SignParams};
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::error::TransportError;
 use crate::http::{client, download_client, screen_url, UrlPolicy};
@@ -28,7 +28,6 @@ pub async fn signed_post(
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
-        warn!(%target_url, %status, %text, "peer rejected signed POST");
         return Err(TransportError::Upstream(format!(
             "peer returned {status}: {text}"
         )));
@@ -135,3 +134,6 @@ pub async fn signed_get(
     }
     Ok(resp)
 }
+
+#[cfg(test)]
+mod tests;

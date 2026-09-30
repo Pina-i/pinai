@@ -1,0 +1,61 @@
+[package]
+name    = "idp-app"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "app"
+
+# The composition root: configuration, the adapters and use cases wired by hand, the server and
+# its background tasks — see .claude/skills/rust-backend-architecture.
+[[bin]]
+name = "idp-server"
+path = "src/main.rs"
+
+[dependencies]
+anyhow               = { workspace = true }
+api                  = { package = "idp-api", path = "../api" }
+application          = { package = "idp-application", path = "../application" }
+axum                 = { workspace = true }
+axum-extra           = { workspace = true }
+domain               = { package = "idp-domain", path = "../domain" }
+dotenvy              = "0.15"
+federation-transport = { workspace = true }
+hex                  = "0.4"
+hkdf                 = { workspace = true }
+infrastructure       = { package = "idp-infrastructure", path = "../infrastructure" }
+jwt-utils            = { workspace = true }
+observability        = { workspace = true }
+serde_json           = { workspace = true }
+sha2                 = { workspace = true }
+sqlx                 = { workspace = true }
+thiserror            = { workspace = true }
+time                 = { workspace = true }
+tokio                = { workspace = true }
+tokio-util           = { workspace = true }
+tracing              = { workspace = true }
+
+# Transports the adapters wrap.
+idp-broker   = { path = "../broker", package = "idp-broker" }
+idp-realtime = { path = "../realtime", package = "idp-realtime" }
+idp-storage  = { path = "../storage", package = "idp-storage" }
+
+[features]
+# End-to-end journeys against the test Postgres and Redis; run by `make test-integration`.
+integration = []
+
+[dev-dependencies]
+base64             = { workspace = true }
+ed25519-dalek      = { workspace = true, features = ["pkcs8", "pem"] }
+rand               = { workspace = true }
+futures-util       = { workspace = true }
+reqwest            = { workspace = true, features = ["stream"] }
+serde_json         = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["fmt", "env-filter"] }
+url                = { workspace = true }
+uuid               = { workspace = true }
+
+[[test]]
+name              = "api"
+path              = "tests/api/main.rs"
+required-features = ["integration"]

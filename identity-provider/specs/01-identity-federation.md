@@ -10,15 +10,17 @@ In this architecture, users can be on **different IdPs** (e.g. Alice on `idp.ali
 -- Local users registered on this IdP instance
 CREATE TABLE users (
   id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  username      TEXT NOT NULL UNIQUE,       -- user input + NanoID suffix, e.g. "alice_xK9mP"
-                                            -- used for federation: @alice_xK9mP@idp.alice.com
+    username      TEXT NOT NULL UNIQUE,       -- the handle: chosen name + "_" + 5 of a–z0–9,
+                                            -- e.g. "alice_xk9mp"; used for federation:
+                                            -- alice_xk9mp@idp.alice.com (§ 1.4)
   display_name  TEXT NOT NULL,              -- set to user input at creation, e.g. "alice"
                                             -- freeform, no uniqueness constraint, shown in UI
   avatar_url    TEXT,                       -- public RustFS URL with `?v=<unix_secs>` cache-bust
                                             -- (avatars bucket is public-read; see § Avatar storage)
   pronouns      TEXT,                       -- closed enum, see CHECK below
   bio           TEXT,                       -- ≤ 190 chars, freeform; enforced server-side
-  email         TEXT NOT NULL UNIQUE,       -- used by OIDC
+    email         TEXT NOT NULL UNIQUE,       -- used by OIDC; kept lowercase, and unique
+                                            -- whatever its case (users_email_lower_key)
   password_hash TEXT NOT NULL,
   actor_uri     TEXT NOT NULL UNIQUE,       -- e.g. "https://idp.alice.com/users/alice"
   inbox_url     TEXT NOT NULL,              -- e.g. "https://idp.alice.com/users/alice/inbox"
@@ -34,15 +36,15 @@ CREATE TABLE users (
 
 -- Signup confirmation OTPs (6-digit numeric, peppered HMAC-SHA256).
 -- At most one *unconsumed* row per user at any moment; resend consumes the
--- previous row in the same transaction. Reaper drops consumed/expired rows
--- older than 24 h.
+-- previous row in the same transaction. The hourly sweep drops consumed/expired
+-- rows older than 24 h.
 CREATE TABLE email_verification_codes (
   id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   code_hash   BYTEA NOT NULL,            -- HMAC-SHA256(EMAIL_OTP_PEPPER, code)
   expires_at  TIMESTAMPTZ NOT NULL,      -- now() + 10 minutes
   consumed_at TIMESTAMPTZ,               -- set on successful verify OR resend invalidation
-  attempts    INTEGER NOT NULL DEFAULT 0, -- max 5 before lockout (resend required)
+    attempts    INTEGER NOT NULL DEFAULT 0, -- max 5, counted under a row lock (resend required)
   created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX idx_evc_user_unconsumed
@@ -69,7 +71,7 @@ CREATE TABLE friendships (
   id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   owner_user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,  -- always local
   friend_actor_uri  TEXT NOT NULL,   -- e.g. "https://idp.bob.com/users/bob" (local or remote)
-  friend_avatar_url TEXT,            -- cached to avoid extra S3/RustFS lookup at render time
+  friend_avatar_url TEXT,            -- a remote friend's avatar, as its last Update{Person} said
   status            TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'accepted')),
   direction         TEXT NOT NULL CHECK (direction IN ('outgoing', 'incoming')),  -- who sent the request
   created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -99,23 +101,35 @@ CREATE TABLE friendships (
 > **Remote actor cache**
 >
 > `remote_actors` is written whenever an actor is resolved (WebFinger, on an outgoing request) or
-> discovered (its first inbound `Follow`). A fetch that brings no inbox or display name — an
-> unreachable peer, an actor document without a name — keeps the cached value rather than erasing
-> it. Discovery accepts only a URI of the form `…/users/{handle}`; any other actor is refused with
-> `400 Cannot parse remote actor URL`.
+> discovered (its first inbound `Follow`), with the inbox, name and avatar (`icon`) its actor
+> document gives. A fetch that brings no inbox, name or avatar — an unreachable peer, a document
+> without them — keeps the cached value rather than erasing it. Discovery accepts only a URI of the
+> form `…/users/{handle}`; any other actor is refused with `400 Cannot parse remote actor URL`. A
+> name or avatar outside the peer profile limits (§ 2) counts as none. The friendship keeps the
+> avatar the actor was met with, on either side of the request, so a new friend is shown with it
+> at once.
+
+> **What peers read of an account**
+>
+> `GET /.well-known/webfinger?resource=acct:{handle}@{domain}` points at the account's actor, for
+> an account of this instance only (`404 User not found` for any other). `GET /users/{handle}` is
+> its `Person` — display name (else the handle), inbox, `icon` when it has an avatar, and the
+> instance key as `publicKey`; `GET /actor` is the instance's `Application` actor, whose key signs
+> the inter-instance requests. The outbox and the `followers` / `following` collections are always
+> empty: nothing is published, and whom an account is friends with is not for anyone to read.
 
 > **Federated address format**
 >
-> The canonical address format used throughout the system is `username@domain` (e.g. `alice_xK9mP@idp.alice.com`), **without** a leading `@`. This is produced by `User::federated_address(&self, domain: &str)` on the server side. Clients receive actor URIs (`https://idp.alice.com/users/alice_xK9mP`) in some events and normalise them to `username@domain` via `actorUriToAddress()` before using them as conversation keys.
+> The canonical address format used throughout the system is `username@domain` (e.g. `alice_xk9mp@idp.alice.com`), **without** a leading `@` — `/userinfo` answers it as `address`. Clients receive actor URIs (`https://idp.alice.com/users/alice_xk9mp`) in some events and normalise them to `username@domain` via `actorUriToAddress()` before using them as conversation keys.
 
 > **`username` vs `display_name`**
 >
-> - `username` is the unique internal identifier used for federation and ActivityPub addressing. It is composed of the user-chosen name + a NanoID 5-character suffix appended by the backend at account creation (e.g. `alice_xK9mP`). This guarantees uniqueness per instance with no coordination needed. It is never shown in the UI.
-> - `display_name` is the only name shown client-side. It is automatically set by the backend at account creation to the user-chosen part, before the NanoID suffix (e.g. user types `alice` → `display_name = "alice"`). It is freeform, has no uniqueness constraint, and can be changed freely at any time.
+> - `username` is the unique internal identifier used for federation and ActivityPub addressing. It is composed of the user-chosen name + `_` + a 5-character suffix of `a–z0–9` appended by the backend at account creation (e.g. `alice_xk9mp`; § 1.4). This guarantees uniqueness per instance with no coordination needed. It is never shown in the UI.
+> - `display_name` is the only name shown client-side. It is automatically set by the backend at account creation to the user-chosen part, before the suffix (e.g. user types `alice` → `display_name = "alice"`). It has no uniqueness constraint and can be changed at any time, within the rules of § 1.5.
 >
 > Example flow at account creation:
 > - User inputs: `alice`
-> - Backend sets: `username = "alice_xK9mP"`, `display_name = "alice"`, `actor_uri = "https://idp.alice.com/users/alice_xK9mP"`
+> - Backend sets: `username = "alice_xk9mp"`, `display_name = "alice"`, `actor_uri = "https://idp.alice.com/users/alice_xk9mp"`
 
 ---
 
@@ -125,10 +139,10 @@ Using `actor_uri` as the universal key, a JOIN across `users` and `remote_actors
 
 ```sql
 SELECT
-  COALESCE(u.username,
-    split_part(f.friend_actor_uri, '/', -1)) AS username,  -- derived from actor_uri for remote
+  u.username                                 AS username,      -- NULL for a remote friend
   COALESCE(u.display_name, ra.display_name)  AS display_name,
-  f.friend_avatar_url                        AS avatar_url,
+  CASE WHEN u.id IS NULL THEN f.friend_avatar_url
+       ELSE u.avatar_url END                 AS avatar_url,
   f.friend_actor_uri,
   COALESCE(ra.instance, 'local')             AS instance
 FROM friendships f
@@ -137,6 +151,10 @@ LEFT JOIN remote_actors ra ON f.friend_actor_uri = ra.actor_uri
 WHERE f.owner_user_id = $1     -- pass the caller's local user id
   AND f.status = 'accepted';
 ```
+
+A local friend is shown as its account is now — name and avatar from `users` — and a remote one
+as it was met and as each `Update{Person}` since said (§ 2). The friendship's `friend_avatar_url` is that copy for a
+remote friend; for a local one it is never read, so a cleared avatar stays cleared.
 
 ### Friendship-accept also creates the DM conversation
 
@@ -206,6 +224,153 @@ no local user still has the remote actor as an accepted friend.
 
 ---
 
+## 1.3. Signing in — OpenID Connect
+
+The IdP is the OpenID provider of its own accounts. There is one flow — the authorization code
+flow with PKCE (`S256`) — for public clients, which hold no secret. The web client hosts the
+sign-in pages (`/login`, `/verify-email`, `/login/totp`) at `FRONTEND_URL`; the IdP's form
+endpoints answer by redirecting between them, and finally back to the client with a code.
+
+```mermaid
+sequenceDiagram
+    participant C as client (browser)
+    participant I as IdP
+    participant P as sign-in pages (web client)
+
+    C->>I: GET /authorize?response_type=code&client_id&redirect_uri&state&code_challenge…
+    alt a session cookie for a live account
+        I-->>C: 303 redirect_uri?code&state
+    else
+        I-->>P: 303 /login?client_id&redirect_uri&scope&state&code_challenge…
+        P->>I: POST /login (email, password + the request)
+        alt the right password, address confirmed, no authenticator
+            I-->>C: 303 redirect_uri?code&state + session cookie
+        else address unconfirmed
+            I-->>P: 303 /verify-email (a code is mailed — § 1.4)
+        else authenticator
+            I-->>P: 303 /login/totp?ticket (§ 1.4b)
+        else wrong email or password
+            I-->>P: 303 /login?…&error=Invalid email or password
+        end
+    end
+    C->>I: POST /token (code, redirect_uri, client_id, code_verifier)
+    I-->>C: access_token + id_token
+```
+
+### Clients
+
+`oauth_clients` registers each client: its `client_id` and its `redirect_uris`. A redirect URI
+must match a registered one **exactly**, case and path included (RFC 6749 § 3.1.2) — it is where
+codes are sent. The web client is seeded by the first migration.
+
+### `GET /authorize`
+
+1. The client must be known and the `redirect_uri` registered for it. Either failure is
+   answered by the IdP itself — `401 invalid_client` or `400 invalid_request` — since the
+   redirect cannot be trusted.
+2. Only then the flow: `response_type=code` and `code_challenge_method=S256`. A failure here goes
+   back to the client, as RFC 6749 § 4.1.2.1 says: `redirect_uri?error=unsupported_response_type`
+   (or `invalid_request`)`&error_description=…&state=…`.
+3. A browser with a session cookie for an account that still exists is handed a code at once;
+   any other goes to the login page, carrying the request.
+
+### `POST /login`
+
+The login form, posted by the browser with the request it carries.
+
+- The request is checked again — a known client, a registered `redirect_uri` — or any page
+  could have a code sent wherever it names. A failure is `401` / `400`, never a redirect.
+- Password guesses are bounded per email address, in any case: 10, then one a minute. Past that,
+  the form is sent back with `error=Too many attempts — try again in a minute`, whatever the
+  password — known address or not, so the limit tells nothing of who has an account.
+- An unknown email is checked against a decoy hash as costly as a real one, and answered like a
+  wrong password: `error=Invalid email or password`. Neither the answer nor its timing tells
+  whether the address has an account.
+- The right password on an unconfirmed address mails a fresh code and goes to `/verify-email`
+  (§ 1.4); on an account with an authenticator it opens a ticket and goes to `/login/totp`
+  (§ 1.4b). Otherwise it issues a code and sets the session cookie.
+
+A code is good for 10 minutes, once. It remembers the account, the client, the
+`redirect_uri`, the scope, the challenge and the nonce; the `state` goes back with it and is not
+kept.
+
+### The session cookie
+
+`idp_session` holds the account id, signed (HMAC-SHA256) with a key derived from
+`SESSION_SECRET`: `HttpOnly`, `SameSite=Lax`, `Path=/`, 30 days, and `Secure` in production. It is
+what lets `/authorize` skip the login page.
+
+The secret makes two keys, each derived from all of it with HKDF-SHA256 under a label of its own:
+the session cookie's (`pinai idp: session cookies`) and the attachment links'
+(`pinai idp: attachment links`, `identity-provider/specs/03-direct-messages.md` § 9). No purpose
+shares another's key, and a new secret signs everyone out.
+
+### `POST /token`
+
+`application/x-www-form-urlencoded`: `grant_type`, `code`, `redirect_uri`, `client_id`,
+`code_verifier`.
+
+1. `grant_type` must be `authorization_code`, the client known, the `redirect_uri` registered.
+2. The code is **spent** as it is read — even if the rest of the exchange is refused, it is never
+   tried twice.
+3. The code must have been issued to this client for this `redirect_uri`, and the verifier must
+   meet its challenge: `BASE64URL(SHA256(code_verifier)) = code_challenge`.
+4. The account must still exist.
+
+```json
+{ "access_token": "…", "token_type": "Bearer", "expires_in": 3600, "id_token": "…" }
+```
+
+Every answer, success or refusal, carries `Cache-Control: no-store` and `Pragma: no-cache`
+(RFC 6749 § 5.1).
+
+| Refusal | Status | `error` |
+|---|---|---|
+| Another grant type | 400 | `unsupported_grant_type` |
+| Unknown client | 401 | `invalid_client` |
+| Unregistered or mismatched `redirect_uri`, unusable code (unknown, expired, spent, or its account gone), another client's code, a verifier that does not meet the challenge | 400 | `invalid_grant` |
+
+### Tokens
+
+Both are JWTs signed with the instance's Ed25519 key (`EdDSA`, the key the JWKS publishes):
+`iss` the issuer, `sub` the account id, `aud` the `client_id`, `email`, `preferred_username` (the
+handle), valid for one hour. The ID token adds the request's `nonce`. There is no refresh token:
+a client signs in again, which a live session cookie makes silent.
+
+A bearer token that is missing or unusable is answered `401 invalid_token`, with the challenge
+RFC 6750 § 3 asks for: `WWW-Authenticate: Bearer` when none was sent, `Bearer
+error="invalid_token"` when one was.
+
+### `GET /logout`
+
+Drops the session cookie and redirects to `post_logout_redirect_uri` — only when it is an
+`http(s)` URL on the origin of a registered redirect URI, where a client lives. Anything else
+goes to `/`: the endpoint is never an open redirect.
+
+### Discovery
+
+`GET /.well-known/openid-configuration` (OpenID Connect Discovery 1.0 § 4) names the endpoints,
+`response_types_supported: ["code"]`, `grant_types_supported: ["authorization_code"]`,
+`code_challenge_methods_supported: ["S256"]`, `id_token_signing_alg_values_supported: ["EdDSA"]`
+and `token_endpoint_auth_methods_supported: ["none"]`. `GET /.well-known/jwks.json` serves the
+public key.
+
+### Scenarios
+
+- **First visit.** The web client sends the browser to `/authorize`; without a session it lands
+  on the login page, signs in, and comes back with a code the client exchanges at `/token`.
+- **Coming back.** The session cookie is still there: `/authorize` answers with a code at once.
+- **A page that forges the login form** with its own `redirect_uri` is refused with `400` — no
+  code leaves.
+- **Someone guessing passwords** for an address gets 10 tries, then one a minute; the answers
+  and their timing are the same for an address with no account.
+- **A code intercepted after its exchange** is useless: it was spent, and without the verifier it
+  could not have been exchanged anyway.
+- **Signing out** returns the browser to the client's origin; a link naming another site goes to
+  `/` instead.
+
+---
+
 ## 1.4. Sign-up email verification
 
 Every new account must prove ownership of its email address before a session
@@ -230,33 +395,71 @@ inaccessible to an unverified user.
 └──────────────┘
 ```
 
+### Registration rules
+
+- **The chosen name** follows the handle rules of `domain::identity`: 2–32 characters of `a–z`,
+  `0–9`, `_` and `.`, no dot at either end or twice in a row. A name breaking them is refused
+  with the rule — never silently changed, so what the user sees is what they typed. It becomes
+  the display name as it is.
+- **The handle** is the chosen name, `_`, and 5 characters drawn from `a–z0–9`
+  (`alice_xk9mp`): it names the account in its actor URI and its address. A handle already
+  taken — a one-in-60-million draw — is drawn again.
+- **The address** is kept lowercase, and is one account's whatever its case: `Alice@Example.com`
+  is taken once `alice@example.com` is. One `@` between two non-empty parts, no whitespace, at
+  most 254 characters.
+- **The password** is 8 bytes at least.
+- Two registrations racing for one address or handle are settled by the database's unique
+  indexes: the one that loses is told the address is registered, as if it had come second.
+
 ### Endpoints
 
 | Endpoint | Body | Result |
 |---|---|---|
-| `POST /register-and-login` | username, email, password + OIDC params | Creates the user with `email_verified_at = NULL`, dispatches OTP, redirects to `frontend_url/verify-email`. **No session is issued.** |
-| `POST /verify-email-and-login` | `pending_user_id`, `pending_email`, `code` + OIDC params | Consumes the code, sets `email_verified_at = now()`, issues an OIDC auth code + session cookie, redirects to `redirect_uri`. Recoverable failures (wrong code, expired) redirect back to `/verify-email` with `error=…`. |
-| `POST /verify-email/resend` | `pending_user_id` | Issues a fresh OTP; rate-limited to 5 codes per user per 10-min window. `204` on success, `410` if already verified, `429` if rate-limited. |
-| `POST /login` (existing) | email, password + OIDC params | If credentials are valid but `email_verified_at IS NULL`, dispatches a fresh OTP and redirects to `/verify-email` instead of issuing a session. |
+| `POST /register` | JSON `{ username, email, password }` | `201` with the account (`id`, `username`, `display_name`, `address`, `email`, `email_verified: false`, `pending_user_id`) and a code mailed. `400` names the rule broken, or `Email already registered`. |
+| `POST /register-and-login` | username, email, password + OIDC params | Creates the account unconfirmed, mails a code, redirects to `frontend_url/verify-email?pending_user_id=…&pending_email=…&{oidc params}`. **No session is issued.** A broken rule goes back to `/login?tab=register&…&error=…`; an unknown client or an unregistered `redirect_uri` is `401` / `400`. |
+| `POST /verify-email-and-login` | `pending_user_id`, `pending_email`, `code` + OIDC params | The request is checked first (`401` / `400`, and `400` for a method other than `S256`); then the code: the right one confirms the address, issues an OIDC auth code and the session cookie, and redirects to `redirect_uri`. A wrong, malformed, expired or exhausted code goes back to `/verify-email` with `error=…`; an address confirmed already goes to `/login`. |
+| `POST /verify-email/resend` | `pending_user_id` | A fresh code. `204` on success, `410` if already confirmed, `429` past the resend limit, `404` for an unknown account. |
+| `POST /login` | email, password + OIDC params | The right password on an unconfirmed address mails a fresh code — within the same resend limit — and redirects to `/verify-email` instead of issuing a session (§ 1.3). |
 
-### OTP rules
+### Code rules
 
-- **Length.** 6 numeric digits. Drawn from `OsRng` with rejection sampling so each digit is uniform `0..=9` (no modulo bias).
-- **Lifetime.** 10 minutes (`SIGNUP_OTP_TTL_SECS = 600`).
-- **Storage.** `code_hash = HMAC-SHA256(EMAIL_OTP_PEPPER, code)`. The pepper is a ≥ 32-byte hex env var; startup fails if unset or shorter. A leaked DB without the pepper is not brute-forceable offline.
-- **Attempts.** 5 per code row before lockout — the user must resend.
-- **Single-use.** `consume_and_verify_user` atomically marks the row `consumed_at = now()` *and* sets `email_verified_at` in one transaction. A race losing thread sees `flipped = false` and is told the code was already used.
-- **Resend invalidation.** Inserting a new code consumes the previous unconsumed row in the same transaction, so only the latest code can succeed.
+- **Length.** 6 numeric digits, drawn from `OsRng` with rejection sampling so each digit is
+  uniform `0..=9` (no modulo bias).
+- **Lifetime.** 10 minutes.
+- **Storage.** `code_hash = HMAC-SHA256(EMAIL_OTP_PEPPER, code)`. The pepper is a ≥ 32-byte hex
+  env var; startup fails if unset or shorter. A leaked database without the pepper is not
+  brute-forceable offline.
+- **Resend limit.** At most 5 codes per account in any 10 minutes, whoever asks — the resend
+  endpoint or a sign-in on the unconfirmed address. Each code is more mail to the address, and
+  more guesses at it: past the limit nothing is sent, and the codes already mailed still work.
+- **Attempts.** 5 per code, then a new one must be asked for. An attempt locks the code's row
+  until it is counted, so guesses sent in parallel queue up and the cap holds for all of them.
+- **Single use.** The right code is spent and the address confirmed in the same transaction.
+- **Only the latest counts.** Issuing a code retires the account's earlier ones.
 
-### Reaper
+### Sweep
 
-`run_signup_reaper` (spawned from `server::main`) wakes every hour and:
-1. Deletes `email_verification_codes` rows that are consumed-or-expired *and* older than 24 hours.
-2. Deletes `users` rows where `email_verified_at IS NULL` *and* `created_at` is older than 7 days. Abandoned signups free the email + username so they can be re-registered.
+Every hour — and once at startup — the IdP deletes:
+1. the codes and the login tickets (§ 1.4b) spent or expired, once a day old;
+2. the accounts never confirmed, once a week old: an abandoned sign-up frees its address and
+   handle.
+
+### Scenarios
+
+- **Signing up.** The web client's form posts to `/register-and-login`; the address gets a
+  code; the verify page posts it back and the browser returns to the client signed in.
+- **A code that never arrives.** The page asks `/verify-email/resend`; after five codes in ten
+  minutes it answers `429`.
+- **Someone guessing codes** gets five guesses per code, however many they send at once, and
+  five codes per ten minutes.
+- **Someone registering a victim's address.** The victim gets one mail per code, within the
+  resend limit; the account, never confirmed, is deleted after a week.
+- **`Alice@example.com` registering after `alice@example.com`** is told the address is
+  registered.
 
 ### Dev SMTP
 
-Mailpit ships in `docker/docker-compose.yml` (`MP_SMTP_AUTH_ACCEPT_ANY=true`, `MP_SMTP_AUTH_ALLOW_INSECURE=true`). Web UI on `MAILPIT_UI_PORT` (Alice 8027, Bob 8028) lets a developer click through to the rendered email and copy the code. Production points `SMTP_HOST`/`SMTP_PORT` at a real relay; set `SMTP_STARTTLS=true` for TLS-enabled relays. `POST /dev/send-test-email` is mounted only when `IDP_ENV=development` and fires a hard-coded `123456` code to verify the SMTP path.
+Mailpit ships in `docker/docker-compose.yml` (`MP_SMTP_AUTH_ACCEPT_ANY=true`, `MP_SMTP_AUTH_ALLOW_INSECURE=true`). Web UI on `MAILPIT_UI_PORT` (Alice 8027, Bob 8028) lets a developer click through to the rendered email and copy the code. Production points `SMTP_HOST`/`SMTP_PORT` at a real relay; set `SMTP_STARTTLS=true` for TLS-enabled relays. `POST /dev/send-test-email` (JSON `{ to, display_name? }`) is mounted only when `IDP_ENV=development` and mails a fixed `123456` code to check the SMTP path.
 
 ### `/userinfo`
 
@@ -274,8 +477,9 @@ to their device.
 
 ```sql
 ALTER TABLE users
-    ADD COLUMN totp_secret  BYTEA,
-    ADD COLUMN totp_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+    ADD COLUMN totp_secret    BYTEA,
+    ADD COLUMN totp_enabled   BOOLEAN NOT NULL DEFAULT FALSE,
+    ADD COLUMN totp_last_step BIGINT;   -- the last 30 s step whose code was used
 
 -- Mid-enrollment secret. Discarded once verify succeeds (copied to users.totp_secret).
 CREATE TABLE pending_totp_enrollments (
@@ -314,89 +518,132 @@ CREATE TABLE recovery_codes (
 
 ### Login flow
 
-```
-POST /login (email + password) ──► verify creds + email_verified_at
-                                  │
-                                  ├─ user.totp_enabled = false
-                                  │     → issue auth code + session cookie + 302 redirect_uri  (existing flow)
-                                  │
-                                  └─ user.totp_enabled = true
-                                        → create pending_totp_logins row carrying OIDC params
-                                        → 302 to frontend_url/login/totp?ticket=<uuid>
-                                                                  │
-                                                                  ▼
-                              POST /login/totp (ticket + code | recovery_code)
-                                        → verify code via idp_totp::verify_code(secret, code)  -or-
-                                          ct-compare recovery_code against unconsumed rows + consume
-                                        → consume ticket + issue auth code + session cookie
-                                        → 302 redirect_uri?code=…&state=…
+```mermaid
+sequenceDiagram
+    participant B as browser
+    participant I as IdP
+    participant P as code page (web client)
+
+    B->>I: POST /login (email, password + the request)
+    I->>I: the right password, a second factor on → a ticket carrying the request
+    I-->>P: 303 /login/totp?ticket=…
+    P->>I: POST /login/totp (ticket, code | recovery_code)
+    I->>I: one of the ticket's five attempts reserved
+    alt the app's code, for a step later than the last used — or an unused recovery code
+        I-->>B: 303 redirect_uri?code=…&state=… + session cookie
+    else wrong, replayed or unknown
+        I-->>P: 303 /login/totp?ticket=…&error=…
+    else the fifth attempt spent, or the ticket gone
+        I-->>P: 303 /login?error=…
+    end
 ```
 
-Failures (wrong code, ticket expired, ticket already consumed) all redirect
-back to `/login/totp?ticket=…&error=…` so the form re-renders inline. After 5
-failed attempts the user is bounced to `/login` with a "sign in again" notice
-— the password step must be re-cleared, not just the second factor.
+- **A ticket** is opened by the password step (§ 1.3), carrying the request; opening one closes
+  the account's earlier ones. It lasts 5 minutes.
+- **Five attempts per ticket**, the right one included. Each attempt is reserved on the ticket
+  before its code is checked, in one statement, so guesses sent in parallel cannot pass five.
+  After the fifth the browser goes back to `/login` (`Too many attempts — sign in again`): the
+  password step must be cleared again, not just the second factor. A form with neither a code
+  nor a recovery code is not an attempt (`Enter a code or a recovery code`).
+- **A code is good once** (RFC 6238 § 5.2). A code matches the app's for the current step or one
+  either side; the account keeps the last step whose code it used, and a code is accepted only
+  for a later step. A code seen once — by someone looking over a shoulder, or replayed from a
+  captured request — is refused thereafter (`Incorrect code`). The same holds for the codes that
+  disable the second factor or regenerate recovery codes.
+- **A recovery code** is spent by its use; dashes, spaces and case do not matter.
+- An expired, spent or unknown ticket goes back to `/login` (`Sign-in expired — try again`).
 
 ### Enrollment / disable / regenerate endpoints
 
 | Endpoint | Auth | Body | Result |
 |---|---|---|---|
-| `POST /api/totp/enroll` | Bearer | — | Generates a fresh 20-byte secret, stores it in `pending_totp_enrollments`, returns `{ secret_base32, provisioning_url }`. The provisioning URL is the `otpauth://totp/...` string the client renders as a QR. |
-| `POST /api/totp/enroll/verify` | Bearer | `{ code }` | Verifies the first authenticator code against the pending secret. On success: commits the secret to `users.totp_secret`, deletes the pending row, generates 10 recovery codes, returns them in `{ recovery_codes: [...] }` — shown once and never re-served. |
-| `POST /api/totp/disable` | Bearer | `{ code }` | Requires a current TOTP code (passive sessions can't disarm). Clears `totp_secret`, sets `totp_enabled = false`, deletes all recovery codes. |
-| `POST /api/totp/recovery-codes/regenerate` | Bearer | `{ code }` | Requires a current TOTP code. Atomically replaces all of the user's recovery codes and returns the fresh set. |
+| `POST /api/totp/enroll` | Bearer | — | Generates a fresh 20-byte secret, keeps it in `pending_totp_enrollments` (replacing an earlier one), returns `{ secret_base32, provisioning_url }`. The provisioning URL is the `otpauth://totp/...` string the client renders as a QR; its issuer names the instance, `Pina'i (DOMAIN)` — a port written after a space, as the format keeps `:` to split the label. `400` while the second factor is on. |
+| `POST /api/totp/enroll/verify` | Bearer | `{ code }` | Checks the first authenticator code against the pending secret. On success, in one transaction: commits the secret, records the code's step, forgets the enrollment, and mints 10 recovery codes, returned in `{ recovery_codes: [...] }` — shown once and never re-served. The second factor is never on without recovery codes. `400 invalid_grant` for a wrong code. |
+| `POST /api/totp/disable` | Bearer | `{ code }` | Requires a current, unused TOTP code (a passive session cannot disarm it). In one transaction: clears the secret and its last step, sets `totp_enabled = false`, deletes the recovery codes and any enrollment. `204`. |
+| `POST /api/totp/recovery-codes/regenerate` | Bearer | `{ code }` | Requires a current, unused TOTP code. Replaces all of the account's recovery codes in one transaction and returns the fresh set. |
 
 ### Constants
 
 - **TOTP digits / step / skew**: 6 / 30 s / ±1 step (allows ±30 s clock drift). Matches Google Authenticator / Authy / 1Password.
 - **Secret length**: 20 bytes (RFC 4226).
-- **Login ticket TTL**: 5 minutes; max 5 attempts per ticket.
+- **Login ticket TTL**: 5 minutes; 5 attempts per ticket.
 - **Recovery codes**: 10 per user, 10 chars from a Crockford-style alphabet (no `0`, `1`, `I`, `L`, `O`, `U`), formatted `XXXXX-XXXXX`. Normalization on input strips dashes + whitespace and uppercases — `abcde-12345` and `ABCDE12345` are equivalent.
 - **Pepper**: recovery code hashes reuse `EMAIL_OTP_PEPPER` — one secret to manage.
+
+### Scenarios
+
+- **Turning it on.** Settings call `/api/totp/enroll`, show the QR, and send the app's first code
+  to `/api/totp/enroll/verify`; the recovery codes appear once.
+- **Signing in.** The password step lands on the code page; the app's code returns the browser to
+  the client.
+- **A lost phone.** A recovery code replaces the app's code, once each; new ones can be minted
+  with the app, or the second factor turned off.
+- **A shoulder-surfed code** is refused: it was used already.
+- **Someone with the password guessing codes** gets five attempts per ticket, however many they
+  send at once, then must clear the password step again.
 
 ### `/userinfo`
 
 Returns `totp_enabled: boolean` so the web client knows whether to render the
 "Enable 2FA" pane vs. the "Disable / Generate new recovery codes" pane.
 
-### Reaper
+### Sweep
 
-`run_signup_reaper` (already running) now also drops consumed/expired
-`pending_totp_logins` rows older than 24 h via the same hourly cadence.
+The hourly sign-up sweep (§ 1.4) also deletes the login tickets spent or expired, once a day
+old.
 
 ---
 
 ## 1.5. Profile editing API
 
-The user's editable profile fields (`display_name`, `pronouns`, `bio`) and their
-avatar are exposed through two endpoints:
+An account edits its name, pronouns, bio and avatar through three Bearer-auth endpoints, and reads
+them back on `/userinfo`:
 
-| Endpoint | Body | Notes |
+| Endpoint | Body | Answer |
 |---|---|---|
-| `PATCH /api/profile` | `{ display_name, pronouns?, bio? }` | All three fields sent on every save. `display_name` required & ≤50 chars. `pronouns` ∈ {`he`,`she`,`non-binary`} or `null`. `bio` ≤190 chars; empty clears. Returns the updated `UserinfoResponse`. |
-| `PUT /api/avatar` | raw image bytes (`image/jpeg|png|webp|gif`, ≤2 MiB) | Replaces any prior avatar. Stored URL ends in `?v=<unix_secs>` to bypass browser cache on re-upload. |
-| `DELETE /api/avatar` | — | Clears the user's avatar. |
+| `GET /userinfo` | — | The account: `sub`, `email`, `email_verified`, `totp_enabled`, `preferred_username` (the handle), `display_name`, `address` (`handle@domain`), `actor_uri`, `avatar_url`, `pronouns`, `bio`, and its `settings` (§ 1.6). A token whose account is gone is `401 invalid_token` (`User not found`). |
+| `PATCH /api/profile` | `{ display_name, pronouns?, bio? }` | The new `/userinfo` document. |
+| `PUT /api/avatar` | the raw image, typed by its `Content-Type`: `image/jpeg`, `image/png`, `image/webp` or `image/gif` | `{ avatar_url }` |
+| `DELETE /api/avatar` | — | `204` |
 
-After any successful change, `propagate_profile_update(user_id)` is invoked
-(see § 2). Pronouns and bio are **local-only today**; only `display_name` and
-`avatar_url` federate. Mastodon-style federation of `summary` (bio) and
-`attachment[].PropertyValue` (pronouns) is the planned upgrade path.
+### Profile rules
+
+The form sends every field on every save:
+
+- `display_name` — required; trimmed, 1–50 characters.
+- `pronouns` — `he`, `she` or `non-binary`; `null` or empty clears. The `users` table checks the
+  set too.
+- `bio` — at most 190 characters; empty clears.
+
+A value outside them is `400 invalid_request`, described by the rule it breaks (`display_name
+cannot be blank`, `pronouns must be one of: he, she, non-binary`, …). An avatar is 1 byte to 2 MiB
+of one of the four types, else `400` (`Content-Type must be image/jpeg, image/png, image/webp, or
+image/gif`, `Body cannot be empty`).
+
+Only the display name and the avatar federate (§ 2); pronouns and bio stay on the home IdP.
+Mastodon-style `summary` (bio) and `attachment[].PropertyValue` (pronouns) are the upgrade path.
 
 ### Avatar storage
 
-The avatars bucket is **public-read** (`s3:GetObject` for `Principal: *`),
-unlike the attachments bucket. The IdP stores the public URL directly on
-`users.avatar_url`:
+The avatars bucket is **public-read** (`s3:GetObject` for `Principal: *`), unlike the attachments
+bucket. The IdP keeps one object per account and type, `{user_id}.{ext}`, and stores its public
+URL on `users.avatar_url`, versioned by the upload time:
 
 ```
 {STORAGE_PUBLIC_URL}/avatars/{user_id}.{ext}?v={unix_secs}
 ```
 
-The query param is appended at upload time. Storage keys are stable per user,
-so without `?v` the browser keeps the old bytes after a re-upload — the
-version param forces a fresh fetch and propagates verbatim through the AP
-`Update{Person}` activity to peer `remote_actors.avatar_url` and
+The key is stable, so without `?v` a browser keeps the old bytes after a re-upload; the version
+travels verbatim through `Update{Person}` to peers' `remote_actors.avatar_url` and
 `friendships.friend_avatar_url`.
+
+The account never points at a removed image. An upload is stored, then shown on
+`users.avatar_url`, and only then are the account's images of the other types removed; a delete
+clears `users.avatar_url` before removing the images. A failed upload or write leaves the avatar
+the account had. An image a failed removal leaves behind is shown nowhere, and the next upload
+removes it.
+
+After each change the account's friends are told of it (§ 2).
 
 ---
 
@@ -480,56 +727,90 @@ sequenceDiagram
 - **Before sign-in, or before `/userinfo` answers.** The client paints its local copy of the account
   settings — those of the last account signed in on it — so pages never flash the default.
 
-## 2. Real-time profile propagation when a friend updates their profile
+## 2. Real-time profile propagation
 
-Regardless of whether the friend is local or remote, the downstream propagation is always the same. The only difference is *how the update is triggered*.
+An account's display name and avatar are shown by its friends' clients, here and on other
+instances; a change reaches them at once.
 
-1. A profile update occurs:
-   - **Local friend**: the Msg Backbone updates the `users` table directly and publishes an event to the message broker.
-   - **Remote friend**: Bob's IdP sends an ActivityPub `Update` activity to Alice's IdP, which updates `remote_actors` and publishes an event to the broker.
+```mermaid
+sequenceDiagram
+    participant A as Alice's client
+    participant IA as idp.alice.com
+    participant C as Carol's client (Alice's friend, same IdP)
+    participant IB as idp.bob.com
+    participant B as Bob's client (Alice's friend)
+
+    A->>IA: PATCH /api/profile · PUT/DELETE /api/avatar
+    IA-->>C: WS friend_profile_updated
+    IA->>IB: Update{Person}, signed as Alice
+    Note over IB: remote_actors + friendships.friend_avatar_url
+    IB-->>B: WS friend_profile_updated
+```
+
+### Outbound
+
+After a change the IdP pushes `friend_profile_updated` to the live sessions of each local account
+that counts the actor among its accepted friends, and posts an `Update{Person}`, signed as the
+account, to the inbox of each accepted friend on another instance — one first seen through its
+`Follow` is reached at `{actor_uri}/inbox`. Delivery is best-effort (§ Federation delivery
+semantics): the change is saved whatever becomes of it.
 
 ```json
 {
   "@context": "https://www.w3.org/ns/activitystreams",
   "type": "Update",
-  "actor": "https://idp.bob.com/users/bob",
+  "actor": "https://idp.bob.com/users/bob_k2m9x",
   "object": {
     "type": "Person",
-    "id": "https://idp.bob.com/users/bob",
-    "preferredUsername": "new_bob",
-    "name": "New Bob Display Name",
-    "icon": { "type": "Image", "url": "https://idp.bob.com/avatars/bob.webp" }
+    "id": "https://idp.bob.com/users/bob_k2m9x",
+    "preferredUsername": "bob_k2m9x",
+    "name": "New Bob",
+    "icon": { "type": "Image", "url": "https://s3.bob.com/avatars/<id>.webp?v=1790762965" }
   }
 }
 ```
 
-2. The IdP updates `friend_avatar_url` on all matching `friendships` rows.
-3. The broker fans out a `friend_profile_updated` event to all users who have that actor as a friend.
-4. The WebSocket layer consumes the event from the broker and pushes it to all connected clients:
+The `Person` carries the whole shown profile — no `name` without a display name, no `icon`
+without an avatar — so each `Update` replaces what the peer knew.
+
+### Inbound
+
+An `Update{Person}` at `POST /users/:username/inbox`, past the three inbound checks
+(`specs/06-federation-authentication.md`):
+
+- **Only the account itself.** The `Person`'s `id` must be the activity's actor, which the
+  signature binds; one naming any other account, or an account of this instance, is
+  `403 access_denied` (`an actor may only update its own profile`). The signature proves who sent
+  the activity, not whose profile it names.
+- **Within this instance's limits.** The name is taken as a local display name is (trimmed,
+  1–50 characters), the avatar only at an `http(s)` URL of at most 2048 bytes, since every
+  friend's client loads it. Anything else is taken as not given. The name an actor document gives
+  when the actor is discovered or resolved (§ Remote actor cache) goes through the same rule.
+- The name and avatar replace those in `remote_actors`, the avatar that of every friendship
+  naming the actor, and `friend_profile_updated` goes to the local accounts that count it among
+  their accepted friends. A `Person` whose `id` is no actor URI is ignored.
+
+### The event
 
 ```json
 {
-  "event": "friend_profile_updated",
-  "actorUri": "https://idp.bob.com/users/bob",
-  "displayName": "New Bob",
-  "avatarUrl": "https://idp.bob.com/avatars/bob.webp"
+  "type": "friend_profile_updated",
+  "data": {
+    "actorUri": "https://idp.bob.com/users/bob_k2m9x",
+    "displayName": "New Bob",
+    "avatarUrl": "https://s3.bob.com/avatars/<id>.webp?v=1790762965"
+  }
 }
 ```
 
-5. Alice's client receives it and updates its local state immediately.
-
-```
-Profile update ──▶ IdP (DB + friendships cache) ──▶ Broker ──▶ WebSocket layer ──▶ Alice's client
-```
-
----
+`displayName` and `avatarUrl` are `null` once cleared. The client updates the friend at once.
 
 ### Summary
 
-| Trigger | Transport | Who updates the cache? |
+| Trigger | Transport | What is written |
 |---|---|---|
-| Local profile update | Broker → WebSocket | `users` table + `friendships.friend_avatar_url` |
-| Remote profile update | ActivityPub `Update` → Broker → WebSocket | `remote_actors` table + `friendships.friend_avatar_url` |
+| Local profile update | WebSocket push | `users` |
+| Remote profile update | `Update{Person}` → WebSocket push | `remote_actors` + `friendships.friend_avatar_url` |
 
 ---
 
@@ -578,10 +859,10 @@ idempotent and naturally self-healing through another mechanism:
 | `Like` / `Undo{Like}` (reaction) | Idempotent | Reconciles on next conversation fetch |
 | `Follow` / `Accept` | Idempotent, low-frequency | The requester can send the request again; a `Follow` for a friendship already accepted here is answered with the `Accept` again |
 | `Reject` / `Undo{Follow}` | Idempotent, low-frequency | The peer keeps its row until either side touches the relationship again — see § Declining a request and ending a friendship |
-| `Update{Person}` (profile) | Idempotent | Self-heals via `remote_actors.fetched_at` TTL re-fetch |
+| `Update{Person}` (profile) | Idempotent, carries the whole shown profile | The next change sends it whole again; until then the peer shows the name and avatar it had |
 
-Each activity type owns its own reconciliation story (TTL re-fetch, next
-user interaction, sender-driven resend), so a missed delivery never produces a
+Each activity type owns its own reconciliation story (the next change,
+next user interaction, sender-driven resend), so a missed delivery never produces a
 permanently inconsistent state. This avoids the failure modes a generic
 queue introduces (silent worker death, queue growth, attempt-counter
 overflow, mis-tuned backoff). If a future activity does require durable

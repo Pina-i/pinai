@@ -1,15 +1,24 @@
+mod accounts;
+mod actors;
 mod attachments;
 pub mod auth;
 pub mod background;
 pub mod error;
 mod groups;
 mod history;
+mod http;
+mod inbox;
 mod key_directory;
 mod messaging;
 mod mls;
 mod presence;
+mod profile;
 pub mod rate_limit;
+mod second_factor;
 mod settings;
+mod sign_in;
+mod sign_up;
+
 mod social;
 #[cfg(test)]
 mod testing;
@@ -17,43 +26,101 @@ mod ws;
 
 use std::sync::Arc;
 
+use application::auth::{
+    Authorize, ConfirmTotpEnrollment, DisableTotp, ExchangeCode, LogIn, LogOut, PassSecondFactor,
+    RegenerateRecoveryCodes, Register, ResendCode, SendTestMail, StartTotpEnrollment, VerifyEmail,
+};
 use application::e2ee::{
     AppendCommit, ArchiveMessages, CatchUpCommits, ClaimKeyPackage, ClaimWelcomes, ClearArchive,
-    KeyPackageStatus, ListDevices, LoadArchiveSalt, ReadArchive, RegisterDevice, RevokeDevice,
-    SendWelcome, SetArchiveSalt, UploadKeyPackages,
+    KeyPackageStatus, ListDevices, LoadArchiveSalt, ReadArchive, ReceiveCommit, ReceiveWelcome,
+    RegisterDevice, RevokeDevice, SendWelcome, SetArchiveSalt, UploadKeyPackages,
 };
+use application::identity::{FindAccount, SearchAccounts, WebFinger};
 use application::messaging::{
     AddGroupMember, CreateGroup, DeliverDirectMessage, EditMessage, ListConversations,
-    ListGroupMembers, LoadHistory, MarkRead, OpenAttachment, ReadBlob, RemoveGroupMember,
-    RenameGroup, SendDirectMessage, SendGroupMessage, SetMemberRole, UploadAttachments,
+    ListGroupMembers, LoadHistory, MarkRead, OpenAttachment, ReadBlob, ReceiveEdit, ReceiveMessage,
+    RemoveGroupMember, RenameGroup, SendDirectMessage, SendGroupMessage, ServePeerContent,
+    SetMemberRole, UploadAttachments,
 };
 use application::presence::{
     Connect, Disconnect, Heartbeat, OpenPeerStream, ReadPresence, ServePeerPresence, SetPresence,
     StartTyping, WatchConversation,
 };
+use application::profile::{
+    ClearAvatar, EditProfile, ReadUserinfo, ReceiveProfileUpdate, SetAvatar,
+};
 use application::settings::UpdateSettings;
 use application::social::{
-    AcceptFriendRequest, DeclineFriendRequest, ListFriends, ListIncomingRequests,
-    SendFriendRequest, Unfriend,
+    AcceptFriendRequest, DeclineFriendRequest, ListFriends, ListIncomingRequests, ReceiveAccept,
+    ReceiveFollow, ReceiveReject, ReceiveUndoFollow, SendFriendRequest, Unfriend,
 };
-use axum::Router;
 use axum::extract::{DefaultBodyLimit, FromRef};
-use axum::routing::{delete, get, patch, post};
+use axum::routing::{delete, get, patch, post, put};
+use axum::{Json, Router};
+use axum_extra::extract::cookie::Key;
 use domain::identity::{InstanceOrigin, SignatureVerifier, TokenVerifier};
 use domain::messaging::AttachmentLimits;
 use domain::presence::MissedEvents;
 use idp_realtime::WsHub;
+use serde_json::json;
+use tokio_util::sync::CancellationToken;
 
+pub use actors::PublicKeyPem;
 pub use error::ApiError;
 pub use rate_limit::RateLimiter;
+pub use sign_in::{Jwks, LoginAttempts, SignInPages};
 
 /// What handlers reach through `State`, built in the composition root.
 #[derive(Clone, FromRef)]
 pub struct AppState {
     pub auth: Arc<dyn TokenVerifier>,
+    /// Signs the session cookie.
+    pub cookie_key: Key,
+    pub sign_in_pages: SignInPages,
+    pub jwks: Jwks,
+    pub authorize: Arc<Authorize>,
+    pub log_in: Arc<LogIn>,
+    pub exchange_code: Arc<ExchangeCode>,
+    pub log_out: Arc<LogOut>,
+    pub login_attempts: LoginAttempts,
+    pub register: Arc<Register>,
+    pub verify_email: Arc<VerifyEmail>,
+    pub resend_code: Arc<ResendCode>,
+    pub send_test_mail: Arc<SendTestMail>,
+    pub pass_second_factor: Arc<PassSecondFactor>,
+    pub start_totp_enrollment: Arc<StartTotpEnrollment>,
+    pub confirm_totp_enrollment: Arc<ConfirmTotpEnrollment>,
+    pub disable_totp: Arc<DisableTotp>,
+    pub regenerate_recovery_codes: Arc<RegenerateRecoveryCodes>,
+    /// Mounts `/dev/*`: a development instance only.
+    #[from_ref(skip)]
+    pub dev_routes: bool,
     pub signatures: Arc<dyn SignatureVerifier>,
     pub origin: InstanceOrigin,
+    /// The web client's origins, allowed cross-origin.
+    #[from_ref(skip)]
+    pub cors_origins: Vec<String>,
+    pub public_key_pem: PublicKeyPem,
+    pub find_account: Arc<FindAccount>,
+    pub web_finger: Arc<WebFinger>,
+    pub search_accounts: Arc<SearchAccounts>,
+    /// What the inbox receives.
+    pub receive_follow: Arc<ReceiveFollow>,
+    pub receive_accept: Arc<ReceiveAccept>,
+    pub receive_reject: Arc<ReceiveReject>,
+    pub receive_undo_follow: Arc<ReceiveUndoFollow>,
+    pub receive_message: Arc<ReceiveMessage>,
+    pub receive_edit: Arc<ReceiveEdit>,
+    pub receive_commit: Arc<ReceiveCommit>,
+    pub receive_welcome: Arc<ReceiveWelcome>,
+    pub receive_profile_update: Arc<ReceiveProfileUpdate>,
+    /// A peer's fetch of an attachment uploaded here.
+    pub serve_peer_content: Arc<ServePeerContent>,
     pub update_settings: Arc<UpdateSettings>,
+    pub read_userinfo: Arc<ReadUserinfo>,
+    pub edit_profile: Arc<EditProfile>,
+    pub set_avatar: Arc<SetAvatar>,
+    pub clear_avatar: Arc<ClearAvatar>,
     pub send_friend_request: Arc<SendFriendRequest>,
     pub list_incoming_requests: Arc<ListIncomingRequests>,
     pub accept_friend_request: Arc<AcceptFriendRequest>,
@@ -108,20 +175,52 @@ pub struct AppState {
     pub open_peer_stream: Arc<OpenPeerStream>,
     #[from_ref(skip)]
     pub typing_limiter: Arc<RateLimiter>,
+    /// Cancelled when the instance stops: the long-lived connections end.
+    pub shutdown: CancellationToken,
 }
 
 pub fn router(state: AppState) -> Router {
+    let dev_routes = state.dev_routes;
+    let cors = http::cors(&state.cors_origins);
     // Every file of an upload at its largest, plus headroom for the multipart framing.
     let upload_limit = state.attachment_limits.max_files
         * usize::try_from(state.attachment_limits.max_bytes).unwrap_or(usize::MAX)
         + 1024 * 1024;
     Router::new()
+        .route("/health", get(|| async { Json(json!({ "ok": true })) }))
+        .route("/.well-known/webfinger", get(actors::web_finger))
+        .route("/actor", get(actors::instance_actor))
+        .route("/users/{slug}", get(actors::person))
+        .route("/users/{slug}/inbox", post(inbox::receive))
+        .route("/users/{slug}/outbox", get(actors::outbox))
+        .route("/users/{slug}/followers", get(actors::followers))
+        .route("/users/{slug}/following", get(actors::following))
+        .route("/api/users/search", get(accounts::search))
+        .route("/.well-known/openid-configuration", get(sign_in::discovery))
+        .route("/.well-known/jwks.json", get(sign_in::jwks))
+        .route("/authorize", get(sign_in::authorize))
+        .route("/login", post(sign_in::log_in))
+        .route("/token", post(sign_in::token))
+        .route("/logout", get(sign_in::log_out))
+        .route("/register", post(sign_up::register))
+        .route("/register-and-login", post(sign_up::register_and_log_in))
+        .route("/verify-email-and-login", post(sign_up::verify_email))
+        .route("/verify-email/resend", post(sign_up::resend))
+        .route("/login/totp", post(second_factor::pass))
+        .route("/api/totp/enroll", post(second_factor::enroll))
+        .route("/api/totp/enroll/verify", post(second_factor::confirm))
+        .route("/api/totp/disable", post(second_factor::disable))
+        .route(
+            "/api/totp/recovery-codes/regenerate",
+            post(second_factor::regenerate),
+        )
         .route(
             "/api/attachments",
             post(attachments::upload).layer(DefaultBodyLimit::max(upload_limit)),
         )
         .route("/api/attachments/{id}", get(attachments::open))
         .route("/api/attachments/{id}/blob", get(attachments::blob))
+        .route("/api/attachments/{id}/content", get(attachments::content))
         .route(
             "/api/keys/devices",
             get(key_directory::devices).post(key_directory::register),
@@ -155,6 +254,12 @@ pub fn router(state: AppState) -> Router {
         .route("/api/presence/batch", post(presence::batch))
         .route("/api/presence/stream", get(presence::stream))
         .route("/api/settings", patch(settings::update_settings))
+        .route("/userinfo", get(profile::userinfo))
+        .route("/api/profile", patch(profile::edit))
+        .route(
+            "/api/avatar",
+            put(profile::put_avatar).delete(profile::delete_avatar),
+        )
         .route("/ws", get(ws::upgrade))
         .route("/api/friends", get(social::friends))
         .route("/api/friends/request", post(social::send_request))
@@ -190,5 +295,12 @@ pub fn router(state: AppState) -> Router {
             "/api/groups/{conversation_id}/members/{actor_uri}/role",
             post(groups::set_role),
         )
+        .merge(if dev_routes {
+            Router::new().route("/dev/send-test-email", post(sign_up::send_test_mail))
+        } else {
+            Router::new()
+        })
         .with_state(state)
+        .layer(cors)
+        .layer(http::trace())
 }

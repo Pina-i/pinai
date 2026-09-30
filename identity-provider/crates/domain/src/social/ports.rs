@@ -58,12 +58,14 @@ pub trait SocialGraph: Send + Sync {
     /// The owner's accepted friends, local and remote, with what is known of their names.
     async fn friends(&self, owner: UserId) -> Result<Vec<FriendView>, SocialStoreError>;
 
-    /// The owner's `incoming` side of a request a remote actor sent, `pending`. A redelivered
-    /// request keeps the one side; an accepted side is left as it is.
+    /// The owner's `incoming` side of a request a remote actor sent, `pending`, keeping the
+    /// avatar the actor was met with. A redelivered request keeps the one side; an accepted side
+    /// is left as it is.
     async fn record_incoming(
         &self,
         owner: UserId,
         friend: &ActorUri,
+        friend_avatar_url: Option<&str>,
     ) -> Result<Friendship, SocialStoreError>;
 
     /// A remote actor accepted the owner's pending outgoing request: it becomes `accepted` and the

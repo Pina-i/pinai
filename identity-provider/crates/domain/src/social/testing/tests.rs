@@ -82,6 +82,28 @@ async fn incoming_requests_are_the_pending_ones_received() {
 }
 
 #[tokio::test]
+async fn a_local_friend_is_listed_as_it_now_is() {
+    let graph = InMemorySocialGraph::default();
+    contract::a_local_friend_is_listed_as_it_now_is(
+        &graph,
+        &graph,
+        &account("alice"),
+        &account("bob"),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_remote_friend_is_listed_with_the_avatar_it_was_met_with() {
+    contract::a_remote_friend_is_listed_with_the_avatar_it_was_met_with(
+        &InMemorySocialGraph::default(),
+        &account("alice"),
+        &account("bob"),
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn the_friends_list_holds_accepted_friends_with_their_names() {
     contract::the_friends_list_holds_accepted_friends_with_their_names(
         &InMemorySocialGraph::default(),

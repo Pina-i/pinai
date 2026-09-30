@@ -31,14 +31,14 @@ RUN --mount=type=cache,id=idp-cargo-registry-v2,target=/usr/local/cargo/registry
     --mount=type=cache,id=idp-cargo-git-v2,target=/usr/local/cargo/git,sharing=locked \
     cargo chef cook --release --recipe-path recipe.json
 
-# Now copy the actual source and build idp-server. Deps are already compiled.
+# Now copy the actual source and build the idp-server binary. Deps are already compiled.
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/
 COPY identity-provider/crates/ identity-provider/crates/
 COPY identity-provider/migrations/ identity-provider/migrations/
 RUN --mount=type=cache,id=idp-cargo-registry-v2,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=idp-cargo-git-v2,target=/usr/local/cargo/git,sharing=locked \
-    cargo build --release -p idp-server && \
+    cargo build --release -p idp-app --bin idp-server && \
     cp target/release/idp-server /idp-server
 
 # ── Runtime ──────────────────────────────────────────────────────────────────

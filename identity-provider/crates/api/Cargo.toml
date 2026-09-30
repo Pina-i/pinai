@@ -8,9 +8,11 @@ name = "api"
 
 # Axum: routes, handlers, DTOs, ApiError, AppState. Never SQLx.
 [dependencies]
+activitypub = { workspace = true }
 anyhow      = { workspace = true }
 application = { package = "idp-application", path = "../application" }
 axum        = { workspace = true, features = ["multipart"] }
+axum-extra  = { workspace = true }
 base64      = { workspace = true }
 domain      = { package = "idp-domain", path = "../domain" }
 futures-core = { workspace = true }
@@ -21,11 +23,15 @@ serde       = { workspace = true }
 serde_json  = { workspace = true }
 time        = { workspace = true }
 tokio       = { workspace = true, features = ["time"] }
+tokio-util  = { workspace = true }
+tower-http  = { workspace = true }
 tracing     = { workspace = true }
 url         = { workspace = true }
 uuid        = { workspace = true }
 
 [dev-dependencies]
 domain         = { package = "idp-domain", path = "../domain", features = ["test-utils"] }
+tracing-subscriber = { workspace = true }
+tokio              = { workspace = true, features = ["test-util"] }
 http-body-util = { workspace = true }
 tower          = { workspace = true }

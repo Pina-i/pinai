@@ -93,6 +93,10 @@ impl InstanceOrigin {
         &self.scheme
     }
 
+    pub fn domain(&self) -> &Domain {
+        &self.domain
+    }
+
     pub fn owns(&self, uri: &ActorUri) -> bool {
         uri.scheme() == self.scheme && *uri.domain() == self.domain
     }

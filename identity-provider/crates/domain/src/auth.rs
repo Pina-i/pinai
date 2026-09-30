@@ -1,0 +1,32 @@
+//! Signing in to this instance over OpenID Connect: the clients, the authorization codes a
+//! sign-in ends in and the tokens they are exchanged for — see
+//! identity-provider/specs/01-identity-federation.md § 1.3.
+
+mod account;
+mod client;
+mod error;
+mod ports;
+mod request;
+mod second_factor;
+mod signup;
+#[cfg(any(test, feature = "test-utils"))]
+pub mod testing;
+
+pub use account::{PasswordHash, SignInAccount};
+pub use client::{Client, ClientId, may_return_after_logout};
+pub use error::AuthError;
+pub use ports::{
+    Authenticator, AuthorizationCodes, Clients, HandleSuffixes, LoginTickets, PasswordHasher,
+    SecondFactors, SignInAccounts, SignUps, SignupCodes, SignupMailer, TokenIssuer,
+};
+pub use request::{
+    ACCESS_TOKEN_TTL, AuthorizationCode, AuthorizationRequest, CODE_TTL, CodeChallenge, GRANT_TYPE,
+    Grant, LOGIN_TICKET_TTL, OtpCode, RESPONSE_TYPE, SIGNUP_CODE_TTL, Tokens,
+};
+pub use second_factor::{
+    Enrollment, RECOVERY_CODES, TICKET_ATTEMPTS, Ticket, TicketAttempt, TotpSecret,
+};
+pub use signup::{
+    CODE_ATTEMPTS, CodeAttempt, Email, NewAccount, RESEND_LIMIT, RESEND_WINDOW, Registration,
+    SPENT_RETENTION, UNVERIFIED_TTL, check_password,
+};

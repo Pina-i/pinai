@@ -12,6 +12,13 @@ use super::{
     LocalRequest, SocialFederation, SocialGraph, SocialNotifier, SocialStoreError, Unfriended,
 };
 
+/// Changes a local account as its owner does — outside the graph, which only reads it.
+#[async_trait::async_trait]
+pub trait AccountEdits: Send + Sync {
+    /// The account's name and avatar become `account`'s.
+    async fn save(&self, account: &Account);
+}
+
 #[derive(Default)]
 pub struct InMemorySocialGraph {
     sides: Mutex<Vec<Friendship>>,
@@ -19,9 +26,22 @@ pub struct InMemorySocialGraph {
     locals: Mutex<HashMap<UserId, Account>>,
     /// DM conversations, by their two members.
     dms: Mutex<Vec<(ActorUri, ActorUri, ConversationId)>>,
+    /// The avatar each side keeps of a remote friend, as it was met.
+    met_with: Mutex<HashMap<(UserId, ActorUri), String>>,
 }
 
 impl InMemorySocialGraph {
+    /// A new side keeps the avatar; an existing one, the avatar it had.
+    fn meet(&self, owner: UserId, friend: &ActorUri, avatar_url: Option<&str>) {
+        if let Some(url) = avatar_url {
+            self.met_with
+                .lock()
+                .unwrap()
+                .entry((owner, friend.clone()))
+                .or_insert_with(|| url.to_owned());
+        }
+    }
+
     /// Seed a side as a test's starting state.
     pub fn insert(&self, side: Friendship) {
         self.sides.lock().unwrap().push(side);
@@ -87,8 +107,9 @@ impl SocialGraph for InMemorySocialGraph {
         &self,
         owner: UserId,
         friend: &ActorUri,
-        _friend_avatar_url: Option<&str>,
+        friend_avatar_url: Option<&str>,
     ) -> Result<Friendship, SocialStoreError> {
+        self.meet(owner, friend, friend_avatar_url);
         let mut sides = self.sides.lock().unwrap();
         Ok(Self::request_side(
             &mut sides,
@@ -205,6 +226,7 @@ impl SocialGraph for InMemorySocialGraph {
     async fn friends(&self, owner: UserId) -> Result<Vec<FriendView>, SocialStoreError> {
         let locals = self.locals.lock().unwrap();
         let sides = self.sides.lock().unwrap();
+        let met_with = self.met_with.lock().unwrap();
         Ok(sides
             .iter()
             .filter(|s| s.owner == owner && s.status == FriendshipStatus::Accepted)
@@ -213,7 +235,10 @@ impl SocialGraph for InMemorySocialGraph {
                 FriendView {
                     username: local.map(|a| a.username.clone()),
                     display_name: local.and_then(|a| a.display_name.clone()),
-                    avatar_url: None,
+                    avatar_url: match local {
+                        Some(account) => account.avatar_url.clone(),
+                        None => met_with.get(&(s.owner, s.friend.clone())).cloned(),
+                    },
                     actor_uri: s.friend.clone(),
                     instance: match local {
                         Some(_) => "local".to_owned(),
@@ -228,7 +253,9 @@ impl SocialGraph for InMemorySocialGraph {
         &self,
         owner: UserId,
         friend: &ActorUri,
+        friend_avatar_url: Option<&str>,
     ) -> Result<Friendship, SocialStoreError> {
+        self.meet(owner, friend, friend_avatar_url);
         let mut sides = self.sides.lock().unwrap();
         Ok(Self::request_side(
             &mut sides,
@@ -471,6 +498,16 @@ impl FriendPresence for RecordingFriendPresence {
     }
 }
 
+#[async_trait::async_trait]
+impl AccountEdits for InMemorySocialGraph {
+    async fn save(&self, account: &Account) {
+        if let Some(local) = self.locals.lock().unwrap().get_mut(&account.id) {
+            local.display_name = account.display_name.clone();
+            local.avatar_url = account.avatar_url.clone();
+        }
+    }
+}
+
 /// Run against the in-memory fake and the Postgres adapter. Each check takes accounts the graph
 /// accepts — the Postgres ones are real `users` rows.
 pub mod contract {
@@ -672,12 +709,95 @@ pub mod contract {
         );
     }
 
+    pub async fn a_local_friend_is_listed_as_it_now_is(
+        graph: &dyn SocialGraph,
+        edits: &dyn super::AccountEdits,
+        alice: &Account,
+        bob: &Account,
+    ) {
+        let bob = Account {
+            avatar_url: Some("http://s3.test/avatars/bob.png?v=1".to_owned()),
+            ..bob.clone()
+        };
+        edits.save(&bob).await;
+        let request = graph
+            .record_local_request(&bob, alice)
+            .await
+            .unwrap()
+            .target_side;
+        graph.accept(&request, alice).await.unwrap();
+        let listed = |bob: &Account| {
+            vec![FriendView {
+                username: Some(bob.username.clone()),
+                display_name: bob.display_name.clone(),
+                avatar_url: bob.avatar_url.clone(),
+                actor_uri: bob.actor_uri.clone(),
+                instance: "local".to_owned(),
+            }]
+        };
+
+        let renamed = Account {
+            display_name: Some("Bob R.".to_owned()),
+            avatar_url: Some("http://s3.test/avatars/bob.webp?v=2".to_owned()),
+            ..bob
+        };
+        edits.save(&renamed).await;
+        assert_eq!(graph.friends(alice.id).await.unwrap(), listed(&renamed));
+
+        let bare = Account {
+            avatar_url: None,
+            ..renamed
+        };
+        edits.save(&bare).await;
+        assert_eq!(graph.friends(alice.id).await.unwrap(), listed(&bare));
+    }
+
+    /// The friends list is compared on avatars only: a remote actor the store does not cache
+    /// has no instance to show.
+    pub async fn a_remote_friend_is_listed_with_the_avatar_it_was_met_with(
+        graph: &dyn SocialGraph,
+        alice: &Account,
+        bob: &Account,
+    ) {
+        let met = "https://idp.bob.test/avatars/bob.png?v=1";
+        graph
+            .record_outgoing(alice.id, &remote_bob(), Some(met))
+            .await
+            .unwrap();
+        graph
+            .accept_outgoing(alice, &remote_bob(), None)
+            .await
+            .unwrap();
+        let request = graph
+            .record_incoming(bob.id, &remote_bob(), Some(met))
+            .await
+            .unwrap();
+        graph.accept(&request, bob).await.unwrap();
+
+        for owner in [alice, bob] {
+            let avatars: Vec<_> = graph
+                .friends(owner.id)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|friend| friend.avatar_url)
+                .collect();
+            assert_eq!(avatars, vec![Some(met.to_owned())], "{}", owner.username);
+        }
+    }
+
     pub async fn an_incoming_request_is_recorded_once_and_never_reopens_a_friendship(
         graph: &dyn SocialGraph,
         bob: &Account,
     ) {
-        let first = graph.record_incoming(bob.id, &remote_bob()).await.unwrap();
-        let redelivered = graph.record_incoming(bob.id, &remote_bob()).await.unwrap();
+        let first = graph
+            .record_incoming(bob.id, &remote_bob(), None)
+            .await
+            .unwrap();
+        let redelivered = graph
+            .record_incoming(bob.id, &remote_bob(), None)
+            .await
+            .unwrap();
         assert_eq!(redelivered.id, first.id);
         assert_eq!(
             (first.status, first.direction),
@@ -685,7 +805,10 @@ pub mod contract {
         );
 
         graph.accept(&first, bob).await.unwrap();
-        let after_acceptance = graph.record_incoming(bob.id, &remote_bob()).await.unwrap();
+        let after_acceptance = graph
+            .record_incoming(bob.id, &remote_bob(), None)
+            .await
+            .unwrap();
 
         assert_eq!(after_acceptance.status, FriendshipStatus::Accepted);
     }
@@ -763,7 +886,7 @@ pub mod contract {
         assert_eq!(graph.between(alice.id, &remote_bob()).await.unwrap(), None);
         assert!(!graph.drop_outgoing(alice.id, &remote_bob()).await.unwrap());
         graph
-            .record_incoming(alice.id, &remote_bob())
+            .record_incoming(alice.id, &remote_bob(), None)
             .await
             .unwrap();
         assert!(

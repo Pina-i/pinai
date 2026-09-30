@@ -96,6 +96,9 @@ pub struct Actor {
     pub summary: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    /// An `Image`, or a list of them: kept as sent, so an unusual shape never fails the document.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<Value>,
 }
 
 impl Actor {
@@ -124,7 +127,23 @@ impl Actor {
             },
             summary: None,
             url: Some(actor_url),
+            icon: None,
         }
+    }
+
+    /// The actor with `url` as its avatar, or none.
+    pub fn with_icon(mut self, url: Option<&str>) -> Self {
+        self.icon = url.map(|url| serde_json::json!({ "type": "Image", "url": url }));
+        self
+    }
+
+    /// The avatar's URL: the icon's, or the first of a list of them.
+    pub fn icon_url(&self) -> Option<&str> {
+        let icon = match self.icon.as_ref()? {
+            Value::Array(icons) => icons.first()?,
+            icon => icon,
+        };
+        icon.get("url")?.as_str()
     }
 }
 

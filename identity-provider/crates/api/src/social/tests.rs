@@ -140,14 +140,14 @@ async fn a_request_without_a_valid_token_is_refused_with_401() {
         w.app.call(Method::GET, "/api/friends", None, None).await,
         (
             StatusCode::UNAUTHORIZED,
-            refusal("invalid_client", "Missing or invalid Authorization header")
+            refusal("invalid_token", "Missing or invalid Authorization header")
         )
     );
     assert_eq!(
         w.app.send(bad_token).await,
         (
             StatusCode::UNAUTHORIZED,
-            refusal("invalid_client", "Invalid or expired access token")
+            refusal("invalid_token", "Invalid or expired access token")
         )
     );
 }

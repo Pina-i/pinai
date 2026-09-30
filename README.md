@@ -7,7 +7,7 @@ the backend services of the platform in a single Cargo workspace:
 |---|---|
 | `identity-provider/` | Layer 2 — OIDC identity provider, ActivityPub federation, DMs, presence, E2EE device keys |
 | `chat-server/` | Layer 3 — chat & voice rooms, attached to one identity provider (not yet implemented) |
-| `crates/` | Shared libraries: `common-types`, `jwt-utils`, `http-signatures`, `activitypub`, `observability`, `federation-transport` |
+| `crates/` | Shared libraries: `jwt-utils`, `http-signatures`, `activitypub`, `observability`, `federation-transport` |
 | `specs/` | Platform-wide specifications (architecture, federation authentication) |
 | `compose.yaml` | The full platform stack for Docker Compose |
 
@@ -72,7 +72,7 @@ every command from the repo root**.
 
 ### 2. Instance secrets
 
-`SESSION_SECRET` (signs session cookies and attachment URLs) and
+`SESSION_SECRET` (the session-cookie and attachment-link keys are derived from it) and
 `EMAIL_OTP_PEPPER` (hashes email OTPs and TOTP recovery codes) are generated
 into the env file with `openssl rand -hex 32`:
 
@@ -159,7 +159,7 @@ make bob                 # in another terminal, after starting Bob's dependencie
 To run a single binary directly:
 
 ```bash
-set -a && . .env.alice && set +a && cargo run -p idp-server
+set -a && . .env.alice && set +a && cargo run -p idp-app
 ```
 
 Migrations in `identity-provider/migrations/` are applied automatically on
@@ -208,7 +208,7 @@ IdP afterwards so the remote-presence registry reloads the new URIs.
 
 ```bash
 cargo build --workspace                  # debug build of every crate
-cargo build --release -p idp-server      # release binary → target/release/idp-server
+cargo build --release -p idp-app         # release binary → target/release/idp-server
 ```
 
 Docker images are built from the repo root (the workspace manifest and shared
@@ -234,7 +234,7 @@ All `make` targets are run from the repo root.
 
 | Command | Effect |
 |---|---|
-| `make alice` / `make bob` | Generate secrets and key, seed dev users, `cargo run -p idp-server` on the host |
+| `make alice` / `make bob` | Generate secrets and key, seed dev users, `cargo run -p idp-app` on the host |
 | `make alice-env` / `make bob-env` | Generate `SESSION_SECRET` / `EMAIL_OTP_PEPPER` in the env file if missing |
 | `make alice-keys` / `make bob-keys` | Generate the instance's Ed25519 key if missing |
 | `make alice-seed` / `make bob-seed` | Apply migrations and upsert the dev users |
@@ -258,7 +258,7 @@ All `make` targets are run from the repo root.
 |---|---|
 | `cargo test --workspace` | Run every test |
 | `cargo test -p <crate>` | Run one crate's tests (e.g. `-p http-signatures`) |
-| `cargo run -p idp-server` | Run the identity provider (env must be loaded) |
+| `cargo run -p idp-app` | Run the identity provider (env must be loaded) |
 | `cargo run -p dev-inject-data -- <users…>` | Seed dev users (`alice`, `bob`, `pierre`) |
 
 ---

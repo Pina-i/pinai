@@ -59,7 +59,10 @@ impl ReceiveFollow {
                 (recorded.target_side, local.username, local.display_name)
             } else {
                 let remote = self.remote_actors.discover(&follower).await?;
-                let side = self.graph.record_incoming(recipient.id, &follower).await?;
+                let side = self
+                    .graph
+                    .record_incoming(recipient.id, &follower, remote.avatar_url.as_deref())
+                    .await?;
                 let username = follower
                     .federated_address()
                     .map(|address| address.user().to_owned())

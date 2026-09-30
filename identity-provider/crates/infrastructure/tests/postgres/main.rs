@@ -1,9 +1,11 @@
 //! Adapter tests against a real Postgres — one module per port.
 
+mod auth;
 mod e2ee;
 mod identity;
 mod messaging;
 mod presence;
+mod profile;
 mod settings;
 mod social;
 

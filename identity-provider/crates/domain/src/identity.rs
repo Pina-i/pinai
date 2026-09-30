@@ -7,6 +7,7 @@ mod address;
 mod handle;
 mod origin;
 mod ports;
+mod search;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod testing;
 
@@ -19,3 +20,4 @@ pub use ports::{
     Accounts, AccountsError, RemoteActors, RemoteActorsError, Requester, SignatureError,
     SignatureVerifier, SignedRequest, TokenError, TokenVerifier,
 };
+pub use search::SearchQuery;

@@ -591,7 +591,7 @@ Lifecycle:
 | `POST /api/dm` | Bearer | New `attachment_ids: [Uuid]` field — each an orphan, or linked to one of the caller's `'failed'` messages. Empty `content` is allowed iff `attachment_ids` is non-empty. |
 | `GET /api/dm/{conv_id}` | Bearer | Each message gains `attachments: [{ id, mime_type, byte_size, original_filename }]`. |
 | `GET /api/attachments/{id}` | Bearer | Returns `{ url, expires_at, mime_type, byte_size, original_filename }`. The `url` is a token-protected blob URL on this IdP. |
-| `GET /api/attachments/{id}/blob?token=...` | HMAC token | The actual fetch. Streams bytes through the IdP — local from the private object store, remote via a signed download from the origin (`specs/06-federation-authentication.md` § Peer request policy), cut off past the `byte_size` the origin announced. |
+| `GET /api/attachments/{id}/blob?token=...` | HMAC token, under the attachment-link key (`identity-provider/specs/01-identity-federation.md` § The session cookie) | The actual fetch. Streams bytes through the IdP — local from the private object store, remote via a signed download from the origin (`specs/06-federation-authentication.md` § Peer request policy), cut off past the `byte_size` the origin announced. |
 | `GET /api/attachments/{id}/content` | HTTP Signature (see `specs/06-federation-authentication.md`) | Peer-IdP-facing source of truth. Streams bytes through the IdP after a membership check (peer must have an actor in the conversation). |
 
 Blob URL TTL: `attachment_url_ttl` (default 1 hour). Browser caches the bytes

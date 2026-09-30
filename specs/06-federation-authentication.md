@@ -105,9 +105,10 @@ flowchart TD
 ```
 
 A rejection is `400` when the request is malformed — no `Signature` header, an
-unparseable one, a `keyId` that does not resolve, a missing `Digest` — and `403` when a
-check fails on a well-formed request: a signature that does not verify, a digest that does
-not match the body, an actor that is not the signer, or a refetch refused by the rate limit.
+unparseable one, a `keyId` that does not resolve — and `403` when a check fails on a
+well-formed request: a signature that does not verify (one covering a `Digest` the request
+lacks included), a `Digest` the signature does not cover or the body does not match, an
+actor that is not the signer, or a refetch refused by the rate limit.
 
 #### 1 — Signature
 
@@ -132,7 +133,9 @@ Two checks close that, and both are needed:
   captured request is replayed with a swapped body.
 
 The handler therefore reads the body as raw bytes. Re-serialising a parsed value would not
-reproduce the bytes as received, and the digest would be computed over the wrong input.
+reproduce the bytes as received, and the digest would be computed over the wrong input. Every
+signed request with a body is held to it — an inbox delivery, a presence poll, a peer's
+KeyPackage claim — and its body is parsed only once it is.
 
 #### 3 — Actor binding
 
@@ -143,6 +146,10 @@ signing `keyId` minus its fragment.
 Without this, any peer holding a valid key of its own could sign an `Accept` naming someone
 else as the actor — and since the handlers read `body["actor"]` directly, a friendship would
 be marked accepted, and its DM conversation minted, without the named user consenting.
+
+The binding covers who speaks, not what about: an activity that changes an account must also
+name the actor's own — an `Update{Person}` of any other account is refused, see
+`identity-provider/specs/01-identity-federation.md` § 2.
 
 > This binding assumes the signing key belongs to the activity's actor, which holds for
 > everything Pina'i emits. Implementations that deliver through an instance actor

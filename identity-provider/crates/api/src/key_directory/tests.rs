@@ -520,3 +520,38 @@ async fn a_claim_the_accounts_instance_cannot_answer_is_a_bad_gateway() {
         )
     );
 }
+
+#[tokio::test]
+async fn a_peers_claim_whose_body_is_not_the_one_signed_is_refused() {
+    let w = world();
+    w.upload(&w.bob, Uuid::new_v4(), packages(1)).await;
+    let signed_over = json!({ "actor_uri": w.alice.actor_uri.to_string() }).to_string();
+    let swapped = json!({ "actor_uri": w.bob.actor_uri.to_string() }).to_string();
+
+    let (status, body) = w
+        .app
+        .send(TestApp::signed(
+            Method::POST,
+            "/api/keys/packages/claim",
+            &peer(),
+            &swapped,
+            &domain::identity::testing::TrustedSignatures::digest(signed_over.as_bytes()),
+        ))
+        .await;
+
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(
+        body["error_description"],
+        "Digest does not match request body"
+    );
+    let (_, left) = w
+        .app
+        .call(
+            Method::GET,
+            "/api/keys/packages/status",
+            Some(w.bob.id),
+            None,
+        )
+        .await;
+    assert_eq!(left["devices"][0]["available"], 1, "{left}");
+}

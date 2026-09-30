@@ -301,7 +301,7 @@ The polling side keeps the **poll targets**: the remote friends of its local acc
 instance. They are loaded from the accepted friendships at startup and kept by the social
 context after — an accepted friendship adds the friend, and the friend is released once no
 local account still counts them among its friends
-(`identity-provider/specs/01-identity-federation.md` § 1.3). Local friends are never polled.
+(`identity-provider/specs/01-identity-federation.md` § Declining a request and ending a friendship). Local friends are never polled.
 
 Every 10 seconds, **every instance is polled at once**, so a slow peer delays only its own
 friends' states. A state that differs from the board's is recorded and published on the local
@@ -324,6 +324,7 @@ Accept: text/event-stream
   replay again.
 - It then carries every presence change of the followed actors, and their typing in the
   conversations they share with the peer's accounts, as they are published on the local bus.
+- It ends when the instance stops; the requesting side opens it again, and gets the replay.
 
 What the stream follows is settled **when it opens**: each stream listens to the whole local
 bus through its own subscription and filters it with the actors and conversations computed at
@@ -418,6 +419,14 @@ the polls, and read by `GET /api/presence`, the batch poll and the stream replay
 persistence: after a restart every actor reads `offline` until it is heard of again.
 
 ---
+
+### When the instance stops
+
+A stopping instance (`SIGTERM`, Ctrl-C) takes no new connection, answers the requests under
+way, and closes every WebSocket with `1001` (going away, "the instance is stopping") — the
+disconnect is announced as usual, so the account goes `offline` unless it is connected
+elsewhere, and the client reconnects, to this instance once it is back or to another behind the
+same address. A peer's stream ends the same way. What is still open ten seconds later is dropped.
 
 ### Initial presence state on connect
 
