@@ -254,6 +254,10 @@ async fn send_dm(state: &AppState, sender: UserId, dm: SendDmPayload) {
             }
         }
         Err(MessagingError::SelfMessage) => {}
+        // The socket has no error channel: a refusal is dropped, as `POST /api/dm` would refuse it.
+        Err(e @ (MessagingError::YouBlocked | MessagingError::Undeliverable)) => {
+            tracing::debug!(%sender, reason = %e, "dm not sent")
+        }
         Err(e) => {
             tracing::warn!(%sender, address = %dm.recipient_address, error = ?e, "dm not sent")
         }

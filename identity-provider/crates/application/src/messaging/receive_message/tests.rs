@@ -6,6 +6,7 @@ use domain::messaging::testing::{
     GroupNotice, InMemoryMessaging, MessageNotice, RecordingGroupNotifier, RecordingMessageNotifier,
 };
 use domain::messaging::{ConversationKind, Member, Message, MessageEvent, MessagingError, Role};
+use domain::social::testing::{BLOCKED, KEPT_OUT_BY_THE_SETTING, StubReachability};
 use domain::{AttachmentId, MessageId};
 
 use super::*;
@@ -19,6 +20,7 @@ pub(crate) struct World {
     pub groups: Arc<RecordingGroupNotifier>,
     pub accounts: Arc<InMemoryAccounts>,
     pub remote_actors: Arc<InMemoryRemoteActors>,
+    pub reach: Arc<StubReachability>,
 }
 
 /// Alice and Bob here; Carol, on another instance, writes to Alice.
@@ -34,6 +36,7 @@ pub(crate) fn world() -> World {
         store: Arc::new(InMemoryMessaging::default()),
         notifier: Arc::new(RecordingMessageNotifier::default()),
         groups: Arc::new(RecordingGroupNotifier::default()),
+        reach: Arc::new(StubReachability::default()),
     }
 }
 
@@ -49,6 +52,7 @@ fn receive(w: &World) -> ReceiveMessage {
         w.remote_actors.clone(),
         w.store.clone(),
         w.store.clone(),
+        w.reach.clone(),
         w.notifier.clone(),
         w.groups.clone(),
     )
@@ -369,4 +373,94 @@ async fn a_received_group_message_is_announced_as_a_group_message() {
             "carol_k2m9x@idp.carol.test"
         )
     );
+}
+
+#[tokio::test]
+async fn a_dm_from_someone_who_cannot_reach_the_recipient_is_refused_whatever_the_cause() {
+    let mut refusals = Vec::new();
+    for kept_out in [BLOCKED, KEPT_OUT_BY_THE_SETTING] {
+        let w = world();
+        w.reach.set(w.alice.id, &w.carol.actor_uri, kept_out);
+        let incoming = from_carol(&w, ConversationId::generate());
+        let activity = incoming.activity_uri.clone();
+
+        let refused = receive(&w).execute(incoming).await;
+
+        refusals.push(format!("{refused:?}"));
+        assert!(w.store.find_by_activity(&activity).await.unwrap().is_none());
+        assert!(
+            w.store
+                .list_for(w.alice.id, &w.alice.actor_uri)
+                .await
+                .unwrap()
+                .is_empty(),
+            "no DM opened"
+        );
+        assert!(w.notifier.sent().is_empty());
+    }
+    assert_eq!(refusals, vec!["Err(Undeliverable)"; 2]);
+}
+
+#[tokio::test]
+async fn a_message_in_a_group_held_here_is_never_checked() {
+    let w = world();
+    let id = ConversationId::generate();
+    receive(&w)
+        .execute(IncomingMessage {
+            group: Some(crew(&w)),
+            ..from_carol(&w, id)
+        })
+        .await
+        .unwrap();
+    w.reach.set(w.alice.id, &w.carol.actor_uri, BLOCKED);
+    let next = IncomingMessage {
+        group: Some(crew(&w)),
+        ..from_carol(&w, id)
+    };
+    let activity = next.activity_uri.clone();
+
+    receive(&w).execute(next).await.unwrap();
+
+    assert_eq!(stored(&w, &activity).await.conversation, id);
+}
+
+/// Dropped, not refused, and never filed as a 1:1 for want of a group.
+async fn dropped(w: &World) {
+    let incoming = IncomingMessage {
+        group: Some(crew(w)),
+        ..from_carol(w, ConversationId::generate())
+    };
+    let (id, activity) = (incoming.conversation, incoming.activity_uri.clone());
+
+    receive(w).execute(incoming).await.unwrap();
+
+    assert_eq!(Conversations::find(&*w.store, id).await.unwrap(), None);
+    assert!(w.store.find_by_activity(&activity).await.unwrap().is_none());
+    assert!(
+        w.store
+            .list_for(w.alice.id, &w.alice.actor_uri)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(w.notifier.sent().is_empty());
+    assert!(w.groups.sent().is_empty());
+}
+
+#[tokio::test]
+async fn a_group_new_here_from_someone_who_cannot_reach_the_recipient_is_dropped() {
+    for kept_out in [BLOCKED, KEPT_OUT_BY_THE_SETTING] {
+        let w = world();
+        w.reach.set(w.alice.id, &w.carol.actor_uri, kept_out);
+
+        dropped(&w).await;
+    }
+}
+
+#[tokio::test]
+async fn a_group_new_here_holding_someone_the_recipient_blocked_is_dropped() {
+    let w = world();
+    w.reach.set(w.alice.id, &w.bob.actor_uri, BLOCKED);
+
+    dropped(&w).await;
 }

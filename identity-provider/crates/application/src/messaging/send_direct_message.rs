@@ -7,6 +7,7 @@ use domain::messaging::{
     ConversationKind, Conversations, DirectDelivery, Message, MessageEvent, MessageNotifier,
     Messages, MessagingError, MlsCiphertext, NewMessage,
 };
+use domain::social::Reachability;
 use domain::{AttachmentId, ConversationId, MessageId, UserId};
 
 use super::shared::{address_of, caller, display_name_of};
@@ -39,10 +40,12 @@ pub struct SendDirectMessage {
     remote_actors: Arc<dyn RemoteActors>,
     conversations: Arc<dyn Conversations>,
     messages: Arc<dyn Messages>,
+    reach: Arc<dyn Reachability>,
     notifier: Arc<dyn MessageNotifier>,
 }
 
 impl SendDirectMessage {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         origin: InstanceOrigin,
         max_attachments: usize,
@@ -50,6 +53,7 @@ impl SendDirectMessage {
         remote_actors: Arc<dyn RemoteActors>,
         conversations: Arc<dyn Conversations>,
         messages: Arc<dyn Messages>,
+        reach: Arc<dyn Reachability>,
         notifier: Arc<dyn MessageNotifier>,
     ) -> Self {
         Self {
@@ -59,6 +63,7 @@ impl SendDirectMessage {
             remote_actors,
             conversations,
             messages,
+            reach,
             notifier,
         }
     }
@@ -82,6 +87,17 @@ impl SendDirectMessage {
             None => None,
         };
         let recipient = self.recipient(&sender, &command.recipient).await?;
+        // Before the DM is opened: a refused first message must leave none for either to list.
+        self.reach
+            .relation(sender.id, recipient.actor_uri())
+            .await?
+            .may_write()?;
+        if let To::Local(account) = &recipient {
+            self.reach
+                .relation(account.id, &sender.actor_uri)
+                .await?
+                .admits()?;
+        }
         let conversation = self
             .conversations
             .open_dm(&sender.actor_uri, recipient.actor_uri(), command.pinned)

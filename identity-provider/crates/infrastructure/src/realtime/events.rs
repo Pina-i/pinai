@@ -48,6 +48,9 @@ pub enum WsEvent {
     /// The account's settings changed, from one of the user's sessions. Sent
     /// to all of them, the one that made the change included.
     SettingsUpdated(SettingsPayload),
+    /// The account's block list changed, from one of the user's sessions. Sent to all of them;
+    /// clients reload `GET /api/blocks`.
+    BlocksUpdated(BlocksUpdatedPayload),
 }
 
 /// Slim attachment projection carried on the wire alongside DM events, shaped as the REST
@@ -233,12 +236,16 @@ pub struct GroupRenamedPayload {
     pub renamed_by_actor_uri: String,
 }
 
-#[cfg(test)]
-mod tests;
-
 /// The account's whole settings document after a change — see
 /// `identity-provider/specs/01-identity-federation.md § 1.6`.
 #[derive(Debug, Clone, Serialize)]
 pub struct SettingsPayload {
     pub settings: serde_json::Value,
 }
+
+/// Empty: the list is read back over REST, so a replayed or reordered push cannot mislead.
+#[derive(Debug, Clone, Serialize)]
+pub struct BlocksUpdatedPayload {}
+
+#[cfg(test)]
+mod tests;

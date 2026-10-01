@@ -4,6 +4,7 @@ use domain::UserId;
 use domain::identity::InstanceOrigin;
 use domain::profile::{ProfileError, Profiles};
 use domain::settings::SettingsStore;
+use domain::social::ContactPolicies;
 
 use super::{Userinfo, userinfo};
 
@@ -12,6 +13,7 @@ pub struct ReadUserinfo {
     origin: InstanceOrigin,
     profiles: Arc<dyn Profiles>,
     settings: Arc<dyn SettingsStore>,
+    contact_policies: Arc<dyn ContactPolicies>,
 }
 
 impl ReadUserinfo {
@@ -19,11 +21,13 @@ impl ReadUserinfo {
         origin: InstanceOrigin,
         profiles: Arc<dyn Profiles>,
         settings: Arc<dyn SettingsStore>,
+        contact_policies: Arc<dyn ContactPolicies>,
     ) -> Self {
         Self {
             origin,
             profiles,
             settings,
+            contact_policies,
         }
     }
 
@@ -33,7 +37,13 @@ impl ReadUserinfo {
             .find(user)
             .await?
             .ok_or(ProfileError::UnknownUser)?;
-        userinfo(&self.origin, self.settings.as_ref(), profile).await
+        userinfo(
+            &self.origin,
+            self.settings.as_ref(),
+            self.contact_policies.as_ref(),
+            profile,
+        )
+        .await
     }
 }
 

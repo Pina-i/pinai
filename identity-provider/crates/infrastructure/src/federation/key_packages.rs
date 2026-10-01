@@ -82,6 +82,7 @@ impl RemoteKeyPackages for SignedRemoteKeyPackages {
             StatusCode::NOT_FOUND => return Err(RemoteClaimError::UserNotFound),
             StatusCode::CONFLICT => return Err(RemoteClaimError::NoKeyPackage),
             StatusCode::TOO_MANY_REQUESTS => return Err(RemoteClaimError::Busy),
+            StatusCode::FORBIDDEN => return Err(RemoteClaimError::Unreachable),
             status => {
                 let text = response.text().await.unwrap_or_default();
                 return Err(RemoteClaimError::Unavailable(anyhow::anyhow!(

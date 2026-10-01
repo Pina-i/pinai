@@ -1,7 +1,7 @@
 use crate::identity::{Account, ActorUri, RemoteActor};
 use crate::{ConversationId, FriendshipId, UserId};
 
-use super::Friendship;
+use super::{BlockedActor, ContactPolicy, Friendship, Relation};
 
 /// The friend graph. Each method is one business operation, atomic on its own.
 #[async_trait::async_trait]
@@ -48,6 +48,21 @@ pub trait SocialGraph: Send + Sync {
         owner: &Account,
         friend: &ActorUri,
     ) -> Result<Option<Unfriended>, SocialStoreError>;
+
+    /// Block `actor` and end the owner's side of any friendship or request with them — and, when
+    /// they are local, their side too — at once. The DM conversation is kept. Blocking again
+    /// changes nothing; `None` when there was no friendship to end.
+    async fn block(
+        &self,
+        owner: &Account,
+        actor: &ActorUri,
+    ) -> Result<Option<Unfriended>, SocialStoreError>;
+
+    /// Lift the block, and nothing else. `false` when `actor` was not blocked.
+    async fn unblock(&self, owner: UserId, actor: &ActorUri) -> Result<bool, SocialStoreError>;
+
+    /// The actors the owner blocked, newest first.
+    async fn blocked(&self, owner: UserId) -> Result<Vec<BlockedActor>, SocialStoreError>;
 
     /// Whether any local account still has `friend` as an accepted friend.
     async fn befriended_by_anyone(&self, friend: &ActorUri) -> Result<bool, SocialStoreError>;
@@ -102,11 +117,35 @@ pub trait SocialGraph: Send + Sync {
     ) -> Result<Option<Friendship>, SocialStoreError>;
 }
 
-/// Tells a local account's live sessions what happened to one of its friendships.
+/// What decides whether an actor may reach a local account.
+#[async_trait::async_trait]
+pub trait Reachability: Send + Sync {
+    /// The owner's contact setting and ties to `other`, read in one go: every outcome costs the
+    /// same, so not even the time taken tells a block apart.
+    async fn relation(&self, owner: UserId, other: &ActorUri)
+    -> Result<Relation, SocialStoreError>;
+
+    /// Whether the owner blocked any of `among` — a group's roster.
+    async fn blocks_any(&self, owner: UserId, among: &[ActorUri])
+    -> Result<bool, SocialStoreError>;
+}
+
+/// The contact setting of local accounts.
+#[async_trait::async_trait]
+pub trait ContactPolicies: Send + Sync {
+    async fn get(&self, owner: UserId) -> Result<ContactPolicy, SocialStoreError>;
+
+    async fn set(&self, owner: UserId, policy: ContactPolicy) -> Result<(), SocialStoreError>;
+}
+
+/// Tells a local account's live sessions what happened to one of its friendships, or to its
+/// blocks.
 pub trait SocialNotifier: Send + Sync {
     fn friend_request(&self, to: UserId, event: &FriendshipEvent);
     fn friend_accepted(&self, to: UserId, event: &FriendshipEvent);
     fn friend_removed(&self, to: UserId, event: &FriendshipEvent);
+    /// The account's blocks changed: its sessions fetch them again.
+    fn blocks_updated(&self, to: UserId);
 }
 
 /// The friendship activities sent to other instances. Fire-and-forget: each is delivered after the

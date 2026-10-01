@@ -1,5 +1,6 @@
 use domain::profile::testing::{ProfileSeeds, own_profile};
 use domain::settings::{SettingsDocument, SettingsPatch, SettingsStore};
+use domain::social::{ContactPolicies, ContactPolicy};
 use serde_json::json;
 
 use super::*;
@@ -61,4 +62,19 @@ async fn a_gone_account_has_no_userinfo() {
         matches!(refused, Err(ProfileError::UnknownUser)),
         "{refused:?}"
     );
+}
+
+#[tokio::test]
+async fn userinfo_carries_who_may_reach_the_account() {
+    let w = world().await;
+    w.contact_policies
+        .set(w.alice.id, ContactPolicy::Friends)
+        .await
+        .unwrap();
+
+    let alice = w.read_userinfo().execute(w.alice.id).await.unwrap();
+    let bob = w.read_userinfo().execute(w.bob.id).await.unwrap();
+
+    assert_eq!(alice.contact_policy, ContactPolicy::Friends);
+    assert_eq!(bob.contact_policy, ContactPolicy::FriendsAndGroups);
 }

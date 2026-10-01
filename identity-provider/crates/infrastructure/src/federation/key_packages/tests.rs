@@ -129,6 +129,7 @@ async fn a_peers_refusal_comes_back_as_what_it_means() {
     let unknown = claim_from(refusing("404 Not Found", r#"{"error":"not_found"}"#)).await;
     let empty = claim_from(refusing("409 Conflict", r#"{"error":"conflict"}"#)).await;
     let busy = claim_from(refusing("429 Too Many Requests", "{}")).await;
+    let kept_out = claim_from(refusing("403 Forbidden", r#"{"error":"access_denied"}"#)).await;
 
     assert!(
         matches!(unknown, Err(RemoteClaimError::UserNotFound)),
@@ -139,6 +140,10 @@ async fn a_peers_refusal_comes_back_as_what_it_means() {
         "{empty:?}"
     );
     assert!(matches!(busy, Err(RemoteClaimError::Busy)), "{busy:?}");
+    assert!(
+        matches!(kept_out, Err(RemoteClaimError::Unreachable)),
+        "{kept_out:?}"
+    );
 }
 
 #[tokio::test]

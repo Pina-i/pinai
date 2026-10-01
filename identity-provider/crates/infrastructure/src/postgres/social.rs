@@ -1,14 +1,15 @@
 use anyhow::Context;
 use domain::identity::{Account, ActorUri};
 use domain::social::{
-    Direction, FriendView, Friendship, LocalRequest, SocialGraph, SocialStoreError, Unfriended,
+    BlockedActor, Direction, FriendView, Friendship, LocalRequest, SocialGraph, SocialStoreError,
+    Unfriended,
 };
 use domain::{ConversationId, UserId};
 use sqlx::{PgConnection, PgPool};
 
 use super::dm;
 
-/// `friendships`: one row per side, `UNIQUE (owner_user_id, friend_actor_uri)`.
+/// `friendships`: one row per side, `UNIQUE (owner_user_id, friend_actor_uri)`; `user_blocks`.
 pub struct PgSocialGraph {
     pool: PgPool,
 }
@@ -236,33 +237,70 @@ impl SocialGraph for PgSocialGraph {
         friend: &ActorUri,
     ) -> Result<Option<Unfriended>, SocialStoreError> {
         let mut tx = self.pool.begin().await.context("begin unfriend")?;
-        let removed: Option<FriendshipRow> = sqlx::query_as(&format!(
-            "DELETE FROM friendships WHERE owner_user_id = $1 AND friend_actor_uri = $2 \
-             RETURNING {COLUMNS}"
-        ))
-        .bind(owner.id.as_uuid())
-        .bind(friend.as_str())
-        .fetch_optional(&mut *tx)
-        .await
-        .context("remove the owner's side")?;
-        let Some(removed) = removed else {
-            return Ok(None);
-        };
-        let reverse: Option<FriendshipRow> = sqlx::query_as(&format!(
-            "DELETE FROM friendships WHERE friend_actor_uri = $1 \
-               AND owner_user_id = (SELECT id FROM users WHERE actor_uri = $2) \
-             RETURNING {COLUMNS}"
-        ))
-        .bind(owner.actor_uri.as_str())
-        .bind(friend.as_str())
-        .fetch_optional(&mut *tx)
-        .await
-        .context("remove the local friend's side")?;
+        let unfriended = end_sides(&mut tx, owner, friend).await?;
         tx.commit().await.context("commit unfriend")?;
-        Ok(Some(Unfriended {
-            removed: removed.try_into()?,
-            reverse: reverse.map(Friendship::try_from).transpose()?,
-        }))
+        Ok(unfriended)
+    }
+
+    async fn block(
+        &self,
+        owner: &Account,
+        actor: &ActorUri,
+    ) -> Result<Option<Unfriended>, SocialStoreError> {
+        let mut tx = self.pool.begin().await.context("begin block")?;
+        sqlx::query(
+            "INSERT INTO user_blocks (owner_user_id, blocked_actor_uri) VALUES ($1, $2) \
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(owner.id.as_uuid())
+        .bind(actor.as_str())
+        .execute(&mut *tx)
+        .await
+        .context("record a block")?;
+        let ended = end_sides(&mut tx, owner, actor).await?;
+        tx.commit().await.context("commit block")?;
+        Ok(ended)
+    }
+
+    async fn unblock(&self, owner: UserId, actor: &ActorUri) -> Result<bool, SocialStoreError> {
+        let lifted = sqlx::query(
+            "DELETE FROM user_blocks WHERE owner_user_id = $1 AND blocked_actor_uri = $2",
+        )
+        .bind(owner.as_uuid())
+        .bind(actor.as_str())
+        .execute(&self.pool)
+        .await
+        .context("lift a block")?;
+        Ok(lifted.rows_affected() > 0)
+    }
+
+    async fn blocked(&self, owner: UserId) -> Result<Vec<BlockedActor>, SocialStoreError> {
+        let rows: Vec<BlockedRow> = sqlx::query_as(
+            "SELECT b.blocked_actor_uri, \
+                    COALESCE(u.display_name, ra.display_name) AS display_name, \
+                    COALESCE(u.avatar_url, ra.avatar_url) AS avatar_url, \
+                    b.created_at \
+             FROM user_blocks b \
+             LEFT JOIN users u ON u.actor_uri = b.blocked_actor_uri \
+             LEFT JOIN remote_actors ra ON ra.actor_uri = b.blocked_actor_uri \
+             WHERE b.owner_user_id = $1 \
+             ORDER BY b.created_at DESC",
+        )
+        .bind(owner.as_uuid())
+        .fetch_all(&self.pool)
+        .await
+        .context("list blocks")?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(BlockedActor {
+                    actor: ActorUri::parse(&row.blocked_actor_uri)
+                        .context("user_blocks.blocked_actor_uri")?,
+                    display_name: row.display_name,
+                    avatar_url: row.avatar_url,
+                    blocked_at: row.created_at,
+                })
+            })
+            .collect()
     }
 
     async fn befriended_by_anyone(&self, friend: &ActorUri) -> Result<bool, SocialStoreError> {
@@ -408,4 +446,46 @@ impl SocialGraph for PgSocialGraph {
             .transpose()
             .map_err(SocialStoreError::from)
     }
+}
+
+/// The owner's side with `friend` and, when the friend is local, theirs: removed within `tx`.
+async fn end_sides(
+    tx: &mut PgConnection,
+    owner: &Account,
+    friend: &ActorUri,
+) -> Result<Option<Unfriended>, SocialStoreError> {
+    let removed: Option<FriendshipRow> = sqlx::query_as(&format!(
+        "DELETE FROM friendships WHERE owner_user_id = $1 AND friend_actor_uri = $2 \
+         RETURNING {COLUMNS}"
+    ))
+    .bind(owner.id.as_uuid())
+    .bind(friend.as_str())
+    .fetch_optional(&mut *tx)
+    .await
+    .context("remove the owner's side")?;
+    let Some(removed) = removed else {
+        return Ok(None);
+    };
+    let reverse: Option<FriendshipRow> = sqlx::query_as(&format!(
+        "DELETE FROM friendships WHERE friend_actor_uri = $1 \
+           AND owner_user_id = (SELECT id FROM users WHERE actor_uri = $2) \
+         RETURNING {COLUMNS}"
+    ))
+    .bind(owner.actor_uri.as_str())
+    .bind(friend.as_str())
+    .fetch_optional(&mut *tx)
+    .await
+    .context("remove the local friend's side")?;
+    Ok(Some(Unfriended {
+        removed: removed.try_into()?,
+        reverse: reverse.map(Friendship::try_from).transpose()?,
+    }))
+}
+
+#[derive(sqlx::FromRow)]
+struct BlockedRow {
+    blocked_actor_uri: String,
+    display_name: Option<String>,
+    avatar_url: Option<String>,
+    created_at: time::OffsetDateTime,
 }

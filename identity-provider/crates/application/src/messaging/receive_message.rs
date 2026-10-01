@@ -5,6 +5,7 @@ use domain::messaging::{
     AttachmentLimits, ConversationKind, Conversations, GroupNotifier, GroupSnapshot, MessageEvent,
     MessageNotifier, Messages, MessagingError, MlsCiphertext, NewMessage, OfferedAttachment,
 };
+use domain::social::Reachability;
 use domain::{ConversationId, MessageId, UserId};
 
 use super::shared::{address_of_actor, caller, mirror};
@@ -31,17 +32,20 @@ pub struct ReceiveMessage {
     remote_actors: Arc<dyn RemoteActors>,
     conversations: Arc<dyn Conversations>,
     messages: Arc<dyn Messages>,
+    reach: Arc<dyn Reachability>,
     notifier: Arc<dyn MessageNotifier>,
     groups: Arc<dyn GroupNotifier>,
 }
 
 impl ReceiveMessage {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         limits: AttachmentLimits,
         accounts: Arc<dyn Accounts>,
         remote_actors: Arc<dyn RemoteActors>,
         conversations: Arc<dyn Conversations>,
         messages: Arc<dyn Messages>,
+        reach: Arc<dyn Reachability>,
         notifier: Arc<dyn MessageNotifier>,
         groups: Arc<dyn GroupNotifier>,
     ) -> Self {
@@ -51,6 +55,7 @@ impl ReceiveMessage {
             remote_actors,
             conversations,
             messages,
+            reach,
             notifier,
             groups,
         }
@@ -59,6 +64,28 @@ impl ReceiveMessage {
     pub async fn execute(&self, incoming: IncomingMessage) -> Result<(), MessagingError> {
         let recipient = caller(&*self.accounts, incoming.recipient).await?;
         if let Some(group) = &incoming.group {
+            let joins = !self
+                .conversations
+                .members(incoming.conversation)
+                .await?
+                .iter()
+                .any(|m| m.actor_uri == recipient.actor_uri);
+            if joins {
+                let roster: Vec<ActorUri> =
+                    group.members.iter().map(|m| m.actor_uri.clone()).collect();
+                let roster_holds_someone_blocked =
+                    self.reach.blocks_any(recipient.id, &roster).await?;
+                let admitted = self
+                    .reach
+                    .relation(recipient.id, &incoming.sender)
+                    .await?
+                    .admits_group_from(roster_holds_someone_blocked);
+                // Dropped, not refused, and before the DM path could file it as a 1:1.
+                if admitted.is_err() {
+                    tracing::debug!(sender = %incoming.sender, "group message dropped");
+                    return Ok(());
+                }
+            }
             mirror(
                 &*self.conversations,
                 &*self.groups,
@@ -80,6 +107,11 @@ impl ReceiveMessage {
                 (c.id, ConversationKind::Group)
             }
             _ => {
+                // Before the DM is opened, as for a local sender.
+                self.reach
+                    .relation(recipient.id, &incoming.sender)
+                    .await?
+                    .admits()?;
                 let dm = self
                     .conversations
                     .open_dm(

@@ -94,6 +94,12 @@ CREATE INDEX idx_dm_conversation_cursor
 
 ### Delivery flow
 
+Whether the sender may reach the recipient is decided first, before any conversation is opened or
+message stored: a sender who blocked the recipient is refused with 403 `You blocked this user`, and
+a local recipient who doesn't admit the sender — a block, or their contact setting — with 403
+`Message could not be delivered`. A remote recipient's own IdP decides on its side, with the same
+refusal (`identity-provider/specs/01-identity-federation.md § 1.7`).
+
 **Local DM** (sender and recipient on the same IdP):
 
 ```
@@ -203,6 +209,7 @@ Scenarios:
 | The failed message had attachments | Retry reuses the same attachment ids; the server moves them to the new message |
 | The failure reaches another of the sender's devices, which never held the plaintext | The row turns undelivered there too, but its Retry is disabled — only a device holding the plaintext can re-encrypt it |
 | The sender's IdP stopped before the delivery ended (a crash, a restart) | The row would stay `pending` for good: a sweep, every minute, marks `failed` each DM to another IdP still `pending` five minutes after it was stored — well past the delivery timeout — and pushes `dm_delivery_failed` to its sender |
+| The recipient doesn't admit the sender — a block, or their contact setting (`identity-provider/specs/01-identity-federation.md § 1.7`) | Their IdP refuses the message with 403, so it turns undelivered exactly as for an unreachable IdP, and so does every retry |
 | The recipient's IdP persisted the message but answered non-2xx (or too late) | The row is marked failed although the recipient has it; a retry then gives the recipient a duplicate, whose attachment rows stay with the first copy (same ids, so the recipient's inbox skips them). The sender's IdP cannot tell this apart from a lost delivery |
 
 ### Pagination — infinite scroll upward
@@ -284,6 +291,9 @@ SELECT
     COUNT(CASE
         WHEN rm.sender_actor_uri != $1
              AND (r.last_read_at IS NULL OR rm.created_at > r.last_read_at)
+             AND NOT EXISTS (SELECT 1 FROM user_blocks b
+                             WHERE b.owner_user_id = $2
+                               AND b.blocked_actor_uri = rm.sender_actor_uri)
         THEN 1 ELSE NULL
     END)                                        AS unread_count,
     -- all active members except the caller, as a JSON array
@@ -317,7 +327,7 @@ GROUP BY c.id, c.kind, c.name, cm_self.conversation_id
 ORDER BY last_message_at DESC NULLS LAST;
 ```
 
-Only messages **not sent by the caller** count as unread — this works correctly for both DMs and group conversations. A `NULL` `last_read_at` means the user has never opened that conversation.
+Only messages **not sent by the caller** count as unread — this works correctly for both DMs and group conversations. Messages from actors the caller blocked don't count either, so a group shared with someone blocked doesn't light up for their messages (`identity-provider/specs/01-identity-federation.md § 1.7`). A `NULL` `last_read_at` means the user has never opened that conversation.
 
 The `members` array contains all active participants **except the caller**. The client uses this to:
 - **DM** (`kind = 'dm'`): use `members[0].displayName` as the conversation title.
@@ -476,7 +486,7 @@ Content-Type: application/json
 { "mls_ciphertext": "<base64(new MLSMessage)>" }
 ```
 
-**Authorization**: only the original sender can edit. The `WHERE` clause enforces ownership atomically at the DB level — no separate fetch + check:
+**Authorization**: only the original sender can edit, and in a 1:1 only while they may still write to the other member — an edit is a message there, refused as a new one would be: 403 `You blocked this user`, or 403 `Message could not be delivered` (`identity-provider/specs/01-identity-federation.md § 1.7`). Edits in a group are never checked. The `WHERE` clause enforces ownership atomically at the DB level:
 
 ```sql
 UPDATE direct_messages
@@ -504,7 +514,7 @@ After a successful update the server pushes a `message_edited` WS event to both 
 
 - **Local recipient**: pushed via `hub.send_to_user()` + published to Redis Streams for catch-up.
 - **Sender (multi-device)**: echoed via `hub.send_to_user()`.
-- **Remote recipient**: an `Update{Note}` ActivityPub activity carrying the new ciphertext is delivered to the recipient's IdP inbox in a background `tokio::spawn`. The remote IdP applies the edit via `edit_message_by_activity_uri` (matches by `activity_uri` instead of `id`) and then pushes `message_edited` to the remote recipient over their local WS.
+- **Remote recipient**: an `Update{Note}` ActivityPub activity carrying the new ciphertext is delivered to the recipient's IdP inbox in a background `tokio::spawn`. The remote IdP applies the edit via `edit_message_by_activity_uri` (matches by `activity_uri` instead of `id`) and then pushes `message_edited` to the remote recipient over their local WS. In a 1:1, a recipient who doesn't admit the sender refuses it with 403, and nothing changes there.
 
 ### Federation — `Update{Note}` (MLS)
 
@@ -710,6 +720,16 @@ a hard delete, so earlier messages stay attached to the conversation.
 | `POST /api/groups/:id/members/:actor_uri/role` | **admin** | Body `{ role: "admin" \| "member" }`. Promote/demote — never the last admin. Emits `member_role_changed`. |
 | `POST /api/groups/:id/messages` | member | Body `{ mls_ciphertext, reply_to_id?, attachment_ids? }`. Attachments follow the DM rules — as many as a DM may carry, each the sender's own upload, unlinked or linked to one of its `'failed'` messages — or the message is refused (400) and nothing is stored. See **Message fan-out** below. |
 
+Both `POST /api/groups` and `POST /api/groups/:id/members` check every invitee before writing
+anything. An invitee must name an account: a local one, or one its own IdP answers for over
+WebFinger, under that very actor URI — asked every time, whether this IdP has the actor cached or
+not, so neither the answer nor the names in the group view tell who here has met whom
+(`identity-provider/specs/01-identity-federation.md § Remote actor cache`). Anything else is 404
+`User not found` with the invitee's `actor_uri`. Then one the caller blocked, or a local one who doesn't admit the caller — a block or their
+contact setting — refuses the whole request with 403 and the invitee's `actor_uri`
+(`identity-provider/specs/01-identity-federation.md § 1.7`). A remote invitee is refused by its
+own IdP, at the KeyPackage claim and on the Welcome.
+
 ### Message fan-out
 
 A group message is **one** `direct_messages` row carrying a single MLS
@@ -781,6 +801,11 @@ holds as an active member of the group, or — for a group new here — one the 
 lists; anything else is refused (400) and nothing is mirrored or stored. A snapshot is never
 applied to a DM. Without this, any federated peer could add itself — or anyone — to a group
 by sending a Note that lists it.
+
+A recipient who isn't an active member yet is mirrored into a group only by someone they admit
+(`identity-provider/specs/01-identity-federation.md § 1.7`): a Welcome from someone else is refused
+(403), and a group Note is dropped (202) when its sender isn't admitted or its roster holds someone
+the recipient blocked — the Note is then neither mirrored nor filed as a 1:1.
 
 An inbound group `Create{Note}` is filed under its `context` UUID directly.
 Opening a DM is reserved for `kind = 'dm'`:

@@ -27,6 +27,9 @@ CREATE TABLE users (
   outbox_url    TEXT NOT NULL,              -- e.g. "https://idp.alice.com/users/alice/outbox"
   email_verified_at TIMESTAMPTZ,            -- NULL until the signup OTP is consumed;
                                             -- /login refuses to issue a session while NULL
+  contact_policy TEXT NOT NULL DEFAULT 'friends_and_groups',
+                                            -- who may message the account (§ 1.7):
+                                            -- everyone | friends_and_groups | friends
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
 
@@ -97,6 +100,9 @@ CREATE TABLE friendships (
 > — otherwise a peer could quietly take a friendship back to `pending`. An inbound `Follow` for an
 > accepted friendship means the peer missed the `Accept`: it is answered with the `Accept` again,
 > naming the pair's DM, and nothing else changes. Ending a friendship goes through unfriend only.
+>
+> A request to someone who blocked the requester never reaches them, and the requester can't tell:
+> their own side is recorded `pending`, as for any request still unanswered (§ 1.7).
 
 > **Remote actor cache**
 >
@@ -108,6 +114,16 @@ CREATE TABLE friendships (
 > name or avatar outside the peer profile limits (§ 2) counts as none. The friendship keeps the
 > avatar the actor was met with, on either side of the request, so a new friend is shown with it
 > at once.
+>
+> The cache is never what tells a user whether someone exists, or what they are called: that would
+> tell them who on this instance has met whom. Where a user names an arbitrary actor — a group's
+> invitees — the actor is resolved anew on its own instance, cached or not
+> (`identity-provider/specs/03-direct-messages.md § 10`).
+>
+> A resolution the actor's instance fails — it doesn't answer, or answers a WebFinger or actor
+> document no instance would send — is `502 the account's instance did not answer`: for a friend
+> request, a DM to an address not cached here, and a group invitee (with its `actor_uri`). An
+> instance that answers it knows no such account is `404`.
 
 > **What peers read of an account**
 >
@@ -121,6 +137,10 @@ CREATE TABLE friendships (
 > **Federated address format**
 >
 > The canonical address format used throughout the system is `username@domain` (e.g. `alice_xk9mp@idp.alice.com`), **without** a leading `@` — `/userinfo` answers it as `address`. Clients receive actor URIs (`https://idp.alice.com/users/alice_xk9mp`) in some events and normalise them to `username@domain` via `actorUriToAddress()` before using them as conversation keys.
+>
+> An actor URI is an `http(s)` URL with a host, no query and no fragment, of 2 KiB at most once
+> normalised (`domain::identity::ActorUri`) — whether a peer or a user hands it over, anything else is
+> refused.
 
 > **`username` vs `display_name`**
 >
@@ -180,7 +200,8 @@ same person reuses it. Each removes both local rows in one transaction.
 | Unfriend | `DELETE /api/friends/:actor_uri` (percent-encoded; 404 when no row) | Deleted | Friend's row deleted; `friend_removed` WS event | `Undo{Follow}` to the friend's inbox |
 
 `DELETE /api/friends/:actor_uri` also withdraws a pending request the caller sent, through
-the same paths.
+the same paths. Blocking someone ends the friendship through these same paths too
+(§ 1.7).
 
 The `friend_removed` event carries the friend's own `friendship_id` and exists so their
 clients refresh the friends and DM lists; clients do not surface it as a notification.
@@ -601,7 +622,7 @@ them back on `/userinfo`:
 
 | Endpoint | Body | Answer |
 |---|---|---|
-| `GET /userinfo` | — | The account: `sub`, `email`, `email_verified`, `totp_enabled`, `preferred_username` (the handle), `display_name`, `address` (`handle@domain`), `actor_uri`, `avatar_url`, `pronouns`, `bio`, and its `settings` (§ 1.6). A token whose account is gone is `401 invalid_token` (`User not found`). |
+| `GET /userinfo` | — | The account: `sub`, `email`, `email_verified`, `totp_enabled`, `preferred_username` (the handle), `display_name`, `address` (`handle@domain`), `actor_uri`, `avatar_url`, `pronouns`, `bio`, its `settings` (§ 1.6), and `privacy` (§ 1.7). A token whose account is gone is `401 invalid_token` (`User not found`). |
 | `PATCH /api/profile` | `{ display_name, pronouns?, bio? }` | The new `/userinfo` document. |
 | `PUT /api/avatar` | the raw image, typed by its `Content-Type`: `image/jpeg`, `image/png`, `image/webp` or `image/gif` | `{ avatar_url }` |
 | `DELETE /api/avatar` | — | `204` |
@@ -726,6 +747,219 @@ sequenceDiagram
   would put its stale copy of the others back.
 - **Before sign-in, or before `/userinfo` answers.** The client paints its local copy of the account
   settings — those of the last account signed in on it — so pages never flash the default.
+
+## 1.7. Who can reach a user
+
+Two things decide who may message a user or add them to a group: their **contact setting** and
+their **blocks**. Both go through one rule, and every refusal it causes is the same refusal. A refusal never tells its cause,
+so the blocked person can't tell a block from a setting they may have fallen outside of — nor, on
+another instance, from an instance that didn't answer.
+
+The default setting is what makes this hold. Under it, someone who isn't a friend and shares no group
+with the user can't message them. An unfriend therefore already stops the DMs, and a block, which
+always ends the friendship, looks like an unfriend.
+
+| | Effect of Alice blocking Bob |
+|---|---|
+| Friendship | Ended on both sides, exactly as an unfriend — or, for a request Bob sent, a decline |
+| Friend requests | Bob's never reach Alice: his side stays `pending`, and she sees nothing. Alice's to Bob are refused until she unblocks him |
+| DMs | Neither can send the other a new DM, or edit one in their 1:1. Bob's attempts end undelivered, as a stranger's do under the default setting |
+| Their DM conversation | Kept, with its history — as after an unfriend |
+| Groups they already share | Unchanged: both read and write as before. Bob's messages don't count as unread for Alice |
+| New groups | Bob can't add Alice to one, nor she him. Others still can add both, if Alice admits them |
+| Presence | As after an unfriend — hiding more would tell Bob he is blocked |
+
+### The contact setting
+
+"Who can message you or add you to a group", one value per account, `users.contact_policy`:
+
+| Value | Who may message the account, or add it to a group |
+|---|---|
+| `everyone` | Anyone with its address, on any instance |
+| `friends_and_groups` (default) | Its friends, and the people it shares a group with |
+| `friends` | Its friends only |
+
+It lives on `users`, not in `user_settings`: that document is the client's, and the IdP never
+interprets it (§ 1.6). The IdP enforces this one.
+
+| Endpoint | Behaviour |
+|---|---|
+| `PATCH /api/privacy` | Bearer-auth. Body `{ contact_policy }`. Answers `200 { contact_policy }`; 400 `contact_policy must be everyone, friends_and_groups or friends`. |
+| `GET /userinfo` | Carries it as `privacy: { contact_policy }`, as does `PATCH /api/profile`, which answers the same shape. |
+
+### Blocks
+
+A user can block any actor, local or remote. A block is private to the blocker: it lives on their
+home IdP only, and it is never federated. ActivityPub's `Block` activity is not delivered to its
+object, as the specification advises, so the blocked person's IdP never learns of it.
+
+#### Data model
+
+```sql
+-- Actors a local user has blocked, local or remote, by actor URI.
+CREATE TABLE user_blocks (
+  owner_user_id      UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  blocked_actor_uri  TEXT NOT NULL,
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (owner_user_id, blocked_actor_uri)
+);
+```
+
+"Alice blocked Bob" below means a row with Alice as owner and Bob's actor URI. A list holds at most
+1000 actors (`domain::social::MAX_BLOCKS`), each an actor URI of 2 KiB at most, since the IdP stores
+what the blocker writes.
+
+#### Endpoints
+
+| Endpoint | Behaviour |
+|---|---|
+| `GET /api/blocks` | Bearer-auth. The caller's blocked actors, newest first: `[{ actor_uri, display_name, avatar_url, blocked_at }]` (`blocked_at` RFC 3339), names from `users` or `remote_actors` (`null` for an actor never resolved). |
+| `POST /api/blocks` | Bearer-auth. Body `{ actor_uri }`. Blocks the actor and ends the relationship (below). Idempotent — blocking again changes nothing, even with a full list. 204; 400 `Invalid actor URI`, `You can't block yourself`, or `You can't block more than 1000 people` — nothing ended then. |
+| `DELETE /api/blocks/:actor_uri` | Bearer-auth; `actor_uri` percent-encoded. Removes the block and nothing else. 204; 404 `Not blocked` when the actor isn't blocked. |
+
+Both writes push `blocks_updated` to every session of the caller, so their other devices refetch the
+list. Like `friend_removed`, it is refresh-only:
+
+```json
+{ "type": "blocks_updated", "data": {} }
+```
+
+#### Ending the relationship
+
+`POST /api/blocks` inserts the row and deletes the friendship's rows here in one transaction, then
+tells the other side what the matching friendship action would (§ "Declining a request and ending a
+friendship") — so Bob sees an unfriend or a decline, never a block:
+
+| Caller's friendship row | Same as | Other side, same IdP | Other side, remote IdP |
+|---|---|---|---|
+| `accepted`, or `pending` `outgoing` | Unfriend | Bob's row deleted; `friend_removed` | `Undo{Follow}` |
+| `pending` `incoming` | Decline | Bob's row deleted, no event | `Reject{Follow}` |
+| none | — | nothing | nothing |
+
+Remote presence polling is released as on unfriend. Unblocking restores nothing: the friendship stays
+ended, and either side must send a new request.
+
+### The rule
+
+Whether an actor may reach a local account is decided on the account's own instance, from four facts
+read together in one query (`domain::social::Relation`), so that every outcome costs the same:
+
+| Fact | Holds when |
+|---|---|
+| `policy` | the account's contact setting |
+| `blocked` | the account blocked the actor |
+| `friends` | an `accepted` friendship — a pending request is not one |
+| `share_a_group` | both are active members of a conversation of kind `group` |
+
+A block refuses, whatever else holds. Otherwise `everyone` admits, `friends_and_groups` needs
+`friends` or `share_a_group`, and `friends` needs `friends`. Their 1:1 DM, which an unfriend keeps,
+is no tie: it would otherwise let an ex-friend write on, and only a block would stop him.
+
+A user who blocked someone can't write to them, ask them to be friends, nor add them to a group:
+those refusals, `You blocked this user` and `Unblock this user first`, are for the blocker only.
+
+Friend requests are open to anyone the user didn't block: the contact setting doesn't cover them. A
+block keeps a request out silently, so to the requester it is just a request nobody answered.
+
+### Where the rule is enforced
+
+| Path | Refused when | Refusal |
+|---|---|---|
+| `POST /api/dm`, WS `send_dm`, `PATCH /api/dm/:id/edit` — 1:1 conversations | The sender blocked the recipient | 403 `You blocked this user` |
+| Same, local recipient | The recipient doesn't admit the sender | 403 `Message could not be delivered`; nothing stored, and no DM opened — checked before the conversation is |
+| Inbound `Create{Note}` without `mlsGroup`, inbound `Update{Note}` in a 1:1 | The inbox owner doesn't admit the actor | 403 `Message could not be delivered`, nothing stored. The sender's IdP marks the message `failed` and pushes `dm_delivery_failed`, as for an unreachable instance (`identity-provider/specs/03-direct-messages.md § Delivery failure`) |
+| `GET /api/dm` unread counts | — | Messages from actors the caller blocked don't count (`identity-provider/specs/03-direct-messages.md § 6`) |
+| `POST /api/friends/request` | The caller blocked the target | 400 `Unblock this user first` |
+| Same, local target | The target blocked the caller | None visible: the caller's `outgoing` side is recorded and answered as usual; the target's `incoming` side and its `friend_request` are not |
+| Inbound `Follow` | The inbox owner blocked the actor | None visible: answered 202, nothing recorded. The requester's own IdP keeps its `pending` side |
+| `POST /api/groups`, `POST /api/groups/:id/members` | The caller blocked an invitee, or a local invitee doesn't admit the caller | 403 `You blocked this user` or `Can't add this person`, with the invitee's `actor_uri`; nothing written. A remote invitee is refused by its own IdP, below |
+| `POST /api/keys/packages/claim`, local target | The target doesn't admit the claimer — the Bearer user, or the account a peer's request is signed as. Not checked for one's own packages | 403 `Can't add this person`, before a package is taken. Proxied for a remote target, the same 403 comes back |
+| `POST /api/mls/welcomes`, local recipient, 1:1 | The recipient doesn't admit the sender — but for one's own new device | 403 `Can't add this person`, nothing written. A group's Welcome needs no check: joining went through the group routes |
+| Inbound Welcome | A 1:1's, or a group's to someone not yet an active member: the recipient doesn't admit the sender, who is the one adding them | 403 `Can't add this person`, nothing mirrored or written |
+| Inbound group `Create{Note}` with `mlsGroup`, recipient not yet an active member | The recipient doesn't admit the sender, or the roster holds someone they blocked | None visible: answered 202, and neither the group nor a DM is created |
+
+WS `send_dm` has no error channel, so a refused `send_dm` is dropped; clients send through
+`POST /api/dm`. Messages and edits in a group are never checked, nor are MLS commits: the group's
+MLS state stays in step, so once a block is lifted new messages decrypt again without re-keying.
+
+**Why new groups are checked twice.** Adding someone to an MLS group takes one of their
+KeyPackages, so the claim is where Bob's attempt from another instance stops. A group he created
+still lists Alice on his IdP, though, and every member's messages fan out to her with the roster.
+Her IdP would mirror the group from the first one (`identity-provider/specs/03-direct-messages.md
+§ 10`), and she would see a group she can never decrypt — named as Bob likes. The roster doesn't
+say who added whom, so the inbound check falls back to its sender and its members. The cost: a
+group whose Welcome to Alice is lost is mirrored from its messages only when their sender may reach
+her and nobody she blocked is in it; the Welcome, from whoever added her, still gets her in.
+
+### What clients do
+
+The IdP enforces the rule. A client keeps quiet what still reaches the user from someone they
+blocked, and words every refusal so that it gives no more away than the IdP does.
+
+- **The list.** `GET /api/blocks`, fetched again on `blocks_updated`. A person is blocked from
+  their row in the friends list, the conversation list (1:1s) or a group's members. They are
+  unblocked from the last two, from the 1:1 itself, from the friends list's Blocked tab, or from
+  Settings → Privacy, which also holds the contact setting.
+- **What still arrives.** A shared group's messages from someone blocked are shown, but play no
+  sound, don't count as unread while the client is open, and their typing isn't shown — the IdP
+  already leaves them out of `unread_count`. A group member the user blocked carries a badge.
+- **The 1:1 with someone blocked.** Its history stays; in place of the composer, "You blocked
+  *name*" and an Unblock button.
+- **Sending.** Every DM goes through `POST /api/dm`, so a refusal comes back as an answer. An own
+  message that ends `failed` or undelivered in a 1:1 says only that the recipient may accept
+  messages from friends only, or that their server may be unreachable — the same words whichever it
+  was.
+- **Adding to a group.** The client keys each invitee after the group route accepts them. When a
+  remote invitee's IdP refuses the KeyPackage claim (`Can't add this person`) or has none to give,
+  the client removes them from the group again, so its roster stops naming someone who can never
+  read it, and says they couldn't be added. Only `You blocked this user` names its cause.
+
+### Scenarios
+
+```mermaid
+sequenceDiagram
+    participant A as Alice's clients
+    participant IA as idp.alice.com
+    participant IB as idp.bob.com
+    participant B as Bob's clients
+
+    A->>IA: POST /api/blocks { actor_uri: bob }
+    IA->>IA: insert the block, delete alice → bob friendship
+    IA->>IB: Undo{Follow}
+    IB->>IB: delete bob → alice friendship
+    IB-->>B: WS friend_removed (refresh only)
+    IA-->>A: 204 + WS blocks_updated (every session)
+
+    B->>IB: POST /api/dm to alice
+    IB-->>B: 201, federation_status pending
+    IB->>IA: Create{Note}
+    IA->>IA: relation(alice, bob) — not admitted
+    IA-->>IB: 403 Message could not be delivered
+    IB->>IB: federation_status = failed
+    IB-->>B: WS dm_delivery_failed
+```
+
+- **Alice blocks a friend.** The friendship ends as an unfriend would; their DM stays listed with its
+  history on both sides. Bob's next message there ends undelivered, and so does every retry.
+- **Carol, a stranger elsewhere, writes to Alice under the default setting.** Her message ends
+  undelivered exactly as Bob's does. Once Alice chooses `everyone`, Carol's messages arrive; Bob's
+  still don't.
+- **Bob is on Alice's own instance.** His `POST /api/dm` is refused at once with the same 403 a
+  stranger gets; no conversation is opened for either of them.
+- **Alice writes to Bob after blocking him.** Refused with `You blocked this user`, until she
+  unblocks him; asking him to be friends, with `Unblock this user first`.
+- **Bob asks Alice to be friends.** His request is recorded on his side, `pending`, and never
+  answered: Alice's IdP drops his `Follow`, or, on her own instance, records nothing for her. Once
+  she unblocks him, a new request from him reaches her as any other.
+- **Bob tries to add Alice to a group.** On her instance, the creation is refused outright with
+  `Can't add this person`. From another instance, his claim for her KeyPackage gets that same
+  answer, and his group's messages never make it appear for her.
+- **Carol, Alice's friend, creates a group with Alice and Bob.** It works: others may add both.
+  Bob's messages there reach Alice as before, without counting as unread.
+- **Alice blocks someone whose request is pending.** The request is declined, silently, as
+  `DELETE /api/friends/:id/reject` would.
+- **Alice blocks someone she never met.** Only the row is written; nobody is told anything.
+- **Alice unblocks Bob.** The row goes; they are strangers, and either may send a new request.
 
 ## 2. Real-time profile propagation
 

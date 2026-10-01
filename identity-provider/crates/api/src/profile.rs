@@ -15,6 +15,7 @@ use time::OffsetDateTime;
 
 use crate::ApiError;
 use crate::auth::Authenticated;
+use crate::privacy::Privacy;
 
 #[derive(Debug, Serialize)]
 pub struct UserinfoResponse {
@@ -30,6 +31,7 @@ pub struct UserinfoResponse {
     pronouns: Option<&'static str>,
     bio: Option<String>,
     settings: Value,
+    privacy: Privacy,
 }
 
 impl From<Userinfo> for UserinfoResponse {
@@ -48,6 +50,9 @@ impl From<Userinfo> for UserinfoResponse {
             pronouns: profile.pronouns.map(|p| p.as_str()),
             bio: profile.bio,
             settings: userinfo.settings.as_value().clone(),
+            privacy: Privacy {
+                contact_policy: userinfo.contact_policy.as_str(),
+            },
         }
     }
 }

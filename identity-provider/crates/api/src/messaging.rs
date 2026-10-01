@@ -343,6 +343,36 @@ impl From<MessagingError> for ApiError {
                 "conflict",
                 "The last admin cannot step down while others remain: promote another member first",
             ),
+            MessagingError::YouBlocked => ApiError::new(
+                StatusCode::FORBIDDEN,
+                "access_denied",
+                "You blocked this user",
+            ),
+            MessagingError::Undeliverable => ApiError::new(
+                StatusCode::FORBIDDEN,
+                "access_denied",
+                "Message could not be delivered",
+            ),
+            MessagingError::CannotAdd(invitee) => ApiError::new(
+                StatusCode::FORBIDDEN,
+                "access_denied",
+                "Can't add this person",
+            )
+            .with("actor_uri", invitee.as_str()),
+            MessagingError::PeerUnavailable(reason) => ApiError::upstream(anyhow::anyhow!(reason)),
+            MessagingError::InviteeUnavailable(invitee) => {
+                ApiError::upstream(anyhow::anyhow!("an invitee's instance did not answer"))
+                    .with("actor_uri", invitee.as_str())
+            }
+            MessagingError::InviteeNotFound(invitee) => {
+                ApiError::not_found("User not found").with("actor_uri", invitee.as_str())
+            }
+            MessagingError::YouBlockedInvitee(invitee) => ApiError::new(
+                StatusCode::FORBIDDEN,
+                "access_denied",
+                "You blocked this user",
+            )
+            .with("actor_uri", invitee.as_str()),
             MessagingError::Unexpected(e) => ApiError::internal(e),
         }
     }

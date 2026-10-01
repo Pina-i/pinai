@@ -5,6 +5,8 @@ use domain::identity::testing::{account, remote_actor};
 use domain::identity::{Account, RemoteActor};
 use serde_json::{Value, json};
 
+use domain::social::testing::KEPT_OUT_BY_THE_SETTING;
+
 use crate::testing::TestApp;
 
 use super::*;
@@ -390,6 +392,46 @@ async fn a_founding_commit_needs_its_conversation() {
         (
             StatusCode::NOT_FOUND,
             refusal("not_found", "conversation not found")
+        )
+    );
+}
+
+#[tokio::test]
+async fn a_dms_welcome_to_someone_who_does_not_admit_the_sender_is_refused() {
+    let w = world().await;
+    let (_, sent) = w
+        .app
+        .call(
+            Method::POST,
+            "/api/dm",
+            Some(w.alice.id),
+            Some(json!({ "recipient_address": w.bob.username, "mls_ciphertext": "AQID" })),
+        )
+        .await;
+    w.app
+        .reach
+        .set(w.bob.id, &w.alice.actor_uri, KEPT_OUT_BY_THE_SETTING);
+
+    let answer = w
+        .app
+        .call(
+            Method::POST,
+            "/api/mls/welcomes",
+            Some(w.alice.id),
+            Some(json!({
+                "recipient_actor_uri": w.bob.actor_uri.to_string(),
+                "recipient_device_id": Uuid::new_v4(),
+                "conversation_id": sent["conversation_id"],
+                "welcome_blob": "AQID",
+            })),
+        )
+        .await;
+
+    assert_eq!(
+        answer,
+        (
+            StatusCode::FORBIDDEN,
+            refusal("access_denied", "Can't add this person")
         )
     );
 }

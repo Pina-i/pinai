@@ -2,26 +2,32 @@
 
 OIDC identity provider and ActivityPub federation server for the Pīna'i platform.
 
-Built with Rust · Axum · SQLx · PostgreSQL · Ed25519
+Built with Rust · Axum · SQLx · PostgreSQL · Redis · Ed25519
 
 ---
 
 ## What it does
 
-- **OIDC / OAuth 2.0** — full PKCE authorization code flow for the web client
-- **Session SSO** — signed `HttpOnly` cookie skips the login form on repeat visits
-- **ActivityPub** — WebFinger discovery, Actor profiles, Follow/DM social graph
-- **User handles** — `username-XXXX` format (e.g. `alice-7G4K`), 4-char base36 suffix derived from the user's UUID
+- **OIDC / OAuth 2.0** — authorization code flow with mandatory PKCE (`S256`) for the web client
+- **Session SSO** — a signed `HttpOnly` cookie skips the login form on repeat visits
+- **Sign-up and second factor** — emailed verification codes, TOTP with one-time recovery codes
+- **ActivityPub federation** — WebFinger discovery, actor documents, friend requests, DMs and
+  profile updates between instances, every inbound activity HTTP-signed
+- **Messaging backbone** — DMs and groups over WebSocket, with opaque MLS ciphertext as the body
+- **E2EE key directory** — IdP-attested devices, KeyPackages, MLS commits and Welcomes, the
+  encrypted history archive
+- **Presence** — online/away/dnd and typing, shared with peer instances by poll and SSE stream
+- **User handles** — the chosen name, `_`, and 5 random characters of `a–z0–9` (e.g. `alice_xk9mp`)
 
 ---
 
 ## Project structure
 
+The Cargo workspace is the monorepo's: its manifest, `compose.yaml`, `.env.example` and the
+`Makefile` sit at the repo root, one level up.
+
 ```
 identity-provider/
-├── Cargo.toml                  # Workspace root
-├── .env.example                # All supported environment variables
-├── migrations/                 # SQLx migrations (run automatically on startup)
 ├── crates/
 │   ├── domain/          # entities, rules, port traits, typed errors
 │   ├── application/     # the use cases
@@ -30,262 +36,132 @@ identity-provider/
 │   ├── app/             # the composition root and the `idp-server` binary
 │   ├── connections/     # the live connections, shared by `api` and `infrastructure`
 │   └── dev-inject-data/ # seeds a development instance
-└── docker/
-    ├── Dockerfile
-    └── docker-compose.yml
+├── migrations/          # SQLx migrations (applied on startup)
+├── specs/               # this service's specifications
+├── docker/
+│   ├── Dockerfile
+│   └── Dockerfile.dev
+└── keys/                # instance signing keys (git-ignored)
 ```
+
+`CLAUDE.md` describes the architecture, the rules every change follows, and each endpoint in
+detail.
 
 ---
 
-## Quick start (local dev)
+## Running
 
-### 1. Prerequisites
-
-- Rust (stable, 1.88+)
-- PostgreSQL 15+
-- OpenSSL
-
-### 2. Generate the Ed25519 signing key
+Setup, the instance secrets and signing key, both ways of running (Docker or `cargo run`), the
+dev users and the configuration reference are in the root [`README.md`](../README.md). In short,
+from the repo root:
 
 ```bash
-mkdir -p keys
-openssl genpkey -algorithm ed25519 -out keys/ed25519.pem
+make alice   # an instance on :8080
+make bob     # a second one on :8081, to exercise federation
 ```
-
-> `keys/` is git-ignored. Never commit private keys.
-
-### 3. Configure environment
-
-```bash
-cp .env.example .env
-# Edit .env — at minimum set DATABASE_URL and SESSION_SECRET
-```
-
-### 4. Start PostgreSQL
-
-```bash
-docker compose -f docker/docker-compose.yml up -d postgres
-```
-
-Or point `DATABASE_URL` at any existing Postgres instance and create the database manually:
-
-```bash
-createdb identity_provider
-```
-
-### 5. Run the server
-
-```bash
-cargo run -p idp-app
-```
-
-Migrations are applied automatically on startup. The server listens on `http://localhost:8080` by default.
-
----
-
-## Environment variables
-
-All variables are documented in [`.env.example`](.env.example). Copy it to `.env` for local development.
-
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `DATABASE_URL` | yes | — | PostgreSQL connection string |
-| `DOMAIN` | yes | — | Hostname (no scheme), e.g. `localhost:8080` |
-| `JWT_PRIVATE_KEY_PATH` | yes | — | Path to the Ed25519 PKCS#8 PEM private key |
-| `JWT_KEY_ID` | yes | — | Key ID included in JWTs and JWKS, e.g. `key-2025-01` |
-| `PORT` | no | `8080` | TCP port to listen on |
-| `SESSION_SECRET` | production | dev default | ≥ 32-byte secret the session-cookie and attachment-link keys are derived from; production refuses to start without one, or on a published placeholder |
-| `FRONTEND_URL` | no | `http://localhost:5173` | Web-client base URL, used for login/register redirects |
-| `CORS_ORIGINS` | no | `http://localhost:5173,http://localhost:3000` | Comma-separated allowed CORS origins |
-| `RUST_LOG` | no | `info` | Log filter (e.g. `debug`, `idp_oidc=trace`) |
-| `LOG_FORMAT` | no | pretty | Set to `json` for structured production logs |
-| `POSTGRES_USER` | Docker | `pina` | Used by the compose Postgres container |
-| `POSTGRES_PASSWORD` | Docker | `secret` | Used by the compose Postgres container |
-| `POSTGRES_DB` | Docker | `identity_provider` | Used by the compose Postgres container |
-| `POSTGRES_PORT` | Docker | `5432` | Host port mapped to Postgres |
-
----
-
-## Docker
-
-### Build and run the full stack
-
-```bash
-cp .env.example .env   # fill in production values
-docker compose -f docker/docker-compose.yml up -d
-```
-
-The compose file reads everything from `.env` via `env_file`. The only values it overrides are:
-
-- `DATABASE_URL` — hostname swapped from `localhost` to the `postgres` compose service
-- `JWT_PRIVATE_KEY_PATH` — points to `/run/secrets/ed25519.pem` (mounted from `./keys/`)
-
-### Running two instances for federation testing
-
-This lets you test ActivityPub federation locally — Alice's instance can follow Bob's and exchange direct messages.
-
-#### Step 1 — Generate two key pairs
-
-```bash
-mkdir -p keys/alice keys/bob
-openssl genpkey -algorithm ed25519 -out keys/alice/ed25519.pem
-openssl genpkey -algorithm ed25519 -out keys/bob/ed25519.pem
-```
-
-#### Step 2 — Create two env files
-
-Place both files in the `docker/` folder.
-
-**`docker/.env.alice`**
-```env
-# ── PostgreSQL ────────────────────────────────────────────────────────────────
-POSTGRES_USER=pina
-POSTGRES_PASSWORD=secret
-POSTGRES_DB=idp_alice
-POSTGRES_PORT=5432
-
-# Full connection string used by the application
-DATABASE_URL=postgres://pina:secret@localhost:5432/idp_alice
-
-# ── Server ────────────────────────────────────────────────────────────────────
-DOMAIN=localhost:8080
-PORT=8080
-
-# ── Keys ─────────────────────────────────────────────────────────────────────
-JWT_PRIVATE_KEY_PATH=./keys/alice/ed25519.pem
-JWT_KEY_ID=alice-key-2025
-
-# ── Session ───────────────────────────────────────────────────────────────────
-SESSION_SECRET=alice-replace-with-openssl-rand-hex-32-output-00000000
-
-# ── Frontend ──────────────────────────────────────────────────────────────────
-FRONTEND_URL=http://localhost:5173
-CORS_ORIGINS=http://localhost:5173
-
-# ── Logging ───────────────────────────────────────────────────────────────────
-RUST_LOG=info
-```
-
-**`docker/.env.bob`**
-```env
-# ── PostgreSQL ────────────────────────────────────────────────────────────────
-POSTGRES_USER=pina
-POSTGRES_PASSWORD=secret
-POSTGRES_DB=idp_bob
-POSTGRES_PORT=5433
-
-# Full connection string used by the application
-DATABASE_URL=postgres://pina:secret@localhost:5433/idp_bob
-
-# ── Server ────────────────────────────────────────────────────────────────────
-DOMAIN=localhost:8081
-PORT=8081
-
-# ── Keys ─────────────────────────────────────────────────────────────────────
-JWT_PRIVATE_KEY_PATH=./keys/bob/ed25519.pem
-JWT_KEY_ID=bob-key-2025
-
-# ── Session ───────────────────────────────────────────────────────────────────
-SESSION_SECRET=bob-replace-with-openssl-rand-hex-32-output-000000000
-
-# ── Frontend ──────────────────────────────────────────────────────────────────
-FRONTEND_URL=http://localhost:5173
-CORS_ORIGINS=http://localhost:5173
-
-# ── Logging ───────────────────────────────────────────────────────────────────
-RUST_LOG=info
-```
-
-#### Step 3a — Run with `cargo run` (recommended for development)
-
-Open two terminals and load the env file before running the server.
-
-**Using `make` (recommended):**
-
-```bash
-make alice   # Terminal 1 — Alice on :8080
-make bob     # Terminal 2 — Bob on :8081
-```
-
-**Or manually from `identity-provider/`:**
-
-```bash
-# Terminal 1 — Alice on :8080
-set -a && source docker/.env.alice && set +a && cargo run -p idp-app
-
-# Terminal 2 — Bob on :8081
-set -a && source docker/.env.bob && set +a && cargo run -p idp-app
-```
-
-Each process runs its own migrations automatically and connects to its own database.
-
-#### Step 3b — Run with Docker Compose
-
-```bash
-make alice-docker
-make bob-docker
-```
-
-To stop and remove:
-
-```bash
-make alice-down
-make bob-down
-```
-
-#### Step 4 — Verify both instances are up
 
 ```bash
 curl http://localhost:8080/health   # → {"ok":true}
-curl http://localhost:8081/health   # → {"ok":true}
-
-# Check WebFinger once users are registered
-curl "http://localhost:8080/.well-known/webfinger?resource=acct:alice-XXXX@localhost:8080"
-curl "http://localhost:8081/.well-known/webfinger?resource=acct:bob-YYYY@localhost:8081"
 ```
 
 ---
 
 ## API reference
 
-### OIDC
+Paths only — the rules, bodies and status codes of each route are in `CLAUDE.md` § API endpoints.
+
+### OIDC and sign-in
 
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/.well-known/openid-configuration` | OIDC discovery document |
 | `GET` | `/.well-known/jwks.json` | Public key set (Ed25519 JWK) |
-| `GET` | `/authorize` | Start OIDC flow — serves login form or issues code via SSO cookie |
-| `POST` | `/login` | Form submit — validates credentials, sets session cookie, redirects |
-| `POST` | `/token` | PKCE code exchange → `access_token` + `id_token` |
-| `GET` | `/userinfo` | Bearer token → user claims |
-| `POST` | `/register` | JSON `{username, email, password}` → 201 with handle |
-| `POST` | `/register-and-login` | Form submit — register + immediately start OIDC flow |
-| `GET` | `/logout` | Clears session cookie, redirects to `post_logout_redirect_uri` |
+| `GET` | `/authorize` | Start the flow — a code at once for a live session cookie, else the web client's login page |
+| `POST` | `/login` | Login form — a code and session cookie, or on to email verification or the TOTP step |
+| `POST` | `/login/totp` | The second step: an authenticator or recovery code |
+| `POST` | `/token` | Code exchange → `access_token` + `id_token` |
+| `GET` | `/userinfo` | Bearer token → the account, its settings and privacy |
+| `GET` | `/logout` | Clears the session cookie, redirects to `post_logout_redirect_uri` |
+| `POST` | `/register` | JSON self-registration; a verification code is mailed |
+| `POST` | `/register-and-login` | The web client's sign-up form, carrying the OIDC request on |
+| `POST` | `/verify-email-and-login` | The mailed code — confirms the address, continues the flow |
+| `POST` | `/verify-email/resend` | Another code |
+| `POST` | `/dev/send-test-email` | Development instances only — checks SMTP |
 
-### ActivityPub (public)
-
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/.well-known/webfinger` | WebFinger discovery (`?resource=acct:alice-7G4K@domain`) |
-| `GET` | `/users/{handle}` | Actor profile (Person, `application/activity+json`) |
-| `POST` | `/users/{handle}/inbox` | Receive AP activities (Follow, Accept, Reject, Undo, Create/Note) |
-| `GET` | `/users/{handle}/outbox` | Outbox (OrderedCollection) |
-| `GET` | `/users/{handle}/followers` | Followers collection |
-| `GET` | `/users/{handle}/following` | Following collection |
-
-### Social graph & DMs (Bearer token required)
+### Account (Bearer)
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/users/search?q=` | Search users by username |
-| `POST` | `/api/follow` | `{handle}` — follow a user |
-| `DELETE` | `/api/follow/{handle}` | Unfollow |
-| `GET` | `/api/follow/incoming` | Pending follow requests aimed at me |
-| `POST` | `/api/follow/{id}/accept` | Accept a follow request |
-| `POST` | `/api/follow/{id}/reject` | Reject a follow request |
-| `GET` | `/api/following` | Users I follow (accepted) |
-| `GET` | `/api/followers` | My accepted followers |
-| `POST` | `/api/dm` | `{recipient_handle, content}` — send a direct message |
-| `GET` | `/api/dm` | List DM conversations |
-| `GET` | `/api/dm/{handle}` | Conversation history with a user |
+| `PATCH` | `/api/profile` | Display name, pronouns, bio |
+| `PUT` · `DELETE` | `/api/avatar` | Replace or clear the avatar |
+| `PATCH` | `/api/settings` | Replace account-settings sections |
+| `PATCH` | `/api/privacy` | Who may message the account |
+| `POST` | `/api/totp/enroll` · `/api/totp/enroll/verify` | Enroll an authenticator |
+| `POST` | `/api/totp/disable` · `/api/totp/recovery-codes/regenerate` | Turn it off, or new recovery codes |
+| `GET` | `/api/users/search?q=` | Accounts by handle |
+
+### Friends and blocks (Bearer)
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/friends` | Accepted friends, local and remote |
+| `POST` | `/api/friends/request` | `{ address }` — a local account or a remote one |
+| `GET` | `/api/friends/incoming` | Pending requests aimed at me |
+| `POST` | `/api/friends/{friendship_id}/accept` | Accept — opens the DM |
+| `DELETE` | `/api/friends/{friendship_id}/reject` | Decline, silently |
+| `DELETE` | `/api/friends/{actor_uri}` | Unfriend |
+| `GET` · `POST` | `/api/blocks` | List blocked actors · block one |
+| `DELETE` | `/api/blocks/{actor_uri}` | Unblock |
+
+### Conversations and attachments (Bearer)
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` · `GET` | `/api/dm` | Send a 1:1 message · list conversations |
+| `GET` | `/api/dm/{conversation_id}` | History, newest first |
+| `POST` | `/api/dm/{conversation_id}/read` | Mark the conversation read |
+| `PATCH` | `/api/dm/{message_id}/edit` | Edit one's own message |
+| `POST` | `/api/groups` | Create a group |
+| `PATCH` | `/api/groups/{conversation_id}` | Rename it |
+| `POST` | `/api/groups/{conversation_id}/messages` | Send to a group |
+| `GET` · `POST` | `/api/groups/{conversation_id}/members` | List · add a member |
+| `DELETE` | `/api/groups/{conversation_id}/members/{actor_uri}` | Remove a member, or leave |
+| `POST` | `/api/groups/{conversation_id}/members/{actor_uri}/role` | Promote or demote |
+| `POST` | `/api/attachments` | Upload files |
+| `GET` | `/api/attachments/{id}` | A token-protected blob URL and metadata |
+| `GET` | `/api/attachments/{id}/blob` | The bytes (token-authed) |
+
+### E2EE (Bearer)
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` · `POST` | `/api/keys/devices` | List devices · register or renew one |
+| `POST` | `/api/keys/devices/{device_id}/revoke` | Revoke a device |
+| `POST` | `/api/keys/packages` | Upload KeyPackages |
+| `POST` | `/api/keys/packages/claim` | Claim one (Bearer or HTTP Signature) |
+| `GET` | `/api/keys/packages/status` | KeyPackages left per device |
+| `POST` · `GET` | `/api/mls/groups/{conversation_id}/commits` | Append a commit · catch up |
+| `GET` · `POST` | `/api/mls/welcomes` | Claim this device's Welcomes · send one |
+| `POST` · `GET` · `DELETE` | `/api/history/messages` | The encrypted history archive |
+| `GET` · `POST` | `/api/history/salt` | Its per-user salt |
+
+### Realtime and presence
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/ws?token=` | WebSocket — DMs, presence, events |
+| `GET` | `/api/presence?actors[]=` | Presence snapshot (Bearer) |
+| `POST` | `/api/presence/batch` | Peer batch poll (HTTP Signature) |
+| `GET` | `/api/presence/stream?actors[]=` | Peer SSE stream (HTTP Signature) |
+
+### Federation
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/.well-known/webfinger` | Discovery (`?resource=acct:alice_xk9mp@domain`) |
+| `GET` | `/actor` | The instance's own actor, whose key signs inter-instance requests |
+| `GET` | `/users/{handle}` | Actor profile (`Person`, `application/activity+json`) |
+| `POST` | `/users/{handle}/inbox` | Peers' activities (HTTP Signature) |
+| `GET` | `/users/{handle}/outbox` · `/followers` · `/following` | Always-empty collections |
+| `GET` | `/api/attachments/{id}/content` | Attachment bytes for a peer (HTTP Signature) |
 | `GET` | `/health` | `{"ok": true}` |

@@ -277,6 +277,9 @@ impl Conversations for PgConversations {
                 COUNT(CASE
                     WHEN rm.sender_actor_uri != $1
                          AND (r.last_read_at IS NULL OR rm.created_at > r.last_read_at)
+                         AND NOT EXISTS (SELECT 1 FROM user_blocks b
+                                         WHERE b.owner_user_id = $2
+                                           AND b.blocked_actor_uri = rm.sender_actor_uri)
                     THEN 1 ELSE NULL
                 END) AS unread_count,
                 COALESCE(

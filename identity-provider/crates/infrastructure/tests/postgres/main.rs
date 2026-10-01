@@ -6,6 +6,7 @@ mod identity;
 mod messaging;
 mod presence;
 mod profile;
+mod reach;
 mod settings;
 mod social;
 

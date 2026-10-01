@@ -6,6 +6,7 @@ use domain::profile::{
     ProfileAudience, ProfileEdit, ProfileError, ProfileFederation, ProfileNotifier, Profiles,
 };
 use domain::settings::SettingsStore;
+use domain::social::ContactPolicies;
 
 use super::{Friends, Userinfo, userinfo};
 
@@ -13,6 +14,7 @@ use super::{Friends, Userinfo, userinfo};
 pub struct EditProfile {
     origin: InstanceOrigin,
     settings: Arc<dyn SettingsStore>,
+    contact_policies: Arc<dyn ContactPolicies>,
     friends: Friends,
 }
 
@@ -21,6 +23,7 @@ impl EditProfile {
         origin: InstanceOrigin,
         profiles: Arc<dyn Profiles>,
         settings: Arc<dyn SettingsStore>,
+        contact_policies: Arc<dyn ContactPolicies>,
         audience: Arc<dyn ProfileAudience>,
         notifier: Arc<dyn ProfileNotifier>,
         federation: Arc<dyn ProfileFederation>,
@@ -28,6 +31,7 @@ impl EditProfile {
         Self {
             origin,
             settings,
+            contact_policies,
             friends: Friends {
                 profiles,
                 audience,
@@ -45,7 +49,13 @@ impl EditProfile {
             .await?
             .ok_or(ProfileError::UnknownUser)?;
         self.friends.tell(user).await;
-        userinfo(&self.origin, self.settings.as_ref(), edited).await
+        userinfo(
+            &self.origin,
+            self.settings.as_ref(),
+            self.contact_policies.as_ref(),
+            edited,
+        )
+        .await
     }
 }
 

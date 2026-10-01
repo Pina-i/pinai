@@ -3,6 +3,7 @@ mod actors;
 mod attachments;
 pub mod auth;
 pub mod background;
+mod blocks;
 pub mod error;
 mod groups;
 mod history;
@@ -12,6 +13,7 @@ mod key_directory;
 mod messaging;
 mod mls;
 mod presence;
+mod privacy;
 mod profile;
 pub mod rate_limit;
 mod second_factor;
@@ -51,8 +53,9 @@ use application::profile::{
 };
 use application::settings::UpdateSettings;
 use application::social::{
-    AcceptFriendRequest, DeclineFriendRequest, ListFriends, ListIncomingRequests, ReceiveAccept,
-    ReceiveFollow, ReceiveReject, ReceiveUndoFollow, SendFriendRequest, Unfriend,
+    AcceptFriendRequest, Block, DeclineFriendRequest, ListBlocks, ListFriends,
+    ListIncomingRequests, ReceiveAccept, ReceiveFollow, ReceiveReject, ReceiveUndoFollow,
+    SendFriendRequest, SetContactPolicy, Unblock, Unfriend,
 };
 use axum::extract::{DefaultBodyLimit, FromRef};
 use axum::routing::{delete, get, patch, post, put};
@@ -127,6 +130,10 @@ pub struct AppState {
     pub decline_friend_request: Arc<DeclineFriendRequest>,
     pub unfriend: Arc<Unfriend>,
     pub list_friends: Arc<ListFriends>,
+    pub block: Arc<Block>,
+    pub unblock: Arc<Unblock>,
+    pub list_blocks: Arc<ListBlocks>,
+    pub set_contact_policy: Arc<SetContactPolicy>,
     pub send_direct_message: Arc<SendDirectMessage>,
     pub deliver_direct_message: Arc<DeliverDirectMessage>,
     pub send_group_message: Arc<SendGroupMessage>,
@@ -270,6 +277,9 @@ pub fn router(state: AppState) -> Router {
             "/api/friends/{friendship_id}/reject",
             delete(social::reject),
         )
+        .route("/api/blocks", get(blocks::list).post(blocks::block))
+        .route("/api/blocks/{actor_uri}", delete(blocks::unblock))
+        .route("/api/privacy", patch(privacy::update))
         .route(
             "/api/dm",
             post(messaging::send_message).get(messaging::conversations),

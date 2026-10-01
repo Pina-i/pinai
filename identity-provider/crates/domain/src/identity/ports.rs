@@ -35,6 +35,9 @@ pub enum RemoteActorsError {
     NotFound,
     #[error("the peer's address is not allowed: {0}")]
     Refused(String),
+    /// The account's instance failed to answer, or answered something no instance would.
+    #[error("the account's instance did not answer: {0}")]
+    Unavailable(String),
     #[error(transparent)]
     Unexpected(#[from] anyhow::Error),
 }

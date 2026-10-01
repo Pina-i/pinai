@@ -3,13 +3,16 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+use time::OffsetDateTime;
+
 use crate::identity::{Account, ActorUri, RemoteActor};
 use crate::messaging::{ConversationKind, may_hold_dm};
 use crate::{ConversationId, FriendshipId, UserId};
 
 use super::{
-    Direction, FriendPresence, FriendView, Friendship, FriendshipEvent, FriendshipStatus,
-    LocalRequest, SocialFederation, SocialGraph, SocialNotifier, SocialStoreError, Unfriended,
+    BlockedActor, ContactPolicies, ContactPolicy, Direction, FriendPresence, FriendView,
+    Friendship, FriendshipEvent, FriendshipStatus, LocalRequest, Reachability, Relation,
+    SocialFederation, SocialGraph, SocialNotifier, SocialStoreError, Unfriended,
 };
 
 /// Changes a local account as its owner does — outside the graph, which only reads it.
@@ -28,6 +31,8 @@ pub struct InMemorySocialGraph {
     dms: Mutex<Vec<(ActorUri, ActorUri, ConversationId)>>,
     /// The avatar each side keeps of a remote friend, as it was met.
     met_with: Mutex<HashMap<(UserId, ActorUri), String>>,
+    /// `(owner, actor, when)`, oldest first.
+    blocks: Mutex<Vec<(UserId, ActorUri, OffsetDateTime)>>,
 }
 
 impl InMemorySocialGraph {
@@ -202,6 +207,46 @@ impl SocialGraph for InMemorySocialGraph {
         Ok(Some(Unfriended { removed, reverse }))
     }
 
+    async fn block(
+        &self,
+        owner: &Account,
+        actor: &ActorUri,
+    ) -> Result<Option<Unfriended>, SocialStoreError> {
+        {
+            let mut blocks = self.blocks.lock().unwrap();
+            if !blocks.iter().any(|(o, a, _)| *o == owner.id && a == actor) {
+                blocks.push((owner.id, actor.clone(), OffsetDateTime::now_utc()));
+            }
+        }
+        self.unfriend(owner, actor).await
+    }
+
+    async fn unblock(&self, owner: UserId, actor: &ActorUri) -> Result<bool, SocialStoreError> {
+        let mut blocks = self.blocks.lock().unwrap();
+        let before = blocks.len();
+        blocks.retain(|(o, a, _)| !(*o == owner && a == actor));
+        Ok(blocks.len() < before)
+    }
+
+    async fn blocked(&self, owner: UserId) -> Result<Vec<BlockedActor>, SocialStoreError> {
+        let locals = self.locals.lock().unwrap();
+        let blocks = self.blocks.lock().unwrap();
+        Ok(blocks
+            .iter()
+            .rev()
+            .filter(|(o, _, _)| *o == owner)
+            .map(|(_, actor, at)| {
+                let local = locals.values().find(|a| &a.actor_uri == actor);
+                BlockedActor {
+                    actor: actor.clone(),
+                    display_name: local.and_then(|a| a.display_name.clone()),
+                    avatar_url: local.and_then(|a| a.avatar_url.clone()),
+                    blocked_at: *at,
+                }
+            })
+            .collect())
+    }
+
     async fn befriended_by_anyone(&self, friend: &ActorUri) -> Result<bool, SocialStoreError> {
         let sides = self.sides.lock().unwrap();
         Ok(sides
@@ -366,6 +411,7 @@ pub enum Notice {
 #[derive(Default)]
 pub struct RecordingSocialNotifier {
     sent: Mutex<Vec<(Notice, UserId, FriendshipEvent)>>,
+    blocks_updated: Mutex<Vec<UserId>>,
 }
 
 impl RecordingSocialNotifier {
@@ -374,7 +420,18 @@ impl RecordingSocialNotifier {
     }
 }
 
+impl RecordingSocialNotifier {
+    /// The accounts told their blocks changed, in order.
+    pub fn blocks_updated(&self) -> Vec<UserId> {
+        self.blocks_updated.lock().unwrap().clone()
+    }
+}
+
 impl SocialNotifier for RecordingSocialNotifier {
+    fn blocks_updated(&self, to: UserId) {
+        self.blocks_updated.lock().unwrap().push(to);
+    }
+
     fn friend_removed(&self, to: UserId, event: &FriendshipEvent) {
         let notice = (Notice::FriendRemoved, to, event.clone());
         self.sent.lock().unwrap().push(notice);
@@ -508,12 +565,104 @@ impl AccountEdits for InMemorySocialGraph {
     }
 }
 
+/// Nothing in the way: what `StubReachability` answers for a pair no test set.
+pub const OPEN: Relation = Relation {
+    policy: ContactPolicy::Everyone,
+    blocked: false,
+    friends: false,
+    share_a_group: false,
+};
+
+/// The actor is blocked.
+pub const BLOCKED: Relation = Relation {
+    blocked: true,
+    ..OPEN
+};
+
+/// No block, but the default setting keeps a stranger out.
+pub const KEPT_OUT_BY_THE_SETTING: Relation = Relation {
+    policy: ContactPolicy::FriendsAndGroups,
+    ..OPEN
+};
+
+/// The relation a test set for each pair. Nothing in memory holds friendships, blocks and groups
+/// together, so the Postgres adapter's query has tests of its own instead of a shared contract.
+#[derive(Default)]
+pub struct StubReachability {
+    relations: Mutex<HashMap<(UserId, ActorUri), Relation>>,
+}
+
+impl StubReachability {
+    pub fn set(&self, owner: UserId, other: &ActorUri, relation: Relation) {
+        self.relations
+            .lock()
+            .unwrap()
+            .insert((owner, other.clone()), relation);
+    }
+}
+
+#[async_trait::async_trait]
+impl Reachability for StubReachability {
+    async fn relation(
+        &self,
+        owner: UserId,
+        other: &ActorUri,
+    ) -> Result<Relation, SocialStoreError> {
+        Ok(self
+            .relations
+            .lock()
+            .unwrap()
+            .get(&(owner, other.clone()))
+            .copied()
+            .unwrap_or(OPEN))
+    }
+
+    async fn blocks_any(
+        &self,
+        owner: UserId,
+        among: &[ActorUri],
+    ) -> Result<bool, SocialStoreError> {
+        let relations = self.relations.lock().unwrap();
+        Ok(among.iter().any(|actor| {
+            relations
+                .get(&(owner, actor.clone()))
+                .is_some_and(|r| r.blocked)
+        }))
+    }
+}
+
+#[derive(Default)]
+pub struct InMemoryContactPolicies {
+    policies: Mutex<HashMap<UserId, ContactPolicy>>,
+}
+
+#[async_trait::async_trait]
+impl ContactPolicies for InMemoryContactPolicies {
+    async fn get(&self, owner: UserId) -> Result<ContactPolicy, SocialStoreError> {
+        Ok(self
+            .policies
+            .lock()
+            .unwrap()
+            .get(&owner)
+            .copied()
+            .unwrap_or_default())
+    }
+
+    async fn set(&self, owner: UserId, policy: ContactPolicy) -> Result<(), SocialStoreError> {
+        self.policies.lock().unwrap().insert(owner, policy);
+        Ok(())
+    }
+}
+
 /// Run against the in-memory fake and the Postgres adapter. Each check takes accounts the graph
 /// accepts — the Postgres ones are real `users` rows.
 pub mod contract {
-    use crate::ConversationId;
     use crate::identity::{Account, ActorUri};
-    use crate::social::{Direction, FriendView, FriendshipStatus, SocialGraph, SocialStoreError};
+    use crate::social::{
+        ContactPolicies, ContactPolicy, Direction, FriendView, FriendshipStatus, SocialGraph,
+        SocialStoreError,
+    };
+    use crate::{ConversationId, UserId};
 
     pub fn remote_bob() -> ActorUri {
         ActorUri::parse("https://idp.bob.test/users/bob_k2m9x").unwrap()
@@ -786,6 +935,116 @@ pub mod contract {
         }
     }
 
+    pub async fn a_block_ends_both_local_sides_of_a_friendship_at_once(
+        graph: &dyn SocialGraph,
+        alice: &Account,
+        bob: &Account,
+    ) {
+        let request = graph
+            .record_local_request(bob, alice)
+            .await
+            .unwrap()
+            .target_side;
+        graph.accept(&request, alice).await.unwrap();
+
+        let ended = graph.block(alice, &bob.actor_uri).await.unwrap().unwrap();
+
+        assert_eq!(ended.removed.status, FriendshipStatus::Accepted);
+        assert_eq!(ended.reverse.map(|side| side.owner), Some(bob.id));
+        assert_eq!(graph.between(alice.id, &bob.actor_uri).await.unwrap(), None);
+        assert_eq!(graph.between(bob.id, &alice.actor_uri).await.unwrap(), None);
+        let blocked = graph.blocked(alice.id).await.unwrap();
+        assert_eq!(blocked.len(), 1);
+        assert_eq!(blocked[0].actor, bob.actor_uri);
+        assert_eq!(blocked[0].display_name, bob.display_name);
+    }
+
+    pub async fn a_request_the_blocked_account_sent_ends_with_the_block(
+        graph: &dyn SocialGraph,
+        alice: &Account,
+        bob: &Account,
+    ) {
+        graph.record_local_request(bob, alice).await.unwrap();
+
+        let ended = graph.block(alice, &bob.actor_uri).await.unwrap().unwrap();
+
+        assert_eq!(
+            (ended.removed.status, ended.removed.direction),
+            (FriendshipStatus::Pending, Direction::Incoming)
+        );
+        assert_eq!(graph.between(bob.id, &alice.actor_uri).await.unwrap(), None);
+    }
+
+    pub async fn a_block_is_kept_once_and_lifted_once(graph: &dyn SocialGraph, alice: &Account) {
+        assert!(graph.block(alice, &remote_bob()).await.unwrap().is_none());
+        assert!(graph.block(alice, &remote_bob()).await.unwrap().is_none());
+        assert_eq!(graph.blocked(alice.id).await.unwrap().len(), 1);
+
+        assert!(graph.unblock(alice.id, &remote_bob()).await.unwrap());
+        assert!(!graph.unblock(alice.id, &remote_bob()).await.unwrap());
+        assert!(graph.blocked(alice.id).await.unwrap().is_empty());
+    }
+
+    /// An actor never resolved here has no name to show.
+    pub async fn blocks_are_listed_newest_first(
+        graph: &dyn SocialGraph,
+        alice: &Account,
+        bob: &Account,
+    ) {
+        graph.block(alice, &remote_bob()).await.unwrap();
+        graph.block(alice, &bob.actor_uri).await.unwrap();
+
+        let blocked = graph.blocked(alice.id).await.unwrap();
+
+        let listed: Vec<_> = blocked
+            .iter()
+            .map(|b| (b.actor.clone(), b.display_name.clone()))
+            .collect();
+        assert_eq!(
+            listed,
+            vec![
+                (bob.actor_uri.clone(), bob.display_name.clone()),
+                (remote_bob(), None)
+            ]
+        );
+        assert!(blocked[0].blocked_at >= blocked[1].blocked_at);
+        assert!(
+            graph.blocked(bob.id).await.unwrap().is_empty(),
+            "a block is its owner's"
+        );
+    }
+
+    pub async fn a_block_leaves_the_owners_other_friendships_alone(
+        graph: &dyn SocialGraph,
+        alice: &Account,
+        bob: &Account,
+        pierre: &Account,
+    ) {
+        for friend in [bob, pierre] {
+            let request = graph
+                .record_local_request(friend, alice)
+                .await
+                .unwrap()
+                .target_side;
+            graph.accept(&request, alice).await.unwrap();
+        }
+
+        graph.block(alice, &bob.actor_uri).await.unwrap();
+
+        let friends = graph.friends(alice.id).await.unwrap();
+        assert_eq!(
+            friends.iter().map(|f| &f.actor_uri).collect::<Vec<_>>(),
+            vec![&pierre.actor_uri]
+        );
+        assert!(
+            graph
+                .between(pierre.id, &alice.actor_uri)
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+
     pub async fn an_incoming_request_is_recorded_once_and_never_reopens_a_friendship(
         graph: &dyn SocialGraph,
         bob: &Account,
@@ -932,6 +1191,34 @@ pub mod contract {
                 .unwrap()
                 .as_ref(),
             Some(target)
+        );
+    }
+
+    pub async fn an_account_takes_messages_from_friends_and_groups_until_it_says_otherwise(
+        policies: &dyn ContactPolicies,
+        alice: UserId,
+    ) {
+        assert_eq!(
+            policies.get(alice).await.unwrap(),
+            ContactPolicy::FriendsAndGroups
+        );
+
+        policies.set(alice, ContactPolicy::Friends).await.unwrap();
+        assert_eq!(policies.get(alice).await.unwrap(), ContactPolicy::Friends);
+        policies.set(alice, ContactPolicy::Everyone).await.unwrap();
+        assert_eq!(policies.get(alice).await.unwrap(), ContactPolicy::Everyone);
+    }
+
+    pub async fn a_contact_policy_is_its_owners(
+        policies: &dyn ContactPolicies,
+        alice: UserId,
+        bob: UserId,
+    ) {
+        policies.set(alice, ContactPolicy::Everyone).await.unwrap();
+
+        assert_eq!(
+            policies.get(bob).await.unwrap(),
+            ContactPolicy::FriendsAndGroups
         );
     }
 }

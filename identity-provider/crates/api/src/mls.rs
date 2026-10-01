@@ -211,6 +211,11 @@ impl From<DeliveryError> for ApiError {
             DeliveryError::RecipientNotFound => {
                 ApiError::not_found("recipient_actor_uri matches our issuer but no such user")
             }
+            DeliveryError::Unreachable => ApiError::new(
+                StatusCode::FORBIDDEN,
+                "access_denied",
+                "Can't add this person",
+            ),
             DeliveryError::EpochTaken(winner) => {
                 let description = DeliveryError::EpochTaken(winner.clone()).to_string();
                 let winning = serde_json::to_value(CommitView::from(*winner))

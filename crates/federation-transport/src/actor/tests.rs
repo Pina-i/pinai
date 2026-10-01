@@ -87,3 +87,55 @@ async fn an_icon_given_as_a_list_brings_its_first_image() {
         Some("https://cdn.test/first.png")
     );
 }
+
+/// A peer on the loopback interface answering every request with `status` and no body.
+async fn a_peer_answering(status: &'static str) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let at = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let mut request = [0; 4096];
+            let _ = socket.read(&mut request).await;
+            let response =
+                format!("HTTP/1.1 {status}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n");
+            let _ = socket.write_all(response.as_bytes()).await;
+        }
+    });
+    at.to_string()
+}
+
+async fn resolving_dave_at(domain: &str) -> Result<(), TransportError> {
+    resolve_remote_actor(
+        "dave",
+        domain,
+        "http",
+        UrlPolicy::from_issuer("http://localhost"),
+    )
+    .await
+    .map(|_| ())
+}
+
+/// Only an instance that answers can say it knows no such account; one that fails to answer says
+/// nothing of the kind.
+#[tokio::test]
+async fn an_unknown_account_is_told_apart_from_an_instance_that_does_not_answer() {
+    let unknown = resolving_dave_at(&a_peer_answering("404 Not Found").await).await;
+    let failing = resolving_dave_at(&a_peer_answering("500 Internal Server Error").await).await;
+    let closed = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let dead = closed.local_addr().unwrap().to_string();
+    drop(closed);
+    let unreachable = resolving_dave_at(&dead).await;
+
+    assert!(
+        matches!(unknown, Err(TransportError::NotFound(_))),
+        "{unknown:?}"
+    );
+    assert!(
+        matches!(failing, Err(TransportError::Upstream(_))),
+        "{failing:?}"
+    );
+    assert!(
+        matches!(unreachable, Err(TransportError::Upstream(_))),
+        "{unreachable:?}"
+    );
+}

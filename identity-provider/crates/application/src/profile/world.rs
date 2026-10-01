@@ -10,6 +10,7 @@ use domain::profile::testing::{
     RecordingProfileNotifier, own_profile,
 };
 use domain::settings::testing::InMemorySettingsStore;
+use domain::social::testing::InMemoryContactPolicies;
 use time::OffsetDateTime;
 
 use super::{ClearAvatar, EditProfile, ReadUserinfo, ReceiveProfileUpdate, SetAvatar};
@@ -22,6 +23,7 @@ pub struct World {
     pub origin: InstanceOrigin,
     pub profiles: Arc<InMemoryProfiles>,
     pub settings: Arc<InMemorySettingsStore>,
+    pub contact_policies: Arc<InMemoryContactPolicies>,
     pub avatars: Arc<InMemoryAvatars>,
     pub notifier: Arc<RecordingProfileNotifier>,
     pub federation: Arc<RecordingProfileFederation>,
@@ -55,6 +57,7 @@ pub async fn world() -> World {
         origin: InstanceOrigin::parse("http://localhost:8080").unwrap(),
         profiles,
         settings: Arc::new(InMemorySettingsStore::default()),
+        contact_policies: Arc::new(InMemoryContactPolicies::default()),
         avatars: Arc::new(InMemoryAvatars::default()),
         notifier: Arc::new(RecordingProfileNotifier::default()),
         federation: Arc::new(RecordingProfileFederation::default()),
@@ -67,6 +70,7 @@ impl World {
             self.origin.clone(),
             self.profiles.clone(),
             self.settings.clone(),
+            self.contact_policies.clone(),
         )
     }
 
@@ -75,6 +79,7 @@ impl World {
             self.origin.clone(),
             self.profiles.clone(),
             self.settings.clone(),
+            self.contact_policies.clone(),
             self.profiles.clone(),
             self.notifier.clone(),
             self.federation.clone(),

@@ -180,3 +180,6 @@ pub async fn set_role(
         .await?;
     Ok(Json(changed.into()))
 }
+
+#[cfg(test)]
+mod tests;

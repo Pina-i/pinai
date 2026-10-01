@@ -151,3 +151,72 @@ async fn an_advertised_id_naming_another_pairs_dm_opens_a_separate_one() {
     )
     .await;
 }
+
+#[tokio::test]
+async fn a_block_ends_both_local_sides_of_a_friendship_at_once() {
+    contract::a_block_ends_both_local_sides_of_a_friendship_at_once(
+        &InMemorySocialGraph::default(),
+        &account("alice"),
+        &account("bob"),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_request_the_blocked_account_sent_ends_with_the_block() {
+    contract::a_request_the_blocked_account_sent_ends_with_the_block(
+        &InMemorySocialGraph::default(),
+        &account("alice"),
+        &account("bob"),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_block_is_kept_once_and_lifted_once() {
+    contract::a_block_is_kept_once_and_lifted_once(
+        &InMemorySocialGraph::default(),
+        &account("alice"),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn blocks_are_listed_newest_first() {
+    let graph = InMemorySocialGraph::default();
+    let (alice, bob) = (account("alice"), account("bob"));
+    // The fake knows an account's name once it met it in a request.
+    graph.record_local_request(&alice, &bob).await.unwrap();
+    graph.unfriend(&alice, &bob.actor_uri).await.unwrap();
+    contract::blocks_are_listed_newest_first(&graph, &alice, &bob).await;
+}
+
+#[tokio::test]
+async fn a_block_leaves_the_owners_other_friendships_alone() {
+    contract::a_block_leaves_the_owners_other_friendships_alone(
+        &InMemorySocialGraph::default(),
+        &account("alice"),
+        &account("bob"),
+        &account("pierre"),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn an_account_takes_messages_from_friends_and_groups_until_it_says_otherwise() {
+    contract::an_account_takes_messages_from_friends_and_groups_until_it_says_otherwise(
+        &InMemoryContactPolicies::default(),
+        UserId::generate(),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_contact_policy_is_its_owners() {
+    contract::a_contact_policy_is_its_owners(
+        &InMemoryContactPolicies::default(),
+        UserId::generate(),
+        UserId::generate(),
+    )
+    .await;
+}

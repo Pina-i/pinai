@@ -104,33 +104,70 @@ pub fn remote_actor(address: &str) -> RemoteActor {
 #[derive(Default)]
 pub struct InMemoryRemoteActors {
     actors: Mutex<Vec<RemoteActor>>,
+    /// Remembered here, but their instance no longer knows them.
+    cached_only: Mutex<Vec<RemoteActor>>,
+    /// Instances that fail to answer.
+    down: Mutex<Vec<String>>,
 }
 
 impl InMemoryRemoteActors {
     pub fn with(actors: impl IntoIterator<Item = RemoteActor>) -> Self {
         Self {
             actors: Mutex::new(actors.into_iter().collect()),
+            cached_only: Mutex::default(),
+            down: Mutex::default(),
         }
+    }
+
+    /// `domain`'s instance fails to answer: resolving anyone there is `Unavailable`.
+    pub fn and_down(self, domain: &str) -> Self {
+        self.down.lock().unwrap().push(domain.to_owned());
+        self
+    }
+
+    /// Also `cached`: found in this instance's cache, unknown to their own instance.
+    pub fn and_cached_only(self, cached: impl IntoIterator<Item = RemoteActor>) -> Self {
+        self.cached_only.lock().unwrap().extend(cached);
+        self
     }
 }
 
 #[async_trait::async_trait]
 impl RemoteActors for InMemoryRemoteActors {
     async fn discover(&self, uri: &ActorUri) -> Result<RemoteActor, RemoteActorsError> {
-        self.find(uri).await?.ok_or(RemoteActorsError::NotFound)
-    }
-
-    async fn find(&self, uri: &ActorUri) -> Result<Option<RemoteActor>, RemoteActorsError> {
-        Ok(self
-            .actors
+        self.actors
             .lock()
             .unwrap()
             .iter()
             .find(|a| &a.actor_uri == uri)
-            .cloned())
+            .cloned()
+            .ok_or(RemoteActorsError::NotFound)
+    }
+
+    async fn find(&self, uri: &ActorUri) -> Result<Option<RemoteActor>, RemoteActorsError> {
+        let known = |actors: &Mutex<Vec<RemoteActor>>| {
+            actors
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|a| &a.actor_uri == uri)
+                .cloned()
+        };
+        Ok(known(&self.actors).or_else(|| known(&self.cached_only)))
     }
 
     async fn resolve(&self, address: &FederatedAddress) -> Result<RemoteActor, RemoteActorsError> {
+        if self
+            .down
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|d| d == address.domain().as_str())
+        {
+            return Err(RemoteActorsError::Unavailable(
+                "connection refused".to_owned(),
+            ));
+        }
         self.actors
             .lock()
             .unwrap()

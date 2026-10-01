@@ -11,7 +11,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use domain::FriendshipId;
 use domain::identity::{ActorUri, InstanceOrigin};
-use domain::social::{FriendView, SocialError};
+use domain::social::{FriendView, MAX_BLOCKS, SocialError};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -172,9 +172,16 @@ impl From<SocialError> for ApiError {
             SocialError::NotAnIncomingRequest => {
                 ApiError::bad_request("Not an incoming friend request")
             }
+            SocialError::SelfBlock => ApiError::bad_request("You can't block yourself"),
+            SocialError::NotBlocked => ApiError::not_found("Not blocked"),
+            SocialError::YouBlocked => ApiError::bad_request("Unblock this user first"),
+            SocialError::BlockListFull => {
+                ApiError::bad_request(format!("You can't block more than {MAX_BLOCKS} people"))
+            }
             SocialError::PeerNotAllowed(reason) => {
                 ApiError::new(StatusCode::FORBIDDEN, "access_denied", reason)
             }
+            SocialError::PeerUnavailable(reason) => ApiError::upstream(anyhow::anyhow!(reason)),
             SocialError::Unexpected(e) => ApiError::internal(e),
         }
     }

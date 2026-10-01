@@ -1,4 +1,5 @@
 use crate::identity::AccountsError;
+use crate::social::{SocialStoreError, Unreachable};
 
 use super::KeyPackageRefusal;
 
@@ -25,8 +26,23 @@ pub enum KeyDirectoryError {
     PeerBusy,
     #[error("the account's instance did not answer")]
     PeerUnavailable(#[source] anyhow::Error),
+    /// The account doesn't admit the claimer: a block or its contact setting, never told apart.
+    #[error("the account cannot be reached")]
+    Unreachable,
     #[error(transparent)]
     Unexpected(#[from] anyhow::Error),
+}
+
+impl From<Unreachable> for KeyDirectoryError {
+    fn from(_: Unreachable) -> Self {
+        Self::Unreachable
+    }
+}
+
+impl From<SocialStoreError> for KeyDirectoryError {
+    fn from(error: SocialStoreError) -> Self {
+        Self::Unexpected(error.into())
+    }
 }
 
 /// What the device and KeyPackage stores fail with.
@@ -74,6 +90,8 @@ pub enum RemoteClaimError {
     NoKeyPackage,
     #[error("the account's instance is rate-limiting this one")]
     Busy,
+    #[error("the account cannot be reached")]
+    Unreachable,
     #[error("the account's instance did not answer")]
     Unavailable(#[from] anyhow::Error),
 }
@@ -85,6 +103,7 @@ impl From<RemoteClaimError> for KeyDirectoryError {
             RemoteClaimError::UserNotFound => Self::UserNotFound,
             RemoteClaimError::NoKeyPackage => Self::NoKeyPackage,
             RemoteClaimError::Busy => Self::PeerBusy,
+            RemoteClaimError::Unreachable => Self::Unreachable,
             RemoteClaimError::Unavailable(e) => Self::PeerUnavailable(e),
         }
     }
@@ -105,8 +124,23 @@ pub enum DeliveryError {
     /// Another commit holds the epoch: the proposer applies it and proposes again.
     #[error("another commit already exists at epoch {} for this conversation", .0.epoch.value())]
     EpochTaken(Box<super::Commit>),
+    /// The recipient doesn't admit the sender: a block or its contact setting, never told apart.
+    #[error("the recipient cannot be reached")]
+    Unreachable,
     #[error(transparent)]
     Unexpected(#[from] anyhow::Error),
+}
+
+impl From<Unreachable> for DeliveryError {
+    fn from(_: Unreachable) -> Self {
+        Self::Unreachable
+    }
+}
+
+impl From<SocialStoreError> for DeliveryError {
+    fn from(error: SocialStoreError) -> Self {
+        Self::Unexpected(error.into())
+    }
 }
 
 /// What the commit log and the Welcome queue fail with.

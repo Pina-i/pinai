@@ -163,11 +163,12 @@ pub async fn get_json_screened(
         .await
         .map_err(|e| TransportError::Upstream(format!("fetch failed: {e}")))?;
 
-    if !resp.status().is_success() {
-        return Err(TransportError::Upstream(format!(
-            "peer returned {}",
-            resp.status()
-        )));
+    let status = resp.status();
+    if status == reqwest::StatusCode::NOT_FOUND || status == reqwest::StatusCode::GONE {
+        return Err(TransportError::NotFound(format!("peer returned {status}")));
+    }
+    if !status.is_success() {
+        return Err(TransportError::Upstream(format!("peer returned {status}")));
     }
 
     let buf = read_capped(resp).await?;

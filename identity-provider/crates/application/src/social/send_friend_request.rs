@@ -3,7 +3,8 @@ use std::sync::Arc;
 use domain::UserId;
 use domain::identity::{Account, Accounts, Recipient, RemoteActors};
 use domain::social::{
-    Friendship, FriendshipEvent, SocialError, SocialFederation, SocialGraph, SocialNotifier,
+    Friendship, FriendshipEvent, Reachability, SocialError, SocialFederation, SocialGraph,
+    SocialNotifier,
 };
 
 /// `POST /api/friends/request`: ask a local or remote account to become friends.
@@ -11,6 +12,7 @@ pub struct SendFriendRequest {
     accounts: Arc<dyn Accounts>,
     remote_actors: Arc<dyn RemoteActors>,
     graph: Arc<dyn SocialGraph>,
+    reach: Arc<dyn Reachability>,
     notifier: Arc<dyn SocialNotifier>,
     federation: Arc<dyn SocialFederation>,
 }
@@ -20,6 +22,7 @@ impl SendFriendRequest {
         accounts: Arc<dyn Accounts>,
         remote_actors: Arc<dyn RemoteActors>,
         graph: Arc<dyn SocialGraph>,
+        reach: Arc<dyn Reachability>,
         notifier: Arc<dyn SocialNotifier>,
         federation: Arc<dyn SocialFederation>,
     ) -> Self {
@@ -27,6 +30,7 @@ impl SendFriendRequest {
             accounts,
             remote_actors,
             graph,
+            reach,
             notifier,
             federation,
         }
@@ -45,12 +49,28 @@ impl SendFriendRequest {
                 if target.id == caller.id {
                     return Err(SocialError::SelfRequest);
                 }
+                self.reach
+                    .relation(caller.id, &target.actor_uri)
+                    .await?
+                    .may_write()?;
                 Friendship::requestable(
                     self.graph
                         .between(caller.id, &target.actor_uri)
                         .await?
                         .as_ref(),
                 )?;
+                if !self
+                    .reach
+                    .relation(target.id, &caller.actor_uri)
+                    .await?
+                    .hears_requests()
+                {
+                    // As a remote IdP that drops the Follow would leave it: pending on one side.
+                    return Ok(self
+                        .graph
+                        .record_outgoing(caller.id, &target.actor_uri, target.avatar_url.as_deref())
+                        .await?);
+                }
                 let recorded = self.graph.record_local_request(&caller, &target).await?;
                 self.notifier.friend_request(
                     target.id,
@@ -66,6 +86,10 @@ impl SendFriendRequest {
             }
             Recipient::Remote(address) => {
                 let remote = self.remote_actors.resolve(&address).await?;
+                self.reach
+                    .relation(caller.id, &remote.actor_uri)
+                    .await?
+                    .may_write()?;
                 Friendship::requestable(
                     self.graph
                         .between(caller.id, &remote.actor_uri)

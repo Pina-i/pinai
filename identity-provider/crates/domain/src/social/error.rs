@@ -1,6 +1,6 @@
 use crate::identity::{AccountsError, RemoteActorsError};
 
-use super::SocialStoreError;
+use super::{SocialStoreError, YouBlocked};
 
 #[derive(Debug, thiserror::Error)]
 pub enum SocialError {
@@ -20,6 +20,16 @@ pub enum SocialError {
     NotAnIncomingRequest,
     #[error("the peer is not allowed: {0}")]
     PeerNotAllowed(String),
+    #[error("the account's instance did not answer: {0}")]
+    PeerUnavailable(String),
+    #[error("a user cannot block themselves")]
+    SelfBlock,
+    #[error("the actor is not blocked")]
+    NotBlocked,
+    #[error("the block list is full")]
+    BlockListFull,
+    #[error("the caller blocked the target")]
+    YouBlocked,
     #[error(transparent)]
     Unexpected(#[from] anyhow::Error),
 }
@@ -46,7 +56,14 @@ impl From<RemoteActorsError> for SocialError {
         match error {
             RemoteActorsError::NotFound => Self::UserNotFound,
             RemoteActorsError::Refused(reason) => Self::PeerNotAllowed(reason),
+            RemoteActorsError::Unavailable(reason) => Self::PeerUnavailable(reason),
             RemoteActorsError::Unexpected(e) => Self::Unexpected(e),
         }
+    }
+}
+
+impl From<YouBlocked> for SocialError {
+    fn from(_: YouBlocked) -> Self {
+        Self::YouBlocked
     }
 }

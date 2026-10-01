@@ -1,7 +1,8 @@
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
 use domain::identity::Account;
-use domain::identity::testing::{account, remote_actor};
+use domain::identity::testing::{InMemoryRemoteActors, account, remote_actor};
+use domain::social::testing::BLOCKED;
 use serde_json::{Value, json};
 
 use crate::testing::TestApp;
@@ -334,6 +335,70 @@ async fn a_peer_the_url_policy_refuses_is_a_403() {
         (
             StatusCode::FORBIDDEN,
             refusal("access_denied", "private address")
+        )
+    );
+}
+
+#[tokio::test]
+async fn a_request_to_someone_the_caller_blocked_is_refused() {
+    let w = world();
+    w.app.reach.set(w.alice.id, &w.bob.actor_uri, BLOCKED);
+
+    assert_eq!(
+        w.request(&w.alice, &w.bob.username).await,
+        (
+            StatusCode::BAD_REQUEST,
+            refusal("invalid_request", "Unblock this user first")
+        )
+    );
+}
+
+/// Alice's answer is any request's: nothing in it tells her Bob blocked her.
+#[tokio::test]
+async fn a_request_to_someone_who_blocked_the_caller_is_answered_as_any_other() {
+    let w = world();
+    w.app.reach.set(w.bob.id, &w.alice.actor_uri, BLOCKED);
+
+    let (status, body) = w.request(&w.alice, &w.bob.username).await;
+    let (_, unblocked) = w.request(&w.carol, &w.bob.username).await;
+
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(body["status"], unblocked["status"]);
+    let (_, incoming) = w
+        .app
+        .call(Method::GET, "/api/friends/incoming", Some(w.bob.id), None)
+        .await;
+    let from: Vec<_> = incoming
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["actor_uri"].clone())
+        .collect();
+    assert_eq!(from, vec![json!(w.carol.actor_uri.as_str())]);
+}
+
+#[tokio::test]
+async fn a_request_to_an_instance_that_does_not_answer_is_a_bad_gateway() {
+    let alice = account("alice");
+    let app = TestApp::knowing(
+        [alice.clone()],
+        InMemoryRemoteActors::default().and_down("idp.down.test"),
+    );
+
+    let answer = app
+        .call(
+            Method::POST,
+            "/api/friends/request",
+            Some(alice.id),
+            Some(json!({ "address": "dave_k2m9x@idp.down.test" })),
+        )
+        .await;
+
+    assert_eq!(
+        answer,
+        (
+            StatusCode::BAD_GATEWAY,
+            refusal("bad_gateway", "the account's instance did not answer")
         )
     );
 }

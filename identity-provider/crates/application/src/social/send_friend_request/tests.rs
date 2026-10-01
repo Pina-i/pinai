@@ -3,7 +3,8 @@ use std::sync::Arc;
 use domain::identity::testing::{InMemoryAccounts, InMemoryRemoteActors, account, remote_actor};
 use domain::identity::{Account, FederatedAddress, Handle, Recipient, RemoteActor};
 use domain::social::testing::{
-    InMemorySocialGraph, Notice, RecordingSocialFederation, RecordingSocialNotifier, Sent,
+    BLOCKED, InMemorySocialGraph, KEPT_OUT_BY_THE_SETTING, Notice, RecordingSocialFederation,
+    RecordingSocialNotifier, Sent, StubReachability,
 };
 use domain::social::{Direction, FriendshipEvent, FriendshipStatus, SocialGraph};
 
@@ -16,6 +17,7 @@ struct World {
     graph: Arc<InMemorySocialGraph>,
     notifier: Arc<RecordingSocialNotifier>,
     federation: Arc<RecordingSocialFederation>,
+    reach: Arc<StubReachability>,
     send: SendFriendRequest,
 }
 
@@ -25,10 +27,12 @@ fn world() -> World {
     let graph = Arc::new(InMemorySocialGraph::default());
     let notifier = Arc::new(RecordingSocialNotifier::default());
     let federation = Arc::new(RecordingSocialFederation::default());
+    let reach = Arc::new(StubReachability::default());
     let send = SendFriendRequest::new(
         Arc::new(InMemoryAccounts::with([alice.clone(), bob.clone()])),
         Arc::new(InMemoryRemoteActors::with([remote_carol.clone()])),
         graph.clone(),
+        reach.clone(),
         notifier.clone(),
         federation.clone(),
     );
@@ -39,6 +43,7 @@ fn world() -> World {
         graph,
         notifier,
         federation,
+        reach,
         send,
     }
 }
@@ -187,4 +192,92 @@ async fn a_request_to_an_unknown_remote_address_finds_no_user() {
         "{refused:?}"
     );
     assert!(w.federation.sent().is_empty());
+}
+
+#[tokio::test]
+async fn a_request_to_someone_the_caller_blocked_is_refused() {
+    let w = world();
+    w.reach.set(w.alice.id, &w.bob.actor_uri, BLOCKED);
+    w.reach.set(w.alice.id, &w.remote_carol.actor_uri, BLOCKED);
+
+    for to in [local(&w.bob), remote("carol_k2m9x@idp.carol.test")] {
+        let refused = w.send.execute(w.alice.id, to).await;
+
+        assert!(
+            matches!(refused, Err(SocialError::YouBlocked)),
+            "{refused:?}"
+        );
+    }
+    assert_eq!(
+        w.graph.between(w.alice.id, &w.bob.actor_uri).await.unwrap(),
+        None
+    );
+    assert!(w.notifier.sent().is_empty());
+    assert!(w.federation.sent().is_empty());
+}
+
+/// To Alice, a request Bob's block keeps out looks like any request still unanswered.
+#[tokio::test]
+async fn a_request_to_someone_who_blocked_the_caller_stays_unanswered() {
+    let w = world();
+    w.reach.set(w.bob.id, &w.alice.actor_uri, BLOCKED);
+
+    let sent = w.send.execute(w.alice.id, local(&w.bob)).await.unwrap();
+
+    assert_eq!(
+        (sent.owner, sent.status, sent.direction),
+        (w.alice.id, FriendshipStatus::Pending, Direction::Outgoing)
+    );
+    assert_eq!(
+        w.graph.between(w.alice.id, &w.bob.actor_uri).await.unwrap(),
+        Some(sent)
+    );
+    assert_eq!(
+        w.graph.between(w.bob.id, &w.alice.actor_uri).await.unwrap(),
+        None
+    );
+    assert!(w.notifier.sent().is_empty());
+}
+
+#[tokio::test]
+async fn the_contact_setting_never_keeps_a_request_out() {
+    let w = world();
+    w.reach
+        .set(w.bob.id, &w.alice.actor_uri, KEPT_OUT_BY_THE_SETTING);
+
+    w.send.execute(w.alice.id, local(&w.bob)).await.unwrap();
+
+    assert!(
+        w.graph
+            .between(w.bob.id, &w.alice.actor_uri)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(w.notifier.sent().len(), 1);
+}
+
+#[tokio::test]
+async fn a_request_to_an_instance_that_does_not_answer_is_refused_and_records_nothing() {
+    let alice = account("alice");
+    let graph = Arc::new(InMemorySocialGraph::default());
+    let federation = Arc::new(RecordingSocialFederation::default());
+    let send = SendFriendRequest::new(
+        Arc::new(InMemoryAccounts::with([alice.clone()])),
+        Arc::new(InMemoryRemoteActors::default().and_down("idp.down.test")),
+        graph.clone(),
+        Arc::new(StubReachability::default()),
+        Arc::new(RecordingSocialNotifier::default()),
+        federation.clone(),
+    );
+
+    let refused = send
+        .execute(alice.id, remote("dave_k2m9x@idp.down.test"))
+        .await;
+
+    assert!(
+        matches!(refused, Err(SocialError::PeerUnavailable(_))),
+        "{refused:?}"
+    );
+    assert!(federation.sent().is_empty());
 }

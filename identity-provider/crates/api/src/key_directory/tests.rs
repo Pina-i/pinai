@@ -4,6 +4,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use domain::identity::testing::{account, remote_actor};
 use domain::identity::{Account, ActorUri};
+use domain::social::testing::{BLOCKED, KEPT_OUT_BY_THE_SETTING};
 use serde_json::{Value, json};
 use time::format_description::well_known::Rfc3339;
 
@@ -554,4 +555,29 @@ async fn a_peers_claim_whose_body_is_not_the_one_signed_is_refused() {
         )
         .await;
     assert_eq!(left["devices"][0]["available"], 1, "{left}");
+}
+
+#[tokio::test]
+async fn a_claim_by_someone_the_owner_does_not_admit_is_refused_alike_whatever_the_cause() {
+    let mut answers = Vec::new();
+    for kept_out in [BLOCKED, KEPT_OUT_BY_THE_SETTING] {
+        let w = world();
+        w.upload(&w.alice, Uuid::new_v4(), packages(1)).await;
+        w.app.reach.set(w.alice.id, &w.bob.actor_uri, kept_out);
+        let target = json!({ "actor_uri": w.alice.actor_uri.to_string() });
+
+        answers.push(w.claim(&w.bob, target.clone()).await);
+        let (own, body) = w.claim(&w.alice, target).await;
+        assert_eq!(own, StatusCode::OK, "her package is still there: {body}");
+    }
+    assert_eq!(
+        answers,
+        vec![
+            (
+                StatusCode::FORBIDDEN,
+                refusal("access_denied", "Can't add this person")
+            );
+            2
+        ]
+    );
 }

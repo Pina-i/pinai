@@ -3,7 +3,8 @@ use std::sync::Arc;
 use domain::identity::testing::{InMemoryAccounts, InMemoryRemoteActors, account, remote_actor};
 use domain::identity::{Account, RemoteActor};
 use domain::social::testing::{
-    InMemorySocialGraph, Notice, RecordingSocialFederation, RecordingSocialNotifier, Sent,
+    BLOCKED, InMemorySocialGraph, KEPT_OUT_BY_THE_SETTING, Notice, RecordingSocialFederation,
+    RecordingSocialNotifier, Sent, StubReachability,
 };
 use domain::social::{Direction, FriendshipStatus, SocialGraph};
 
@@ -15,6 +16,7 @@ struct World {
     graph: Arc<InMemorySocialGraph>,
     notifier: Arc<RecordingSocialNotifier>,
     federation: Arc<RecordingSocialFederation>,
+    reach: Arc<StubReachability>,
     receive: ReceiveFollow,
 }
 
@@ -25,10 +27,12 @@ fn world() -> World {
     let graph = Arc::new(InMemorySocialGraph::default());
     let notifier = Arc::new(RecordingSocialNotifier::default());
     let federation = Arc::new(RecordingSocialFederation::default());
+    let reach = Arc::new(StubReachability::default());
     let receive = ReceiveFollow::new(
         Arc::new(InMemoryAccounts::with([bob.clone()])),
         Arc::new(InMemoryRemoteActors::with([remote_carol.clone()])),
         graph.clone(),
+        reach.clone(),
         notifier.clone(),
         federation.clone(),
     );
@@ -38,6 +42,7 @@ fn world() -> World {
         graph,
         notifier,
         federation,
+        reach,
         receive,
     }
 }
@@ -135,6 +140,7 @@ async fn a_follow_from_a_local_account_records_both_sides() {
         Arc::new(InMemoryAccounts::with([alice.clone(), bob.clone()])),
         Arc::new(InMemoryRemoteActors::default()),
         graph.clone(),
+        Arc::new(StubReachability::default()),
         notifier.clone(),
         Arc::new(RecordingSocialFederation::default()),
     );
@@ -165,6 +171,7 @@ async fn a_follower_is_recorded_with_the_avatar_it_was_discovered_with() {
         Arc::new(InMemoryAccounts::with([bob.clone()])),
         Arc::new(InMemoryRemoteActors::with([carol.clone()])),
         graph.clone(),
+        Arc::new(StubReachability::default()),
         Arc::new(RecordingSocialNotifier::default()),
         Arc::new(RecordingSocialFederation::default()),
     );
@@ -178,4 +185,39 @@ async fn a_follower_is_recorded_with_the_avatar_it_was_discovered_with() {
 
     let friends = graph.friends(bob.id).await.unwrap();
     assert_eq!(friends[0].avatar_url, carol.avatar_url);
+}
+
+#[tokio::test]
+async fn a_follow_from_someone_the_recipient_blocked_is_dropped_unannounced() {
+    let w = world();
+    w.reach.set(w.bob.id, &w.remote_carol.actor_uri, BLOCKED);
+
+    w.receive
+        .execute(w.bob.id, w.remote_carol.actor_uri.clone())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        w.graph
+            .between(w.bob.id, &w.remote_carol.actor_uri)
+            .await
+            .unwrap(),
+        None
+    );
+    assert!(w.notifier.sent().is_empty());
+    assert!(w.federation.sent().is_empty());
+}
+
+#[tokio::test]
+async fn the_contact_setting_never_keeps_a_follow_out() {
+    let w = world();
+    w.reach
+        .set(w.bob.id, &w.remote_carol.actor_uri, KEPT_OUT_BY_THE_SETTING);
+
+    w.receive
+        .execute(w.bob.id, w.remote_carol.actor_uri.clone())
+        .await
+        .unwrap();
+
+    assert_eq!(w.notifier.sent().len(), 1);
 }

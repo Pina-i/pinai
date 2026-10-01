@@ -110,7 +110,7 @@ fn refusal(error: TransportError) -> RemoteActorsError {
         TransportError::Denied(reason) | TransportError::BadRequest(reason) => {
             RemoteActorsError::Refused(reason)
         }
-        TransportError::Upstream(reason) => RemoteActorsError::Unexpected(anyhow::anyhow!(reason)),
+        TransportError::Upstream(reason) => RemoteActorsError::Unavailable(reason),
     }
 }
 
@@ -155,3 +155,6 @@ impl RemoteActors for FederatedRemoteActors {
         self.remember(uri, None, display_name, avatar_url).await
     }
 }
+
+#[cfg(test)]
+mod tests;

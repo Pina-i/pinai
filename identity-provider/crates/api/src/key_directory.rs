@@ -306,6 +306,11 @@ impl From<KeyDirectoryError> for ApiError {
             KeyDirectoryError::PeerNotAllowed(reason) => ApiError::bad_request(reason),
             KeyDirectoryError::PeerBusy => rate_limited(),
             KeyDirectoryError::PeerUnavailable(e) => ApiError::upstream(e),
+            KeyDirectoryError::Unreachable => ApiError::new(
+                StatusCode::FORBIDDEN,
+                "access_denied",
+                "Can't add this person",
+            ),
             KeyDirectoryError::Unexpected(e) => ApiError::internal(e),
         }
     }

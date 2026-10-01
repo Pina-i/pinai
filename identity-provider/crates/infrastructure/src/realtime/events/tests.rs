@@ -70,6 +70,17 @@ fn settings_updated_carries_the_whole_document() {
     );
 }
 
+/// A refresh signal: the list itself never travels over the socket.
+#[test]
+fn blocks_updated_carries_nothing_but_its_type() {
+    let json = serde_json::to_value(WsEvent::BlocksUpdated(BlocksUpdatedPayload {})).unwrap();
+
+    assert_eq!(
+        json,
+        serde_json::json!({ "type": "blocks_updated", "data": {} })
+    );
+}
+
 /// The heartbeat ack is `api::ws`'s own frame; the rest of the wire format is here.
 #[test]
 fn every_event_is_a_type_and_its_data() {

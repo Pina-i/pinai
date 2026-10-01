@@ -48,6 +48,7 @@ async fn userinfo_answers_the_account_its_address_and_its_settings() {
             "pronouns": null,
             "bio": null,
             "settings": {},
+            "privacy": { "contact_policy": "friends_and_groups" },
         })
     );
 }

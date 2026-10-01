@@ -3,9 +3,10 @@
 # Development Dockerfile — debug build, fast incremental rebuilds.
 #
 # Same cargo-chef layout as the production Dockerfile, but compiles in debug
-# profile (faster rebuilds, slower runtime). Use this for the inner dev loop:
+# profile (faster rebuilds, slower runtime). Selected by compose.dev.yml and
+# compose-win.dev.yml; start it through the Makefile, which also seeds the database:
 #
-#   docker compose -f docker/docker-compose.yml -f docker/docker-compose.dev.yml up -d --build
+#   make alice-docker        # bob-docker, or alice-docker-win / bob-docker-win on Windows
 #
 # Cache-mount IDs are versioned (-v2) — bump after big workspace restructures.
 
@@ -35,7 +36,7 @@ COPY identity-provider/crates/ identity-provider/crates/
 COPY identity-provider/migrations/ identity-provider/migrations/
 RUN --mount=type=cache,id=idp-cargo-registry-v2,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=idp-cargo-git-v2,target=/usr/local/cargo/git,sharing=locked \
-    cargo build -p idp-server && \
+    cargo build -p idp-app --bin idp-server && \
     cp target/debug/idp-server /idp-server
 
 # ── Runtime ──────────────────────────────────────────────────────────────────
@@ -46,8 +47,8 @@ RUN apt-get update && apt-get install -y libssl3 ca-certificates && rm -rf /var/
 WORKDIR /app
 COPY --from=builder /idp-server /app/idp-server
 
-# Default RUST_LOG bumped to debug so you can see what the IdP is doing.
-ENV RUST_LOG=info,idp_auth=debug,idp_presence=debug,idp_federation=debug,idp_messaging=debug,idp_social=debug
+# Default RUST_LOG bumped to debug for every IdP crate. Targets are lib names (`api`, not `idp_api`).
+ENV RUST_LOG=info,domain=debug,application=debug,infrastructure=debug,connections=debug,api=debug,app=debug,idp_server=debug
 
 EXPOSE 8080
 CMD ["/app/idp-server"]

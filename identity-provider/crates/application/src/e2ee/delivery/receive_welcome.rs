@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use domain::e2ee::{DeliveryError, MlsNotifier, NewWelcome, WelcomeBlob, Welcomes, check_welcome};
 use domain::identity::{Accounts, ActorUri};
-use domain::messaging::{Conversations, GroupNotifier, GroupSnapshot};
+use domain::messaging::{ConversationKind, Conversations, GroupNotifier, GroupSnapshot};
+use domain::social::Reachability;
 use domain::{ConversationId, DeviceId, UserId};
 
 /// A Welcome another instance delivered for a device of one of our accounts.
@@ -21,6 +22,7 @@ pub struct ReceiveWelcome {
     accounts: Arc<dyn Accounts>,
     conversations: Arc<dyn Conversations>,
     welcomes: Arc<dyn Welcomes>,
+    reach: Arc<dyn Reachability>,
     notifier: Arc<dyn MlsNotifier>,
     groups: Arc<dyn GroupNotifier>,
 }
@@ -30,6 +32,7 @@ impl ReceiveWelcome {
         accounts: Arc<dyn Accounts>,
         conversations: Arc<dyn Conversations>,
         welcomes: Arc<dyn Welcomes>,
+        reach: Arc<dyn Reachability>,
         notifier: Arc<dyn MlsNotifier>,
         groups: Arc<dyn GroupNotifier>,
     ) -> Self {
@@ -37,6 +40,7 @@ impl ReceiveWelcome {
             accounts,
             conversations,
             welcomes,
+            reach,
             notifier,
             groups,
         }
@@ -50,6 +54,25 @@ impl ReceiveWelcome {
             .ok_or_else(|| {
                 DeliveryError::Unexpected(anyhow::anyhow!("the recipient's account is gone"))
             })?;
+        let is_group = incoming.roster.is_some()
+            || self
+                .conversations
+                .find(incoming.conversation)
+                .await?
+                .is_some_and(|c| c.kind == ConversationKind::Group);
+        let joins = !self
+            .conversations
+            .members(incoming.conversation)
+            .await?
+            .iter()
+            .any(|m| m.actor_uri == recipient.actor_uri);
+        // The sender of a group's Welcome is who adds the recipient; a 1:1's is always checked.
+        if !is_group || joins {
+            self.reach
+                .relation(recipient.id, &incoming.sender)
+                .await?
+                .admits()?;
+        }
         if let Some(roster) = &incoming.roster {
             crate::messaging::shared::mirror(
                 &*self.conversations,

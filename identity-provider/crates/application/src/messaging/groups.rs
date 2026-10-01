@@ -18,10 +18,67 @@ pub use rename_group::RenameGroup;
 pub use set_member_role::SetMemberRole;
 
 use domain::ConversationId;
-use domain::identity::{Account, Accounts, RemoteActors};
+use domain::identity::{
+    Account, Accounts, ActorUri, InstanceOrigin, RemoteActors, RemoteActorsError,
+};
 use domain::messaging::{Conversation, ConversationKind, Conversations, Member, MessagingError};
+use domain::social::Reachability;
 
 use super::shared::display_name_of;
+
+/// Whether `adder` may add `invitee`: an account that exists — asked of its own instance, since
+/// this one's cache would tell who here has met whom —, not someone they blocked, nor a local
+/// account that doesn't admit them. Another instance's account is that instance's to refuse.
+async fn may_add(
+    ports: &Invitees<'_>,
+    adder: &Account,
+    invitee: &ActorUri,
+) -> Result<(), MessagingError> {
+    let not_found = || MessagingError::InviteeNotFound(invitee.clone());
+    let local = if ports.origin.owns(invitee) {
+        Some(
+            ports
+                .accounts
+                .find_by_uri(invitee)
+                .await?
+                .ok_or_else(not_found)?,
+        )
+    } else {
+        let address = invitee.federated_address().ok_or_else(not_found)?;
+        match ports.remote_actors.resolve(&address).await {
+            // A WebFinger answer naming another actor is no proof this URI is anyone's.
+            Ok(actor) if actor.actor_uri == *invitee => None,
+            Ok(_) | Err(RemoteActorsError::NotFound) => return Err(not_found()),
+            Err(RemoteActorsError::Unavailable(_)) => {
+                return Err(MessagingError::InviteeUnavailable(invitee.clone()));
+            }
+            Err(e) => return Err(e.into()),
+        }
+    };
+    ports
+        .reach
+        .relation(adder.id, invitee)
+        .await?
+        .may_write()
+        .map_err(|_| MessagingError::YouBlockedInvitee(invitee.clone()))?;
+    if let Some(local) = local {
+        ports
+            .reach
+            .relation(local.id, &adder.actor_uri)
+            .await?
+            .admits()
+            .map_err(|_| MessagingError::CannotAdd(invitee.clone()))?;
+    }
+    Ok(())
+}
+
+/// What `may_add` asks.
+struct Invitees<'a> {
+    origin: &'a InstanceOrigin,
+    accounts: &'a dyn Accounts,
+    remote_actors: &'a dyn RemoteActors,
+    reach: &'a dyn Reachability,
+}
 
 /// A member as the group's views show them.
 #[derive(Debug, Clone, PartialEq, Eq)]

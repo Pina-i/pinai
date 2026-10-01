@@ -6,6 +6,7 @@ use domain::identity::testing::{TrustedSignatures, account, remote_actor};
 use domain::identity::{Account, ActorUri, RemoteActor};
 use domain::messaging::testing::MessageNotice;
 use domain::profile::testing::ProfileSeeds;
+use domain::social::testing::{BLOCKED, KEPT_OUT_BY_THE_SETTING};
 use domain::social::{FriendshipStatus, SocialGraph};
 use serde_json::{Value, json};
 
@@ -218,6 +219,21 @@ async fn a_follow_is_an_incoming_request() {
 }
 
 #[tokio::test]
+async fn a_follow_from_someone_the_recipient_blocked_is_accepted_and_dropped() {
+    let w = world();
+    w.app.reach.set(w.alice.id, &w.carol.actor_uri, BLOCKED);
+
+    let (status, _) = w.deliver(&w.carol.actor_uri, w.follow()).await;
+
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let (_, incoming) = w
+        .app
+        .call(Method::GET, "/api/friends/incoming", Some(w.alice.id), None)
+        .await;
+    assert_eq!(incoming, json!([]));
+}
+
+#[tokio::test]
 async fn an_accept_makes_friends_under_the_advertised_dm() {
     let w = world();
     w.app
@@ -358,6 +374,113 @@ async fn an_edit_replaces_the_message() {
             .iter()
             .any(|notice| matches!(notice, MessageNotice::Edited(to, _) if *to == w.alice.id)),
     );
+}
+
+/// The sending instance only sees a refusal: it marks the message undelivered, as when no one
+/// answers.
+#[tokio::test]
+async fn a_dm_from_someone_who_cannot_reach_the_recipient_is_refused_alike_whatever_the_cause() {
+    let mut answers = Vec::new();
+    for kept_out in [BLOCKED, KEPT_OUT_BY_THE_SETTING] {
+        let w = world();
+        w.app.reach.set(w.alice.id, &w.carol.actor_uri, kept_out);
+
+        answers.push(
+            w.deliver(
+                &w.carol.actor_uri,
+                w.by_carol("Create", w.mls_note("application", json!({}))),
+            )
+            .await,
+        );
+        assert!(w.app.peers.message_notifier.sent().is_empty());
+    }
+    assert_eq!(
+        answers,
+        vec![
+            (
+                StatusCode::FORBIDDEN,
+                json!({
+                    "error": "access_denied",
+                    "error_description": "Message could not be delivered",
+                })
+            );
+            2
+        ]
+    );
+}
+
+#[tokio::test]
+async fn an_edit_in_a_dm_from_someone_who_cannot_reach_the_recipient_is_refused() {
+    let w = world();
+    let create = w.by_carol("Create", w.mls_note("application", json!({})));
+    let published = create["id"].clone();
+    w.deliver(&w.carol.actor_uri, create).await;
+    w.app.reach.set(w.alice.id, &w.carol.actor_uri, BLOCKED);
+    let edit = json!({
+        "type": "Note",
+        "id": published,
+        "mediaType": "application/mls",
+        "content": B64.encode(b"edited bytes"),
+    });
+
+    let (status, _) = w
+        .deliver(&w.carol.actor_uri, w.by_carol("Update", edit))
+        .await;
+
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn a_dms_welcome_from_someone_who_cannot_reach_the_recipient_is_refused() {
+    let w = world();
+    w.app.reach.set(w.alice.id, &w.carol.actor_uri, BLOCKED);
+    let welcome = w.mls_note(
+        "welcome",
+        json!({ "mlsRecipientDeviceId": uuid::Uuid::new_v4().to_string() }),
+    );
+
+    let answer = w
+        .deliver(&w.carol.actor_uri, w.by_carol("Create", welcome))
+        .await;
+
+    assert_eq!(
+        answer,
+        (
+            StatusCode::FORBIDDEN,
+            json!({ "error": "access_denied", "error_description": "Can't add this person" })
+        )
+    );
+}
+
+/// No group appears for a stranger's message, and nothing is filed as a 1:1 instead.
+#[tokio::test]
+async fn a_group_new_here_from_someone_who_cannot_reach_the_recipient_is_accepted_and_dropped() {
+    let w = world();
+    w.app
+        .reach
+        .set(w.alice.id, &w.carol.actor_uri, KEPT_OUT_BY_THE_SETTING);
+    let note = w.mls_note(
+        "application",
+        json!({ "mlsGroup": {
+            "name": "crew",
+            "members": [
+                { "actorUri": w.carol.actor_uri.as_str(), "role": "admin" },
+                { "actorUri": w.alice.actor_uri.as_str(), "role": "member" },
+            ],
+        }}),
+    );
+
+    let (status, _) = w
+        .deliver(&w.carol.actor_uri, w.by_carol("Create", note))
+        .await;
+
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let (_, listed) = w
+        .app
+        .call(Method::GET, "/api/dm", Some(w.alice.id), None)
+        .await;
+    assert_eq!(listed, json!([]));
+    assert!(w.app.peers.message_notifier.sent().is_empty());
 }
 
 #[tokio::test]

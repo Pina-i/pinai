@@ -11,6 +11,7 @@ use domain::e2ee::{
 };
 use domain::identity::testing::{InMemoryAccounts, account, remote_actor};
 use domain::identity::{Account, ActorUri, InstanceOrigin, RemoteActor, Requester};
+use domain::social::testing::{BLOCKED, KEPT_OUT_BY_THE_SETTING, StubReachability};
 use time::{Duration, OffsetDateTime};
 
 use super::*;
@@ -23,6 +24,7 @@ struct World {
     store: Arc<InMemoryKeyDirectory>,
     notifier: Arc<RecordingDeviceNotifier>,
     remote: Arc<InMemoryRemoteKeyPackages>,
+    reach: Arc<StubReachability>,
     register: RegisterDevice,
     list: ListDevices,
     revoke: RevokeDevice,
@@ -81,6 +83,7 @@ fn world() -> World {
     let accounts = Arc::new(InMemoryAccounts::with([alice.clone(), bob.clone()]));
     let store = Arc::new(InMemoryKeyDirectory::default());
     let notifier = Arc::new(RecordingDeviceNotifier::default());
+    let reach = Arc::new(StubReachability::default());
     let remote = Arc::new(InMemoryRemoteKeyPackages::with(
         carol.actor_uri.clone(),
         carols_claim.clone(),
@@ -101,6 +104,7 @@ fn world() -> World {
             accounts,
             store.clone(),
             remote.clone(),
+            reach.clone(),
         ),
         status: KeyPackageStatus::new(policy(), store.clone()),
         sweep: SweepKeyPackages::new(store.clone()),
@@ -111,6 +115,7 @@ fn world() -> World {
         store,
         notifier,
         remote,
+        reach,
     }
 }
 
@@ -552,4 +557,43 @@ async fn a_device_id_another_account_holds_is_neither_registered_nor_stocked() {
     );
     assert_eq!(w.store.find(device).await.unwrap(), alices);
     assert_eq!(w.notifier.joined().len(), 1, "alice's registration only");
+}
+
+/// The claim is how someone adds Alice's devices to a group: refused alike whatever keeps them out,
+/// and before a package is taken.
+#[tokio::test]
+async fn a_claim_by_someone_the_owner_does_not_admit_is_refused_and_takes_nothing() {
+    let peer_claimer = ActorUri::parse("https://idp.carol.test/users/carol_k2m9x").unwrap();
+    let mut refusals = Vec::new();
+    for kept_out in [BLOCKED, KEPT_OUT_BY_THE_SETTING] {
+        let w = world();
+        let device = DeviceId::generate();
+        w.upload(&w.alice, device, batch(2)).await;
+        w.reach.set(w.alice.id, &w.bob.actor_uri, kept_out);
+        w.reach.set(w.alice.id, &peer_claimer, kept_out);
+
+        for requester in [
+            Requester::User(w.bob.id),
+            Requester::Peer(peer_claimer.clone()),
+        ] {
+            let refused = w.claim_as(requester, &w.alice.actor_uri, None).await;
+            refusals.push(format!("{:?}", refused.map(|_| ())));
+        }
+        assert_eq!(w.store.available(w.alice.id, device).await.unwrap(), 2);
+    }
+    assert_eq!(refusals, vec!["Err(Unreachable)"; 4]);
+}
+
+#[tokio::test]
+async fn an_account_always_claims_its_own_packages() {
+    let w = world();
+    w.upload(&w.alice, DeviceId::generate(), batch(1)).await;
+    w.reach
+        .set(w.alice.id, &w.alice.actor_uri, KEPT_OUT_BY_THE_SETTING);
+
+    let claim = w
+        .claim_as(Requester::User(w.alice.id), &w.alice.actor_uri, None)
+        .await;
+
+    assert!(claim.is_ok(), "{:?}", claim.map(|_| ()));
 }

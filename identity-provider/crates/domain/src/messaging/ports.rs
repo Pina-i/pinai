@@ -41,7 +41,8 @@ pub trait Conversations: Send + Sync {
         snapshot: &GroupSnapshot,
     ) -> Result<Conversation, MessageStoreError>;
 
-    /// The account's conversations, the most recently active first.
+    /// The account's conversations, the most recently active first. Messages from actors the
+    /// account blocked never count as unread.
     async fn list_for(
         &self,
         user: UserId,

@@ -4,9 +4,10 @@ use connections::Hub;
 use domain::UserId;
 use domain::social::{FriendshipEvent, SocialNotifier};
 
-use super::events::{FriendshipPayload, WsEvent};
+use super::events::{BlocksUpdatedPayload, FriendshipPayload, WsEvent};
 
-/// Pushes `friend_request` / `friend_accepted` / `friend_removed` to the account's live sessions.
+/// Pushes `friend_request` / `friend_accepted` / `friend_removed` / `blocks_updated` to the
+/// account's live sessions.
 pub struct HubSocialNotifier {
     hub: Arc<Hub>,
 }
@@ -49,6 +50,14 @@ impl SocialNotifier for HubSocialNotifier {
             &self.hub,
             &to.as_uuid(),
             WsEvent::FriendRemoved(payload(event)),
+        );
+    }
+
+    fn blocks_updated(&self, to: UserId) {
+        super::push(
+            &self.hub,
+            &to.as_uuid(),
+            WsEvent::BlocksUpdated(BlocksUpdatedPayload {}),
         );
     }
 }

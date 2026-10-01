@@ -32,14 +32,7 @@ pub async fn resolve_remote_actor(
 
     debug!(%webfinger_url, "resolving remote actor via WebFinger");
 
-    let wf_doc = get_json_screened(&webfinger_url, "application/jrd+json", policy)
-        .await
-        .map_err(|e| match e {
-            TransportError::Upstream(_) => {
-                TransportError::NotFound("Remote user not found (WebFinger failed)".into())
-            }
-            other => other,
-        })?;
+    let wf_doc = get_json_screened(&webfinger_url, "application/jrd+json", policy).await?;
     let wf: WebFingerResponse = serde_json::from_value(wf_doc)
         .map_err(|e| TransportError::Upstream(format!("WebFinger parse failed: {e}")))?;
 

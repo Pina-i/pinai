@@ -14,14 +14,19 @@ pub struct ActorUri {
 }
 
 impl ActorUri {
+    /// Every writer stores what it is handed, a peer's or a user's.
+    pub const MAX_BYTES: usize = 2048;
+
     pub fn parse(raw: &str) -> Result<Self, ValidationError> {
-        let refuse = || ValidationError::new("actor URI", "an http(s) URL with a host");
+        let refuse =
+            || ValidationError::new("actor URI", "an http(s) URL with a host, of 2 KiB at most");
         let url = Url::parse(raw).map_err(|_| refuse())?;
         // The URL standard reads `http:///x` as host `x`; an empty authority is malformed here.
         let has_authority = raw
             .split_once("://")
             .is_some_and(|(_, rest)| !rest.starts_with('/'));
         let plain = has_authority
+            && url.as_str().len() <= Self::MAX_BYTES
             && matches!(url.scheme(), "http" | "https")
             && url.host_str().is_some_and(|host| !host.is_empty())
             && url.query().is_none()

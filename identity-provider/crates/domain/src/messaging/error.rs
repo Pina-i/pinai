@@ -1,4 +1,5 @@
-use crate::identity::{AccountsError, RemoteActorsError};
+use crate::identity::{AccountsError, ActorUri, RemoteActorsError};
+use crate::social::{SocialStoreError, Unreachable, YouBlocked};
 
 #[derive(Debug, thiserror::Error)]
 pub enum MessagingError {
@@ -19,6 +20,8 @@ pub enum MessagingError {
     AttachmentsUnavailable,
     #[error("the peer's address is not allowed: {0}")]
     PeerNotAllowed(String),
+    #[error("the account's instance did not answer: {0}")]
+    PeerUnavailable(String),
     #[error("only a group's admins may do this")]
     NotAnAdmin,
     #[error("not a member of the group")]
@@ -31,8 +34,42 @@ pub enum MessagingError {
     LastAdmin,
     #[error("already a member of the group")]
     AlreadyAMember,
+    #[error("the sender blocked the recipient")]
+    YouBlocked,
+    /// A local invitee who doesn't admit the adder, whatever the cause.
+    #[error("the invitee cannot be added")]
+    CannotAdd(ActorUri),
+    #[error("the adder blocked the invitee")]
+    YouBlockedInvitee(ActorUri),
+    /// Neither this instance nor the invitee's knows an account by that URI.
+    #[error("no such account")]
+    InviteeNotFound(ActorUri),
+    #[error("the invitee's instance did not answer")]
+    InviteeUnavailable(ActorUri),
+    /// A block or the recipient's contact setting, which nobody outside their instance may tell
+    /// apart.
+    #[error("the recipient cannot be reached")]
+    Undeliverable,
     #[error(transparent)]
     Unexpected(#[from] anyhow::Error),
+}
+
+impl From<Unreachable> for MessagingError {
+    fn from(_: Unreachable) -> Self {
+        Self::Undeliverable
+    }
+}
+
+impl From<YouBlocked> for MessagingError {
+    fn from(_: YouBlocked) -> Self {
+        Self::YouBlocked
+    }
+}
+
+impl From<SocialStoreError> for MessagingError {
+    fn from(error: SocialStoreError) -> Self {
+        Self::Unexpected(error.into())
+    }
 }
 
 /// What the conversation and message stores fail with.
@@ -66,6 +103,7 @@ impl From<RemoteActorsError> for MessagingError {
         match error {
             RemoteActorsError::NotFound => Self::RecipientNotFound,
             RemoteActorsError::Refused(reason) => Self::PeerNotAllowed(reason),
+            RemoteActorsError::Unavailable(reason) => Self::PeerUnavailable(reason),
             RemoteActorsError::Unexpected(e) => Self::Unexpected(e),
         }
     }

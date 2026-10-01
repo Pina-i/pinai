@@ -6,6 +6,7 @@ use domain::e2ee::{
 };
 use domain::identity::{Accounts, ActorUri, InstanceOrigin, RemoteActors};
 use domain::messaging::{ConversationKind, Conversations, GroupSnapshot};
+use domain::social::Reachability;
 use domain::{ConversationId, DeviceId, UserId};
 
 /// `POST /api/mls/welcomes`: a Welcome for one device of `recipient` — waiting here for a local
@@ -16,6 +17,7 @@ pub struct SendWelcome {
     remote_actors: Arc<dyn RemoteActors>,
     conversations: Arc<dyn Conversations>,
     welcomes: Arc<dyn Welcomes>,
+    reach: Arc<dyn Reachability>,
     notifier: Arc<dyn MlsNotifier>,
     federation: Arc<dyn MlsFederation>,
 }
@@ -28,6 +30,7 @@ impl SendWelcome {
         remote_actors: Arc<dyn RemoteActors>,
         conversations: Arc<dyn Conversations>,
         welcomes: Arc<dyn Welcomes>,
+        reach: Arc<dyn Reachability>,
         notifier: Arc<dyn MlsNotifier>,
         federation: Arc<dyn MlsFederation>,
     ) -> Self {
@@ -37,6 +40,7 @@ impl SendWelcome {
             remote_actors,
             conversations,
             welcomes,
+            reach,
             notifier,
             federation,
         }
@@ -70,6 +74,18 @@ impl SendWelcome {
         }
         check_welcome(&members, &sender.actor_uri, recipient)?;
         if let Some(account) = local {
+            // Joining a group went through its own checks; a 1:1 has none but this one.
+            let is_dm = self
+                .conversations
+                .find(conversation)
+                .await?
+                .is_some_and(|c| c.kind == ConversationKind::Dm);
+            if is_dm && account.id != sender.id {
+                self.reach
+                    .relation(account.id, &sender.actor_uri)
+                    .await?
+                    .admits()?;
+            }
             let welcome = self
                 .welcomes
                 .deposit(&NewWelcome {

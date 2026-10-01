@@ -27,8 +27,9 @@ use application::profile::{
 };
 use application::settings::UpdateSettings;
 use application::social::{
-    AcceptFriendRequest, DeclineFriendRequest, ListFriends, ListIncomingRequests, ReceiveAccept,
-    ReceiveFollow, ReceiveReject, ReceiveUndoFollow, SendFriendRequest, Unfriend,
+    AcceptFriendRequest, Block, DeclineFriendRequest, ListBlocks, ListFriends,
+    ListIncomingRequests, ReceiveAccept, ReceiveFollow, ReceiveReject, ReceiveUndoFollow,
+    SendFriendRequest, SetContactPolicy, Unblock, Unfriend,
 };
 use axum::Router;
 use axum::body::Body;
@@ -64,8 +65,8 @@ use domain::profile::testing::{
 };
 use domain::settings::testing::{InMemorySettingsStore, RecordingSettingsNotifier};
 use domain::social::testing::{
-    InMemorySocialGraph, RecordingFriendPresence, RecordingSocialFederation,
-    RecordingSocialNotifier,
+    InMemoryContactPolicies, InMemorySocialGraph, RecordingFriendPresence,
+    RecordingSocialFederation, RecordingSocialNotifier, StubReachability,
 };
 use http_body_util::BodyExt;
 use serde_json::Value;
@@ -109,6 +110,8 @@ pub struct TestApp {
     pub sign_in: SignInFakes,
     pub profile: ProfileFakes,
     pub peers: PeerFakes,
+    /// Open to every pair until a test says otherwise.
+    pub reach: Arc<StubReachability>,
 }
 
 impl TestApp {
@@ -117,8 +120,16 @@ impl TestApp {
         accounts: impl IntoIterator<Item = Account>,
         remote: impl IntoIterator<Item = RemoteActor>,
     ) -> Self {
+        Self::knowing(accounts, InMemoryRemoteActors::with(remote))
+    }
+
+    /// The same, with other instances as `remote_actors` has them — some down, say.
+    pub fn knowing(
+        accounts: impl IntoIterator<Item = Account>,
+        remote_actors: InMemoryRemoteActors,
+    ) -> Self {
         let accounts: Arc<dyn Accounts> = Arc::new(InMemoryAccounts::with(accounts));
-        let remote_actors: Arc<dyn RemoteActors> = Arc::new(InMemoryRemoteActors::with(remote));
+        let remote_actors: Arc<dyn RemoteActors> = Arc::new(remote_actors);
         let graph = Arc::new(InMemorySocialGraph::default());
         let notifier = Arc::new(RecordingSocialNotifier::default());
         let federation = Arc::new(RecordingSocialFederation::default());
@@ -164,6 +175,8 @@ impl TestApp {
         };
         let clients = Arc::new(InMemoryClients::with([web_client()]));
         let shutdown = tokio_util::sync::CancellationToken::new();
+        let reach = Arc::new(StubReachability::default());
+        let contact_policies = Arc::new(InMemoryContactPolicies::default());
         let peers = PeerFakes {
             graph: graph.clone(),
             message_notifier: message_notifier.clone(),
@@ -267,6 +280,7 @@ impl TestApp {
                 accounts.clone(),
                 remote_actors.clone(),
                 graph.clone(),
+                reach.clone(),
                 notifier.clone(),
                 federation.clone(),
             )),
@@ -291,10 +305,16 @@ impl TestApp {
                 remote_actors.clone(),
                 store.clone(),
                 store.clone(),
+                reach.clone(),
                 message_notifier.clone(),
                 group_notifier.clone(),
             )),
-            receive_edit: Arc::new(ReceiveEdit::new(store.clone(), message_notifier.clone())),
+            receive_edit: Arc::new(ReceiveEdit::new(
+                store.clone(),
+                store.clone(),
+                reach.clone(),
+                message_notifier.clone(),
+            )),
             receive_commit: Arc::new(ReceiveCommit::new(
                 accounts.clone(),
                 store.clone(),
@@ -305,6 +325,7 @@ impl TestApp {
                 accounts.clone(),
                 store.clone(),
                 delivery.clone(),
+                reach.clone(),
                 mls_notifier.clone(),
                 group_notifier.clone(),
             )),
@@ -328,11 +349,13 @@ impl TestApp {
                 origin.clone(),
                 profile.profiles.clone(),
                 settings.clone(),
+                contact_policies.clone(),
             )),
             edit_profile: Arc::new(EditProfile::new(
                 origin.clone(),
                 profile.profiles.clone(),
                 settings,
+                contact_policies.clone(),
                 profile.profiles.clone(),
                 profile.notifier.clone(),
                 profile.federation.clone(),
@@ -355,6 +378,7 @@ impl TestApp {
                 accounts.clone(),
                 remote_actors.clone(),
                 graph.clone(),
+                reach.clone(),
                 notifier.clone(),
                 federation.clone(),
             )),
@@ -381,11 +405,22 @@ impl TestApp {
                 accounts.clone(),
                 remote_actors.clone(),
                 graph.clone(),
-                notifier,
+                notifier.clone(),
+                federation.clone(),
+                presence.clone(),
+            )),
+            list_friends: Arc::new(ListFriends::new(graph.clone())),
+            block: Arc::new(Block::new(
+                accounts.clone(),
+                remote_actors.clone(),
+                graph.clone(),
+                notifier.clone(),
                 federation,
                 presence,
             )),
-            list_friends: Arc::new(ListFriends::new(graph.clone())),
+            unblock: Arc::new(Unblock::new(graph.clone(), notifier)),
+            list_blocks: Arc::new(ListBlocks::new(graph.clone())),
+            set_contact_policy: Arc::new(SetContactPolicy::new(contact_policies.clone())),
             send_direct_message: Arc::new(SendDirectMessage::new(
                 origin.clone(),
                 5,
@@ -393,6 +428,7 @@ impl TestApp {
                 remote_actors.clone(),
                 store.clone(),
                 store.clone(),
+                reach.clone(),
                 message_notifier.clone(),
             )),
             deliver_direct_message: Arc::new(DeliverDirectMessage::new(
@@ -414,6 +450,7 @@ impl TestApp {
                 remote_actors.clone(),
                 store.clone(),
                 store.clone(),
+                reach.clone(),
                 message_notifier.clone(),
                 message_federation,
             )),
@@ -426,9 +463,11 @@ impl TestApp {
             mark_read: Arc::new(MarkRead::new(accounts.clone(), store.clone())),
             list_conversations: Arc::new(ListConversations::new(accounts.clone(), store.clone())),
             create_group: Arc::new(CreateGroup::new(
+                origin.clone(),
                 accounts.clone(),
                 remote_actors.clone(),
                 store.clone(),
+                reach.clone(),
                 group_notifier.clone(),
             )),
             list_group_members: Arc::new(ListGroupMembers::new(
@@ -437,9 +476,11 @@ impl TestApp {
                 store.clone(),
             )),
             add_group_member: Arc::new(AddGroupMember::new(
+                origin.clone(),
                 accounts.clone(),
                 remote_actors.clone(),
                 store.clone(),
+                reach.clone(),
                 group_notifier.clone(),
             )),
             remove_group_member: Arc::new(RemoveGroupMember::new(
@@ -498,6 +539,7 @@ impl TestApp {
                 accounts.clone(),
                 keys.clone(),
                 Arc::new(InMemoryRemoteKeyPackages::default()),
+                reach.clone(),
             )),
             key_package_status: Arc::new(KeyPackageStatus::new(key_policy, keys)),
             claim_limiter: Arc::new(RateLimiter::new(60, 1.0)),
@@ -560,6 +602,7 @@ impl TestApp {
                 remote_actors.clone(),
                 store.clone(),
                 delivery,
+                reach.clone(),
                 mls_notifier,
                 mls_federation,
             )),
@@ -571,6 +614,7 @@ impl TestApp {
             sign_in,
             profile,
             peers,
+            reach,
         }
     }
 

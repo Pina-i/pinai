@@ -1,8 +1,9 @@
-use domain::AttachmentId;
 use domain::identity::ActorUri;
-use domain::messaging::Conversations;
 use domain::messaging::testing::{Uploads, contract};
-use infrastructure::postgres::{PgAttachments, PgConversations, PgMessages};
+use domain::messaging::{Conversations, Messages, MlsCiphertext, NewMessage, initial_roster};
+use domain::social::SocialGraph;
+use domain::{AttachmentId, MessageId};
+use infrastructure::postgres::{PgAttachments, PgConversations, PgMessages, PgSocialGraph};
 use sqlx::PgPool;
 
 use super::an_account;
@@ -387,4 +388,49 @@ async fn the_conversations_an_actor_ever_held_include_those_it_left(pool: PgPool
         &bob,
     )
     .await;
+}
+
+/// Kept beside the contract: the in-memory store holds no blocks.
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn messages_from_someone_the_reader_blocked_are_never_unread(pool: PgPool) {
+    let (alice, bob) = (
+        an_account(&pool, "alice").await,
+        an_account(&pool, "bob").await,
+    );
+    let carol = ActorUri::parse("https://idp.carol.test/users/carol_k2m9x").unwrap();
+    let conversations = PgConversations::new(pool.clone());
+    let messages = PgMessages::new(pool.clone());
+    let group = conversations
+        .create_group(
+            None,
+            &initial_roster(&alice.actor_uri, &[bob.actor_uri.clone(), carol.clone()]),
+        )
+        .await
+        .unwrap();
+    for sender in [&carol, &carol, &bob.actor_uri] {
+        let id = MessageId::generate();
+        messages
+            .record(&NewMessage {
+                id,
+                conversation: group.id,
+                sender: sender.clone(),
+                ciphertext: MlsCiphertext::parse(vec![1; 8]).unwrap(),
+                activity_uri: id.activity_uri(sender),
+                reply_to: None,
+                attachments: Vec::new(),
+            })
+            .await
+            .unwrap();
+    }
+    PgSocialGraph::new(pool.clone())
+        .block(&alice, &carol)
+        .await
+        .unwrap();
+
+    let unread = |of: &domain::identity::Account| {
+        let (conversations, of) = (&conversations, of.clone());
+        async move { conversations.list_for(of.id, &of.actor_uri).await.unwrap()[0].unread_count }
+    };
+    assert_eq!(unread(&alice).await, 1, "bob's message only");
+    assert_eq!(unread(&bob).await, 2, "a block is its owner's");
 }

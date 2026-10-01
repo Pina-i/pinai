@@ -3,7 +3,8 @@ use std::sync::Arc;
 use domain::UserId;
 use domain::identity::{Account, Accounts, ActorUri, RemoteActors};
 use domain::social::{
-    FriendshipEvent, FriendshipStatus, SocialError, SocialFederation, SocialGraph, SocialNotifier,
+    FriendshipEvent, FriendshipStatus, Reachability, SocialError, SocialFederation, SocialGraph,
+    SocialNotifier,
 };
 
 /// An inbound `Follow`: someone asks the inbox owner to become friends. Peers deliver at least
@@ -12,6 +13,7 @@ pub struct ReceiveFollow {
     accounts: Arc<dyn Accounts>,
     remote_actors: Arc<dyn RemoteActors>,
     graph: Arc<dyn SocialGraph>,
+    reach: Arc<dyn Reachability>,
     notifier: Arc<dyn SocialNotifier>,
     federation: Arc<dyn SocialFederation>,
 }
@@ -21,6 +23,7 @@ impl ReceiveFollow {
         accounts: Arc<dyn Accounts>,
         remote_actors: Arc<dyn RemoteActors>,
         graph: Arc<dyn SocialGraph>,
+        reach: Arc<dyn Reachability>,
         notifier: Arc<dyn SocialNotifier>,
         federation: Arc<dyn SocialFederation>,
     ) -> Self {
@@ -28,6 +31,7 @@ impl ReceiveFollow {
             accounts,
             remote_actors,
             graph,
+            reach,
             notifier,
             federation,
         }
@@ -35,6 +39,15 @@ impl ReceiveFollow {
 
     pub async fn execute(&self, recipient: UserId, follower: ActorUri) -> Result<(), SocialError> {
         let recipient = self.recipient(recipient).await?;
+        if !self
+            .reach
+            .relation(recipient.id, &follower)
+            .await?
+            .hears_requests()
+        {
+            tracing::debug!(%follower, "follow dropped");
+            return Ok(());
+        }
 
         if let Some(existing) = self.graph.between(recipient.id, &follower).await?
             && existing.status == FriendshipStatus::Accepted

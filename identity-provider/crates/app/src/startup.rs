@@ -11,8 +11,9 @@ use application::messaging::{
     SetMemberRole, SweepOrphanAttachments, SweepStaleDeliveries, UploadAttachments,
 };
 use application::social::{
-    AcceptFriendRequest, DeclineFriendRequest, ListFriends, ListIncomingRequests, ReceiveAccept,
-    ReceiveFollow, ReceiveReject, ReceiveUndoFollow, SendFriendRequest, Unfriend,
+    AcceptFriendRequest, Block, DeclineFriendRequest, ListBlocks, ListFriends,
+    ListIncomingRequests, ReceiveAccept, ReceiveFollow, ReceiveReject, ReceiveUndoFollow,
+    SendFriendRequest, SetContactPolicy, Unblock, Unfriend,
 };
 use axum::Router;
 use connections::Hub;
@@ -181,6 +182,11 @@ impl Application {
             ));
         let graph: Arc<dyn domain::social::SocialGraph> =
             Arc::new(infrastructure::postgres::PgSocialGraph::new(pool.clone()));
+        let reach: Arc<dyn domain::social::Reachability> =
+            Arc::new(infrastructure::postgres::PgReachability::new(pool.clone()));
+        let contact_policies: Arc<dyn domain::social::ContactPolicies> = Arc::new(
+            infrastructure::postgres::PgContactPolicies::new(pool.clone()),
+        );
         let social_notifier: Arc<dyn domain::social::SocialNotifier> = Arc::new(
             infrastructure::realtime::HubSocialNotifier::new(Arc::clone(&hub)),
         );
@@ -221,6 +227,7 @@ impl Application {
             Arc::clone(&remote_actors),
             Arc::clone(&conversations),
             Arc::clone(&messages),
+            Arc::clone(&reach),
             Arc::clone(&message_notifier),
         ));
         let deliver_direct_message = Arc::new(DeliverDirectMessage::new(
@@ -234,11 +241,14 @@ impl Application {
             Arc::clone(&remote_actors),
             Arc::clone(&conversations),
             Arc::clone(&messages),
+            Arc::clone(&reach),
             Arc::clone(&message_notifier),
             Arc::clone(&group_notifier),
         ));
         let receive_edit = Arc::new(ReceiveEdit::new(
+            Arc::clone(&conversations),
             Arc::clone(&messages),
+            Arc::clone(&reach),
             Arc::clone(&message_notifier),
         ));
         let attachments: Arc<dyn domain::messaging::Attachments> =
@@ -364,6 +374,7 @@ impl Application {
             Arc::clone(&accounts),
             Arc::clone(&conversations),
             Arc::clone(&welcomes),
+            Arc::clone(&reach),
             Arc::clone(&mls_notifier),
             Arc::clone(&group_notifier),
         ));
@@ -382,6 +393,7 @@ impl Application {
             Arc::clone(&remote_actors),
             Arc::clone(&conversations),
             Arc::clone(&messages),
+            Arc::clone(&reach),
             Arc::clone(&message_notifier),
             Arc::clone(&message_federation),
         ));
@@ -452,6 +464,7 @@ impl Application {
             Arc::clone(&accounts),
             Arc::clone(&remote_actors),
             Arc::clone(&graph),
+            Arc::clone(&reach),
             Arc::clone(&social_notifier),
             Arc::clone(&social_federation),
         ));
@@ -586,11 +599,13 @@ impl Application {
                 origin.clone(),
                 Arc::clone(&profiles),
                 Arc::clone(&settings_store),
+                Arc::clone(&contact_policies),
             )),
             edit_profile: Arc::new(application::profile::EditProfile::new(
                 origin.clone(),
                 Arc::clone(&profiles),
                 settings_store,
+                Arc::clone(&contact_policies),
                 Arc::clone(&profile_audience),
                 Arc::clone(&profile_notifier),
                 Arc::clone(&profile_federation),
@@ -613,6 +628,7 @@ impl Application {
                 Arc::clone(&accounts),
                 Arc::clone(&remote_actors),
                 Arc::clone(&graph),
+                Arc::clone(&reach),
                 Arc::clone(&social_notifier),
                 Arc::clone(&social_federation),
             )),
@@ -644,6 +660,20 @@ impl Application {
                 Arc::clone(&friend_presence),
             )),
             list_friends: Arc::new(ListFriends::new(Arc::clone(&graph))),
+            block: Arc::new(Block::new(
+                Arc::clone(&accounts),
+                Arc::clone(&remote_actors),
+                Arc::clone(&graph),
+                Arc::clone(&social_notifier),
+                Arc::clone(&social_federation),
+                Arc::clone(&friend_presence),
+            )),
+            unblock: Arc::new(Unblock::new(
+                Arc::clone(&graph),
+                Arc::clone(&social_notifier),
+            )),
+            list_blocks: Arc::new(ListBlocks::new(Arc::clone(&graph))),
+            set_contact_policy: Arc::new(SetContactPolicy::new(Arc::clone(&contact_policies))),
             send_direct_message: Arc::clone(&send_direct_message),
             deliver_direct_message: Arc::clone(&deliver_direct_message),
             send_group_message,
@@ -652,9 +682,11 @@ impl Application {
             mark_read,
             list_conversations,
             create_group: Arc::new(CreateGroup::new(
+                origin.clone(),
                 Arc::clone(&accounts),
                 Arc::clone(&remote_actors),
                 Arc::clone(&conversations),
+                Arc::clone(&reach),
                 Arc::clone(&group_notifier),
             )),
             list_group_members: Arc::new(ListGroupMembers::new(
@@ -663,9 +695,11 @@ impl Application {
                 Arc::clone(&conversations),
             )),
             add_group_member: Arc::new(AddGroupMember::new(
+                origin.clone(),
                 Arc::clone(&accounts),
                 Arc::clone(&remote_actors),
                 Arc::clone(&conversations),
+                Arc::clone(&reach),
                 Arc::clone(&group_notifier),
             )),
             remove_group_member: Arc::new(RemoveGroupMember::new(
@@ -718,6 +752,7 @@ impl Application {
                     Arc::clone(&keypair),
                     url_policy,
                 )),
+                Arc::clone(&reach),
             )),
             key_package_status: Arc::new(application::e2ee::KeyPackageStatus::new(
                 key_package_policy,
@@ -807,6 +842,7 @@ impl Application {
                 Arc::clone(&remote_actors),
                 Arc::clone(&conversations),
                 welcomes,
+                Arc::clone(&reach),
                 mls_notifier,
                 mls_federation,
             )),

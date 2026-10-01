@@ -6,6 +6,7 @@ use domain::messaging::testing::{
     InMemoryMessaging, MessageNotice, RecordingMessageNotifier, Uploads,
 };
 use domain::messaging::{ConversationKind, DeliveryStatus, MessageEvent};
+use domain::social::testing::{BLOCKED, KEPT_OUT_BY_THE_SETTING, StubReachability};
 
 use super::*;
 
@@ -15,6 +16,7 @@ struct World {
     carol: RemoteActor,
     store: Arc<InMemoryMessaging>,
     notifier: Arc<RecordingMessageNotifier>,
+    reach: Arc<StubReachability>,
     send: SendDirectMessage,
 }
 
@@ -23,6 +25,7 @@ fn world() -> World {
     let carol = remote_actor("carol_k2m9x@idp.carol.test");
     let store = Arc::new(InMemoryMessaging::default());
     let notifier = Arc::new(RecordingMessageNotifier::default());
+    let reach = Arc::new(StubReachability::default());
     let send = SendDirectMessage::new(
         InstanceOrigin::parse("http://localhost:8080").unwrap(),
         2,
@@ -30,6 +33,7 @@ fn world() -> World {
         Arc::new(InMemoryRemoteActors::with([carol.clone()])),
         store.clone(),
         store.clone(),
+        reach.clone(),
         notifier.clone(),
     );
     World {
@@ -38,6 +42,7 @@ fn world() -> World {
         carol,
         store,
         notifier,
+        reach,
         send,
     }
 }
@@ -274,4 +279,90 @@ async fn a_reply_to_a_message_of_another_conversation_is_refused() {
         refused.map(|s| s.message)
     );
     assert_eq!(w.notifier.sent().len(), notices, "nothing announced");
+}
+
+impl World {
+    async fn conversations_of(&self, account: &Account) -> usize {
+        self.store
+            .list_for(account.id, &account.actor_uri)
+            .await
+            .unwrap()
+            .len()
+    }
+}
+
+#[tokio::test]
+async fn a_message_to_someone_the_sender_blocked_is_refused_and_stores_nothing() {
+    let w = world();
+    w.reach.set(w.alice.id, &w.bob.actor_uri, BLOCKED);
+    w.reach.set(w.alice.id, &w.carol.actor_uri, BLOCKED);
+
+    for recipient in [local(&w.bob), remote()] {
+        let refused = w.send.execute(w.alice.id, to(recipient)).await;
+
+        assert!(
+            matches!(refused, Err(MessagingError::YouBlocked)),
+            "{:?}",
+            refused.map(|_| ())
+        );
+    }
+    assert_eq!(w.conversations_of(&w.alice).await, 0);
+    assert!(w.notifier.sent().is_empty());
+}
+
+/// Bob must not tell a block from Alice's setting: both are the same refusal, and leave no DM
+/// for either of them to list.
+#[tokio::test]
+async fn a_local_recipient_who_cannot_be_reached_gets_nothing_whatever_the_cause() {
+    let mut refusals = Vec::new();
+    for kept_out in [BLOCKED, KEPT_OUT_BY_THE_SETTING] {
+        let w = world();
+        w.reach.set(w.bob.id, &w.alice.actor_uri, kept_out);
+
+        let refused = w.send.execute(w.alice.id, to(local(&w.bob))).await;
+
+        refusals.push(format!("{:?}", refused.map(|_| ())));
+        assert_eq!(w.conversations_of(&w.alice).await, 0);
+        assert_eq!(w.conversations_of(&w.bob).await, 0);
+        assert!(w.notifier.sent().is_empty());
+    }
+    assert_eq!(refusals, vec!["Err(Undeliverable)"; 2]);
+}
+
+#[tokio::test]
+async fn a_message_to_an_instance_that_does_not_answer_is_refused_and_stores_nothing() {
+    let alice = account("alice");
+    let store = Arc::new(InMemoryMessaging::default());
+    let send = SendDirectMessage::new(
+        InstanceOrigin::parse("http://localhost:8080").unwrap(),
+        2,
+        Arc::new(InMemoryAccounts::with([alice.clone()])),
+        Arc::new(InMemoryRemoteActors::default().and_down("idp.down.test")),
+        store.clone(),
+        store.clone(),
+        Arc::new(StubReachability::default()),
+        Arc::new(RecordingMessageNotifier::default()),
+    );
+
+    let refused = send
+        .execute(
+            alice.id,
+            to(Recipient::Remote(
+                FederatedAddress::parse("dave_k2m9x@idp.down.test").unwrap(),
+            )),
+        )
+        .await;
+
+    assert!(
+        matches!(refused, Err(MessagingError::PeerUnavailable(_))),
+        "{:?}",
+        refused.map(|_| ())
+    );
+    assert!(
+        store
+            .list_for(alice.id, &alice.actor_uri)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }

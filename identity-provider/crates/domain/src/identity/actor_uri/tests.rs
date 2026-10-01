@@ -24,6 +24,20 @@ fn anything_but_a_plain_http_url_is_refused() {
 }
 
 #[test]
+fn an_actor_uri_is_at_most_2_kib() {
+    let of_length = |len: usize| {
+        let prefix = "https://idp.example/users/";
+        format!("{prefix}{}", "a".repeat(len - prefix.len()))
+    };
+
+    assert!(ActorUri::parse(&of_length(ActorUri::MAX_BYTES)).is_ok());
+    assert!(ActorUri::parse(&of_length(ActorUri::MAX_BYTES + 1)).is_err());
+    // Measured as stored: `é` is written `%C3%A9`.
+    let encoded = format!("{}é", of_length(ActorUri::MAX_BYTES - 5));
+    assert!(ActorUri::parse(&encoded).is_err());
+}
+
+#[test]
 fn a_users_uri_gives_the_address_it_stands_for() {
     let address = |raw: &str| {
         ActorUri::parse(raw)

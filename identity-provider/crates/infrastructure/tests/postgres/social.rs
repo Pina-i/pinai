@@ -1,5 +1,5 @@
 use domain::ConversationId;
-use domain::identity::Account;
+use domain::identity::{Account, ActorUri};
 use domain::social::SocialGraph;
 use domain::social::testing::{AccountEdits, contract};
 use infrastructure::postgres::PgSocialGraph;
@@ -245,4 +245,91 @@ async fn an_advertised_id_naming_another_pairs_dm_opens_a_separate_one(pool: PgP
         &carol,
     )
     .await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn a_block_ends_both_local_sides_of_a_friendship_at_once(pool: PgPool) {
+    let (alice, bob) = (
+        an_account(&pool, "alice").await,
+        an_account(&pool, "bob").await,
+    );
+
+    contract::a_block_ends_both_local_sides_of_a_friendship_at_once(
+        &PgSocialGraph::new(pool),
+        &alice,
+        &bob,
+    )
+    .await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn a_request_the_blocked_account_sent_ends_with_the_block(pool: PgPool) {
+    let (alice, bob) = (
+        an_account(&pool, "alice").await,
+        an_account(&pool, "bob").await,
+    );
+
+    contract::a_request_the_blocked_account_sent_ends_with_the_block(
+        &PgSocialGraph::new(pool),
+        &alice,
+        &bob,
+    )
+    .await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn a_block_is_kept_once_and_lifted_once(pool: PgPool) {
+    let alice = an_account(&pool, "alice").await;
+
+    contract::a_block_is_kept_once_and_lifted_once(&PgSocialGraph::new(pool), &alice).await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn blocks_are_listed_newest_first(pool: PgPool) {
+    let (alice, bob) = (
+        an_account(&pool, "alice").await,
+        an_account(&pool, "bob").await,
+    );
+
+    contract::blocks_are_listed_newest_first(&PgSocialGraph::new(pool), &alice, &bob).await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn a_block_leaves_the_owners_other_friendships_alone(pool: PgPool) {
+    let alice = an_account(&pool, "alice").await;
+    let bob = an_account(&pool, "bob").await;
+    let pierre = an_account(&pool, "pierre").await;
+
+    contract::a_block_leaves_the_owners_other_friendships_alone(
+        &PgSocialGraph::new(pool),
+        &alice,
+        &bob,
+        &pierre,
+    )
+    .await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn a_block_goes_with_its_owners_account(pool: PgPool) {
+    let alice = an_account(&pool, "alice").await;
+    let graph = PgSocialGraph::new(pool.clone());
+    graph
+        .block(
+            &alice,
+            &ActorUri::parse("https://idp.bob.test/users/bob_zz9yy").unwrap(),
+        )
+        .await
+        .unwrap();
+
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(alice.id.as_uuid())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let left: i64 = sqlx::query_scalar("SELECT count(*) FROM user_blocks")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(left, 0);
 }

@@ -237,6 +237,8 @@ fn offered_attachments(value: Option<&Value>) -> Vec<OfferedAttachment> {
 
 fn messaging_refused(error: MessagingError) -> ApiError {
     match error {
+        // The answer a local sender gets, so that nothing tells a peer more.
+        undeliverable @ MessagingError::Undeliverable => undeliverable.into(),
         MessagingError::Unexpected(e) => ApiError::internal(e),
         other => ApiError::bad_request(other.to_string()),
     }
@@ -244,6 +246,7 @@ fn messaging_refused(error: MessagingError) -> ApiError {
 
 fn delivery_refused(error: DeliveryError) -> ApiError {
     match error {
+        unreachable @ DeliveryError::Unreachable => unreachable.into(),
         DeliveryError::Unexpected(e) => ApiError::internal(e),
         other => ApiError::bad_request(other.to_string()),
     }

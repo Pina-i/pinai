@@ -22,9 +22,10 @@ use domain::profile::{
     PublicProfile,
 };
 use domain::settings::{SettingsDocument, SettingsStore};
+use domain::social::{ContactPolicies, ContactPolicy};
 
-/// `/userinfo`: the account as its owner sees it, how other accounts address it, and its
-/// settings.
+/// `/userinfo`: the account as its owner sees it, how other accounts address it, its settings,
+/// and who may reach it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Userinfo {
     pub profile: OwnProfile,
@@ -32,11 +33,13 @@ pub struct Userinfo {
     pub address: String,
     pub actor_uri: String,
     pub settings: SettingsDocument,
+    pub contact_policy: ContactPolicy,
 }
 
 pub(crate) async fn userinfo(
     origin: &InstanceOrigin,
     settings: &dyn SettingsStore,
+    contact_policies: &dyn ContactPolicies,
     profile: OwnProfile,
 ) -> Result<Userinfo, ProfileError> {
     let address = format!("{}@{}", profile.username, origin.domain());
@@ -48,11 +51,13 @@ pub(crate) async fn userinfo(
         .load(profile.id)
         .await?
         .unwrap_or_else(SettingsDocument::empty);
+    let contact_policy = contact_policies.get(profile.id).await?;
     Ok(Userinfo {
         profile,
         address,
         actor_uri,
         settings,
+        contact_policy,
     })
 }
 

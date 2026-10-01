@@ -278,6 +278,20 @@ impl TestApp {
         tokens["access_token"].as_str().unwrap().to_owned()
     }
 
+    /// A count straight from the instance's database, for what no route shows.
+    pub async fn count(&self, query: &str) -> i64 {
+        let server = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://test:test@localhost:55432/test".into());
+        let base = &server[..server.rfind('/').unwrap()];
+        let mut connection = PgConnection::connect(&format!("{base}/{}", self.database))
+            .await
+            .unwrap();
+        sqlx::query_scalar(query)
+            .fetch_one(&mut connection)
+            .await
+            .unwrap()
+    }
+
     /// Stops the application and waits for it, then drops its database.
     pub async fn stop(self) -> anyhow::Result<()> {
         self.stop.cancel();

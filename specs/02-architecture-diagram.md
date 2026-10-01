@@ -18,8 +18,8 @@ flowchart TD
         WS_A["⚡ WebSocket Layer\nthin delivery only"]
 
         subgraph Broker_A["Redis (idp.alice.com)"]
-            PUBSUB_A["📡 pub-sub\nPresence — ephemeral"]
-            STREAMS_A["🌊 Streams\nDMs · profile updates · friend requests"]
+            PUBSUB_A["📡 pub-sub\nPresence · typing — ephemeral"]
+            STREAMS_A["🌊 Streams\nDMs — durable"]
         end
 
         subgraph DB_Alice["PostgreSQL (idp.alice.com)"]
@@ -37,8 +37,8 @@ flowchart TD
         WS_B["⚡ WebSocket Layer\nthin delivery only"]
 
         subgraph Broker_B["Redis (idp.bob.com)"]
-            PUBSUB_B["📡 pub-sub\nPresence — ephemeral"]
-            STREAMS_B["🌊 Streams\nDMs · profile updates · friend requests"]
+            PUBSUB_B["📡 pub-sub\nPresence · typing — ephemeral"]
+            STREAMS_B["🌊 Streams\nDMs — durable"]
         end
 
         subgraph DB_Bob["PostgreSQL (idp.bob.com)"]
@@ -70,6 +70,7 @@ flowchart TD
 
     MSG_A -->|"publish durable event"| STREAMS_A
     MSG_A -->|"publish presence"| PUBSUB_A
+    MSG_A -->|"push to live sessions:\nprofile · friendship events"| WS_A
     STREAMS_A -->|"consume & push"| WS_A
     PUBSUB_A  -->|"consume & push"| WS_A
 
@@ -81,6 +82,7 @@ flowchart TD
 
     MSG_B -->|"publish durable event"| STREAMS_B
     MSG_B -->|"publish presence"| PUBSUB_B
+    MSG_B -->|"push to live sessions:\nprofile · friendship events"| WS_B
     STREAMS_B -->|"consume & push"| WS_B
     PUBSUB_B  -->|"consume & push"| WS_B
 

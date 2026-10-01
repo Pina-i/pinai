@@ -8,6 +8,7 @@ mod key_directory;
 mod messaging;
 mod presence;
 mod profile;
+mod reach;
 mod settings;
 mod social;
 
@@ -23,5 +24,6 @@ pub use key_directory::{PgDevices, PgKeyPackages};
 pub use messaging::{PgConversations, PgMessages};
 pub use presence::PgPresenceAudience;
 pub use profile::{PgPeerProfiles, PgProfileAudience, PgProfiles};
+pub use reach::{PgContactPolicies, PgReachability};
 pub use settings::PgSettingsStore;
 pub use social::PgSocialGraph;

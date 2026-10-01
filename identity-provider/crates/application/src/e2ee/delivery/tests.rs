@@ -11,6 +11,7 @@ use domain::identity::testing::{InMemoryAccounts, InMemoryRemoteActors, account,
 use domain::identity::{Account, ActorUri, InstanceOrigin, RemoteActor};
 use domain::messaging::testing::{GroupNotice, InMemoryMessaging, RecordingGroupNotifier};
 use domain::messaging::{Conversations, GroupName, GroupSnapshot, Member, Role};
+use domain::social::testing::{BLOCKED, KEPT_OUT_BY_THE_SETTING, StubReachability};
 use domain::{ConversationId, DeviceId, UserId};
 use time::{Duration, OffsetDateTime};
 
@@ -29,6 +30,7 @@ struct World {
     notifier: Arc<RecordingMlsNotifier>,
     federation: Arc<RecordingMlsFederation>,
     groups: Arc<RecordingGroupNotifier>,
+    reach: Arc<StubReachability>,
     append: AppendCommit,
     catch_up: CatchUpCommits,
     claim: ClaimWelcomes,
@@ -90,6 +92,7 @@ async fn world() -> World {
     let notifier = Arc::new(RecordingMlsNotifier::default());
     let federation = Arc::new(RecordingMlsFederation::default());
     let groups = Arc::new(RecordingGroupNotifier::default());
+    let reach = Arc::new(StubReachability::default());
     World {
         append: AppendCommit::new(
             accounts.clone(),
@@ -107,6 +110,7 @@ async fn world() -> World {
             remote_actors,
             store.clone(),
             delivery.clone(),
+            reach.clone(),
             notifier.clone(),
             federation.clone(),
         ),
@@ -120,6 +124,7 @@ async fn world() -> World {
             accounts,
             store.clone(),
             delivery.clone(),
+            reach.clone(),
             notifier.clone(),
             groups.clone(),
         ),
@@ -136,6 +141,7 @@ async fn world() -> World {
         notifier,
         federation,
         groups,
+        reach,
     }
 }
 
@@ -693,4 +699,128 @@ async fn claimed_welcomes_are_swept_once_their_grace_is_over() {
     let after = w.sweep.execute(now + Duration::days(2)).await.unwrap();
 
     assert_eq!((within, after), (0, 1));
+}
+
+fn crew_with_alice(w: &World) -> GroupSnapshot {
+    GroupSnapshot {
+        name: Some("crew".to_owned()),
+        members: vec![
+            member(&w.carol.actor_uri, Role::Admin),
+            member(&w.alice.actor_uri, Role::Member),
+        ],
+    }
+}
+
+#[tokio::test]
+async fn a_dms_welcome_to_a_local_member_who_does_not_admit_the_sender_is_refused() {
+    let mut refusals = Vec::new();
+    for kept_out in [BLOCKED, KEPT_OUT_BY_THE_SETTING] {
+        let w = world().await;
+        w.reach.set(w.bob.id, &w.alice.actor_uri, kept_out);
+
+        let refused = w.welcome(&w.alice, &w.bob.actor_uri, w.dm).await;
+
+        refusals.push(format!("{:?}", refused.map(|_| ())));
+        assert!(w.notifier.welcomes_ready().is_empty());
+    }
+    assert_eq!(refusals, vec!["Err(Unreachable)"; 2]);
+}
+
+/// Joining a group went through its own checks; a Welcome there only admits a member's device.
+#[tokio::test]
+async fn a_groups_welcome_and_ones_own_are_never_checked() {
+    let w = world().await;
+    w.reach.set(w.bob.id, &w.alice.actor_uri, BLOCKED);
+    w.reach
+        .set(w.alice.id, &w.alice.actor_uri, KEPT_OUT_BY_THE_SETTING);
+
+    let to_bob = w.welcome(&w.alice, &w.bob.actor_uri, w.group).await;
+    let to_herself = w.welcome(&w.alice, &w.alice.actor_uri, w.dm).await;
+
+    assert!(to_bob.is_ok(), "{:?}", to_bob.map(|_| ()));
+    assert!(to_herself.is_ok(), "{:?}", to_herself.map(|_| ()));
+}
+
+#[tokio::test]
+async fn an_inbound_dm_welcome_from_someone_who_cannot_reach_the_recipient_opens_nothing() {
+    let mut refusals = Vec::new();
+    for kept_out in [BLOCKED, KEPT_OUT_BY_THE_SETTING] {
+        let w = world().await;
+        w.reach.set(w.alice.id, &w.carol.actor_uri, kept_out);
+        let dm = ConversationId::generate();
+
+        let refused = w
+            .receive_welcome
+            .execute(w.incoming_welcome(&w.carol.actor_uri, dm, None))
+            .await;
+
+        refusals.push(format!("{refused:?}"));
+        assert_eq!(Conversations::find(&*w.store, dm).await.unwrap(), None);
+        assert!(w.notifier.welcomes_ready().is_empty());
+    }
+    assert_eq!(refusals, vec!["Err(Unreachable)"; 2]);
+}
+
+#[tokio::test]
+async fn an_inbound_welcome_into_a_group_new_here_from_someone_kept_out_mirrors_nothing() {
+    let w = world().await;
+    w.reach
+        .set(w.alice.id, &w.carol.actor_uri, KEPT_OUT_BY_THE_SETTING);
+    let group = ConversationId::generate();
+
+    let refused = w
+        .receive_welcome
+        .execute(w.incoming_welcome(&w.carol.actor_uri, group, Some(crew_with_alice(&w))))
+        .await;
+
+    assert!(
+        matches!(refused, Err(DeliveryError::Unreachable)),
+        "{refused:?}"
+    );
+    assert_eq!(Conversations::find(&*w.store, group).await.unwrap(), None);
+    assert!(w.groups.sent().is_empty());
+    assert!(w.notifier.welcomes_ready().is_empty());
+}
+
+#[tokio::test]
+async fn an_inbound_welcome_into_a_group_the_recipient_is_in_is_never_checked() {
+    let w = world().await;
+    w.reach.set(w.alice.id, &w.carol.actor_uri, BLOCKED);
+    let roster = GroupSnapshot {
+        name: Some("crew".to_owned()),
+        members: vec![
+            member(&w.alice.actor_uri, Role::Admin),
+            member(&w.bob.actor_uri, Role::Member),
+            member(&w.carol.actor_uri, Role::Member),
+        ],
+    };
+
+    let welcomed = w
+        .receive_welcome
+        .execute(w.incoming_welcome(&w.carol.actor_uri, w.group, Some(roster)))
+        .await;
+
+    assert!(welcomed.is_ok(), "{welcomed:?}");
+}
+
+#[tokio::test]
+async fn an_inbound_welcome_into_a_dm_the_two_already_share_is_checked_too() {
+    let w = world().await;
+    let dm = w
+        .store
+        .open_dm(&w.alice.actor_uri, &w.carol.actor_uri, None)
+        .await
+        .unwrap();
+    w.reach.set(w.alice.id, &w.carol.actor_uri, BLOCKED);
+
+    let refused = w
+        .receive_welcome
+        .execute(w.incoming_welcome(&w.carol.actor_uri, dm, None))
+        .await;
+
+    assert!(
+        matches!(refused, Err(DeliveryError::Unreachable)),
+        "{refused:?}"
+    );
+    assert!(w.notifier.welcomes_ready().is_empty());
 }
