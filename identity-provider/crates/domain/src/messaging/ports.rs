@@ -6,8 +6,8 @@ use crate::{AttachmentId, ConversationId, MessageId, UserId};
 use super::{
     Attachment, ByteStream, Conversation, ConversationKind, ConversationSummary, DeliveryStatus,
     Departure, EventWindow, GroupChange, GroupChanges, GroupEvent, GroupName, GroupSnapshot,
-    HistoryCursor, Member, Membership, Message, MessageStoreError, MlsCiphertext, NamedEvent,
-    NewMessage, ObjectStoreError, RemoteAttachment, Role,
+    HistoryCursor, Member, Membership, Message, MessageStoreError, Mirrored, MlsCiphertext,
+    NamedEvent, NewMessage, ObjectStoreError, RemoteAttachment, Role,
 };
 
 /// Conversations and who is in them.
@@ -38,12 +38,14 @@ pub trait Conversations: Send + Sync {
     ) -> Result<Vec<ConversationId>, MessageStoreError>;
 
     /// Take what another instance's snapshot changed (`GroupSnapshot::changes`): create the group
-    /// when new, under the name the changes carry, and hold each member exactly as given.
+    /// when new, under the name the changes carry, and hold each member exactly as given. Several
+    /// can mirror one group at once — each member's inbox gets its own Note — and each member is
+    /// brought in by one of them only.
     async fn mirror_group(
         &self,
         id: ConversationId,
         changes: &GroupChanges,
-    ) -> Result<Conversation, MessageStoreError>;
+    ) -> Result<Mirrored, MessageStoreError>;
 
     /// The account's conversations, the most recently active first, and the groups it was
     /// removed from and hasn't cleared, as they stood then. Messages from actors the account

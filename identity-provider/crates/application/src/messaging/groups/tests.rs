@@ -935,6 +935,7 @@ fn receive(w: &World) -> ReceiveGroupChange {
         w.accounts.clone(),
         w.remote_actors.clone(),
         w.store.clone(),
+        w.reach.clone(),
         w.notifier.clone(),
         w.store.clone(),
     )
@@ -1121,6 +1122,36 @@ async fn a_leave_a_rename_and_a_role_made_elsewhere_are_taken() {
         carol.clone(),
         None
     )));
+}
+
+#[tokio::test]
+async fn an_add_made_elsewhere_brings_in_no_account_here_who_does_not_admit_its_maker() {
+    for kept_out in [KEPT_OUT_BY_THE_SETTING, BLOCKED] {
+        let w = world();
+        let group = carols(&w).await;
+        w.reach.set(w.eve.id, &w.carol.actor_uri, kept_out);
+        let add = by(
+            &w.carol.actor_uri,
+            group,
+            GroupChangeKind::Added(w.eve.actor_uri.clone()),
+        );
+
+        // Through a member's inbox, and through her own.
+        for inbox in [w.alice.id, w.eve.id] {
+            receive(&w).execute(inbox, add.clone()).await.unwrap();
+        }
+
+        assert!(
+            !w.store
+                .members(group)
+                .await
+                .unwrap()
+                .iter()
+                .any(|m| m.actor_uri == w.eve.actor_uri)
+        );
+        assert!(w.notifier.sent().is_empty(), "{:?}", w.notifier.sent());
+        assert!(lines(&w, group).await.is_empty());
+    }
 }
 
 #[tokio::test]

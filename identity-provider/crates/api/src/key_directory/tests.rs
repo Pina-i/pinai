@@ -581,3 +581,37 @@ async fn a_claim_by_someone_the_owner_does_not_admit_is_refused_alike_whatever_t
         ]
     );
 }
+
+#[tokio::test]
+async fn a_claim_for_each_device_answers_one_package_of_every_device_that_has_one() {
+    let w = world();
+    let (laptop, phone) = (Uuid::new_v4(), Uuid::new_v4());
+    w.upload(&w.alice, laptop, packages(3)).await;
+    w.upload(&w.alice, phone, packages(1)).await;
+
+    let (status, body) = w
+        .app
+        .call(
+            Method::POST,
+            "/api/keys/packages/claim/devices",
+            Some(w.bob.id),
+            Some(json!({ "actor_uri": w.alice.actor_uri.to_string() })),
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let mut devices: Vec<Value> = body["claims"]
+        .as_array()
+        .expect("a list of claims")
+        .iter()
+        .map(|claim| {
+            assert_eq!(b64(&claim["key_package"]), vec![1; 8]);
+            time(&claim["expires_at"]);
+            claim["device_id"].clone()
+        })
+        .collect();
+    devices.sort_by_key(|d| d.to_string());
+    let mut expected = vec![json!(laptop), json!(phone)];
+    expected.sort_by_key(|d| d.to_string());
+    assert_eq!(devices, expected);
+}

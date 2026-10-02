@@ -16,7 +16,7 @@ use super::{
     Departure, DirectDelivery, EventWindow, GroupChange, GroupChanges, GroupEvent, GroupEvents,
     GroupFederation, GroupName, GroupNotifier, GroupSnapshot, HistoryCursor, Member, MemberView,
     Membership, Message, MessageEvent, MessageFederation, MessageNotifier, MessageStoreError,
-    Messages, MlsCiphertext, NamedEvent, NewMessage, ObjectStore, ObjectStoreError,
+    Messages, Mirrored, MlsCiphertext, NamedEvent, NewMessage, ObjectStore, ObjectStoreError,
     RemoteAttachment, RemoteFiles, Role, SnapshotMember, may_hold_dm,
 };
 
@@ -387,7 +387,7 @@ impl Conversations for InMemoryMessaging {
         &self,
         id: ConversationId,
         changes: &GroupChanges,
-    ) -> Result<Conversation, MessageStoreError> {
+    ) -> Result<Mirrored, MessageStoreError> {
         let mut state = self.state.lock().unwrap();
         match state.conversations.iter_mut().find(|c| c.id == id) {
             Some(existing) => {
@@ -406,11 +406,19 @@ impl Conversations for InMemoryMessaging {
                 state.create(id, ConversationKind::Group, name, at);
             }
         }
+        let mut brought_in = Vec::new();
         for membership in &changes.members {
+            let actor = &membership.member.actor_uri;
+            if !state.is_active(id, actor) {
+                brought_in.push(actor.clone());
+            }
             state.hold(id, membership);
         }
         let group = state.conversations.iter().find(|c| c.id == id).cloned();
-        Ok(group.expect("just mirrored"))
+        Ok(Mirrored {
+            group: group.expect("just mirrored"),
+            brought_in,
+        })
     }
 
     async fn list_for(
@@ -1539,11 +1547,16 @@ pub mod contract {
             ],
         };
 
-        let group = conversations.mirror_group(id, &changes).await.unwrap();
+        let mirrored = conversations.mirror_group(id, &changes).await.unwrap();
 
+        let group = mirrored.group;
         assert_eq!(
             (group.id, group.kind, group.name.as_deref(), group.name_at),
             (id, ConversationKind::Group, Some("crew"), stamp(10))
+        );
+        assert_eq!(
+            mirrored.brought_in,
+            vec![remote("ana"), alice.actor_uri.clone()]
         );
         assert_eq!(conversations.find(id).await.unwrap(), Some(group));
         assert_eq!(
@@ -1590,6 +1603,8 @@ pub mod contract {
             .await
             .unwrap();
 
+        assert_eq!(renamed.brought_in, vec![remote("cy")], "back; alice was in");
+        let renamed = renamed.group;
         assert_eq!(
             (renamed.name.as_deref(), renamed.name_at),
             (Some("new crew"), stamp(20))
@@ -1610,7 +1625,8 @@ pub mod contract {
         let unnamed = conversations
             .mirror_group(id, &GroupChanges::default())
             .await
-            .unwrap();
+            .unwrap()
+            .group;
         assert_eq!(
             (unnamed.name.as_deref(), unnamed.name_at),
             (Some("new crew"), stamp(20))

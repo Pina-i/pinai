@@ -763,6 +763,7 @@ impl Application {
                 Arc::clone(&accounts),
                 Arc::clone(&remote_actors),
                 Arc::clone(&conversations),
+                Arc::clone(&reach),
                 Arc::clone(&group_notifier),
                 Arc::clone(&group_events),
             )),

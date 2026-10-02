@@ -617,6 +617,92 @@ async fn a_claim_that_leaves_a_device_at_the_threshold_tells_the_owner_to_refill
     assert_eq!(w.notifier.key_packages_low(), vec![w.alice.id]);
 }
 
+/// A contact's first add takes one of each device's, so every device of theirs reads the group.
+#[tokio::test]
+async fn a_claim_for_each_device_takes_the_oldest_package_of_every_device_that_has_one() {
+    let w = world();
+    let (laptop, phone) = (DeviceId::generate(), DeviceId::generate());
+    w.upload(&w.alice, laptop, vec![package(1)]).await;
+    w.upload(&w.alice, laptop, batch(5)).await;
+    w.upload(&w.alice, phone, vec![package(9)]).await;
+    let bob = Requester::User(w.bob.id);
+
+    let first = w.claim.each_device(&bob, &w.alice.actor_uri).await.unwrap();
+    let second = w.claim.each_device(&bob, &w.alice.actor_uri).await.unwrap();
+
+    let mut taken: Vec<_> = first
+        .iter()
+        .map(|c| (c.package.device, c.package.bytes.clone()))
+        .collect();
+    taken.sort_by_key(|(device, _)| device.as_uuid());
+    let mut expected = vec![(laptop, package(1).bytes), (phone, package(9).bytes)];
+    expected.sort_by_key(|(device, _)| device.as_uuid());
+    assert_eq!(taken, expected);
+    assert_eq!(
+        second.iter().map(|c| c.package.device).collect::<Vec<_>>(),
+        vec![laptop],
+        "the phone has none left"
+    );
+    assert_eq!(
+        w.notifier.key_packages_low(),
+        vec![w.alice.id],
+        "the phone ran out"
+    );
+}
+
+#[tokio::test]
+async fn a_claim_for_each_device_elsewhere_is_asked_of_its_instance() {
+    let w = world();
+
+    let claims = w
+        .claim
+        .each_device(&Requester::User(w.alice.id), &w.carol.actor_uri)
+        .await
+        .unwrap();
+
+    assert_eq!(claims, vec![w.carols_claim.clone()]);
+    assert_eq!(
+        w.remote.asked_each(),
+        vec![(w.alice.actor_uri.clone(), w.carol.actor_uri.clone())]
+    );
+}
+
+#[tokio::test]
+async fn a_claim_for_each_device_is_refused_as_a_claim_is() {
+    let w = world();
+    let device = DeviceId::generate();
+    w.upload(&w.alice, device, batch(2)).await;
+    w.reach.set(w.alice.id, &w.bob.actor_uri, BLOCKED);
+    let peer = ActorUri::parse("https://idp.carol.test/users/carol_k2m9x").unwrap();
+
+    let refused = w
+        .claim
+        .each_device(&Requester::User(w.bob.id), &w.alice.actor_uri)
+        .await;
+    let empty = w
+        .claim
+        .each_device(&Requester::User(w.alice.id), &w.bob.actor_uri)
+        .await;
+    let peer_elsewhere = w
+        .claim
+        .each_device(&Requester::Peer(peer), &w.carol.actor_uri)
+        .await;
+
+    assert!(
+        matches!(refused, Err(KeyDirectoryError::Unreachable)),
+        "{refused:?}"
+    );
+    assert_eq!(w.store.available(w.alice.id, device).await.unwrap(), 2);
+    assert!(
+        matches!(empty, Err(KeyDirectoryError::NoKeyPackage)),
+        "{empty:?}"
+    );
+    assert!(
+        matches!(peer_elsewhere, Err(KeyDirectoryError::PeerMustTargetLocal)),
+        "{peer_elsewhere:?}"
+    );
+}
+
 /// The owner's live devices refill then, so the next claim finds one.
 #[tokio::test]
 async fn a_claim_that_finds_no_package_tells_the_owner_to_refill() {

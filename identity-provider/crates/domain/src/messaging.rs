@@ -20,7 +20,7 @@ pub use attachment::{
 pub use ciphertext::MlsCiphertext;
 pub use conversation::{
     Conversation, ConversationKind, ConversationSummary, Departure, GroupChanges, GroupSnapshot,
-    Member, MemberView, Membership, Role, SnapshotMember, StampedName, may_hold_dm,
+    Member, MemberView, Membership, Mirrored, Role, SnapshotMember, StampedName, may_hold_dm,
 };
 pub use error::{AttachmentError, MessageStoreError, MessagingError, ObjectStoreError};
 pub use event::{EventWindow, GroupEvent, GroupEventKind, NamedEvent};

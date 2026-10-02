@@ -692,6 +692,107 @@ async fn an_inbound_welcome_mirrors_the_group_and_announces_it_to_the_newcomer_o
     );
 }
 
+/// Each line recorded, by whom it names, as the account `to` is told it.
+fn lines_told(w: &World, to: UserId) -> Vec<(String, Option<ActorUri>)> {
+    w.groups
+        .events()
+        .into_iter()
+        .filter(|(told, _)| *told == to)
+        .map(|(_, named)| {
+            (
+                named.event.kind_name().to_owned(),
+                named.event.subject().cloned(),
+            )
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_roster_brings_in_every_member_here_it_lists_and_announces_each_once() {
+    let w = world().await;
+    let group = ConversationId::generate();
+    let roster = unstamped(
+        Some("crew"),
+        &[
+            member(&w.carol.actor_uri, Role::Admin),
+            member(&w.alice.actor_uri, Role::Member),
+            member(&w.bob.actor_uri, Role::Member),
+        ],
+    );
+
+    // A Welcome reaches each member's inbox on its own; whichever comes first brings both in.
+    for recipient in [w.alice.id, w.bob.id, w.alice.id] {
+        w.receive_welcome
+            .execute(IncomingWelcome {
+                recipient,
+                ..w.incoming_welcome(&w.carol.actor_uri, group, Some(roster.clone()))
+            })
+            .await
+            .unwrap();
+    }
+
+    let mut joined = w.groups.sent();
+    joined.sort_by_key(|notice| format!("{notice:?}"));
+    let mut expected = vec![
+        GroupNotice::Joined(w.alice.id, group, w.carol.actor_uri.clone()),
+        GroupNotice::Joined(w.bob.id, group, w.carol.actor_uri.clone()),
+    ];
+    expected.sort_by_key(|notice| format!("{notice:?}"));
+    assert_eq!(joined, expected);
+    let added = |who: &Account| ("added".to_owned(), Some(who.actor_uri.clone()));
+    for to in [w.alice.id, w.bob.id] {
+        let mut lines = lines_told(&w, to);
+        lines.sort_by_key(|line| format!("{line:?}"));
+        let mut expected = vec![added(&w.alice), added(&w.bob)];
+        expected.sort_by_key(|line| format!("{line:?}"));
+        assert_eq!(lines, expected, "each one's line, once");
+    }
+}
+
+#[tokio::test]
+async fn a_roster_leaves_out_a_member_here_who_does_not_admit_its_sender() {
+    for keeps_out in ["the setting", "a block of someone listed"] {
+        let w = world().await;
+        let group = ConversationId::generate();
+        match keeps_out {
+            "the setting" => w
+                .reach
+                .set(w.bob.id, &w.carol.actor_uri, KEPT_OUT_BY_THE_SETTING),
+            _ => w.reach.set(w.bob.id, &w.eve.actor_uri, BLOCKED),
+        }
+        let roster = unstamped(
+            Some("crew"),
+            &[
+                member(&w.carol.actor_uri, Role::Admin),
+                member(&w.alice.actor_uri, Role::Member),
+                member(&w.bob.actor_uri, Role::Member),
+                member(&w.eve.actor_uri, Role::Member),
+            ],
+        );
+
+        w.receive_welcome
+            .execute(w.incoming_welcome(&w.carol.actor_uri, group, Some(roster)))
+            .await
+            .unwrap();
+
+        let members = w.store.members(group).await.unwrap();
+        assert!(
+            !members.iter().any(|m| m.actor_uri == w.bob.actor_uri),
+            "kept out by {keeps_out}"
+        );
+        assert_eq!(members.len(), 3, "carol, alice and eve");
+        assert_eq!(
+            w.groups.sent(),
+            vec![GroupNotice::Joined(
+                w.alice.id,
+                group,
+                w.carol.actor_uri.clone()
+            )]
+        );
+        assert!(lines_told(&w, w.bob.id).is_empty());
+    }
+}
+
 #[tokio::test]
 async fn a_welcome_from_before_the_recipients_departure_is_refused_and_brings_nobody_back() {
     let w = world().await;

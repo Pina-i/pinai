@@ -284,19 +284,25 @@ impl DeviceNotifier for RecordingDeviceNotifier {
 pub struct InMemoryRemoteKeyPackages {
     answers: Mutex<Vec<(ActorUri, Claim)>>,
     asked: Mutex<Vec<(ActorUri, ActorUri, Option<DeviceId>)>>,
+    asked_each: Mutex<Vec<(ActorUri, ActorUri)>>,
 }
 
 impl InMemoryRemoteKeyPackages {
     pub fn with(target: ActorUri, claim: Claim) -> Self {
         Self {
             answers: Mutex::new(vec![(target, claim)]),
-            asked: Mutex::default(),
+            ..Self::default()
         }
     }
 
     /// `(sender, target, device)` of every claim sent.
     pub fn asked(&self) -> Vec<(ActorUri, ActorUri, Option<DeviceId>)> {
         self.asked.lock().unwrap().clone()
+    }
+
+    /// `(sender, target)` of every claim for each device sent.
+    pub fn asked_each(&self) -> Vec<(ActorUri, ActorUri)> {
+        self.asked_each.lock().unwrap().clone()
     }
 }
 
@@ -319,6 +325,31 @@ impl RemoteKeyPackages for InMemoryRemoteKeyPackages {
             .find(|(t, _)| t == target)
             .map(|(_, claim)| claim.clone())
             .ok_or_else(|| RemoteClaimError::Unavailable(anyhow::anyhow!("no such peer")))
+    }
+
+    async fn claim_each_device(
+        &self,
+        sender: &ActorUri,
+        target: &ActorUri,
+    ) -> Result<Vec<Claim>, RemoteClaimError> {
+        self.asked_each
+            .lock()
+            .unwrap()
+            .push((sender.clone(), target.clone()));
+        let claims: Vec<Claim> = self
+            .answers
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(t, _)| t == target)
+            .map(|(_, claim)| claim.clone())
+            .collect();
+        if claims.is_empty() {
+            return Err(RemoteClaimError::Unavailable(anyhow::anyhow!(
+                "no such peer"
+            )));
+        }
+        Ok(claims)
     }
 }
 

@@ -289,6 +289,7 @@ All Bearer-auth except where noted. Cross-IdP paths use HTTP Signatures — see
 | `POST /api/keys/devices/:device_id/revoke` | Directory-level revocation flag; complements MLS Remove commits. Idempotent; `404` for a device that is not the caller's |
 | `POST /api/keys/packages` | Upload a batch of KeyPackages for one of the caller's devices — refused whole (`400`) when a package is empty or not base64, expires in the past or beyond the lifetime, or would take the device past the cap |
 | `POST /api/keys/packages/claim` | Atomically reserve one KeyPackage for `actor_uri` — of `device_id`, or of any device with some left. Bearer or HTTP-Sig (peer IdPs); for remote `actor_uri` the local IdP proxies to the target IdP via HTTP-Sig |
+| `POST /api/keys/packages/claim/devices` | One KeyPackage of each of `actor_uri`'s unrevoked devices that has any, as `{ claims: [...] }` — a contact's first add brings all their devices in (§ 6.5). Asked, proxied, limited and refused as a single claim is; none at all → 409 |
 | `GET /api/keys/packages/status` | Per-device available counts + `needs_refill` flag |
 
 #### Key directory rules
@@ -472,6 +473,41 @@ device of the user comes online, it pulls `/api/keys/devices` and runs
 the same fanout for any device it doesn't yet have an MLS leaf for in
 every conversation.
 
+**The fanout's rules** (`IE2eePort.addOwnDevices`, `devicesToAdd` in
+`@pinai/domain/models/group`):
+
+- A device adds its siblings only to groups it holds keys for. One that holds
+  none founds nothing: a group founded there would hold only it, and its commit
+  would take an epoch from the real one.
+- Each device is added with a KeyPackage of its own — claimed by its device id,
+  never "any device of this account" — one device a commit, the leaves looked
+  at again after each.
+- A commit that loses its epoch (`409`) is dropped, the group catches up on the
+  DS's log, and the leaves are looked at again: another of the user's devices
+  may have added this one meanwhile. At most five times; a commit lost any other
+  way is dropped too, so the group can commit again on the next run.
+- Runs on one device take turns. A run goes over every conversation the device
+  holds keys for: it first applies the commits the DS holds past its epoch, then
+  adds the siblings missing. It runs when the device list refreshes (the
+  `device_joined` push only refreshes it), when the conversation list changes,
+  and when the device comes to hold a group — founded on a first send or joined
+  from a Welcome (`IE2eePort.onGroupHeld`).
+- A device applies a group's commits as the `mls_commit` push announces them
+  (`IE2eePort.catchUp`), so its next message is sent at the epoch the others
+  are at: one sent from an epoch they left is read by none of them.
+- A contact's first add takes a KeyPackage of each of their devices (§ 6.5), so
+  all of them read the conversation from the start; only one with no KeyPackage
+  left then waits for a sibling to add it.
+- Each device shows what the user's other devices send: a message from the
+  user's own account is this device's echo only when it holds a copy of it
+  (`isHeldHere` in `@pinai/domain/models/own-messages`). Any other is decrypted
+  like anyone's; one that doesn't decrypt — MLS never decrypts a device's own —
+  shows nothing, never a placeholder.
+
+Every member's Welcome carries the ratchet tree (the extension), not only the
+founder's: the device adding a sibling, or an admin adding someone later, is
+seldom the founder, and a joiner builds the group from the Welcome alone.
+
 ### 6.3 Receiving a message
 
 ```mermaid
@@ -552,13 +588,15 @@ sequenceDiagram
     participant Bob
 
     Alice->>AliceIdP: ensureGroupExists(convo, bob@idp.bob.com)
-    AliceIdP->>BobIdP: HTTP-Sig POST /api/keys/packages/claim {actor: bob}
-    BobIdP-->>AliceIdP: KeyPackage (bob's device)
-    AliceIdP-->>Alice: KeyPackage
+    AliceIdP->>BobIdP: HTTP-Sig POST /api/keys/packages/claim/devices {actor: bob}
+    BobIdP-->>AliceIdP: a KeyPackage of each of bob's devices
+    AliceIdP-->>Alice: KeyPackages
     Alice->>Alice: verify attestation chain (fetch BobIdP JWKS)
-    Alice->>Alice: build MLS Add commit + Welcome
-    Alice->>AliceIdP: POST /api/mls/groups/:id/commits
-    Alice->>AliceIdP: POST /api/mls/welcomes {recipient: bob}
+    loop each of bob's devices
+        Alice->>Alice: build MLS Add commit + Welcome
+        Alice->>AliceIdP: POST /api/mls/groups/:id/commits
+        Alice->>AliceIdP: POST /api/mls/welcomes {recipient: bob, device}
+    end
     AliceIdP->>BobIdP: signed AP Create{Note} mlsKind=welcome
     BobIdP-->>Bob: WS mls_welcome_ready
     Bob->>BobIdP: GET /api/mls/welcomes

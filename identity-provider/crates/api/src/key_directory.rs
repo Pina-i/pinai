@@ -11,7 +11,7 @@ use axum::http::{HeaderMap, StatusCode, header};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use domain::e2ee::{
-    Device, DeviceLabel, DeviceRootKey, KeyDirectoryError, KeyPackageBytes, NewKeyPackage,
+    Claim, Device, DeviceLabel, DeviceRootKey, KeyDirectoryError, KeyPackageBytes, NewKeyPackage,
 };
 use domain::identity::{ActorUri, Requester};
 use serde::{Deserialize, Serialize};
@@ -86,6 +86,16 @@ pub struct ClaimRequest {
     /// Omitted, any device of the account's with KeyPackages left.
     #[serde(default)]
     device_id: Option<Uuid>,
+}
+
+#[derive(Deserialize)]
+pub struct ClaimEachRequest {
+    actor_uri: String,
+}
+
+#[derive(Serialize)]
+pub struct ClaimsBody {
+    claims: Vec<ClaimedBody>,
 }
 
 #[derive(Serialize)]
@@ -247,13 +257,42 @@ pub async fn claim(
     let claimed = claim
         .execute(&requester, &target, body.device_id.map(Into::into))
         .await?;
-    Ok(Json(ClaimedBody {
-        key_package: B64.encode(claimed.package.bytes.as_bytes()),
-        device_id: claimed.package.device.as_uuid(),
-        expires_at: claimed.package.expires_at,
-        remaining_count: claimed.remaining,
-        needs_refill: claimed.needs_refill,
+    Ok(Json(claimed.into()))
+}
+
+/// `POST /api/keys/packages/claim/devices` — one package of each of the account's devices, by a
+/// local user or a peer instance, limited as a claim is.
+pub async fn claim_each_device(
+    State(claim): State<Arc<ClaimKeyPackage>>,
+    State(limiter): State<Arc<RateLimiter>>,
+    CallerJson(requester, body): CallerJson<ClaimEachRequest>,
+) -> Result<Json<ClaimsBody>, ApiError> {
+    let bucket = match &requester {
+        Requester::User(user) => format!("user:{user}"),
+        Requester::Peer(peer) => format!("peer:{peer}"),
+    };
+    if !limiter.allow(&bucket) {
+        tracing::warn!(%bucket, "rate-limited claim request");
+        return Err(rate_limited());
+    }
+    let target = ActorUri::parse(&body.actor_uri)
+        .map_err(|_| ApiError::bad_request("`actor_uri` is not a valid URL"))?;
+    let claims = claim.each_device(&requester, &target).await?;
+    Ok(Json(ClaimsBody {
+        claims: claims.into_iter().map(Into::into).collect(),
     }))
+}
+
+impl From<Claim> for ClaimedBody {
+    fn from(claimed: Claim) -> Self {
+        Self {
+            key_package: B64.encode(claimed.package.bytes.as_bytes()),
+            device_id: claimed.package.device.as_uuid(),
+            expires_at: claimed.package.expires_at,
+            remaining_count: claimed.remaining,
+            needs_refill: claimed.needs_refill,
+        }
+    }
 }
 
 /// `GET /api/keys/packages/status`

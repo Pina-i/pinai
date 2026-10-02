@@ -107,6 +107,12 @@ pub trait RemoteKeyPackages: Send + Sync {
         target: &ActorUri,
         device: Option<DeviceId>,
     ) -> Result<Claim, RemoteClaimError>;
+    /// One KeyPackage of each of `target`'s devices that has any.
+    async fn claim_each_device(
+        &self,
+        sender: &ActorUri,
+        target: &ActorUri,
+    ) -> Result<Vec<Claim>, RemoteClaimError>;
 }
 
 /// Each MLS group's commits in epoch order: the order every member's client applies them in.

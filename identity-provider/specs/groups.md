@@ -102,7 +102,12 @@ ciphertext out: local members receive a `new_dm` WS event (and broker publish);
 remote members receive a signed AP `Create{Note}` (`mlsKind: application`) at
 their inbox, exactly like a 1:1 — only enumerated over `conversation_members`
 instead of a single recipient. Delivery is best-effort and self-heals via the
-recipient's catch-up pull. The sender encrypts once with the group's existing
+recipient's catch-up pull.
+
+An instance holding several of the group's members therefore receives the same
+`Create{Note}` once per member, at each one's inbox, and stores it once (by its
+activity URI). Whichever delivery stores it pushes `new_dm` to every active
+member there; the others are redeliveries and push nothing. The sender encrypts once with the group's existing
 MLS state (no per-message bootstrap), so there is no `ensureGroupExists` step.
 
 ## 5. WS events
@@ -203,10 +208,12 @@ snapshot of the sender's roster beside the payload:
 ```
 
 The receiving IdP creates the conversation under the advertised `context` UUID
-with `kind = 'group'`, upserts every member, and pushes `group_created` to the
-recipient — once per recipient, gated on their own membership row being new,
-so the second welcome into an already-materialised group still notifies its
-target. Welcomes, commits and group messages all carry the snapshot, so the
+with `kind = 'group'`, upserts every member, and pushes `group_created` to each
+account of its own the snapshot brings in, once. Each member's inbox gets a
+Note of its own, so the first to arrive brings in every account there it
+lists, and the later ones find them in; of two arriving at the same moment,
+each account is brought in, told and given its line by one only
+(`Conversations::mirror_group` answers whom its write brought in). Welcomes, commits and group messages all carry the snapshot, so the
 group materialises on whichever arrives first — a group whose Welcome never
 landed included. 1:1 DMs never carry one: their row is minted on both IdPs at
 friendship-accept.
@@ -218,8 +225,8 @@ and members catch up only from their own IdP's log: a commit refused there
 would be lost for good to every member of that IdP who joined before it, who
 could then read nothing sent after it. Carrying the roster, the first of the two
 to arrive materialises the group, and the commit is stored either way. Whichever
-brings the recipient in records the line their conversation starts with, by its
-sender; the other finds them there already.
+brings an account in records the line its conversation starts with, by its
+sender ("Alice added Pierre"); the others find it there already.
 
 ```mermaid
 sequenceDiagram
@@ -292,6 +299,11 @@ A recipient who isn't an active member yet is mirrored into a group only by some
 holds someone the recipient blocked — the Note is then neither mirrored nor filed as a 1:1. A
 dropped commit is no loss to the members already there: each gets its own copy at their inbox.
 
+The other accounts of this instance a snapshot lists are held to the same rule, since a Note
+through one member's inbox brings in every account here it lists: one that doesn't admit the
+sender, or blocked someone the snapshot lists, is left out of this copy, and the Notes that later
+reach its own inbox are dropped as above.
+
 ## 8. Group changes
 
 Every change to a group made on an IdP — an add, a removal, a leave, a rename, a role — is sent,
@@ -327,6 +339,9 @@ The receiving IdP takes a change (`application::messaging::ReceiveGroupChange`) 
   — a peer acts on a group here only through its members;
 - whoever made it may (`GroupChange::is_entitled`): an active admin as this copy holds them, or for
   a `Leave`, the member leaving;
+- an add that brings in an account of this instance is one that account admits from whoever made
+  it, as for an add made here (`identity-provider/specs/social.md § 2`) — another instance's
+  account is that instance's to refuse;
 - it is newer than what the copy holds (`GroupChange::effect`), as for a snapshot: a removal or a
   leave of an active member after their join, an add of someone not in it — never held, or out
   since before it — while the copy has room, a role or a name newer than the one held. An add of

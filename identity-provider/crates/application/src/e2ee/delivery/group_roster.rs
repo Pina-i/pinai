@@ -5,8 +5,9 @@ use domain::messaging::{
     ConversationKind, Conversations, GroupChangeKind, GroupEvent, GroupEventKind, GroupEvents,
     GroupNotifier, GroupSnapshot,
 };
+use domain::social::Reachability;
 
-use crate::messaging::shared::{Timeline, mirror};
+use crate::messaging::shared::{Roster, Timeline};
 
 /// The roster an MLS Note bound for another instance carries, so that instance can hold the
 /// group; `None` for a DM, which both hold from the friendship.
@@ -28,13 +29,14 @@ pub(super) struct Mirror<'a> {
     pub(super) accounts: &'a dyn Accounts,
     pub(super) remote_actors: &'a dyn RemoteActors,
     pub(super) conversations: &'a dyn Conversations,
+    pub(super) reach: &'a dyn Reachability,
     pub(super) groups: &'a dyn GroupNotifier,
     pub(super) events: &'a dyn GroupEvents,
 }
 
 impl Mirror<'_> {
-    /// Take from `roster` what is newer here. When it brings the recipient in, its sender is who
-    /// added them: the line their conversation starts with.
+    /// Take from `roster` what is newer here. Its sender is who added each account here it
+    /// brings in: the line that one's conversation starts with.
     pub(super) async fn apply(
         &self,
         recipient: &Account,
@@ -42,32 +44,33 @@ impl Mirror<'_> {
         id: ConversationId,
         roster: &GroupSnapshot,
     ) -> Result<(), DeliveryError> {
-        let Some(at) = mirror(
-            self.conversations,
-            self.groups,
-            recipient,
-            sender,
-            id,
-            roster,
-        )
-        .await?
-        else {
+        let newcomers = Roster {
+            conversations: self.conversations,
+            accounts: self.accounts,
+            reach: self.reach,
+            notifier: self.groups,
+        }
+        .mirror(recipient, sender, id, roster)
+        .await?;
+        if newcomers.is_empty() {
             return Ok(());
-        };
-        let added = GroupEvent {
-            at,
-            kind: GroupEventKind::Changed(GroupChangeKind::Added(recipient.actor_uri.clone())),
-            ..GroupEvent::created(id, sender.clone(), at)
-        };
+        }
         let members = self.conversations.members(id).await?;
-        Timeline {
+        let timeline = Timeline {
             accounts: self.accounts,
             remote_actors: self.remote_actors,
             events: self.events,
             notifier: self.groups,
+        };
+        for newcomer in newcomers {
+            let at = newcomer.joined_at;
+            let added = GroupEvent {
+                at,
+                kind: GroupEventKind::Changed(GroupChangeKind::Added(newcomer.account.actor_uri)),
+                ..GroupEvent::created(id, sender.clone(), at)
+            };
+            timeline.record(&members, added).await?;
         }
-        .record(&members, added)
-        .await?;
         Ok(())
     }
 }

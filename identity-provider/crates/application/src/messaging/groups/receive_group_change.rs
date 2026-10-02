@@ -1,11 +1,12 @@
 use std::sync::Arc;
 
 use domain::UserId;
-use domain::identity::{Accounts, RemoteActors};
+use domain::identity::{Accounts, ActorUri, RemoteActors};
 use domain::messaging::{
     ConversationKind, Conversations, GroupChange, GroupChangeKind, GroupEffect, GroupEvent,
     GroupEvents, GroupNotifier, Member, MessagingError, Role,
 };
+use domain::social::Reachability;
 
 use super::local_accounts;
 use crate::messaging::shared::{Timeline, caller};
@@ -17,6 +18,7 @@ pub struct ReceiveGroupChange {
     accounts: Arc<dyn Accounts>,
     remote_actors: Arc<dyn RemoteActors>,
     conversations: Arc<dyn Conversations>,
+    reach: Arc<dyn Reachability>,
     notifier: Arc<dyn GroupNotifier>,
     events: Arc<dyn GroupEvents>,
 }
@@ -26,6 +28,7 @@ impl ReceiveGroupChange {
         accounts: Arc<dyn Accounts>,
         remote_actors: Arc<dyn RemoteActors>,
         conversations: Arc<dyn Conversations>,
+        reach: Arc<dyn Reachability>,
         notifier: Arc<dyn GroupNotifier>,
         events: Arc<dyn GroupEvents>,
     ) -> Self {
@@ -33,9 +36,19 @@ impl ReceiveGroupChange {
             accounts,
             remote_actors,
             conversations,
+            reach,
             notifier,
             events,
         }
+    }
+
+    /// As for an add made here: an account of this instance comes in only by someone it admits.
+    /// Another instance's account is that instance's to refuse.
+    async fn admits(&self, added: &ActorUri, by: &ActorUri) -> Result<bool, MessagingError> {
+        Ok(match self.accounts.find_by_uri(added).await? {
+            Some(local) => self.reach.relation(local.id, by).await?.admits().is_ok(),
+            None => true,
+        })
     }
 
     fn timeline(&self) -> Timeline<'_> {
@@ -93,13 +106,22 @@ impl ReceiveGroupChange {
                     .await?;
             }
             GroupEffect::Take(changes) => {
-                let group = self.conversations.mirror_group(group.id, &changes).await?;
+                if let GroupChangeKind::Added(added) = &change.kind {
+                    let new_here = !before.iter().any(|m| &m.actor_uri == added);
+                    if new_here && !self.admits(added, &change.by).await? {
+                        tracing::debug!(by = %change.by, "add of an account here who doesn't admit its maker ignored");
+                        return Ok(());
+                    }
+                }
+                let mirrored = self.conversations.mirror_group(group.id, &changes).await?;
+                let group = mirrored.group;
                 let after = self.conversations.members(group.id).await?;
                 let locals = local_accounts(&*self.accounts, &after).await?;
                 match &change.kind {
                     GroupChangeKind::Added(added) => {
-                        // An add that only moves a stamp forward tells nobody anything.
-                        if before.iter().any(|m| &m.actor_uri == added) {
+                        // An add that only moves a stamp forward tells nobody anything, nor does
+                        // one another member's copy of it brought in at the same moment.
+                        if !mirrored.brought_in.contains(added) {
                             return Ok(());
                         }
                         let member = Member {

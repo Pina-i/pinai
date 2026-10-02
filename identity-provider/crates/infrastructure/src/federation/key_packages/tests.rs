@@ -164,3 +164,57 @@ async fn a_peer_failing_otherwise_is_unavailable() {
         "{garbled:?}"
     );
 }
+
+#[tokio::test]
+async fn a_claim_for_each_device_is_signed_and_asked_of_the_targets_instance() {
+    let (laptop, phone) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+    let entry = |device: uuid::Uuid, remaining: usize| {
+        format!(
+            r#"{{"key_package":"AQID","device_id":"{device}","expires_at":"2026-10-06T12:00:00Z","remaining_count":{remaining},"needs_refill":false}}"#
+        )
+    };
+    let (address, received) = peer(answer(&format!(
+        r#"{{"claims":[{},{}]}}"#,
+        entry(laptop, 7),
+        entry(phone, 4)
+    )))
+    .await;
+    let bob = ActorUri::parse(&format!("http://{address}/users/bob_t3st0")).unwrap();
+
+    let claims = remote("http://localhost:8080")
+        .claim_each_device(&alice(), &bob)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        claims
+            .iter()
+            .map(|c| (c.package.device, c.remaining))
+            .collect::<Vec<_>>(),
+        vec![(laptop.into(), 7), (phone.into(), 4)]
+    );
+    let request = received.await.unwrap();
+    assert!(
+        request.starts_with("POST /api/keys/packages/claim/devices HTTP/1.1"),
+        "{request}"
+    );
+    assert!(
+        request.contains(r#"keyId="http://localhost:8080/users/alice_t3st0#main-key""#),
+        "{request}"
+    );
+}
+
+#[tokio::test]
+async fn a_peers_refusal_of_a_claim_for_each_device_comes_back_as_what_it_means() {
+    let (address, _) = peer(refusing("403 Forbidden", r#"{"error":"access_denied"}"#)).await;
+    let bob = ActorUri::parse(&format!("http://{address}/users/bob_t3st0")).unwrap();
+
+    let refused = remote("http://localhost:8080")
+        .claim_each_device(&alice(), &bob)
+        .await;
+
+    assert!(
+        matches!(refused, Err(RemoteClaimError::Unreachable)),
+        "{refused:?}"
+    );
+}

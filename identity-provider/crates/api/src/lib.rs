@@ -242,6 +242,10 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/keys/packages", post(key_directory::upload))
         .route("/api/keys/packages/claim", post(key_directory::claim))
+        .route(
+            "/api/keys/packages/claim/devices",
+            post(key_directory::claim_each_device),
+        )
         .route("/api/keys/packages/status", get(key_directory::status))
         .route(
             "/api/mls/groups/{conversation_id}/commits",

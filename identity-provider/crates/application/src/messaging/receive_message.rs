@@ -2,13 +2,14 @@ use std::sync::Arc;
 
 use domain::identity::{Accounts, ActorUri, RemoteActors};
 use domain::messaging::{
-    AttachmentLimits, ConversationKind, Conversations, GroupNotifier, GroupSnapshot, MessageEvent,
-    MessageNotifier, Messages, MessagingError, MlsCiphertext, NewMessage, OfferedAttachment,
+    AttachmentLimits, ConversationKind, Conversations, GroupNotifier, GroupSnapshot, Member,
+    MessageEvent, MessageNotifier, Messages, MessagingError, MlsCiphertext, NewMessage,
+    OfferedAttachment,
 };
 use domain::social::Reachability;
 use domain::{ConversationId, MessageId, UserId};
 
-use super::shared::{address_of_actor, admits_group_note, caller, mirror};
+use super::shared::{Roster, address_of_actor, admits_group_note, audience, caller};
 
 /// A message another instance delivered to one of our accounts.
 pub struct IncomingMessage {
@@ -78,19 +79,18 @@ impl ReceiveMessage {
                 tracing::debug!(sender = %incoming.sender, "group message dropped");
                 return Ok(());
             }
-            mirror(
-                &*self.conversations,
-                &*self.groups,
-                &recipient,
-                &incoming.sender,
-                incoming.conversation,
-                group,
-            )
+            Roster {
+                conversations: &*self.conversations,
+                accounts: &*self.accounts,
+                reach: &*self.reach,
+                notifier: &*self.groups,
+            }
+            .mirror(&recipient, &incoming.sender, incoming.conversation, group)
             .await?;
         }
         // A group is filed by its id; a DM goes through the pair, which also heals one whose
         // members were only half recorded.
-        let (conversation, kind) = match self.conversations.find(incoming.conversation).await? {
+        let (conversation, members) = match self.conversations.find(incoming.conversation).await? {
             Some(c) if c.kind == ConversationKind::Group => {
                 let members = self.conversations.members(c.id).await?;
                 if !members.iter().any(|m| m.actor_uri == incoming.sender) {
@@ -101,7 +101,7 @@ impl ReceiveMessage {
                     tracing::debug!(sender = %incoming.sender, "group message to a non-member dropped");
                     return Ok(());
                 }
-                (c.id, ConversationKind::Group)
+                (c.id, Some(members))
             }
             _ => {
                 // Before the DM is opened, as for a local sender.
@@ -117,7 +117,7 @@ impl ReceiveMessage {
                         Some(incoming.conversation),
                     )
                     .await?;
-                (dm, ConversationKind::Dm)
+                (dm, None)
             }
         };
         // A parent from another conversation is not linked: the message stands on its own.
@@ -169,18 +169,36 @@ impl ReceiveMessage {
             .find(&incoming.sender)
             .await?
             .and_then(|actor| actor.display_name);
-        self.notifier.message(
-            recipient.id,
-            &MessageEvent {
-                message,
-                kind,
-                sender_address: address_of_actor(&incoming.sender),
-                sender_display_name,
-                client_id: None,
-            },
-        );
+        let (kind, told) = match members {
+            // Each member's inbox gets its own delivery, but the message is stored here once: the
+            // delivery that stores it tells every member here, and the others are redeliveries.
+            Some(members) => (
+                ConversationKind::Group,
+                told_here(&*self.accounts, &members, &incoming.sender).await?,
+            ),
+            None => (ConversationKind::Dm, vec![recipient.id]),
+        };
+        let event = MessageEvent {
+            message,
+            kind,
+            sender_address: address_of_actor(&incoming.sender),
+            sender_display_name,
+            client_id: None,
+        };
+        for member in told {
+            self.notifier.message(member, &event);
+        }
         Ok(())
     }
+}
+
+async fn told_here(
+    accounts: &dyn Accounts,
+    members: &[Member],
+    sender: &ActorUri,
+) -> Result<Vec<UserId>, MessagingError> {
+    let (local, _) = audience(accounts, members, sender).await?;
+    Ok(local.into_iter().map(|account| account.id).collect())
 }
 
 #[cfg(test)]

@@ -88,6 +88,7 @@ impl ReceiveCommit {
                 accounts: &*self.accounts,
                 remote_actors: &*self.remote_actors,
                 conversations: &*self.conversations,
+                reach: &*self.reach,
                 groups: &*self.groups,
                 events: &*self.events,
             }

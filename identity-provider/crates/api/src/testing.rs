@@ -524,6 +524,7 @@ impl TestApp {
                 accounts.clone(),
                 remote_actors.clone(),
                 store.clone(),
+                reach.clone(),
                 group_notifier.clone(),
                 store.clone(),
             )),

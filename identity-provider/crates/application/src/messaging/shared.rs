@@ -130,53 +130,118 @@ impl Timeline<'_> {
     }
 }
 
-/// Mirror the roster a group message or Welcome carries, taking from it only what is newer than
-/// this copy holds (`GroupSnapshot::changes`): an add or a role change converges on the next one
-/// a member receives, and a stale one undoes nothing. Answers the recipient's join stamp when it
-/// brings them in.
-pub(crate) async fn mirror(
-    conversations: &dyn Conversations,
-    notifier: &dyn GroupNotifier,
-    recipient: &Account,
-    sender: &ActorUri,
-    id: ConversationId,
-    snapshot: &GroupSnapshot,
-) -> Result<Option<OffsetDateTime>, MessagingError> {
-    if snapshot.members.is_empty() {
-        return Ok(None);
+/// An account of this instance a roster brought into a group, and when it joined.
+pub(crate) struct Newcomer {
+    pub(crate) account: Account,
+    pub(crate) joined_at: OffsetDateTime,
+}
+
+/// What mirroring the roster another instance sent reads and tells.
+pub(crate) struct Roster<'a> {
+    pub(crate) conversations: &'a dyn Conversations,
+    pub(crate) accounts: &'a dyn Accounts,
+    pub(crate) reach: &'a dyn Reachability,
+    pub(crate) notifier: &'a dyn GroupNotifier,
+}
+
+impl Roster<'_> {
+    /// Mirror the roster a group message, commit or Welcome carries, taking from it only what is
+    /// newer than this copy holds (`GroupSnapshot::changes`): an add or a role change converges
+    /// on the next one a member receives, and a stale one undoes nothing.
+    ///
+    /// Each member's inbox gets its own copy, and whichever comes first brings in every account
+    /// here the roster lists: each is told it joined, and the others the recipient's caller didn't
+    /// ask are left out when they don't admit the sender. Answers the accounts brought in.
+    pub(crate) async fn mirror(
+        &self,
+        recipient: &Account,
+        sender: &ActorUri,
+        id: ConversationId,
+        snapshot: &GroupSnapshot,
+    ) -> Result<Vec<Newcomer>, MessagingError> {
+        if snapshot.members.is_empty() {
+            return Ok(Vec::new());
+        }
+        // No copy of a group holds more: this one is not a group's.
+        if snapshot.members.len() > MAX_MEMBERS {
+            return Err(MessagingError::TooManyMembers(MAX_MEMBERS));
+        }
+        let local = self.conversations.find(id).await?;
+        let held = self.conversations.memberships(id).await?;
+        let members: Vec<Member> = held
+            .iter()
+            .filter(|m| m.is_active())
+            .map(|m| m.member.clone())
+            .collect();
+        // A roster only a member may assert: anyone else could add themselves to the group here.
+        if !snapshot.may_be_asserted_by(sender, local.as_ref(), &members) {
+            return Err(MessagingError::ConversationNotFound);
+        }
+        let mut changes = snapshot.changes(local.as_ref(), &held, OffsetDateTime::now_utc());
+        let listed = listed(snapshot);
+        let mut newcomers = Vec::new();
+        let mut kept = Vec::with_capacity(changes.members.len());
+        for change in std::mem::take(&mut changes.members) {
+            let new_here = !members
+                .iter()
+                .any(|m| m.actor_uri == change.member.actor_uri);
+            let account = match new_here {
+                true => self.accounts.find_by_uri(&change.member.actor_uri).await?,
+                false => None,
+            };
+            if let Some(account) = account {
+                let asked = account.actor_uri == recipient.actor_uri;
+                if !asked && !admits_into_group(self.reach, &account, sender, &listed).await? {
+                    continue;
+                }
+                newcomers.push(Newcomer {
+                    account,
+                    joined_at: change.joined_at,
+                });
+            }
+            kept.push(change);
+        }
+        changes.members = kept;
+        if changes.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mirrored = self.conversations.mirror_group(id, &changes).await?;
+        // Another member's Note may be mirroring the same group at this moment: whoever this
+        // write didn't bring in, that one did, and tells them.
+        newcomers.retain(|n| mirrored.brought_in.contains(&n.account.actor_uri));
+        for newcomer in &newcomers {
+            self.notifier.joined(
+                newcomer.account.id,
+                &mirrored.group,
+                snapshot.creator(sender),
+            );
+        }
+        Ok(newcomers)
     }
-    // No copy of a group holds more: this one is not a group's.
-    if snapshot.members.len() > MAX_MEMBERS {
-        return Err(MessagingError::TooManyMembers(MAX_MEMBERS));
-    }
-    let local = conversations.find(id).await?;
-    let held = conversations.memberships(id).await?;
-    let members: Vec<Member> = held
-        .iter()
-        .filter(|m| m.is_active())
-        .map(|m| m.member.clone())
-        .collect();
-    // A roster only a member may assert: anyone else could add themselves to the group here.
-    if !snapshot.may_be_asserted_by(sender, local.as_ref(), &members) {
-        return Err(MessagingError::ConversationNotFound);
-    }
-    let changes = snapshot.changes(local.as_ref(), &held, OffsetDateTime::now_utc());
-    if changes.is_empty() {
-        return Ok(None);
-    }
-    let joined_at = changes
+}
+
+fn listed(snapshot: &GroupSnapshot) -> Vec<ActorUri> {
+    snapshot
         .members
         .iter()
-        .find(|m| m.member.actor_uri == recipient.actor_uri)
-        .map(|m| m.joined_at)
-        .filter(|_| !members.iter().any(|m| m.actor_uri == recipient.actor_uri));
-    let group = conversations.mirror_group(id, &changes).await?;
-    // Gated on the recipient's own membership: a second member's first message lands in a group
-    // already mirrored here, and still has to reach them.
-    if joined_at.is_some() {
-        notifier.joined(recipient.id, &group, snapshot.creator(sender));
-    }
-    Ok(joined_at)
+        .map(|m| m.member.actor_uri.clone())
+        .collect()
+}
+
+/// Whether `sender` may bring `account` into a group listing `listed`: someone it admits, with
+/// nobody it blocked among them, since a roster doesn't say who added whom.
+async fn admits_into_group(
+    reach: &dyn Reachability,
+    account: &Account,
+    sender: &ActorUri,
+    listed: &[ActorUri],
+) -> Result<bool, MessagingError> {
+    let roster_holds_someone_blocked = reach.blocks_any(account.id, listed).await?;
+    Ok(reach
+        .relation(account.id, sender)
+        .await?
+        .admits_group_from(roster_holds_someone_blocked)
+        .is_ok())
 }
 
 /// Whether a group Note may bring `recipient` into the group it names: only from someone they
@@ -197,15 +262,5 @@ pub(crate) async fn admits_group_note(
     if !joins {
         return Ok(true);
     }
-    let listed: Vec<ActorUri> = roster
-        .members
-        .iter()
-        .map(|m| m.member.actor_uri.clone())
-        .collect();
-    let roster_holds_someone_blocked = reach.blocks_any(recipient.id, &listed).await?;
-    Ok(reach
-        .relation(recipient.id, sender)
-        .await?
-        .admits_group_from(roster_holds_someone_blocked)
-        .is_ok())
+    admits_into_group(reach, recipient, sender, &listed(roster)).await
 }

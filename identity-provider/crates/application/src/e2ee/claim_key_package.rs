@@ -1,11 +1,12 @@
 use std::sync::Arc;
 
-use domain::DeviceId;
 use domain::e2ee::{
-    Claim, DeviceNotifier, KeyDirectoryError, KeyPackagePolicy, KeyPackages, RemoteKeyPackages,
+    Claim, ClaimedKeyPackage, DeviceNotifier, KeyDirectoryError, KeyPackagePolicy, KeyPackages,
+    RemoteKeyPackages,
 };
 use domain::identity::{Accounts, ActorUri, InstanceOrigin, Requester};
 use domain::social::Reachability;
+use domain::{DeviceId, UserId};
 
 /// `POST /api/keys/packages/claim`: one of `target`'s KeyPackages, to add a device of theirs to
 /// a group — of `device`, or of any device with some left. A local user's claim for an account
@@ -49,14 +50,70 @@ impl ClaimKeyPackage {
         device: Option<DeviceId>,
     ) -> Result<Claim, KeyDirectoryError> {
         if !self.origin.owns(target) {
-            let Requester::User(user) = requester else {
-                return Err(KeyDirectoryError::PeerMustTargetLocal);
-            };
-            let sender = self.accounts.find(*user).await?.ok_or_else(|| {
-                KeyDirectoryError::Unexpected(anyhow::anyhow!("the claiming account is gone"))
-            })?;
-            return Ok(self.remote.claim(&sender.actor_uri, target, device).await?);
+            let sender = self.local_sender(requester).await?;
+            return Ok(self.remote.claim(&sender, target, device).await?);
         }
+        let owner = self.admitted_owner(requester, target).await?;
+        let Some(package) = self.key_packages.claim(owner, device).await? else {
+            self.notifier.key_packages_low(owner);
+            return Err(KeyDirectoryError::NoKeyPackage);
+        };
+        let claim = self.counted(owner, package).await?;
+        if claim.needs_refill {
+            self.notifier.key_packages_low(owner);
+        }
+        Ok(claim)
+    }
+
+    /// `POST /api/keys/packages/claim/devices`: one KeyPackage of each of `target`'s devices that
+    /// has any, for a contact's first add — every device of theirs then reads the group, not only
+    /// the one a single claim would pick. Asked and refused as a single claim is.
+    pub async fn each_device(
+        &self,
+        requester: &Requester,
+        target: &ActorUri,
+    ) -> Result<Vec<Claim>, KeyDirectoryError> {
+        if !self.origin.owns(target) {
+            let sender = self.local_sender(requester).await?;
+            return Ok(self.remote.claim_each_device(&sender, target).await?);
+        }
+        let owner = self.admitted_owner(requester, target).await?;
+        let mut claims = Vec::new();
+        for (device, available) in self.key_packages.available_per_device(owner).await? {
+            if available == 0 {
+                continue;
+            }
+            // A revoked device's, or one another claimer just emptied, comes back empty.
+            if let Some(package) = self.key_packages.claim(owner, Some(device)).await? {
+                claims.push(self.counted(owner, package).await?);
+            }
+        }
+        if claims.is_empty() || claims.iter().any(|c| c.needs_refill) {
+            self.notifier.key_packages_low(owner);
+        }
+        if claims.is_empty() {
+            return Err(KeyDirectoryError::NoKeyPackage);
+        }
+        Ok(claims)
+    }
+
+    /// A local user asking for an account elsewhere, whose instance is asked in their name.
+    async fn local_sender(&self, requester: &Requester) -> Result<ActorUri, KeyDirectoryError> {
+        let Requester::User(user) = requester else {
+            return Err(KeyDirectoryError::PeerMustTargetLocal);
+        };
+        let sender = self.accounts.find(*user).await?.ok_or_else(|| {
+            KeyDirectoryError::Unexpected(anyhow::anyhow!("the claiming account is gone"))
+        })?;
+        Ok(sender.actor_uri)
+    }
+
+    /// The owner of `target`, here, once they admit whoever asks.
+    async fn admitted_owner(
+        &self,
+        requester: &Requester,
+        target: &ActorUri,
+    ) -> Result<UserId, KeyDirectoryError> {
         let owner = self
             .accounts
             .find_by_uri(target)
@@ -80,22 +137,19 @@ impl ClaimKeyPackage {
         if claimer != owner.actor_uri {
             self.reach.relation(owner.id, &claimer).await?.admits()?;
         }
-        let Some(package) = self.key_packages.claim(owner.id, device).await? else {
-            self.notifier.key_packages_low(owner.id);
-            return Err(KeyDirectoryError::NoKeyPackage);
-        };
-        let remaining = self
-            .key_packages
-            .available(owner.id, package.device)
-            .await?;
-        let needs_refill = self.policy.needs_refill(remaining);
-        if needs_refill {
-            self.notifier.key_packages_low(owner.id);
-        }
+        Ok(owner.id)
+    }
+
+    async fn counted(
+        &self,
+        owner: UserId,
+        package: ClaimedKeyPackage,
+    ) -> Result<Claim, KeyDirectoryError> {
+        let remaining = self.key_packages.available(owner, package.device).await?;
         Ok(Claim {
+            needs_refill: self.policy.needs_refill(remaining),
             package,
             remaining,
-            needs_refill,
         })
     }
 }

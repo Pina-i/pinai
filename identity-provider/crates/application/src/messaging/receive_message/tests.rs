@@ -180,15 +180,95 @@ async fn a_group_message_mirrors_its_roster_and_announces_the_group_once() {
         (ConversationKind::Group, Some("crew"))
     );
     assert_eq!(w.store.members(group).await.unwrap().len(), 3);
-    let joined = w.groups.sent();
+    let joined = |to: &Account| GroupNotice::Joined(to.id, group, w.carol.actor_uri.clone());
     assert_eq!(
-        joined,
+        w.groups.sent(),
+        vec![joined(&w.alice), joined(&w.bob)],
+        "both here, though only alice's inbox got it"
+    );
+}
+
+fn told(w: &World) -> Vec<UserId> {
+    w.notifier
+        .sent()
+        .into_iter()
+        .filter_map(|notice| match notice {
+            MessageNotice::Message(to, _) => Some(to),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_group_message_reaches_every_member_here_whichever_inbox_brings_it() {
+    let w = world();
+    let group = ConversationId::generate();
+    let message = IncomingMessage {
+        group: Some(crew(&w)),
+        ..from_carol(&w, group)
+    };
+
+    // Carol's instance delivers it once per member's inbox, and may deliver a copy again.
+    for recipient in [w.bob.id, w.alice.id, w.alice.id] {
+        let delivery = IncomingMessage {
+            recipient,
+            group: message.group.clone(),
+            ciphertext: message.ciphertext.clone(),
+            activity_uri: message.activity_uri.clone(),
+            ..from_carol(&w, group)
+        };
+        receive(&w).execute(delivery).await.unwrap();
+    }
+
+    let mut told = told(&w);
+    told.sort();
+    let mut members = vec![w.alice.id, w.bob.id];
+    members.sort();
+    assert_eq!(told, members);
+}
+
+#[tokio::test]
+async fn a_group_messages_roster_leaves_out_a_member_here_who_does_not_admit_its_sender() {
+    let w = world();
+    w.reach
+        .set(w.bob.id, &w.carol.actor_uri, KEPT_OUT_BY_THE_SETTING);
+    let group = ConversationId::generate();
+
+    receive(&w)
+        .execute(IncomingMessage {
+            group: Some(crew(&w)),
+            ..from_carol(&w, group)
+        })
+        .await
+        .unwrap();
+
+    assert!(!is_member(&w.store.members(group).await.unwrap(), &w.bob));
+    assert_eq!(
+        w.groups.sent(),
         vec![GroupNotice::Joined(
             w.alice.id,
             group,
             w.carol.actor_uri.clone()
         )]
     );
+    assert_eq!(told(&w), [w.alice.id]);
+}
+
+#[tokio::test]
+async fn a_group_message_is_not_announced_to_a_member_who_left() {
+    let w = world();
+    let group = crew_bob_left(&w).await;
+    let before = w.notifier.sent().len();
+
+    receive(&w)
+        .execute(IncomingMessage {
+            group: Some(crew(&w)),
+            ..from_carol(&w, group)
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(told(&w)[before..], [w.alice.id]);
 }
 
 /// The crew as Carol's instance stamped it, everyone in since `at`.
@@ -529,17 +609,23 @@ async fn a_received_group_message_is_announced_as_a_group_message() {
 
     receive(&w).execute(incoming).await.unwrap();
 
-    let Some(MessageNotice::Message(to, event)) = w.notifier.sent().pop() else {
-        panic!("no message announced");
-    };
-    assert_eq!(
-        (to, event.kind, event.sender_address.as_str()),
-        (
-            w.alice.id,
-            ConversationKind::Group,
-            "carol_k2m9x@idp.carol.test"
-        )
-    );
+    let announced: Vec<_> = w
+        .notifier
+        .sent()
+        .into_iter()
+        .filter_map(|notice| match notice {
+            MessageNotice::Message(to, event) => Some((to, event.kind, event.sender_address)),
+            _ => None,
+        })
+        .collect();
+    assert!(!announced.is_empty(), "no message announced");
+    for (_, kind, sender_address) in &announced {
+        assert_eq!(
+            (*kind, sender_address.as_str()),
+            (ConversationKind::Group, "carol_k2m9x@idp.carol.test")
+        );
+    }
+    assert!(announced.iter().any(|(to, _, _)| *to == w.alice.id));
 }
 
 #[tokio::test]

@@ -1,8 +1,11 @@
 use domain::identity::ActorUri;
 use domain::messaging::testing::{Uploads, contract};
-use domain::messaging::{Conversations, Messages, MlsCiphertext, NewMessage, initial_roster};
+use domain::messaging::{
+    Conversations, GroupChanges, Member, Membership, Messages, MlsCiphertext, NewMessage, Role,
+    StampedName, initial_roster,
+};
 use domain::social::SocialGraph;
-use domain::{AttachmentId, MessageId};
+use domain::{AttachmentId, ConversationId, MessageId};
 use infrastructure::postgres::{
     PgAttachments, PgConversations, PgGroupEvents, PgMessages, PgSocialGraph,
 };
@@ -513,4 +516,48 @@ async fn every_kind_of_event_comes_back_as_recorded(pool: PgPool) {
         &alice,
     )
     .await;
+}
+
+/// Two members' Notes, or a commit and its Welcome, can bring a group here at the same moment.
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn a_group_mirrored_from_two_notes_at_once_lands_with_both(pool: PgPool) {
+    let conversations = PgConversations::new(pool);
+    let now = time::OffsetDateTime::now_utc();
+    let actor =
+        |name: &str| ActorUri::parse(&format!("https://idp.remote.test/users/{name}")).unwrap();
+    let roster = GroupChanges {
+        name: Some(StampedName {
+            name: Some("crew".to_owned()),
+            at: now,
+        }),
+        members: ["ana", "bea"]
+            .map(|name| Membership {
+                member: Member {
+                    actor_uri: actor(name),
+                    role: Role::Member,
+                },
+                joined_at: now,
+                role_at: now,
+                left_at: None,
+            })
+            .to_vec(),
+    };
+
+    for _ in 0..20 {
+        let id = ConversationId::generate();
+
+        let (first, second) = tokio::join!(
+            conversations.mirror_group(id, &roster),
+            conversations.mirror_group(id, &roster),
+        );
+
+        let mut brought_in = [first.unwrap().brought_in, second.unwrap().brought_in].concat();
+        brought_in.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+        assert_eq!(
+            brought_in,
+            vec![actor("ana"), actor("bea")],
+            "each by one of them"
+        );
+        assert_eq!(conversations.members(id).await.unwrap().len(), 2);
+    }
 }

@@ -156,6 +156,14 @@ impl GroupChanges {
     }
 }
 
+/// A copy of a group once changes are taken, and the members taking them brought in: added, or
+/// back from a departure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Mirrored {
+    pub group: Conversation,
+    pub brought_in: Vec<ActorUri>,
+}
+
 impl GroupSnapshot {
     /// The group as this instance holds it, every stamp included.
     pub fn of(group: &Conversation, held: &[Membership]) -> Self {
