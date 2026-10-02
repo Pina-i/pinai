@@ -6,7 +6,7 @@ use crate::identity::ActorUri;
 use crate::{ConversationId, GroupEventId};
 
 /// A change to a group as its conversation shows it, between the messages —
-/// identity-provider/specs/03-direct-messages.md § 10, A group's changes in its conversation.
+/// identity-provider/specs/groups.md § 6.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GroupEvent {
     pub id: GroupEventId,

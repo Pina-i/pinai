@@ -1,4 +1,4 @@
-//! Device attestations, signed with the instance's key — identity-provider/specs/05-e2ee.md § 7.2.
+//! Device attestations, signed with the instance's key — identity-provider/specs/e2ee.md § 7.2.
 
 use std::sync::Arc;
 

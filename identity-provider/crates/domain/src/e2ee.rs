@@ -2,7 +2,7 @@
 //! attests, the KeyPackages peers claim to add those devices to MLS groups, the Delivery
 //! Service — each group's commits in order, and the Welcomes waiting for their devices — and
 //! each account's encrypted history archive. Every key, package, MLS message and archive entry
-//! is opaque here — see identity-provider/specs/05-e2ee.md.
+//! is opaque here — see identity-provider/specs/e2ee.md.
 
 mod archive;
 mod delivery;

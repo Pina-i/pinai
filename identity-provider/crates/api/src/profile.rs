@@ -1,5 +1,5 @@
 //! `/userinfo`, the profile and the avatar — see
-//! identity-provider/specs/01-identity-federation.md § 1.5.
+//! identity-provider/specs/profile-and-settings.md § 1.
 
 use std::sync::Arc;
 

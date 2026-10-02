@@ -89,7 +89,7 @@ flowchart TD
     %% ── Federation (ActivityPub) ──────────────────────────────────────
     %% Outbound delivery is best-effort, inline tokio::spawn — no queue.
     %% Recovery for missed deliveries is per-activity (TTL re-fetch, idempotent retry,
-    %% a failed DM reported to its sender). See identity-provider/specs/01-identity-federation.md § Federation delivery semantics.
+    %% a failed DM reported to its sender). See identity-provider/specs/event-delivery.md § 2.
     MSG_B -->|"HTTP POST ActivityPub activity\nbest-effort, inline tokio::spawn"| MSG_A
     MSG_A -->|"update remote_actors cache\n+ friendships.friend_avatar_url"| REMOTE_A
     MSG_A -->|"update remote_actors cache\n+ friendships.friend_avatar_url"| FRIENDS_A
@@ -99,7 +99,7 @@ flowchart TD
     MSG_B -->|"update remote_actors cache\n+ friendships.friend_avatar_url"| FRIENDS_B
 
     %% Presence crosses instances by poll and stream, never by ActivityPub.
-    %% See identity-provider/specs/04-presence.md § Cross-instance presence.
+    %% See identity-provider/specs/presence.md § Cross-instance presence.
     MSG_A <-->|"presence: batch poll every 10 s,\nSSE stream while a conversation is open\nHTTP-signed, each instance speaks for its own accounts"| MSG_B
 
     %% ── Styles ────────────────────────────────────────────────────────

@@ -1,6 +1,5 @@
 //! A group's changes for the other instances holding its members: `Add`, `Remove`, `Leave`, and
-//! `Update` of the group's name or of a member's role — identity-provider/specs/03-direct-messages.md
-//! § 10, Group changes.
+//! `Update` of the group's name or of a member's role — identity-provider/specs/groups.md § 8.
 
 use std::sync::Arc;
 

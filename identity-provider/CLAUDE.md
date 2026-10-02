@@ -139,7 +139,7 @@ connections ──► (no internal deps)
 | `GET /logout` | Drops the session cookie; `post_logout_redirect_uri` only to the origin of a registered redirect URI, else `/` |
 | `GET /userinfo` | The account (handle, `address`, `actor_uri`, name, avatar, pronouns, bio, `email_verified`, `totp_enabled`), its `settings` document, and `privacy: { contact_policy }`. A token outliving its account is `401 invalid_token` |
 | `PATCH /api/profile` | Bearer-auth. Every field on every save: `display_name` trimmed 1–50, `pronouns` ∈ {he, she, non-binary} or empty, `bio` ≤ 190 or empty; `400` names the rule broken. Answers the new userinfo; the friends are told (`friend_profile_updated` here, `Update{Person}` elsewhere) |
-| `PATCH /api/settings` | Bearer-auth. Replace the account-settings sections the body names (`{ appearance: {…} }`), keep the others; returns the merged document and pushes it to the user's sessions as `settings_updated`. Read back on `GET /userinfo` (`settings`). Device-scoped settings never reach the IdP — see `identity-provider/specs/01-identity-federation.md § 1.6` |
+| `PATCH /api/settings` | Bearer-auth. Replace the account-settings sections the body names (`{ appearance: {…} }`), keep the others; returns the merged document and pushes it to the user's sessions as `settings_updated`. Read back on `GET /userinfo` (`settings`). Device-scoped settings never reach the IdP — see `identity-provider/specs/profile-and-settings.md § 2` |
 | `PUT /api/avatar` | Replace the avatar (raw image bytes; 1 byte–2 MiB; jpeg/png/webp/gif): stored, shown, then the other types removed; URL cache-busted with `?v=<unix_secs>`; the friends are told |
 | `DELETE /api/avatar` | Clear the avatar, then remove its images; the friends are told |
 | `POST /register` | JSON self-registration: `201` with the account, a code mailed, no session. `400` names the rule broken (the handle rules, an address, 8-byte passwords) or `Email already registered` — whatever its case, races included |
@@ -159,7 +159,7 @@ connections ──► (no internal deps)
 | `DELETE /api/friends/:id/reject` | Decline a pending request, silently. Clears the requester's side: their row (local) or `Reject{Follow}` (remote) |
 | `DELETE /api/friends/:actor_uri` | Unfriend (`actor_uri` percent-encoded; 404 when not a friend). Deletes both sides — the friend's row plus a refresh-only `friend_removed` (local) or `Undo{Follow}` (remote). The DM conversation is kept |
 | `GET /api/friends` | Accepted friends, local and remote |
-| `PATCH /api/privacy` | Bearer-auth. Body `{ contact_policy }`: `everyone` \| `friends_and_groups` (default) \| `friends` — who may message the account; 400 otherwise. Enforced with the blocks by one rule, one refusal (`identity-provider/specs/01-identity-federation.md § 1.7`) |
+| `PATCH /api/privacy` | Bearer-auth. Body `{ contact_policy }`: `everyone` \| `friends_and_groups` (default) \| `friends` — who may message the account; 400 otherwise. Enforced with the blocks by one rule, one refusal (`identity-provider/specs/social.md § 2`) |
 | `GET /api/blocks` | The caller's blocked actors, newest first (`actor_uri`, `display_name`, `avatar_url`, `blocked_at`). Private to the blocker, never federated |
 | `POST /api/blocks` | Block an actor. Body: `{ actor_uri }`; idempotent, 204. Ends the friendship as an unfriend — or a decline, for a request they sent — would. 400 for one's own URI, an invalid one, or past 1000 blocks. `blocks_updated` to the caller's sessions |
 | `DELETE /api/blocks/:actor_uri` | Unblock (`actor_uri` percent-encoded); 404 when not blocked. Restores nothing. `blocks_updated` to the caller's sessions |
@@ -215,10 +215,16 @@ file wherever it is read from.
 
 | File | Contents | Read when working on… |
 |---|---|---|
-| `identity-provider/specs/01-identity-federation.md` | `users`, `remote_actors`, `friendships`, `user_blocks` schema, who can reach a user (the contact setting, blocks, the rule and where it is enforced), real-time profile propagation, Redis broker strategy, federation delivery semantics | Auth, user accounts, friend requests, blocking, the contact setting, profile updates, WebFinger, ActivityPub inbox/outbox |
-| `identity-provider/specs/03-direct-messages.md` | `conversations`, `conversation_members`, `direct_messages` schema, DM delivery (local + federated), unread tracking, reactions, replies, message editing | Anything touching DMs, conversations, messages, reactions, replies, unread counts |
-| `identity-provider/specs/04-presence.md` | Presence states (online/away/offline/dnd), typing indicators, Redis pub-sub channels, heartbeat, the presence board, cross-instance presence (batch poll, SSE stream, what a peer is told and what is taken from it) | Online status, typing indicators, presence propagation, inter-IdP SSE |
-| `identity-provider/specs/05-e2ee.md` | MLS-based E2EE: trust model (user-controlled MSK / SSK / USK / Recovery Key), key directory tables + endpoints, group lifecycle on top of `conversation_members`, MLSCiphertext wire format, encrypted attachments, multi-device pairing, account recovery | Anything touching message content, identity keys, KeyPackages, group commits/welcomes, encrypted attachments, device pairing |
+| `identity-provider/specs/identity.md` | `users` and `remote_actors` schema, the remote actor cache and how a group's remote members are reached, what peers read of an account (WebFinger, the actor documents), the address and name formats | Accounts, handles and display names, actor URIs and addresses, WebFinger, the actor documents |
+| `identity-provider/specs/auth.md` | OpenID Connect sign-in (clients, `/authorize`, `/login`, the session cookie, `/token`, tokens, logout, discovery), sign-up email verification, TOTP two-factor and recovery codes | Signing in, sessions, tokens, sign-up, email codes, the second factor |
+| `identity-provider/specs/social.md` | `friendships` and `user_blocks` schema, a friendship's life (request, accept opening the DM, decline, unfriend), who can reach a user (the contact setting, blocks, the rule and where it is enforced) | Friend requests, the friends list, blocking, the contact setting |
+| `identity-provider/specs/profile-and-settings.md` | Profile editing and avatar storage, `user_settings`, real-time profile propagation (`friend_profile_updated`, `Update{Person}`) | Profile fields, avatars, account settings, profile federation |
+| `identity-provider/specs/event-delivery.md` | Redis Streams vs pub-sub, federation delivery semantics (best-effort, each activity's recovery), reconnect and catch-up | The broker, the WebSocket replay, outbound ActivityPub delivery |
+| `identity-provider/specs/direct-messages.md` | `conversations`, `conversation_members`, `direct_messages` schema, DM delivery (local + federated) and delivery failure, pagination, unread tracking, replies and reactions, editing | Anything touching DMs, conversations, messages, reactions, replies, unread counts |
+| `identity-provider/specs/attachments.md` | `message_attachments`, the upload and download routes, the federation wire format, validation and limits | Attachments |
+| `identity-provider/specs/groups.md` | Roles, the group routes, a member removed from a group, fan-out, a group's changes in its conversation (`conversation_events`), federated groups and their changes | Group conversations, membership and roles, group federation |
+| `identity-provider/specs/presence.md` | Presence states (online/away/offline/dnd), typing indicators, Redis pub-sub channels, heartbeat, the presence board, cross-instance presence (batch poll, SSE stream, what a peer is told and what is taken from it) | Online status, typing indicators, presence propagation, inter-IdP SSE |
+| `identity-provider/specs/e2ee.md` | MLS-based E2EE: trust model (user-controlled MSK / SSK / USK / Recovery Key), key directory tables + endpoints, group lifecycle on top of `conversation_members`, MLSCiphertext wire format, encrypted attachments, multi-device pairing, account recovery | Anything touching message content, identity keys, KeyPackages, group commits/welcomes, encrypted attachments, device pairing |
 
 ## Spec file modifications **IMPORTANT**
 
@@ -252,7 +258,7 @@ Don't mention any "phase" development or what is currently being worked on. The 
 - Whether one account may message another goes through `domain::social::Relation`, read by the
   `Reachability` port in one query — never an ad-hoc check. A block and the contact setting give
   the same refusal, so nobody can tell one from the other
-  (`identity-provider/specs/01-identity-federation.md § 1.7`).
+  (`identity-provider/specs/social.md § 2`).
 
 ### Conversations
 - Every conversation (DM or group) has a stable **`conversation_id UUID`** that never changes regardless of participant count.
@@ -262,7 +268,7 @@ Don't mention any "phase" development or what is currently being worked on. The 
 - **A group's copies converge by stamps**: each instance holding a member keeps its own copy, and
   takes a name, a role, a join or a rejoin from a snapshot only when its stamp is newer than the
   one held (`domain::messaging::GroupSnapshot::changes`) — so a stale snapshot never undoes a
-  departure, a rename or a role change (`identity-provider/specs/03-direct-messages.md § 10`).
+  departure, a rename or a role change (`identity-provider/specs/groups.md § 7`).
 - `kind = 'dm'` | `'group'`. DM titles are derived client-side from `members[0].display_name`. Group titles use the stored `name` column (defaults to comma-joined member display names at creation, editable via `PATCH`).
 - **Cross-IdP row-id bridging**: `direct_messages.id` and `message_attachments.id` are NOT freshly generated — they're derived from the trailing UUID of the message's `activity_uri` (`<issuer>/users/<username>/activities/<uuid>`) and the attachment's URL (`<issuer>/api/attachments/<uuid>/content`) respectively. Both IdPs in a cross-server DM see the same activity URLs, so both compute the same row ids. Without this, anything that references a message or attachment by id from inside the encrypted MLS body (reactions' `target_message_id`, `AttachmentBlobKey.id`, edits, replies) silently fails on the receiver. The rule lives in `domain::messaging` (`MessageId::of_activity`, `AttachmentId::of_content_url`) and every writer goes through it; a URI without a trailing UUID gets a fresh id. An inbound attachment URL is kept only when it is the sender's own instance's `/content` endpoint (`AttachmentLimits::admit`), since this IdP later fetches it as itself.
 
@@ -272,11 +278,11 @@ Don't mention any "phase" development or what is currently being worked on. The 
   to the live sessions only.
 
 ### Federation
-- **Outbound AP delivery** is best-effort, inline `tokio::spawn` per remote inbox — no persistent outbox queue. A delivery never fails the request that caused it: friendship activities go through the fire-and-forget `SocialFederation` port. Each activity owns its own reconciliation story (the next profile change, idempotent retry, a failed 1:1 DM reported to its sender). See `identity-provider/specs/01-identity-federation.md § Federation delivery semantics`.
+- **Outbound AP delivery** is best-effort, inline `tokio::spawn` per remote inbox — no persistent outbox queue. A delivery never fails the request that caused it: friendship activities go through the fire-and-forget `SocialFederation` port. Each activity owns its own reconciliation story (the next profile change, idempotent retry, a failed 1:1 DM reported to its sender). See `identity-provider/specs/event-delivery.md § 2`.
 - **`remote_actors.inbox_url`** is cached on first WebFinger resolution. Every writer (`remote_actors::upsert()`, `FederatedRemoteActors`) uses `COALESCE(EXCLUDED.inbox_url, remote_actors.inbox_url)` — never overwrite a cached value with `None`.
 - **A group's changes travel on their own**: an add, removal, leave, rename or role change made
   here is sent to the group's remote members as `Add`, `Remove`, `Leave` or `Update`, stamped
-  (`GroupFederation`, `ReceiveGroupChange`; `identity-provider/specs/03-direct-messages.md § 10`).
+  (`GroupFederation`, `ReceiveGroupChange`; `identity-provider/specs/groups.md § 8`).
 - **A fan-out reaches every remote member, met here or not**: use cases hand the federation actor URIs, and `infrastructure::federation::Inboxes` finds each inbox in the background — the cache, else WebFinger, 10 lookups a send, an unresolved actor left alone for 10 minutes. Never filter recipients on the cache in a use case.
 - **HTTP Signatures** are mandatory on all incoming ActivityPub activities and on the inter-IdP endpoints. Reuses the instance's key pair — no separate key material. A signed request with a body goes through `SignedBody` / `SignedJson` / `CallerJson`, which check its `Digest` before the body is read; `SignedPeer` is for bodyless requests only.
 
@@ -383,7 +389,7 @@ starts the background tasks; `run_until_stopped` serves until its stop token is 
 `SIGTERM` or Ctrl-C in the binary. It then takes no new connection, answers the requests under
 way, closes each WebSocket with `1001` and ends the peers' presence streams, lets every background
 task finish its run under way, and drops what is still open ten seconds on
-(`identity-provider/specs/04-presence.md` § When the instance stops).
+(`identity-provider/specs/presence.md` § When the instance stops).
 
 ---
 

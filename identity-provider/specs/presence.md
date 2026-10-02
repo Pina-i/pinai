@@ -301,7 +301,7 @@ The polling side keeps the **poll targets**: the remote friends of its local acc
 instance. They are loaded from the accepted friendships at startup and kept by the social
 context after — an accepted friendship adds the friend, and the friend is released once no
 local account still counts them among its friends
-(`identity-provider/specs/01-identity-federation.md` § Declining a request and ending a friendship). Local friends are never polled.
+(`identity-provider/specs/social.md` § 1, Declining a request and ending a friendship). Local friends are never polled.
 
 Every 10 seconds, **every instance is polled at once**, so a slow peer delays only its own
 friends' states. A state that differs from the board's is recorded and published on the local

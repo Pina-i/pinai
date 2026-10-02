@@ -1,4 +1,4 @@
-//! Commits and Welcomes for members on other instances — identity-provider/specs/05-e2ee.md § 5.
+//! Commits and Welcomes for members on other instances — identity-provider/specs/e2ee.md § 5.
 
 use std::sync::Arc;
 

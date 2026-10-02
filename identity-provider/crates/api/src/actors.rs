@@ -1,5 +1,5 @@
 //! What peers read of this instance's accounts: WebFinger, the actor documents and their
-//! collections — see identity-provider/specs/01-identity-federation.md.
+//! collections — see identity-provider/specs/identity.md § 3.
 
 use std::sync::Arc;
 

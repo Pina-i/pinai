@@ -1,5 +1,5 @@
 //! `PATCH /api/privacy`: who may message the account or add it to a group — see
-//! identity-provider/specs/01-identity-federation.md § 1.7.
+//! identity-provider/specs/social.md § 2.
 
 use std::sync::Arc;
 

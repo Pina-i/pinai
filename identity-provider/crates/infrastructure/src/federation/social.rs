@@ -1,5 +1,5 @@
 //! Friendship activities, delivered best-effort — see
-//! identity-provider/specs/01-identity-federation.md § Federation delivery semantics.
+//! identity-provider/specs/event-delivery.md § 2.
 
 use std::sync::Arc;
 

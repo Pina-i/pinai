@@ -35,10 +35,10 @@ server-to-server endpoint uses the same scheme and the same code path.
 | Endpoint | Direction | Spec |
 |---|---|---|
 | `POST /users/:username/inbox` | inbound activities | this file, § Inbound |
-| `GET /api/attachments/:id/content` | peer fetching attachment bytes | `identity-provider/specs/03-direct-messages.md` |
-| `POST /api/presence/batch` | peer batch-polling presence | `identity-provider/specs/04-presence.md` |
-| `GET /api/presence/stream` | peer SSE subscription | `identity-provider/specs/04-presence.md` |
-| `POST /api/keys/packages/claim` | peer claiming a KeyPackage | `identity-provider/specs/05-e2ee.md` |
+| `GET /api/attachments/:id/content` | peer fetching attachment bytes | `identity-provider/specs/attachments.md` |
+| `POST /api/presence/batch` | peer batch-polling presence | `identity-provider/specs/presence.md` |
+| `GET /api/presence/stream` | peer SSE subscription | `identity-provider/specs/presence.md` |
+| `POST /api/keys/packages/claim` | peer claiming a KeyPackage | `identity-provider/specs/e2ee.md` |
 
 Implementation lives in `crates/federation-transport/`, shared with the chat server. Domain
 handling — which activity verbs a service accepts and what they do — stays in the service.
@@ -149,7 +149,7 @@ be marked accepted, and its DM conversation minted, without the named user conse
 
 The binding covers who speaks, not what about: an activity that changes an account must also
 name the actor's own — an `Update{Person}` of any other account is refused, see
-`identity-provider/specs/01-identity-federation.md` § 2.
+`identity-provider/specs/profile-and-settings.md` § 3.
 
 > This binding assumes the signing key belongs to the activity's actor, which holds for
 > everything Pina'i emits. Implementations that deliver through an instance actor
@@ -233,7 +233,7 @@ use a second client with the same screen and download-sized bounds:
 | Total timeout | none | A large file takes what it takes |
 | Read timeout | 30 s | A stalled peer still releases the task |
 | Redirects | none | The redirect target would not be screened |
-| Body cap | the size the peer announced | The caller caps the stream as bytes arrive (`identity-provider/specs/03-direct-messages.md` § 9) |
+| Body cap | the size the peer announced | The caller caps the stream as bytes arrive (`identity-provider/specs/attachments.md`) |
 
 Peer URLs are screened before the request is made:
 

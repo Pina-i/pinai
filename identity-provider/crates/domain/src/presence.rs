@@ -1,5 +1,5 @@
 //! Who is around, and who is typing: presence states and typing indicators, both ephemeral —
-//! never persisted, losing one is always acceptable. See identity-provider/specs/04-presence.md.
+//! never persisted, losing one is always acceptable. See identity-provider/specs/presence.md.
 
 mod board;
 mod connections;

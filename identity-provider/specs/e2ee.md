@@ -295,7 +295,7 @@ All Bearer-auth except where noted. Cross-IdP paths use HTTP Signatures — see
   that fails to answer is `502`. A peer's own claim must name an account of this instance (`400`)
   — peers never relay through another instance.
 - **A claim is how someone adds a device to a group**, so it follows who may add the account
-  (`identity-provider/specs/01-identity-federation.md § 1.7`): a claimer the account doesn't admit —
+  (`identity-provider/specs/social.md § 2`): a claimer the account doesn't admit —
   a block or its contact setting — is refused with `403 Can't add this person` before a package is
   taken. One's own packages are always claimable.
 
@@ -315,7 +315,7 @@ All Bearer-auth except where noted. Cross-IdP paths use HTTP Signatures — see
 | `POST /api/mls/groups/:conversation_id/commits` | Append an MLS Commit at the next epoch, then push it to every member — the proposer's own sessions included — and send it to the members' instances. `409` on epoch race carries the winning commit |
 | `GET /api/mls/groups/:conversation_id/commits?since=<epoch>` | Catch-up: the commits after `since`, in epoch order, 256 a page with `has_more` |
 | `GET /api/mls/welcomes?device_id=<uuid>` | Atomically claim every pending Welcome targeted at the calling device |
-| `POST /api/mls/welcomes` | Hand a Welcome bundle to the sender's IdP. The IdP routes off `recipient_actor_uri`: local → row + WS push, remote → signed AP `Create{Note}` with `mlsKind: welcome` (the answer's `id` is then nil). For a group, the Note also carries the roster so the recipient's IdP can materialise the conversation — see `identity-provider/specs/03-direct-messages.md § 10` |
+| `POST /api/mls/welcomes` | Hand a Welcome bundle to the sender's IdP. The IdP routes off `recipient_actor_uri`: local → row + WS push, remote → signed AP `Create{Note}` with `mlsKind: welcome` (the answer's `id` is then nil). For a group, the Note also carries the roster so the recipient's IdP can materialise the conversation — see `identity-provider/specs/groups.md § 7` |
 
 #### Delivery Service rules
 
@@ -329,11 +329,11 @@ and they hold for what peers deliver as much as for local clients.
 - **A Welcome goes from an active member to an active member** (`403` either way) and never
   changes membership — joining is the group routes' business, with their admin rules. A member's
   own new device is a member already.
-- **A Welcome follows who may add the recipient** (`identity-provider/specs/01-identity-federation.md
-  § 1.7`): a 1:1's, or a group's to someone not yet a member, from a sender the recipient doesn't
+- **A Welcome follows who may add the recipient** (`identity-provider/specs/social.md
+  § 2`): a 1:1's, or a group's to someone not yet a member, from a sender the recipient doesn't
   admit is refused with `403 Can't add this person`. One's own new device is always welcome.
 - **An inbound Welcome** mirrors a group's roster first, when the sender may assert it (see
-  `identity-provider/specs/03-direct-messages.md § 10`). A DM's Welcome can outrun the
+  `identity-provider/specs/groups.md § 7`). A DM's Welcome can outrun the
   friendship's `Accept`: it opens the pair's DM under its id, as a first message would — or is
   refused when the pair's DM has another id.
 - **Redelivery is harmless**: a commit already at its epoch — resent, or a race another member
@@ -582,7 +582,7 @@ device.
 
 ### 6.8 Someone leaves a group's MLS state with its roster
 
-Taking someone off a group's roster (`identity-provider/specs/03-direct-messages.md § 10`) takes
+Taking someone off a group's roster (`identity-provider/specs/groups.md § 3`) takes
 nothing from them cryptographically: their devices still hold the group's keys. So every device of
 someone the roster no longer holds is committed out of the MLS group — one Remove commit a leaf,
 each posted to the DS, after the roster change, never before (the IdP validates the change first:

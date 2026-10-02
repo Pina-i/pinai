@@ -1,4 +1,4 @@
-//! Presence snapshots, and what peers poll and stream — see identity-provider/specs/04-presence.md.
+//! Presence snapshots, and what peers poll and stream — see identity-provider/specs/presence.md.
 
 use std::collections::HashMap;
 use std::convert::Infallible;

@@ -1,5 +1,5 @@
 //! OpenID Connect sign-in: `/authorize`, the login form, `/token`, `/logout`, and the documents
-//! a client discovers them by — see identity-provider/specs/01-identity-federation.md § 1.3.
+//! a client discovers them by — see identity-provider/specs/auth.md § 1.
 
 use std::sync::Arc;
 

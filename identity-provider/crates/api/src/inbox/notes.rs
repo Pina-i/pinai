@@ -2,7 +2,7 @@
 //! case — commit, Welcome or application message — and an `Update{Note}`, an edit. Any other
 //! Note is dropped: a peer on a pre-MLS build cannot interoperate. Outbound Notes are
 //! `infrastructure::federation::{ApMessageFederation, ApMlsFederation}`; see
-//! `identity-provider/specs/05-e2ee.md § 5`.
+//! `identity-provider/specs/e2ee.md § 5`.
 
 use application::e2ee::{IncomingCommit, IncomingWelcome};
 use application::messaging::{IncomingEdit, IncomingMessage};

@@ -1,6 +1,6 @@
 //! What an account shows of itself — its name, pronouns, bio and avatar — and how a change
 //! reaches its friends, here and on other instances — see
-//! identity-provider/specs/01-identity-federation.md § 1.5 and § 2.
+//! identity-provider/specs/profile-and-settings.md § 1 and § 3.
 
 mod avatar;
 mod edit;

@@ -1,4 +1,4 @@
-//! Devices and KeyPackages — see identity-provider/specs/05-e2ee.md § 5.
+//! Devices and KeyPackages — see identity-provider/specs/e2ee.md § 5.
 
 use std::sync::Arc;
 

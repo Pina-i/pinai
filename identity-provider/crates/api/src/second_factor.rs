@@ -1,5 +1,5 @@
 //! The second factor: `/login/totp`, and `/api/totp/*` to turn it on and off — see
-//! identity-provider/specs/01-identity-federation.md § 1.4b.
+//! identity-provider/specs/auth.md § 3.
 
 use std::sync::Arc;
 

@@ -1,5 +1,5 @@
 //! The friend graph: requests, acceptance, the end of a friendship, blocks, and who may reach an
-//! account — see identity-provider/specs/01-identity-federation.md § 1.7.
+//! account — see identity-provider/specs/social.md § 2.
 
 mod block;
 mod error;

@@ -51,14 +51,16 @@ Then edit each one. At a minimum:
 | `IDP_ENV` | `development` | `development` |
 | `DOMAIN` / `PORT` | `localhost:8080` / `8080` | `localhost:8081` / `8081` |
 | `POSTGRES_DB` / `POSTGRES_PORT` | `idp_alice` / `5432` | `idp_bob` / `5433` |
-| `DATABASE_URL` | `postgres://pina:secret@localhost:5432/idp_alice` | `postgres://pina:secret@localhost:5433/idp_bob` |
-| `REDIS_PORT` / `REDIS_URL` | `6379` / `redis://localhost:6379` | `6380` / `redis://localhost:6380` |
+| `REDIS_PORT` | `6379` | `6380` |
 | `RUSTFS_PORT` / `RUSTFS_CONSOLE_PORT` | `9004` / `9005` | `9002` / `9003` |
-| `STORAGE_ENDPOINT` | `http://localhost:9004` | `http://localhost:9002` |
 | `MAILPIT_SMTP_PORT` / `MAILPIT_UI_PORT` | `1025` / `8025` | `1026` / `8026` |
 | `SMTP_HOST` / `SMTP_PORT` | `localhost` / `1025` | `localhost` / `1026` |
 | `IDP_KEYS_DIR` | `./identity-provider/keys/alice` | `./identity-provider/keys/bob` |
 | `JWT_PRIVATE_KEY_PATH` | `./identity-provider/keys/alice/ed25519.pem` | `./identity-provider/keys/bob/ed25519.pem` |
+
+`DATABASE_URL`, `REDIS_URL` and `STORAGE_ENDPOINT` are not set in the env file:
+compose and the Makefile build them from the ports above, so changing a port is
+enough.
 
 Leave `SESSION_SECRET` and `EMAIL_OTP_PEPPER` as they are: the next step fills
 them in.
@@ -156,10 +158,14 @@ make alice
 make bob                 # in another terminal, after starting Bob's dependencies
 ```
 
-To run a single binary directly:
+To run a single binary directly, give it the URLs the Makefile builds from the
+ports (`instance-env` in the `Makefile`):
 
 ```bash
-set -a && . .env.alice && set +a && cargo run -p idp-app
+set -a && . .env.alice && set +a
+export DATABASE_URL="postgres://$POSTGRES_USER:$POSTGRES_PASSWORD@localhost:$POSTGRES_PORT/$POSTGRES_DB"
+export REDIS_URL="redis://localhost:$REDIS_PORT" STORAGE_ENDPOINT="http://localhost:$RUSTFS_PORT"
+cargo run -p idp-app
 ```
 
 Migrations in `identity-provider/migrations/` are applied automatically on
@@ -267,12 +273,12 @@ All `make` targets are run from the repo root.
 
 `.env.example` documents every supported variable. The main groups:
 
-- **PostgreSQL** — `POSTGRES_*`, `DATABASE_URL`
+- **PostgreSQL** — `POSTGRES_*`; `DATABASE_URL` is built from them
 - **Server** — `IDP_ENV`, `DOMAIN`, `PORT`
 - **Keys** — `IDP_KEYS_DIR`, `JWT_PRIVATE_KEY_PATH`, `JWT_KEY_ID`
 - **Session / frontend** — `SESSION_SECRET`, `FRONTEND_URL`, `CORS_ORIGINS`
-- **Redis** — `REDIS_URL`, `REDIS_PORT` (event streams and presence pub-sub)
-- **Object storage** — `STORAGE_ENDPOINT`, `STORAGE_ACCESS_KEY`, `STORAGE_SECRET_KEY`, optional `STORAGE_PUBLIC_URL` and bucket names
+- **Redis** — `REDIS_PORT`, from which `REDIS_URL` is built (event streams and presence pub-sub)
+- **Object storage** — `RUSTFS_PORT`, from which `STORAGE_ENDPOINT` is built, `STORAGE_ACCESS_KEY`, `STORAGE_SECRET_KEY`, optional `STORAGE_PUBLIC_URL` and bucket names
 - **Email** — `SMTP_*`, `EMAIL_OTP_PEPPER`, `MAILPIT_*` ports
 - **Chat server** — `CHAT_PORT`, `CHAT_POSTGRES_DB`, `IDP_ISSUER`
 - **Logging** — `RUST_LOG`, `LOG_FORMAT=json` for structured logs

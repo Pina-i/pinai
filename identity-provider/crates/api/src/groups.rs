@@ -1,4 +1,4 @@
-//! Group management — see identity-provider/specs/03-direct-messages.md § 9.
+//! Group management — see identity-provider/specs/groups.md.
 
 use std::sync::Arc;
 

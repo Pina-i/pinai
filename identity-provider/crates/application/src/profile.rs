@@ -1,5 +1,5 @@
 //! What an account shows of itself, and how a change reaches its friends — see
-//! identity-provider/specs/01-identity-federation.md § 1.5 and § 2.
+//! identity-provider/specs/profile-and-settings.md § 1 and § 3.
 
 mod avatar;
 mod edit_profile;

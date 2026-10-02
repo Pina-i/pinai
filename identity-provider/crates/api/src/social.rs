@@ -1,4 +1,4 @@
-//! Friend requests and the friends list — see identity-provider/specs/01-identity-federation.md.
+//! Friend requests and the friends list — see identity-provider/specs/social.md.
 
 use std::sync::Arc;
 

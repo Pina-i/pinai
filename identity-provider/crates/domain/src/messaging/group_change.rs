@@ -6,7 +6,7 @@ use crate::ConversationId;
 use crate::identity::ActorUri;
 
 /// A change to a group, as the instance where it was made tells the others holding its members —
-/// identity-provider/specs/03-direct-messages.md § 10, Group changes.
+/// identity-provider/specs/groups.md § 8.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GroupChange {
     pub group: ConversationId,

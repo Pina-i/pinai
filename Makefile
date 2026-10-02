@@ -12,6 +12,16 @@ SHELL := bash
         fmt fmt-check lint check \
         test-integration test-integration-down check-all
 
+# ── Instance environment ─────────────────────────────────────────────────────
+# Sources an instance's env file for a program run on this machine, then builds the URLs it
+# connects with from the ports the file publishes, as compose builds the IdP container's. A
+# port is thus set in one place; a URL the file still sets is replaced.
+instance-env = set -a && . $(1) && \
+	DATABASE_URL="postgres://$$POSTGRES_USER:$$POSTGRES_PASSWORD@localhost:$${POSTGRES_PORT:-5432}/$$POSTGRES_DB" && \
+	REDIS_URL="redis://localhost:$${REDIS_PORT:-6379}" && \
+	STORAGE_ENDPOINT="http://localhost:$${RUSTFS_PORT:-9000}" && \
+	set +a
+
 # ── Local dev (cargo run on host) ─────────────────────────────────────────────
 # Fastest inner loop. Requires the Rust toolchain locally. Each target seeds
 # the dev fixture user first (applies migrations + upserts the user), then
@@ -19,10 +29,10 @@ SHELL := bash
 # in the env files is resolved against the working directory.
 
 alice: alice-env alice-keys alice-seed
-	set -a && . .env.alice && set +a && cargo run -p idp-app
+	$(call instance-env,.env.alice) && cargo run -p idp-app
 
 bob: bob-env bob-keys bob-seed
-	set -a && . .env.bob && set +a && cargo run -p idp-app
+	$(call instance-env,.env.bob) && cargo run -p idp-app
 
 # ── Instance secrets ─────────────────────────────────────────────────────────
 # Fills SESSION_SECRET and EMAIL_OTP_PEPPER in the env file when they are unset,
@@ -98,10 +108,10 @@ bob-keys:
 # group conversations and same-instance E2EE without involving federation.
 
 alice-seed:
-	set -a && . .env.alice && set +a && cargo run -p dev-inject-data -- alice pierre
+	$(call instance-env,.env.alice) && cargo run -p dev-inject-data -- alice pierre
 
 bob-seed:
-	set -a && . .env.bob && set +a && cargo run -p dev-inject-data -- bob
+	$(call instance-env,.env.bob) && cargo run -p dev-inject-data -- bob
 
 # ── Docker — dev (Linux, host networking + Dockerfile.dev) ───────────────────
 # Same network model as prod; only the IdP image switches to debug profile.

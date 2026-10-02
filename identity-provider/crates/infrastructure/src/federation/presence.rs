@@ -1,5 +1,5 @@
 //! Presence from other instances: the batch poll behind a friends list, and the streams behind an
-//! open conversation — identity-provider/specs/04-presence.md § Cross-instance presence.
+//! open conversation — identity-provider/specs/presence.md § Cross-instance presence.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};

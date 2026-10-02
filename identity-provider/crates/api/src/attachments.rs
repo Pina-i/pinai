@@ -1,4 +1,4 @@
-//! Attachments — see identity-provider/specs/03-direct-messages.md § 9.
+//! Attachments — see identity-provider/specs/attachments.md.
 
 use std::sync::Arc;
 

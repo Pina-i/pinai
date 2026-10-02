@@ -1,4 +1,4 @@
-//! `PATCH /api/settings` — see identity-provider/specs/01-identity-federation.md § 1.6.
+//! `PATCH /api/settings` — see identity-provider/specs/profile-and-settings.md § 2.
 
 use std::sync::Arc;
 

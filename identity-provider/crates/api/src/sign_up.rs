@@ -1,6 +1,6 @@
 //! Registering and confirming an address: `/register`, `/register-and-login`,
 //! `/verify-email-and-login`, `/verify-email/resend` — see
-//! identity-provider/specs/01-identity-federation.md § 1.4.
+//! identity-provider/specs/auth.md § 2.
 
 use std::sync::Arc;
 

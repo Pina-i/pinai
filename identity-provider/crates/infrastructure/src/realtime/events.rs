@@ -262,7 +262,7 @@ pub struct GroupEventPayload {
 }
 
 /// The account's whole settings document after a change — see
-/// `identity-provider/specs/01-identity-federation.md § 1.6`.
+/// `identity-provider/specs/profile-and-settings.md § 2`.
 #[derive(Debug, Clone, Serialize)]
 pub struct SettingsPayload {
     pub settings: serde_json::Value,

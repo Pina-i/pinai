@@ -1,6 +1,6 @@
 //! Signing in to this instance over OpenID Connect: the clients, the authorization codes a
 //! sign-in ends in and the tokens they are exchanged for — see
-//! identity-provider/specs/01-identity-federation.md § 1.3.
+//! identity-provider/specs/auth.md § 1.
 
 mod account;
 mod client;

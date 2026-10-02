@@ -1,5 +1,5 @@
 //! Messages to other instances: MLS application messages inside `Create{Note}` /
-//! `Update{Note}` — see identity-provider/specs/05-e2ee.md § 5.
+//! `Update{Note}` — see identity-provider/specs/e2ee.md § 5.
 
 use std::sync::Arc;
 

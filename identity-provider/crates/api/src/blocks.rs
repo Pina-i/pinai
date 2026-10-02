@@ -1,4 +1,4 @@
-//! The block list — see identity-provider/specs/01-identity-federation.md § 1.7.
+//! The block list — see identity-provider/specs/social.md § 2.
 
 use std::sync::Arc;
 

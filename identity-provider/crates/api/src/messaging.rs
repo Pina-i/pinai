@@ -1,4 +1,5 @@
-//! Direct and group messages — see identity-provider/specs/03-direct-messages.md.
+//! Direct and group messages — see identity-provider/specs/direct-messages.md and
+//! identity-provider/specs/groups.md.
 
 use std::sync::Arc;
 

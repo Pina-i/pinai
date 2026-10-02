@@ -132,7 +132,7 @@ async fn main() -> Result<()> {
         .collect::<Result<Vec<_>>>()?;
 
     let database_url = env::var("DATABASE_URL")
-        .context("DATABASE_URL must be set (source docker/.env.alice or .env.bob)")?;
+        .context("DATABASE_URL must be set (`make alice-seed` / `make bob-seed` build it)")?;
     let domain =
         env::var("DOMAIN").context("DOMAIN must be set (matches the IdP's configured domain)")?;
 

@@ -1,6 +1,6 @@
 //! A group's changes from another instance — `Add`, `Remove`, `Leave`, and `Update` of a `Group`'s
-//! name or a `Membership`'s role; see identity-provider/specs/03-direct-messages.md § 10, Group
-//! changes. Whether to take one is the use case's to say.
+//! name or a `Membership`'s role; see identity-provider/specs/groups.md § 8. Whether to take one
+//! is the use case's to say.
 
 use domain::ConversationId;
 use domain::identity::{Account, ActorUri};

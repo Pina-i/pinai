@@ -1,5 +1,5 @@
 //! `GET /ws?token=` — a client's live connection: events out, frames in. See
-//! identity-provider/specs/04-presence.md.
+//! identity-provider/specs/presence.md.
 
 mod frames;
 
