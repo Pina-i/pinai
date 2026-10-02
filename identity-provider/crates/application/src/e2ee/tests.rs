@@ -105,6 +105,7 @@ fn world() -> World {
             store.clone(),
             remote.clone(),
             reach.clone(),
+            notifier.clone(),
         ),
         status: KeyPackageStatus::new(policy(), store.clone()),
         sweep: SweepKeyPackages::new(store.clone()),
@@ -580,6 +581,7 @@ async fn a_claim_by_someone_the_owner_does_not_admit_is_refused_and_takes_nothin
             refusals.push(format!("{:?}", refused.map(|_| ())));
         }
         assert_eq!(w.store.available(w.alice.id, device).await.unwrap(), 2);
+        assert!(w.notifier.key_packages_low().is_empty());
     }
     assert_eq!(refusals, vec!["Err(Unreachable)"; 4]);
 }
@@ -596,4 +598,37 @@ async fn an_account_always_claims_its_own_packages() {
         .await;
 
     assert!(claim.is_ok(), "{:?}", claim.map(|_| ()));
+}
+
+#[tokio::test]
+async fn a_claim_that_leaves_a_device_at_the_threshold_tells_the_owner_to_refill() {
+    let w = world();
+    w.upload(&w.alice, DeviceId::generate(), batch(5)).await;
+
+    w.claim_as(Requester::User(w.bob.id), &w.alice.actor_uri, None)
+        .await
+        .unwrap();
+    let above_the_threshold = w.notifier.key_packages_low();
+    w.claim_as(Requester::User(w.bob.id), &w.alice.actor_uri, None)
+        .await
+        .unwrap();
+
+    assert!(above_the_threshold.is_empty(), "4 left, over 3");
+    assert_eq!(w.notifier.key_packages_low(), vec![w.alice.id]);
+}
+
+/// The owner's live devices refill then, so the next claim finds one.
+#[tokio::test]
+async fn a_claim_that_finds_no_package_tells_the_owner_to_refill() {
+    let w = world();
+
+    let empty = w
+        .claim_as(Requester::User(w.bob.id), &w.alice.actor_uri, None)
+        .await;
+
+    assert!(
+        matches!(empty, Err(KeyDirectoryError::NoKeyPackage)),
+        "{empty:?}"
+    );
+    assert_eq!(w.notifier.key_packages_low(), vec![w.alice.id]);
 }

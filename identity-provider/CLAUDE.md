@@ -142,6 +142,7 @@ connections ──► (no internal deps)
 | `PATCH /api/settings` | Bearer-auth. Replace the account-settings sections the body names (`{ appearance: {…} }`), keep the others; returns the merged document and pushes it to the user's sessions as `settings_updated`. Read back on `GET /userinfo` (`settings`). Device-scoped settings never reach the IdP — see `identity-provider/specs/profile-and-settings.md § 2` |
 | `PUT /api/avatar` | Replace the avatar (raw image bytes; 1 byte–2 MiB; jpeg/png/webp/gif): stored, shown, then the other types removed; URL cache-busted with `?v=<unix_secs>`; the friends are told |
 | `DELETE /api/avatar` | Clear the avatar, then remove its images; the friends are told |
+| `GET /api/profiles?actor=<actor URI>` | Bearer-auth. The profile card: `actor_uri`, `display_name`, `avatar_url`, `pronouns`, `bio`, `friends_since` (RFC 3339 or null). An account here for anyone here; one elsewhere, from `remote_actors`, only for an accepted friend or an active co-member — any other is `404 User not found`, cached or not. A cache over 24 h old is answered and rediscovered in the background |
 | `POST /register` | JSON self-registration: `201` with the account, a code mailed, no session. `400` names the rule broken (the handle rules, an address, 8-byte passwords) or `Email already registered` — whatever its case, races included |
 | `POST /register-and-login` | The web client's sign-up form: the same, carrying the OIDC request on to `/verify-email`; a broken rule goes back to `/login?tab=register&error=` |
 | `POST /verify-email-and-login` | The mailed code: 5 guesses a code, counted under a row lock; the right one confirms the address, issues an auth code + session, redirects to `redirect_uri` |
@@ -158,7 +159,7 @@ connections ──► (no internal deps)
 | `POST /api/friends/:id/accept` | Accept a request; mints the DM conversation and sends `friend_accepted` (local) or `Accept{Follow}` with `conversationId` (remote) |
 | `DELETE /api/friends/:id/reject` | Decline a pending request, silently. Clears the requester's side: their row (local) or `Reject{Follow}` (remote) |
 | `DELETE /api/friends/:actor_uri` | Unfriend (`actor_uri` percent-encoded; 404 when not a friend). Deletes both sides — the friend's row plus a refresh-only `friend_removed` (local) or `Undo{Follow}` (remote). The DM conversation is kept |
-| `GET /api/friends` | Accepted friends, local and remote |
+| `GET /api/friends` | Accepted friends, local and remote, each with `since`: when the friendship was accepted on this side |
 | `PATCH /api/privacy` | Bearer-auth. Body `{ contact_policy }`: `everyone` \| `friends_and_groups` (default) \| `friends` — who may message the account; 400 otherwise. Enforced with the blocks by one rule, one refusal (`identity-provider/specs/social.md § 2`) |
 | `GET /api/blocks` | The caller's blocked actors, newest first (`actor_uri`, `display_name`, `avatar_url`, `blocked_at`). Private to the blocker, never federated |
 | `POST /api/blocks` | Block an actor. Body: `{ actor_uri }`; idempotent, 204. Ends the friendship as an unfriend — or a decline, for a request they sent — would. 400 for one's own URI, an invalid one, or past 1000 blocks. `blocks_updated` to the caller's sessions |
@@ -171,7 +172,7 @@ connections ──► (no internal deps)
 | `GET /api/dm/:conversation_id` | Conversation history, newest first — up to their removal for a member removed from a group, until they clear it. Items tagged `kind: message`; with `include=events`, a group's changes too (`kind: event`), those its reader saw happen; also pushed live as `group_event` (keyset cursor `cursor_created_at` — RFC 3339, as `created_at` is returned — plus `cursor_id`; `limit` ≤ 100, default 50) — every row carries `mls_ciphertext`; marks as read on initial load |
 | `POST /api/dm/:conversation_id/read` | Mark the conversation read (Bearer): `204`, or `404` for a conversation the caller is not a member of |
 | `PATCH /api/dm/:message_id/edit` | Replace the row's `mls_ciphertext` and stamp `edited_at`; sender-only. In a 1:1, the same two 403s as `POST /api/dm` |
-| `POST /api/groups` | Create a group conversation (Bearer). Body: `{ name?, member_actor_uris[] }`, created in one step. Every `/api/groups/:id…` route answers 404 for a DM. Caller becomes admin; members join as `member`. Returns the group view; emits `group_created` WS to local members — remote members get theirs from their own IdP when it materialises the group off the Welcome's `mlsGroup` snapshot. Client bootstraps MLS afterwards. At most 50 members, the creator included: 400 `A group holds at most 50 members`, before any invitee is looked up. Each invitee is resolved anew (local, or WebFinger on its own IdP — never the cache): 404 `User not found` with its `actor_uri` otherwise, 502 with it when that IdP fails to answer. 403 with the invitee's `actor_uri` — `You blocked this user`, or `Can't add this person` for a local invitee who doesn't admit the caller. Nothing written on any refusal |
+| `POST /api/groups` | Create a group conversation (Bearer). Body: `{ name?, member_actor_uris[] }`, created in one step. Every `/api/groups/:id…` route answers 404 for a DM. Caller becomes admin; members join as `member`. Returns the group view; emits `group_created` WS to local members — remote members get theirs from their own IdP when it materialises the group off the `mlsGroup` snapshot of the first commit or Welcome to arrive. Client bootstraps MLS afterwards. At most 50 members, the creator included: 400 `A group holds at most 50 members`, before any invitee is looked up. Each invitee is resolved anew (local, or WebFinger on its own IdP — never the cache): 404 `User not found` with its `actor_uri` otherwise, 502 with it when that IdP fails to answer. 403 with the invitee's `actor_uri` — `You blocked this user`, or `Can't add this person` for a local invitee who doesn't admit the caller. Nothing written on any refusal |
 | `POST /api/groups/:conversation_id/messages` | Send a message to a group (Bearer; member-gated). Body: `{ mls_ciphertext, reply_to_id?, attachment_ids? }`. Persists one row, then fans the ciphertext out to every other member — local via WS, remote via signed AP `Create{Note}` (`mlsKind: application`) carrying the `mlsGroup` roster, so a member whose Welcome was lost still gets the conversation. |
 | `GET /api/groups/:conversation_id/members` | List members with `role` (`admin`/`member`) + `displayName`/`avatarUrl` (Bearer; member-gated). |
 | `POST /api/groups/:conversation_id/members` | Add a member (Bearer; **admin-gated**). Body: `{ actor_uri }`; 409 when already a member, or `The group is full: it holds at most 50 members`; the same 404 and two 403s as `POST /api/groups`. Emits `member_added`. MLS key delivery happens separately via the welcome the client posts. |
@@ -188,7 +189,7 @@ connections ──► (no internal deps)
 | `POST /api/presence/batch` | Inter-IdP batch poll behind the friends lists (HTTP Signature). Body `{ actors[] }`; every actor answered in order — `offline` for whoever none of the peer's accounts knows and for other instances' actors |
 | `POST /api/keys/devices` | Register/renew/rotate this device's IdP-attested DRK (Bearer-auth). Idempotent on `(device_id, drk_public_key)`. New row → first-time mint + `DeviceJoined` WS event; same DRK → fresh `expires_at`; new DRK → rotation. Returns the signature, kid, expiries, and the canonical bytes the IdP signed so the client can re-verify locally. A device id another account holds → 409; a revoked device → 403. |
 | `POST /api/keys/packages` | Upload a batch of KeyPackages for one of the caller's devices (cap + lifetime enforced; the same 409 / 403 as registration) |
-| `POST /api/keys/packages/claim` | Atomically reserve one KeyPackage for `actor_uri` — of `device_id`, or of any unrevoked device with some left, named in the answer. Bearer requests for a remote `actor_uri` are sent to the target's IdP signed as the user; its 404 / 409 / 429 come back as they are, and a peer that fails to answer is 502. Bearer or HTTP-Sig; 60 claims then one a second per requester (429); peer requests for remote targets are refused (400). No KeyPackage left → 409. A claimer the account doesn't admit → 403 `Can't add this person`, before a package is taken (one's own packages always) |
+| `POST /api/keys/packages/claim` | Atomically reserve one KeyPackage for `actor_uri` — of `device_id`, or of any unrevoked device with some left, named in the answer. Bearer requests for a remote `actor_uri` are sent to the target's IdP signed as the user; its 404 / 409 / 429 come back as they are, and a peer that fails to answer is 502. Bearer or HTTP-Sig; 60 claims then one a second per requester (429); peer requests for remote targets are refused (400). No KeyPackage left → 409. A claimer the account doesn't admit → 403 `Can't add this person`, before a package is taken (one's own packages always). A claim that leaves a device at the refill threshold, or finds none, pushes `key_packages_low` to the owner's live sessions, which top their own device up |
 | `GET /api/keys/packages/status` | Per-device available KeyPackage counts + `needs_refill` flag |
 | `GET /api/keys/devices` | List the caller's devices (Bearer-auth) — `device_id`, `display_name`, `kind`, `paired_at`, `last_seen_at`, `revoked_at`, `attestation_expires_at` (when the device's DRK attestation expires, for renewal scheduling). |
 | `POST /api/keys/devices/:device_id/revoke` | Mark the caller's device revoked (Bearer-auth) — directory-level flag complementing MLS Remove commits: its KeyPackages are never claimed again. 404 for another account's device. |
@@ -197,7 +198,7 @@ connections ──► (no internal deps)
 | `DELETE /api/history/messages` | Wipe the user's archive (Settings → Clear). |
 | `GET /api/history/salt` | Return the per-user salt for Argon2id HAK derivation, or 404 when unset. |
 | `POST /api/history/salt` | Idempotent set-once. Multi-device race-safe via `COALESCE` — loser receives the winning device's salt. |
-| `POST /api/mls/groups/:conversation_id/commits` | Append an MLS Commit at the next epoch (Bearer; active members only, 403). Returns `409` with the winning commit on epoch race; an unknown conversation is 404 at any epoch — a conversation exists before its MLS group. Pushed to every local member, sent to the remote ones. |
+| `POST /api/mls/groups/:conversation_id/commits` | Append an MLS Commit at the next epoch (Bearer; active members only, 403). Returns `409` with the winning commit on epoch race; an unknown conversation is 404 at any epoch — a conversation exists before its MLS group. Pushed to every local member, sent to the remote ones — a group's with its `mlsGroup` roster, so it lands even ahead of the Welcome that would bring the group there. |
 | `GET /api/mls/groups/:conversation_id/commits?since=:epoch` | Catch-up: every commit `> since` in epoch order, 256 a page with `has_more` (Bearer; member-gated) |
 | `GET /api/mls/welcomes?device_id=:uuid` | Atomically claim every pending Welcome targeted at the calling device (Bearer; per-device to keep multi-device users from racing each other) |
 | `POST /api/mls/welcomes` | Hand a Welcome bundle to the sender's IdP for delivery (Bearer-auth as the sender). Body: `{ recipient_actor_uri, recipient_device_id, conversation_id, welcome_blob }`. Sender and recipient must both be active members (403) — a Welcome never changes membership. A 1:1's to a local recipient who doesn't admit the sender → 403 `Can't add this person`. Server routes off `recipient_actor_uri`: **local** → insert into `mls_welcomes` + `MlsWelcomeReady` WS push; **remote** → signed AP `Create{Note}` (`mlsKind: welcome`) to the recipient IdP's inbox, answering a nil `id`. For a **group**, the outbound Note carries an `mlsGroup` roster snapshot so the recipient's IdP materialises the conversation and emits `group_created`. The client never branches on local-vs-remote — it always hands the welcome to its own IdP. |
@@ -218,7 +219,7 @@ file wherever it is read from.
 | `identity-provider/specs/identity.md` | `users` and `remote_actors` schema, the remote actor cache and how a group's remote members are reached, what peers read of an account (WebFinger, the actor documents), the address and name formats | Accounts, handles and display names, actor URIs and addresses, WebFinger, the actor documents |
 | `identity-provider/specs/auth.md` | OpenID Connect sign-in (clients, `/authorize`, `/login`, the session cookie, `/token`, tokens, logout, discovery), sign-up email verification, TOTP two-factor and recovery codes | Signing in, sessions, tokens, sign-up, email codes, the second factor |
 | `identity-provider/specs/social.md` | `friendships` and `user_blocks` schema, a friendship's life (request, accept opening the DM, decline, unfriend), who can reach a user (the contact setting, blocks, the rule and where it is enforced) | Friend requests, the friends list, blocking, the contact setting |
-| `identity-provider/specs/profile-and-settings.md` | Profile editing and avatar storage, `user_settings`, real-time profile propagation (`friend_profile_updated`, `Update{Person}`) | Profile fields, avatars, account settings, profile federation |
+| `identity-provider/specs/profile-and-settings.md` | Profile editing and avatar storage, the profile card (`GET /api/profiles`), `user_settings`, real-time profile propagation (`friend_profile_updated`, `Update{Person}`) | Profile fields, avatars, the profile card, account settings, profile federation |
 | `identity-provider/specs/event-delivery.md` | Redis Streams vs pub-sub, federation delivery semantics (best-effort, each activity's recovery), reconnect and catch-up | The broker, the WebSocket replay, outbound ActivityPub delivery |
 | `identity-provider/specs/direct-messages.md` | `conversations`, `conversation_members`, `direct_messages` schema, DM delivery (local + federated) and delivery failure, pagination, unread tracking, replies and reactions, editing | Anything touching DMs, conversations, messages, reactions, replies, unread counts |
 | `identity-provider/specs/attachments.md` | `message_attachments`, the upload and download routes, the federation wire format, validation and limits | Attachments |
@@ -249,8 +250,13 @@ Don't mention any "phase" development or what is currently being worked on. The 
 
 ### Profile
 - An inbound `Update{Person}` changes only its signer's own account, never one of this instance
-  (`ReceiveProfileUpdate`), and keeps only a name and an `http(s)` avatar URL within
-  `PublicProfile::within_limits` — every friend's client loads that URL.
+  (`ReceiveProfileUpdate`), and keeps only a name, an `http(s)` avatar URL, pronouns and a bio
+  within `PublicProfile::within_limits` — every friend's client loads that URL. The `summary`
+  is HTML both ways (`activitypub::summary_html` / `summary_text`).
+- Accepting a friend elsewhere sends them an `Update{Person}`, on both sides
+  (`application::profile::introduce`): each instance read the other's `Person` at request time.
+- Whether a viewer may read a card is `CardFacts::card` (domain); the facts come in one query
+  (`PgProfileCards`).
 - An avatar is replaced upload → `users.avatar_url` → removal of the other types, and cleared
   `users.avatar_url` → removal: the account never points at a removed object.
 
@@ -305,13 +311,15 @@ pending_totp_enrollments — in-flight 2FA secret awaiting first-code verify
 pending_totp_logins      — short-lived "passed password, need TOTP" tickets carrying OIDC params
                             (5 attempts)
 recovery_codes           — 10 per user, single-use, peppered HMAC
-remote_actors            — cache of federated users (inbox_url, display_name, avatar_url — as the
-                            actor's own `Update{Person}` last said, within the profile limits)
+remote_actors            — cache of federated users (inbox_url, display_name, avatar_url, pronouns,
+                            bio — as the actor's own `Update{Person}` or document last said, within
+                            the profile limits; fetched_at dates the last resolution)
 user_settings            — account settings, one client-owned JSONB document per user
                             (sections replaced whole by PATCH /api/settings; ≤ 16 KiB)
 friendships              — friend graph (friend_actor_uri, status, direction: outgoing|incoming —
                             only the incoming side may answer; friend_avatar_url, read for a
-                            remote friend only — a local one is shown from `users`)
+                            remote friend only — a local one is shown from `users`;
+                            accepted_at, set once when the side is accepted, and only then)
 user_blocks              — actors a local user blocked (owner_user_id, blocked_actor_uri, created_at;
                             1000 per owner) — never federated
 conversations            — anchor for every conversation (kind: dm|group, name, name_at;

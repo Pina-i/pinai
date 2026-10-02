@@ -8,8 +8,11 @@ use domain::identity::Accounts;
 use domain::messaging::Conversations;
 use domain::{ConversationId, UserId};
 
+use super::group_roster::roster_of;
+
 /// `POST /api/mls/groups/{id}/commits`: a member's commit at the next epoch, then to every
-/// member — the proposer's own sessions too, so its other tabs keep up.
+/// member — the proposer's own sessions too, so its other tabs keep up. A group's travels to
+/// other instances with its roster.
 pub struct AppendCommit {
     accounts: Arc<dyn Accounts>,
     conversations: Arc<dyn Conversations>,
@@ -75,8 +78,11 @@ impl AppendCommit {
                 remote.push(member.actor_uri.clone());
             }
         }
-        self.federation
-            .send_commit(&account.actor_uri, &remote, &commit);
+        if !remote.is_empty() {
+            let roster = roster_of(&*self.conversations, conversation).await?;
+            self.federation
+                .send_commit(&account.actor_uri, &remote, &commit, roster.as_ref());
+        }
         Ok(commit)
     }
 }

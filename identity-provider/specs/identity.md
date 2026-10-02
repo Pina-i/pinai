@@ -46,7 +46,10 @@ CREATE TABLE remote_actors (
   instance      TEXT NOT NULL,              -- e.g. "idp.bob.com"
   display_name  TEXT,
   avatar_url    TEXT,
-  fetched_at    TIMESTAMPTZ NOT NULL DEFAULT now(),  -- used for cache invalidation
+  pronouns      TEXT CHECK (pronouns IN ('he', 'she', 'non-binary')),
+  bio           TEXT,                       -- the Person's `summary`, as text
+  fetched_at    TIMESTAMPTZ NOT NULL DEFAULT now(),  -- last resolved or discovered; a profile card
+                                                     -- older than 24 h discovers the actor again
   updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 ```
@@ -54,12 +57,15 @@ CREATE TABLE remote_actors (
 ## 2. Remote actor cache
 
 `remote_actors` is written whenever an actor is resolved (WebFinger, on an outgoing request) or
-discovered (its first inbound `Follow`), with the inbox, name and avatar (`icon`) its actor
-document gives. A fetch that brings no inbox, name or avatar — an unreachable peer, a document
-without them — keeps the cached value rather than erasing it. Discovery accepts only a URI of the
+discovered (its first inbound `Follow`, or a stale profile card —
+`identity-provider/specs/profile-and-settings.md § 1`), with the inbox, name, avatar (`icon`), bio
+(`summary`) and pronouns its actor document gives. A fetch that brings no inbox, name or avatar —
+an unreachable peer, a document without them — keeps the cached value rather than erasing it. The
+bio and pronouns are those of the document read: one without them clears them, and only an
+unreachable peer keeps them. Discovery accepts only a URI of the
 form `…/users/{handle}`; any other actor is refused with `400 Cannot parse remote actor URL`. A
-name or avatar outside the peer profile limits (`identity-provider/specs/profile-and-settings.md § 3`) counts as
-none. The friendship keeps the
+name, avatar, bio or pronouns outside the peer profile limits
+(`identity-provider/specs/profile-and-settings.md § 3`) count as none. The friendship keeps the
 avatar the actor was met with, on either side of the request, so a new friend is shown with it
 at once.
 
@@ -86,8 +92,9 @@ instance is never looked up.
 
 `GET /.well-known/webfinger?resource=acct:{handle}@{domain}` points at the account's actor, for
 an account of this instance only (`404 User not found` for any other). `GET /users/{handle}` is
-its `Person` — display name (else the handle), inbox, `icon` when it has an avatar, and the
-instance key as `publicKey`; `GET /actor` is the instance's `Application` actor, whose key signs
+its `Person` — display name (else the handle), inbox, `icon` when it has an avatar, `summary` and
+`pronouns` when it has a bio and pronouns (`identity-provider/specs/profile-and-settings.md § 3`),
+and the instance key as `publicKey`; `GET /actor` is the instance's `Application` actor, whose key signs
 the inter-instance requests. The outbox and the `followers` / `following` collections are always
 empty: nothing is published, and whom an account is friends with is not for anyone to read.
 

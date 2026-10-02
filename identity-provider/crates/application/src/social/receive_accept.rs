@@ -1,10 +1,12 @@
 use std::sync::Arc;
 
 use domain::identity::{Account, Accounts, ActorUri, RemoteActors};
+use domain::profile::{ProfileFederation, Profiles};
 use domain::social::{FriendPresence, FriendshipEvent, SocialError, SocialGraph, SocialNotifier};
 use domain::{ConversationId, UserId};
 
 use super::names::name_of;
+use crate::profile::introduce;
 
 /// An inbound `Accept`: a remote actor accepted the inbox owner's request. Keyed on the inbox it
 /// reached, never on the activity's content; a redelivered Accept changes nothing.
@@ -14,6 +16,8 @@ pub struct ReceiveAccept {
     graph: Arc<dyn SocialGraph>,
     notifier: Arc<dyn SocialNotifier>,
     presence: Arc<dyn FriendPresence>,
+    profiles: Arc<dyn Profiles>,
+    profile_federation: Arc<dyn ProfileFederation>,
 }
 
 impl ReceiveAccept {
@@ -23,6 +27,8 @@ impl ReceiveAccept {
         graph: Arc<dyn SocialGraph>,
         notifier: Arc<dyn SocialNotifier>,
         presence: Arc<dyn FriendPresence>,
+        profiles: Arc<dyn Profiles>,
+        profile_federation: Arc<dyn ProfileFederation>,
     ) -> Self {
         Self {
             accounts,
@@ -30,6 +36,8 @@ impl ReceiveAccept {
             graph,
             notifier,
             presence,
+            profiles,
+            profile_federation,
         }
     }
 
@@ -61,6 +69,15 @@ impl ReceiveAccept {
             },
         );
         self.presence.watch(&accepter);
+        if let Some(friend) = self.remote_actors.find(&accepter).await? {
+            introduce(
+                &*self.profiles,
+                &*self.profile_federation,
+                owner.id,
+                &friend,
+            )
+            .await;
+        }
         Ok(())
     }
 

@@ -2,18 +2,18 @@
 
 use std::sync::Arc;
 
-use domain::identity::testing::remote_actor;
+use domain::identity::testing::{InMemoryAccounts, remote_actor};
 use domain::identity::{InstanceOrigin, RemoteActor};
 use domain::profile::OwnProfile;
 use domain::profile::testing::{
     InMemoryAvatars, InMemoryProfiles, ProfileSeeds, RecordingProfileFederation,
-    RecordingProfileNotifier, own_profile,
+    RecordingProfileNotifier, RecordingProfileRefresh, own_profile,
 };
 use domain::settings::testing::InMemorySettingsStore;
 use domain::social::testing::InMemoryContactPolicies;
 use time::OffsetDateTime;
 
-use super::{ClearAvatar, EditProfile, ReadUserinfo, ReceiveProfileUpdate, SetAvatar};
+use super::{ClearAvatar, EditProfile, ReadProfile, ReadUserinfo, ReceiveProfileUpdate, SetAvatar};
 
 pub struct World {
     /// A local account with a friend here, `bob`, and one elsewhere, `carol`.
@@ -27,6 +27,7 @@ pub struct World {
     pub avatars: Arc<InMemoryAvatars>,
     pub notifier: Arc<RecordingProfileNotifier>,
     pub federation: Arc<RecordingProfileFederation>,
+    pub refresh: Arc<RecordingProfileRefresh>,
 }
 
 pub fn now() -> OffsetDateTime {
@@ -61,6 +62,7 @@ pub async fn world() -> World {
         avatars: Arc::new(InMemoryAvatars::default()),
         notifier: Arc::new(RecordingProfileNotifier::default()),
         federation: Arc::new(RecordingProfileFederation::default()),
+        refresh: Arc::new(RecordingProfileRefresh::default()),
     }
 }
 
@@ -103,6 +105,15 @@ impl World {
             self.profiles.clone(),
             self.notifier.clone(),
             self.federation.clone(),
+        )
+    }
+
+    pub fn read_profile(&self) -> ReadProfile {
+        let accounts = [&self.alice, &self.bob].map(|p| p.account().unwrap());
+        ReadProfile::new(
+            Arc::new(InMemoryAccounts::with(accounts)),
+            self.profiles.clone(),
+            self.refresh.clone(),
         )
     }
 

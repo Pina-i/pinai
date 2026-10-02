@@ -13,10 +13,13 @@ CREATE TABLE friendships (
   friend_avatar_url TEXT,            -- a remote friend's avatar, as its last Update{Person} said
   status            TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'accepted')),
   direction         TEXT NOT NULL CHECK (direction IN ('outgoing', 'incoming')),  -- who sent the request
+  accepted_at       TIMESTAMPTZ,     -- when this side was accepted; NULL while pending
   created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
 
-  UNIQUE (owner_user_id, friend_actor_uri)
+  UNIQUE (owner_user_id, friend_actor_uri),
+  CONSTRAINT friendships_accepted_when_accepted
+    CHECK ((status = 'accepted') = (accepted_at IS NOT NULL))
 );
 ```
 
@@ -51,7 +54,8 @@ SELECT
   CASE WHEN u.id IS NULL THEN f.friend_avatar_url
        ELSE u.avatar_url END                 AS avatar_url,
   f.friend_actor_uri,
-  COALESCE(ra.instance, 'local')             AS instance
+  COALESCE(ra.instance, 'local')             AS instance,
+  f.accepted_at                              AS since
 FROM friendships f
 LEFT JOIN users u          ON f.friend_actor_uri = u.actor_uri
 LEFT JOIN remote_actors ra ON f.friend_actor_uri = ra.actor_uri
@@ -63,6 +67,12 @@ A local friend is shown as its account is now — name and avatar from `users` �
 as it was met and as each `Update{Person}` since said (`identity-provider/specs/profile-and-settings.md § 3`). The friendship's `friend_avatar_url` is that copy for a
 remote friend; for a local one it is never read, so a cleared avatar stays cleared.
 
+`GET /api/friends` answers each friend with `since` (RFC 3339): when the friendship was accepted on
+this side. It is stamped where the side becomes accepted — on both sides of a local pair at once,
+on a remote friend's side when their `Accept` arrives — and never moves: neither a request to a
+friend nor a profile change touches it. Ending the friendship deletes the row, so a friend made
+again starts a new date.
+
 ### Friendship-accept also creates the DM conversation
 
 When a friendship transitions to `accepted` (via `POST /api/friends/:id/accept` for both same-IdP and cross-IdP recipients, or an inbound `Accept{Follow}` when a remote peer's IdP accepts a request our user sent), the accepter's IdP flips both local rows and creates the DM conversation in one transaction: a
@@ -71,6 +81,10 @@ request`. Same-IdP and cross-IdP requests share one model: both rows land in `pe
 
 - **Locally**: the WS `friend_accepted` payload carries it on `FriendshipPayload.conversation_id` (`Option<Uuid>`, absent on `friend_request`/`friend_removed` — the conversation outlives an unfriend). Web clients invalidate the `dm-conversations` query on this event so `localDmConvos` populates with the new row immediately.
 - **Cross-IdP**: the outbound AP `Accept{Follow}` activity carries it in a non-standard `conversationId` field on the activity body (a sibling of `id`/`type`/`actor`/`object`). The requester's IdP opens its DM under that id, so both sides persist the row under the same UUID — unless the pair already shares a DM there, which is kept. An advertised id that already names a group conversation is never reused: a separate DM is opened. A peer that omits the field gets a DM under a locally minted id; the two IdPs then disagree on it, which is a safe degradation.
+
+Accepting also sends the new friend's instance the account's `Update{Person}`, on both sides of a
+cross-IdP request (`identity-provider/specs/profile-and-settings.md § 3`), so a profile edited while
+it was pending reaches them.
 
 The migration `20260512000001_backfill_friendship_conversations.sql` retroactively creates a DM for every accepted friendship that doesn't yet have one (deduplicated by ordering the actor pair lexicographically so the two friendship rows don't each get their own conversation).
 

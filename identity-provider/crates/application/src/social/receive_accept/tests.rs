@@ -2,6 +2,10 @@ use std::sync::Arc;
 
 use domain::ConversationId;
 use domain::identity::testing::{InMemoryAccounts, InMemoryRemoteActors, account, remote_actor};
+use domain::profile::testing::{
+    InMemoryProfiles, ProfileSeeds, RecordingProfileFederation, own_profile,
+};
+use domain::profile::{OwnProfile, Pronouns};
 use domain::social::testing::{
     InMemorySocialGraph, Notice, RecordingFriendPresence, RecordingSocialNotifier,
 };
@@ -10,8 +14,17 @@ use domain::social::{FriendshipStatus, SocialGraph};
 use super::*;
 
 #[tokio::test]
-async fn an_accept_befriends_the_owner_and_opens_the_advertised_dm_once() {
+async fn an_accept_befriends_the_owner_opens_the_advertised_dm_and_sends_the_profile_once() {
     let alice = account("alice");
+    let alices = OwnProfile {
+        id: alice.id,
+        pronouns: Some(Pronouns::She),
+        bio: Some("kia ora".to_owned()),
+        ..own_profile("alice")
+    };
+    let profiles = Arc::new(InMemoryProfiles::default());
+    profiles.sign_up(&alices).await;
+    let profile_federation = Arc::new(RecordingProfileFederation::default());
     let carol = remote_actor("carol_k2m9x@idp.carol.test");
     let graph = Arc::new(InMemorySocialGraph::default());
     let notifier = Arc::new(RecordingSocialNotifier::default());
@@ -22,6 +35,8 @@ async fn an_accept_befriends_the_owner_and_opens_the_advertised_dm_once() {
         graph.clone(),
         notifier.clone(),
         presence.clone(),
+        profiles,
+        profile_federation.clone(),
     );
     let request = graph
         .record_outgoing(alice.id, &carol.actor_uri, None)
@@ -53,4 +68,8 @@ async fn an_accept_befriends_the_owner_and_opens_the_advertised_dm_once() {
         (alice.id, request.id, Some(advertised))
     );
     assert_eq!(presence.watched(), vec![carol.actor_uri.clone()]);
+    assert_eq!(
+        profile_federation.sent(),
+        [(alices.public().unwrap(), carol.actor_uri.clone())]
+    );
 }

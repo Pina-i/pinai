@@ -8,7 +8,7 @@ use domain::messaging::{
 use domain::social::Reachability;
 use domain::{ConversationId, MessageId, UserId};
 
-use super::shared::{address_of_actor, caller, mirror};
+use super::shared::{address_of_actor, admits_group_note, caller, mirror};
 
 /// A message another instance delivered to one of our accounts.
 pub struct IncomingMessage {
@@ -64,30 +64,19 @@ impl ReceiveMessage {
     pub async fn execute(&self, incoming: IncomingMessage) -> Result<(), MessagingError> {
         let recipient = caller(&*self.accounts, incoming.recipient).await?;
         if let Some(group) = &incoming.group {
-            let joins = !self
-                .conversations
-                .members(incoming.conversation)
-                .await?
-                .iter()
-                .any(|m| m.actor_uri == recipient.actor_uri);
-            if joins {
-                let roster: Vec<ActorUri> = group
-                    .members
-                    .iter()
-                    .map(|m| m.member.actor_uri.clone())
-                    .collect();
-                let roster_holds_someone_blocked =
-                    self.reach.blocks_any(recipient.id, &roster).await?;
-                let admitted = self
-                    .reach
-                    .relation(recipient.id, &incoming.sender)
-                    .await?
-                    .admits_group_from(roster_holds_someone_blocked);
-                // Dropped, not refused, and before the DM path could file it as a 1:1.
-                if admitted.is_err() {
-                    tracing::debug!(sender = %incoming.sender, "group message dropped");
-                    return Ok(());
-                }
+            let admitted = admits_group_note(
+                &*self.conversations,
+                &*self.reach,
+                &recipient,
+                &incoming.sender,
+                incoming.conversation,
+                group,
+            )
+            .await?;
+            // Dropped, not refused, and before the DM path could file it as a 1:1.
+            if !admitted {
+                tracing::debug!(sender = %incoming.sender, "group message dropped");
+                return Ok(());
             }
             mirror(
                 &*self.conversations,

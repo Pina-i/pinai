@@ -6,6 +6,8 @@ fn claimed(display_name: &str, avatar_url: &str) -> PublicProfile {
         actor: remote_actor("carol_k2m9x@idp.carol.test").actor_uri,
         display_name: Some(display_name.to_owned()),
         avatar_url: Some(avatar_url.to_owned()),
+        pronouns: Some(Pronouns::She),
+        bio: Some("kia ora".to_owned()),
     }
 }
 
@@ -46,4 +48,57 @@ fn an_avatar_anywhere_but_at_an_http_url_is_dropped() {
         assert_eq!(kept.avatar_url, None, "{url:?}");
         assert!(kept.display_name.is_some());
     }
+}
+
+#[test]
+fn a_peers_bio_within_the_bio_rules_is_kept_and_any_other_dropped() {
+    let with_bio = |bio: &str| PublicProfile {
+        bio: Some(bio.to_owned()),
+        ..claimed("Carol", "http://idp.carol.test/c.png")
+    };
+
+    assert_eq!(
+        with_bio(&"é".repeat(190)).within_limits().bio,
+        Some("é".repeat(190))
+    );
+    for bio in [&"é".repeat(191), "", "   "] {
+        let kept = with_bio(bio).within_limits();
+        assert_eq!(kept.bio, None, "{bio:?}");
+        assert_eq!(kept.pronouns, Some(Pronouns::She));
+    }
+}
+
+#[test]
+fn an_account_shows_others_its_name_avatar_pronouns_and_bio() {
+    let own = OwnProfile {
+        id: crate::UserId::generate(),
+        username: "aroha_x1y2z".to_owned(),
+        email: "aroha@idp.test".to_owned(),
+        email_verified: true,
+        totp_enabled: false,
+        actor_uri: Some(remote_actor("aroha_x1y2z@idp.test").actor_uri),
+        display_name: Some("Aroha".to_owned()),
+        avatar_url: Some("http://s3.test/avatars/aroha.png?v=1".to_owned()),
+        pronouns: Some(Pronouns::She),
+        bio: Some("kia ora".to_owned()),
+    };
+
+    assert_eq!(
+        own.public(),
+        Some(PublicProfile {
+            actor: own.actor_uri.clone().unwrap(),
+            display_name: own.display_name.clone(),
+            avatar_url: own.avatar_url.clone(),
+            pronouns: Some(Pronouns::She),
+            bio: Some("kia ora".to_owned()),
+        })
+    );
+    assert_eq!(
+        OwnProfile {
+            actor_uri: None,
+            ..own
+        }
+        .public(),
+        None
+    );
 }

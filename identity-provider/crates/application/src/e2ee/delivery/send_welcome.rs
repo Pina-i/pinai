@@ -5,9 +5,11 @@ use domain::e2ee::{
     Welcomes, check_welcome,
 };
 use domain::identity::{Accounts, ActorUri, InstanceOrigin, RemoteActors};
-use domain::messaging::{ConversationKind, Conversations, GroupSnapshot};
+use domain::messaging::{ConversationKind, Conversations};
 use domain::social::Reachability;
 use domain::{ConversationId, DeviceId, UserId};
+
+use super::group_roster::roster_of;
 
 /// `POST /api/mls/welcomes`: a Welcome for one device of `recipient` — waiting here for a local
 /// account, sent to its instance for a remote one. The client never tells the two apart.
@@ -98,13 +100,7 @@ impl SendWelcome {
             self.notifier.welcome_ready(account.id, &welcome);
             return Ok(Some(welcome));
         }
-        let roster = match self.conversations.find(conversation).await? {
-            Some(group) if group.kind == ConversationKind::Group => {
-                let held = self.conversations.memberships(conversation).await?;
-                Some(GroupSnapshot::of(&group, &held))
-            }
-            _ => None,
-        };
+        let roster = roster_of(&*self.conversations, conversation).await?;
         let to = match self.remote_actors.find(recipient).await? {
             Some(actor) => actor,
             None => self.remote_actors.discover(recipient).await?,

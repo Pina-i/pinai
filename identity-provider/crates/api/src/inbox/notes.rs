@@ -66,12 +66,14 @@ pub(super) async fn create(
                 .and_then(Value::as_i64)
                 .ok_or_else(|| ApiError::bad_request("MLS commit Note missing `mlsEpoch`"))?;
             let incoming = IncomingCommit {
+                recipient: recipient.id,
                 proposer: sender,
                 conversation: conversation.into(),
                 epoch: Epoch::parse(epoch)
                     .map_err(|_| ApiError::bad_request("MLS commit `mlsEpoch` is negative"))?,
                 blob: CommitBlob::parse(blob)
                     .map_err(|_| ApiError::bad_request("MLS Note `content` is empty"))?,
+                roster: group_snapshot(note),
             };
             state
                 .receive_commit

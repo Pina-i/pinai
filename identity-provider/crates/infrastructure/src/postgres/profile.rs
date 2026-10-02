@@ -1,11 +1,12 @@
 use anyhow::Context;
 use domain::UserId;
-use domain::identity::{ActorUri, RemoteActor};
+use domain::identity::{Account, ActorUri, RemoteActor};
 use domain::profile::{
-    OwnProfile, PeerProfiles, ProfileAudience, ProfileEdit, ProfileError, Profiles, Pronouns,
-    PublicProfile,
+    CardFacts, OwnProfile, PeerProfiles, ProfileAudience, ProfileCards, ProfileEdit, ProfileError,
+    Profiles, Pronouns, PublicProfile,
 };
 use sqlx::PgPool;
+use time::OffsetDateTime;
 
 use crate::federation::RemoteActorRow;
 
@@ -129,12 +130,15 @@ impl PeerProfiles for PgPeerProfiles {
     async fn record(&self, profile: &PublicProfile) -> Result<(), ProfileError> {
         let mut tx = self.pool.begin().await.context("begin a peer profile")?;
         sqlx::query(
-            "UPDATE remote_actors SET display_name = $2, avatar_url = $3, updated_at = now() \
+            "UPDATE remote_actors \
+             SET display_name = $2, avatar_url = $3, pronouns = $4, bio = $5, updated_at = now() \
              WHERE actor_uri = $1",
         )
         .bind(profile.actor.as_str())
         .bind(profile.display_name.as_deref())
         .bind(profile.avatar_url.as_deref())
+        .bind(profile.pronouns.map(Pronouns::as_str))
+        .bind(profile.bio.as_deref())
         .execute(&mut *tx)
         .await
         .context("cache a peer's profile")?;
@@ -190,5 +194,86 @@ impl ProfileAudience for PgProfileAudience {
         rows.into_iter()
             .map(|row| RemoteActor::try_from(row).map_err(ProfileError::from))
             .collect()
+    }
+}
+
+/// A profile card's facts, from `users` or `remote_actors`, with the viewer's friendship and
+/// conversations.
+pub struct PgProfileCards {
+    pool: PgPool,
+}
+
+impl PgProfileCards {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct CardRow {
+    display_name: Option<String>,
+    avatar_url: Option<String>,
+    pronouns: Option<String>,
+    bio: Option<String>,
+    local: bool,
+    known: bool,
+    friends_since: Option<OffsetDateTime>,
+    fetched_at: Option<OffsetDateTime>,
+}
+
+#[async_trait::async_trait]
+impl ProfileCards for PgProfileCards {
+    async fn facts(
+        &self,
+        viewer: &Account,
+        actor: &ActorUri,
+    ) -> Result<Option<CardFacts>, ProfileError> {
+        let row: Option<CardRow> = sqlx::query_as(
+            "SELECT COALESCE(u.display_name, ra.display_name) AS display_name, \
+                    COALESCE(u.avatar_url, ra.avatar_url) AS avatar_url, \
+                    COALESCE(u.pronouns, ra.pronouns) AS pronouns, \
+                    COALESCE(u.bio, ra.bio) AS bio, \
+                    u.id IS NOT NULL AS local, \
+                    ra.fetched_at, \
+                    f.accepted_at AS friends_since, \
+                    (f.accepted_at IS NOT NULL OR EXISTS ( \
+                        SELECT 1 FROM conversation_members mine \
+                        JOIN conversation_members theirs \
+                          ON theirs.conversation_id = mine.conversation_id \
+                        WHERE mine.actor_uri = $2 AND mine.left_at IS NULL \
+                          AND theirs.actor_uri = $3 AND theirs.left_at IS NULL \
+                    )) AS known \
+             FROM (SELECT $3::text AS actor_uri) target \
+             LEFT JOIN users u ON u.actor_uri = target.actor_uri \
+             LEFT JOIN remote_actors ra ON ra.actor_uri = target.actor_uri \
+             LEFT JOIN friendships f ON f.owner_user_id = $1 \
+                  AND f.friend_actor_uri = target.actor_uri AND f.status = 'accepted' \
+             WHERE u.id IS NOT NULL OR ra.actor_uri IS NOT NULL",
+        )
+        .bind(viewer.id.as_uuid())
+        .bind(viewer.actor_uri.as_str())
+        .bind(actor.as_str())
+        .fetch_optional(&self.pool)
+        .await
+        .context("read a profile card")?;
+        let Some(row) = row else { return Ok(None) };
+        Ok(Some(CardFacts {
+            profile: PublicProfile {
+                actor: actor.clone(),
+                display_name: row.display_name,
+                avatar_url: row.avatar_url,
+                pronouns: row
+                    .pronouns
+                    .as_deref()
+                    .map(Pronouns::parse)
+                    .transpose()
+                    .context("a card's pronouns")?,
+                bio: row.bio,
+            },
+            local: row.local,
+            known: row.known,
+            friends_since: row.friends_since,
+            fetched_at: row.fetched_at,
+        }))
     }
 }

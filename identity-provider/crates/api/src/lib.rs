@@ -49,7 +49,7 @@ use application::presence::{
     StartTyping, WatchConversation,
 };
 use application::profile::{
-    ClearAvatar, EditProfile, ReadUserinfo, ReceiveProfileUpdate, SetAvatar,
+    ClearAvatar, EditProfile, ReadProfile, ReadUserinfo, ReceiveProfileUpdate, SetAvatar,
 };
 use application::settings::UpdateSettings;
 use application::social::{
@@ -105,6 +105,7 @@ pub struct AppState {
     pub cors_origins: Vec<String>,
     pub public_key_pem: PublicKeyPem,
     pub find_account: Arc<FindAccount>,
+    pub show_person: Arc<application::profile::ShowPerson>,
     pub web_finger: Arc<WebFinger>,
     pub search_accounts: Arc<SearchAccounts>,
     /// What the inbox receives.
@@ -121,6 +122,7 @@ pub struct AppState {
     pub serve_peer_content: Arc<ServePeerContent>,
     pub update_settings: Arc<UpdateSettings>,
     pub read_userinfo: Arc<ReadUserinfo>,
+    pub read_profile: Arc<ReadProfile>,
     pub edit_profile: Arc<EditProfile>,
     pub set_avatar: Arc<SetAvatar>,
     pub clear_avatar: Arc<ClearAvatar>,
@@ -265,6 +267,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/settings", patch(settings::update_settings))
         .route("/userinfo", get(profile::userinfo))
         .route("/api/profile", patch(profile::edit))
+        .route("/api/profiles", get(profile::card))
         .route(
             "/api/avatar",
             put(profile::put_avatar).delete(profile::delete_avatar),

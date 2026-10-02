@@ -43,7 +43,7 @@ idempotent and naturally self-healing through another mechanism:
 | `Like` / `Undo{Like}` (reaction) | Idempotent | Reconciles on next conversation fetch |
 | `Follow` / `Accept` | Idempotent, low-frequency | The requester can send the request again; a `Follow` for a friendship already accepted here is answered with the `Accept` again |
 | `Reject` / `Undo{Follow}` | Idempotent, low-frequency | The peer keeps its row until either side touches the relationship again — see `identity-provider/specs/social.md § 1`, Declining a request and ending a friendship |
-| `Update{Person}` (profile) | Idempotent, carries the whole shown profile | The next change sends it whole again; until then the peer shows the name and avatar it had |
+| `Update{Person}` (profile) | Idempotent, carries the whole shown profile | The next change sends it whole again; until then the peer shows the profile it had, and a card for it more than 24 h old discovers the actor again — see `identity-provider/specs/profile-and-settings.md § 1` |
 
 Each activity type owns its own reconciliation story (the next change,
 next user interaction, sender-driven resend), so a missed delivery never produces a

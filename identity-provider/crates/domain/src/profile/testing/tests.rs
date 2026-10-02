@@ -37,3 +37,25 @@ async fn an_account_reaches_its_accepted_friends_on_other_instances() {
     contract::an_account_reaches_its_accepted_friends_on_other_instances(&profiles, &profiles)
         .await;
 }
+
+#[tokio::test]
+async fn a_card_holds_what_an_account_here_shows_and_dates_a_friendship() {
+    let profiles = InMemoryProfiles::default();
+    contract::a_card_holds_what_an_account_here_shows_and_dates_a_friendship(&profiles, &profiles)
+        .await;
+}
+
+#[tokio::test]
+async fn a_card_knows_another_instances_account_by_a_friendship_or_a_conversation() {
+    let profiles = InMemoryProfiles::default();
+    contract::a_card_knows_another_instances_account_by_a_friendship_or_a_conversation(
+        &profiles, &profiles, &profiles,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn no_card_for_an_account_this_instance_does_not_hold() {
+    let profiles = InMemoryProfiles::default();
+    contract::no_card_for_an_account_this_instance_does_not_hold(&profiles, &profiles).await;
+}

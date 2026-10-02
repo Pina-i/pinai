@@ -3,20 +3,24 @@
 
 mod avatar;
 mod edit_profile;
+mod read_profile;
 mod read_userinfo;
 mod receive_profile_update;
+mod show_person;
 #[cfg(test)]
 mod world;
 
 pub use avatar::{ClearAvatar, SetAvatar};
 pub use edit_profile::EditProfile;
+pub use read_profile::ReadProfile;
 pub use read_userinfo::ReadUserinfo;
 pub use receive_profile_update::ReceiveProfileUpdate;
+pub use show_person::{Person, ShowPerson};
 
 use std::sync::Arc;
 
 use domain::UserId;
-use domain::identity::InstanceOrigin;
+use domain::identity::{Account, InstanceOrigin, RemoteActor};
 use domain::profile::{
     OwnProfile, ProfileAudience, ProfileError, ProfileFederation, ProfileNotifier, Profiles,
     PublicProfile,
@@ -80,17 +84,42 @@ impl Friends {
     }
 
     async fn try_tell(&self, user: UserId) -> Result<(), ProfileError> {
-        let Some(account) = self.profiles.find(user).await?.and_then(|p| p.account()) else {
+        let Some((account, shown)) = shown(&*self.profiles, user).await? else {
             tracing::warn!(user_id = %user, "profile change: no actor URI to tell it under");
             return Ok(());
         };
-        let shown = PublicProfile::from(&account);
         for friend in self.audience.friends_here(&account.actor_uri).await? {
             self.notifier.friend_profile_updated(friend, &shown);
         }
         for friend in self.audience.friends_elsewhere(user).await? {
-            self.federation.send_update(&account, &friend);
+            self.federation.send_update(&account, &shown, &friend);
         }
         Ok(())
+    }
+}
+
+/// The account and the profile it shows; `None` without an actor URI to show it under.
+async fn shown(
+    profiles: &dyn Profiles,
+    user: UserId,
+) -> Result<Option<(Account, PublicProfile)>, ProfileError> {
+    let own = profiles.find(user).await?;
+    Ok(own.and_then(|p| Some((p.account()?, p.public()?))))
+}
+
+/// Sends `user`'s profile to a friend just made elsewhere, whose instance only heard it while the
+/// request was pending. Best effort, like `Friends::tell`.
+pub(crate) async fn introduce(
+    profiles: &dyn Profiles,
+    federation: &dyn ProfileFederation,
+    user: UserId,
+    friend: &RemoteActor,
+) {
+    match shown(profiles, user).await {
+        Ok(Some((account, profile))) => federation.send_update(&account, &profile, friend),
+        Ok(None) => {}
+        Err(e) => {
+            tracing::warn!(user_id = %user, error = ?e, "profile not sent to a new friend");
+        }
     }
 }

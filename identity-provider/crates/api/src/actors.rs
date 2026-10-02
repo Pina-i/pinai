@@ -5,11 +5,13 @@ use std::sync::Arc;
 
 use activitypub::{Actor, OrderedCollection, WebFingerResponse};
 use application::identity::{FindAccount, WebFinger};
+use application::profile::{Person, ShowPerson};
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderValue, header};
 use axum::response::{IntoResponse, Response};
 use domain::identity::{Account, InstanceOrigin};
+use domain::profile::Pronouns;
 use serde::Deserialize;
 use serde_json::json;
 
@@ -87,15 +89,24 @@ pub async fn instance_actor(
 
 /// `GET /users/{slug}` — an account's `Person`.
 pub async fn person(
-    State(find): State<Arc<FindAccount>>,
+    State(show): State<Arc<ShowPerson>>,
     State(origin): State<InstanceOrigin>,
     State(key): State<PublicKeyPem>,
     Path(slug): Path<String>,
 ) -> Result<Response, ApiError> {
-    let account = account(&find, &slug).await?;
+    let Person {
+        account,
+        pronouns,
+        bio,
+    } = show
+        .execute(&slug)
+        .await
+        .map_err(|e| ApiError::internal(e.into()))?
+        .ok_or_else(|| ApiError::not_found("User not found"))?;
     let name = account.display_name.as_deref().unwrap_or(&account.username);
     let actor = Actor::person(&origin.base_url(), &slug, name, &key.0)
-        .with_icon(account.avatar_url.as_deref());
+        .with_icon(account.avatar_url.as_deref())
+        .with_profile(bio.as_deref(), pronouns.map(Pronouns::as_str));
     Ok(typed(actor, ACTIVITY_JSON))
 }
 

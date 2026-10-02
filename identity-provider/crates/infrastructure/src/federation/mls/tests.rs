@@ -31,7 +31,7 @@ fn a_commit_travels_as_a_create_whose_note_names_its_epoch() {
     let (alice, carol) = (account("alice"), remote_actor("carol_k2m9x@idp.carol.test"));
     let c = commit(&alice.actor_uri);
 
-    let activity = commit_activity(&alice.actor_uri, &carol.actor_uri, &c);
+    let activity = commit_activity(&alice.actor_uri, &carol.actor_uri, &c, None);
 
     assert_eq!(
         (&activity["type"], &activity["actor"], &activity["to"]),
@@ -56,6 +56,29 @@ fn a_commit_travels_as_a_create_whose_note_names_its_epoch() {
             .unwrap()
             .starts_with(&format!("{}/activities/", alice.actor_uri))
     );
+}
+
+#[test]
+fn a_groups_commit_carries_its_roster_and_a_dms_none() {
+    let (alice, carol) = (account("alice"), remote_actor("carol_k2m9x@idp.carol.test"));
+    let roster = unstamped(
+        Some("Weekend trip"),
+        &[Member {
+            actor_uri: carol.actor_uri.clone(),
+            role: Role::Member,
+        }],
+    );
+    let c = commit(&alice.actor_uri);
+
+    let group = commit_activity(&alice.actor_uri, &carol.actor_uri, &c, Some(&roster));
+    let dm = commit_activity(&alice.actor_uri, &carol.actor_uri, &c, None);
+
+    assert_eq!(group["object"]["mlsGroup"]["name"], json!("Weekend trip"));
+    assert_eq!(
+        group["object"]["mlsGroup"]["members"][0]["actorUri"],
+        json!(carol.actor_uri.as_str())
+    );
+    assert_eq!(dm["object"].get("mlsGroup"), None);
 }
 
 #[test]

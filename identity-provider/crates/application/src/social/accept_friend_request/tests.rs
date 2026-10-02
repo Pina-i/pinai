@@ -3,6 +3,10 @@ use std::sync::Arc;
 use domain::FriendshipId;
 use domain::identity::testing::{InMemoryAccounts, InMemoryRemoteActors, account, remote_actor};
 use domain::identity::{Account, RemoteActor};
+use domain::profile::testing::{
+    InMemoryProfiles, ProfileSeeds, RecordingProfileFederation, own_profile,
+};
+use domain::profile::{OwnProfile, Pronouns};
 use domain::social::testing::{
     InMemorySocialGraph, Notice, RecordingFriendPresence, RecordingSocialFederation,
     RecordingSocialNotifier, Sent,
@@ -19,16 +23,28 @@ struct World {
     notifier: Arc<RecordingSocialNotifier>,
     federation: Arc<RecordingSocialFederation>,
     presence: Arc<RecordingFriendPresence>,
+    /// What `bob` shows.
+    bobs: OwnProfile,
+    profile_federation: Arc<RecordingProfileFederation>,
     accept: AcceptFriendRequest,
 }
 
-fn world() -> World {
+async fn world() -> World {
     let (alice, bob) = (account("alice"), account("bob"));
     let remote_carol = remote_actor("carol_k2m9x@idp.carol.test");
     let graph = Arc::new(InMemorySocialGraph::default());
     let notifier = Arc::new(RecordingSocialNotifier::default());
     let federation = Arc::new(RecordingSocialFederation::default());
     let presence = Arc::new(RecordingFriendPresence::default());
+    let profiles = Arc::new(InMemoryProfiles::default());
+    let bobs = OwnProfile {
+        id: bob.id,
+        pronouns: Some(Pronouns::He),
+        bio: Some("kia ora".to_owned()),
+        ..own_profile("bob")
+    };
+    profiles.sign_up(&bobs).await;
+    let profile_federation = Arc::new(RecordingProfileFederation::default());
     let accept = AcceptFriendRequest::new(
         Arc::new(InMemoryAccounts::with([alice.clone(), bob.clone()])),
         Arc::new(InMemoryRemoteActors::with([remote_carol.clone()])),
@@ -36,6 +52,8 @@ fn world() -> World {
         notifier.clone(),
         federation.clone(),
         presence.clone(),
+        profiles,
+        profile_federation.clone(),
     );
     World {
         alice,
@@ -45,13 +63,15 @@ fn world() -> World {
         notifier,
         federation,
         presence,
+        bobs,
+        profile_federation,
         accept,
     }
 }
 
 #[tokio::test]
 async fn accepting_a_local_request_befriends_both_and_tells_the_requester() {
-    let w = world();
+    let w = world().await;
     let request = w
         .graph
         .record_local_request(&w.alice, &w.bob)
@@ -79,6 +99,11 @@ async fn accepting_a_local_request_befriends_both_and_tells_the_requester() {
         "the requester is told which DM to open"
     );
     assert_eq!(w.presence.watched(), vec![w.alice.actor_uri.clone()]);
+    assert_eq!(
+        w.profile_federation.sent(),
+        [],
+        "an account here reads the profile itself"
+    );
 }
 
 fn incoming_from(owner: &Account, remote: &RemoteActor) -> Friendship {
@@ -93,7 +118,7 @@ fn incoming_from(owner: &Account, remote: &RemoteActor) -> Friendship {
 
 #[tokio::test]
 async fn accepting_a_remote_request_answers_its_instance_with_the_dm() {
-    let w = world();
+    let w = world().await;
     let request = incoming_from(&w.bob, &w.remote_carol);
     w.graph.insert(request.clone());
 
@@ -123,8 +148,22 @@ async fn accepting_a_remote_request_answers_its_instance_with_the_dm() {
 }
 
 #[tokio::test]
+async fn accepting_a_remote_request_sends_the_new_friend_the_profile_the_caller_shows() {
+    let w = world().await;
+    let request = incoming_from(&w.bob, &w.remote_carol);
+    w.graph.insert(request.clone());
+
+    w.accept.execute(w.bob.id, request.id).await.unwrap();
+
+    assert_eq!(
+        w.profile_federation.sent(),
+        [(w.bobs.public().unwrap(), w.remote_carol.actor_uri.clone())]
+    );
+}
+
+#[tokio::test]
 async fn only_a_pending_request_the_caller_received_can_be_accepted() {
-    let w = world();
+    let w = world().await;
     let sent_by_alice = w
         .graph
         .record_local_request(&w.alice, &w.bob)

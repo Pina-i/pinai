@@ -1,13 +1,16 @@
 use std::sync::Arc;
 
 use domain::DeviceId;
-use domain::e2ee::{Claim, KeyDirectoryError, KeyPackagePolicy, KeyPackages, RemoteKeyPackages};
+use domain::e2ee::{
+    Claim, DeviceNotifier, KeyDirectoryError, KeyPackagePolicy, KeyPackages, RemoteKeyPackages,
+};
 use domain::identity::{Accounts, ActorUri, InstanceOrigin, Requester};
 use domain::social::Reachability;
 
 /// `POST /api/keys/packages/claim`: one of `target`'s KeyPackages, to add a device of theirs to
 /// a group — of `device`, or of any device with some left. A local user's claim for an account
-/// elsewhere is asked of that account's instance.
+/// elsewhere is asked of that account's instance. The owner's live sessions are told to refill
+/// when a claim leaves a device at the threshold, or finds nothing.
 pub struct ClaimKeyPackage {
     origin: InstanceOrigin,
     policy: KeyPackagePolicy,
@@ -15,6 +18,7 @@ pub struct ClaimKeyPackage {
     key_packages: Arc<dyn KeyPackages>,
     remote: Arc<dyn RemoteKeyPackages>,
     reach: Arc<dyn Reachability>,
+    notifier: Arc<dyn DeviceNotifier>,
 }
 
 impl ClaimKeyPackage {
@@ -25,6 +29,7 @@ impl ClaimKeyPackage {
         key_packages: Arc<dyn KeyPackages>,
         remote: Arc<dyn RemoteKeyPackages>,
         reach: Arc<dyn Reachability>,
+        notifier: Arc<dyn DeviceNotifier>,
     ) -> Self {
         Self {
             origin,
@@ -33,6 +38,7 @@ impl ClaimKeyPackage {
             key_packages,
             remote,
             reach,
+            notifier,
         }
     }
 
@@ -74,19 +80,22 @@ impl ClaimKeyPackage {
         if claimer != owner.actor_uri {
             self.reach.relation(owner.id, &claimer).await?.admits()?;
         }
-        let package = self
-            .key_packages
-            .claim(owner.id, device)
-            .await?
-            .ok_or(KeyDirectoryError::NoKeyPackage)?;
+        let Some(package) = self.key_packages.claim(owner.id, device).await? else {
+            self.notifier.key_packages_low(owner.id);
+            return Err(KeyDirectoryError::NoKeyPackage);
+        };
         let remaining = self
             .key_packages
             .available(owner.id, package.device)
             .await?;
+        let needs_refill = self.policy.needs_refill(remaining);
+        if needs_refill {
+            self.notifier.key_packages_low(owner.id);
+        }
         Ok(Claim {
             package,
             remaining,
-            needs_refill: self.policy.needs_refill(remaining),
+            needs_refill,
         })
     }
 }

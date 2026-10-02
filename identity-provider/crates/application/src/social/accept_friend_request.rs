@@ -1,10 +1,13 @@
 use std::sync::Arc;
 
 use domain::identity::{Account, Accounts, RemoteActors};
+use domain::profile::{ProfileFederation, Profiles};
 use domain::social::{
     FriendPresence, FriendshipEvent, SocialError, SocialFederation, SocialGraph, SocialNotifier,
 };
 use domain::{FriendshipId, UserId};
+
+use crate::profile::introduce;
 
 /// `POST /api/friends/{id}/accept`: accept a request the caller received.
 pub struct AcceptFriendRequest {
@@ -14,9 +17,12 @@ pub struct AcceptFriendRequest {
     notifier: Arc<dyn SocialNotifier>,
     federation: Arc<dyn SocialFederation>,
     presence: Arc<dyn FriendPresence>,
+    profiles: Arc<dyn Profiles>,
+    profile_federation: Arc<dyn ProfileFederation>,
 }
 
 impl AcceptFriendRequest {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         accounts: Arc<dyn Accounts>,
         remote_actors: Arc<dyn RemoteActors>,
@@ -24,6 +30,8 @@ impl AcceptFriendRequest {
         notifier: Arc<dyn SocialNotifier>,
         federation: Arc<dyn SocialFederation>,
         presence: Arc<dyn FriendPresence>,
+        profiles: Arc<dyn Profiles>,
+        profile_federation: Arc<dyn ProfileFederation>,
     ) -> Self {
         Self {
             accounts,
@@ -32,6 +40,8 @@ impl AcceptFriendRequest {
             notifier,
             federation,
             presence,
+            profiles,
+            profile_federation,
         }
     }
 
@@ -59,6 +69,13 @@ impl AcceptFriendRequest {
         } else if let Some(requester) = self.remote_actors.find(&request.friend).await? {
             self.federation
                 .send_accept(&caller, &requester, request.id, conversation);
+            introduce(
+                &*self.profiles,
+                &*self.profile_federation,
+                caller.id,
+                &requester,
+            )
+            .await;
         }
         self.presence.watch(&request.friend);
         Ok(())

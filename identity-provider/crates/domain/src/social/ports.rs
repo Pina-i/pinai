@@ -1,3 +1,5 @@
+use time::OffsetDateTime;
+
 use crate::identity::{Account, ActorUri, RemoteActor};
 use crate::{ConversationId, FriendshipId, UserId};
 
@@ -201,6 +203,8 @@ pub struct FriendView {
     pub actor_uri: ActorUri,
     /// The friend's instance, or `local`.
     pub instance: String,
+    /// When this side became a friendship; a friend made again starts a new date.
+    pub since: OffsetDateTime,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -35,6 +35,9 @@ pub enum WsEvent {
     /// A new device of the recipient's account just registered. Other live
     /// sessions add its leaf to every group they're in.
     DeviceJoined(DeviceJoinedPayload),
+    /// A claim left one of the recipient's devices at the refill threshold, or found none left.
+    /// Each live session tops its own device up.
+    KeyPackagesLow(KeyPackagesLowPayload),
     /// A group conversation was created with the recipient as a member.
     GroupCreated(GroupCreatedPayload),
     /// A member was added to a group the recipient belongs to.
@@ -185,6 +188,10 @@ pub struct DeviceJoinedPayload {
     /// devices use it to look up the new device when targeting MLS Add commits.
     pub drk_public_key: String,
 }
+
+/// Empty: each device reads its own stash back over REST.
+#[derive(Debug, Clone, Serialize)]
+pub struct KeyPackagesLowPayload {}
 
 // ─── Group membership payloads ─────────────────────────────────────────────────
 //

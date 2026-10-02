@@ -19,7 +19,7 @@ pub use key_packages::SignedRemoteKeyPackages;
 pub use messaging::ApMessageFederation;
 pub use mls::ApMlsFederation;
 pub use presence::{SignedPeerPresence, SsePeerStreams};
-pub use profile::ApProfileFederation;
+pub use profile::{ApProfileFederation, BackgroundProfileRefresh};
 pub use remote_actors::FederatedRemoteActors;
 pub(crate) use remote_actors::RemoteActorRow;
 pub use remote_files::SignedRemoteFiles;

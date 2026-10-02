@@ -99,6 +99,9 @@ pub struct Actor {
     /// An `Image`, or a list of them: kept as sent, so an unusual shape never fails the document.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<Value>,
+    /// A Pina'i extension: the account's pronouns, as a word its instance chose (`"she"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pronouns: Option<String>,
 }
 
 impl Actor {
@@ -128,7 +131,23 @@ impl Actor {
             summary: None,
             url: Some(actor_url),
             icon: None,
+            pronouns: None,
         }
+    }
+
+    /// The actor with `bio` as its summary, escaped, and its pronouns, or neither.
+    pub fn with_profile(mut self, bio: Option<&str>, pronouns: Option<&str>) -> Self {
+        self.summary = bio.map(summary_html);
+        self.pronouns = pronouns.map(str::to_owned);
+        self
+    }
+
+    /// The summary as plain text, or none when it says nothing.
+    pub fn bio(&self) -> Option<String> {
+        self.summary
+            .as_deref()
+            .map(summary_text)
+            .filter(|bio| !bio.is_empty())
     }
 
     /// The actor with `url` as its avatar, or none.
@@ -144,6 +163,96 @@ impl Actor {
             icon => icon,
         };
         icon.get("url")?.as_str()
+    }
+}
+
+// ─── Summary ─────────────────────────────────────────────────────────────────
+
+/// A plain-text bio as a `summary`, which ActivityPub reads as HTML: escaped, line breaks kept.
+pub fn summary_html(text: &str) -> String {
+    let mut html = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '&' => html.push_str("&amp;"),
+            '<' => html.push_str("&lt;"),
+            '>' => html.push_str("&gt;"),
+            '"' => html.push_str("&quot;"),
+            '\'' => html.push_str("&#39;"),
+            '\n' => html.push_str("<br>"),
+            c => html.push(c),
+        }
+    }
+    html
+}
+
+/// A peer's HTML `summary` as plain text: tags dropped — a line break or the end of a paragraph
+/// kept as a new line — and character references decoded.
+pub fn summary_text(html: &str) -> String {
+    let mut text = String::with_capacity(html.len());
+    let mut rest = html;
+    while let Some(open) = rest.find('<') {
+        text.push_str(&rest[..open]);
+        let Some(close) = rest[open..].find('>') else {
+            break;
+        };
+        let tag = rest[open + 1..open + close].trim().to_ascii_lowercase();
+        let name = tag
+            .trim_start_matches('/')
+            .split(|c: char| c.is_whitespace() || c == '/')
+            .next()
+            .unwrap_or_default();
+        if name == "br" || (tag.starts_with('/') && name == "p") {
+            text.push('\n');
+        }
+        rest = &rest[open + close + 1..];
+    }
+    // An unterminated `<` reads as itself.
+    text.push_str(rest);
+    let decoded = decode_references(&text);
+    let lines: Vec<&str> = decoded.lines().map(str::trim_end).collect();
+    lines.join("\n").trim().to_owned()
+}
+
+fn decode_references(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(amp) = rest.find('&') {
+        out.push_str(&rest[..amp]);
+        rest = &rest[amp..];
+        let decoded = rest[1..]
+            .find(';')
+            .filter(|&semi| semi <= 10)
+            .and_then(|semi| Some((reference(&rest[1..1 + semi])?, semi + 2)));
+        match decoded {
+            Some((c, len)) => {
+                out.push(c);
+                rest = &rest[len..];
+            }
+            None => {
+                out.push('&');
+                rest = &rest[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+fn reference(name: &str) -> Option<char> {
+    match name {
+        "amp" => Some('&'),
+        "lt" => Some('<'),
+        "gt" => Some('>'),
+        "quot" => Some('"'),
+        "apos" => Some('\''),
+        "nbsp" => Some(' '),
+        _ => {
+            let code = match name.strip_prefix("#x").or_else(|| name.strip_prefix("#X")) {
+                Some(hex) => u32::from_str_radix(hex, 16).ok()?,
+                None => name.strip_prefix('#')?.parse().ok()?,
+            };
+            char::from_u32(code)
+        }
     }
 }
 
@@ -258,12 +367,15 @@ impl Activity {
         }
     }
 
-    /// Build an Update{Person} activity for profile propagation.
+    /// Build an Update{Person} activity for profile propagation: the whole shown profile, a
+    /// field left out meaning there is none.
     pub fn update_person(
         actor_url: &str,
         username: &str,
         display_name: Option<&str>,
         avatar_url: Option<&str>,
+        bio: Option<&str>,
+        pronouns: Option<&str>,
     ) -> Self {
         let mut person = serde_json::json!({
             "type": "Person",
@@ -278,6 +390,12 @@ impl Activity {
                 "type": "Image",
                 "url": url,
             });
+        }
+        if let Some(bio) = bio {
+            person["summary"] = Value::String(summary_html(bio));
+        }
+        if let Some(pronouns) = pronouns {
+            person["pronouns"] = Value::String(pronouns.to_owned());
         }
 
         let activity_id = format!("{}/updates/{}", actor_url, uuid::Uuid::new_v4());

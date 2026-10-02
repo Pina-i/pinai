@@ -41,6 +41,25 @@ async fn accepting_makes_both_local_sides_friends_once() {
 }
 
 #[tokio::test]
+async fn a_friendship_is_dated_from_its_acceptance_on_both_sides_once() {
+    contract::a_friendship_is_dated_from_its_acceptance_on_both_sides_once(
+        &InMemorySocialGraph::default(),
+        &account("alice"),
+        &account("bob"),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn an_accepted_outgoing_request_is_dated_once() {
+    contract::an_accepted_outgoing_request_is_dated_once(
+        &InMemorySocialGraph::default(),
+        &account("alice"),
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn declining_removes_both_local_sides() {
     contract::declining_removes_both_local_sides(
         &InMemorySocialGraph::default(),

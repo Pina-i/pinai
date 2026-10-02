@@ -11,6 +11,10 @@ pub struct RemoteActor {
     pub preferred_username: Option<String>,
     pub display_name: Option<String>,
     pub avatar_url: Option<String>,
+    /// The summary, as text.
+    pub bio: Option<String>,
+    /// The Pina'i `pronouns` extension, as the peer wrote it.
+    pub pronouns: Option<String>,
 }
 
 /// Resolve a federated handle (`username@domain`) to a remote actor via WebFinger.
@@ -50,6 +54,7 @@ pub async fn resolve_remote_actor(
         .map_err(|e| TransportError::Upstream(format!("Actor parse failed: {e}")))?;
 
     let avatar_url = actor.icon_url().map(str::to_owned);
+    let bio = actor.bio();
     Ok(RemoteActor {
         actor_url: actor.id,
         inbox: actor.inbox,
@@ -60,6 +65,8 @@ pub async fn resolve_remote_actor(
             Some(actor.name)
         },
         avatar_url,
+        bio,
+        pronouns: actor.pronouns,
     })
 }
 

@@ -384,9 +384,13 @@ impl Application {
             ));
         let receive_commit = Arc::new(application::e2ee::ReceiveCommit::new(
             Arc::clone(&accounts),
+            Arc::clone(&remote_actors),
             Arc::clone(&conversations),
             Arc::clone(&commits),
+            Arc::clone(&reach),
             Arc::clone(&mls_notifier),
+            Arc::clone(&group_notifier),
+            Arc::clone(&group_events),
         ));
         let receive_welcome = Arc::new(application::e2ee::ReceiveWelcome::new(
             Arc::clone(&accounts),
@@ -442,6 +446,9 @@ impl Application {
             max_lifetime: time::Duration::try_from(config.e2ee_keypackage_lifetime)
                 .map_err(|e| anyhow::anyhow!("KeyPackage lifetime: {e}"))?,
         };
+        let device_notifier: Arc<dyn domain::e2ee::DeviceNotifier> = Arc::new(
+            infrastructure::realtime::HubDeviceNotifier::new(Arc::clone(&hub)),
+        );
         let sweep_key_packages = Arc::new(application::e2ee::SweepKeyPackages::new(Arc::clone(
             &key_packages,
         )));
@@ -493,6 +500,8 @@ impl Application {
             Arc::clone(&graph),
             Arc::clone(&social_notifier),
             Arc::clone(&friend_presence),
+            Arc::clone(&profiles),
+            Arc::clone(&profile_federation),
         ));
         let receive_reject = Arc::new(ReceiveReject::new(Arc::clone(&graph)));
 
@@ -596,6 +605,11 @@ impl Application {
                 origin.clone(),
                 Arc::clone(&accounts),
             )),
+            show_person: Arc::new(application::profile::ShowPerson::new(
+                origin.clone(),
+                Arc::clone(&accounts),
+                Arc::clone(&profiles),
+            )),
             web_finger: Arc::new(application::identity::WebFinger::new(
                 origin.clone(),
                 Arc::clone(&accounts),
@@ -620,6 +634,13 @@ impl Application {
                 Arc::clone(&settings_store),
                 Arc::clone(&contact_policies),
             )),
+            read_profile: Arc::new(application::profile::ReadProfile::new(
+                Arc::clone(&accounts),
+                Arc::new(infrastructure::postgres::PgProfileCards::new(pool.clone())),
+                Arc::new(infrastructure::federation::BackgroundProfileRefresh::new(
+                    Arc::clone(&remote_actors),
+                )),
+            )),
             edit_profile: Arc::new(application::profile::EditProfile::new(
                 origin.clone(),
                 Arc::clone(&profiles),
@@ -637,11 +658,11 @@ impl Application {
                 Arc::clone(&profile_federation),
             )),
             clear_avatar: Arc::new(application::profile::ClearAvatar::new(
-                profiles,
+                Arc::clone(&profiles),
                 avatars,
                 profile_audience,
                 profile_notifier,
-                profile_federation,
+                Arc::clone(&profile_federation),
             )),
             send_friend_request: Arc::new(SendFriendRequest::new(
                 Arc::clone(&accounts),
@@ -663,6 +684,8 @@ impl Application {
                 Arc::clone(&social_notifier),
                 Arc::clone(&social_federation),
                 Arc::clone(&friend_presence),
+                profiles,
+                profile_federation,
             )),
             decline_friend_request: Arc::new(DeclineFriendRequest::new(
                 Arc::clone(&accounts),
@@ -772,9 +795,7 @@ impl Application {
                 Arc::new(infrastructure::attestation::Ed25519DeviceAttester::new(
                     Arc::clone(&keypair),
                 )),
-                Arc::new(infrastructure::realtime::HubDeviceNotifier::new(
-                    Arc::clone(&hub),
-                )),
+                Arc::clone(&device_notifier),
             )),
             list_devices: Arc::new(application::e2ee::ListDevices::new(Arc::clone(&devices))),
             revoke_device: Arc::new(application::e2ee::RevokeDevice::new(Arc::clone(&devices))),
@@ -793,6 +814,7 @@ impl Application {
                     url_policy,
                 )),
                 Arc::clone(&reach),
+                device_notifier,
             )),
             key_package_status: Arc::new(application::e2ee::KeyPackageStatus::new(
                 key_package_policy,

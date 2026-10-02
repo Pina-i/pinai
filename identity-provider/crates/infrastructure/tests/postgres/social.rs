@@ -150,6 +150,28 @@ async fn incoming_requests_are_the_pending_ones_received(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn a_friendship_is_dated_from_its_acceptance_on_both_sides_once(pool: PgPool) {
+    let (alice, bob) = (
+        an_account(&pool, "alice").await,
+        an_account(&pool, "bob").await,
+    );
+
+    contract::a_friendship_is_dated_from_its_acceptance_on_both_sides_once(
+        &PgSocialGraph::new(pool),
+        &alice,
+        &bob,
+    )
+    .await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn an_accepted_outgoing_request_is_dated_once(pool: PgPool) {
+    let alice = an_account(&pool, "alice").await;
+
+    contract::an_accepted_outgoing_request_is_dated_once(&PgSocialGraph::new(pool), &alice).await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
 async fn the_friends_list_holds_accepted_friends_with_their_names(pool: PgPool) {
     let (alice, bob) = (
         an_account(&pool, "alice").await,

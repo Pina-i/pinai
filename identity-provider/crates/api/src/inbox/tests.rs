@@ -712,3 +712,32 @@ async fn a_peers_own_profile_update_is_kept_and_anothers_refused() {
         "an actor may only update its own profile"
     );
 }
+
+#[tokio::test]
+async fn a_peers_html_bio_is_kept_as_text_with_pronouns_this_instance_knows() {
+    let w = world();
+    w.app.profile.profiles.remember(&w.carol).await;
+    let person = |pronouns: &str| {
+        json!({
+            "type": "Person", "id": w.carol.actor_uri.as_str(), "name": "Carol R.",
+            "summary": "<p>Tom &amp; Jerry</p><p>kia ora</p>", "pronouns": pronouns,
+        })
+    };
+
+    let (known, _) = w
+        .deliver(
+            &w.carol.actor_uri,
+            w.by_carol("Update", person("non-binary")),
+        )
+        .await;
+    let (kept, _) = w.app.profile.profiles.shown(&w.carol.actor_uri).await;
+    w.deliver(&w.carol.actor_uri, w.by_carol("Update", person("xe/xem")))
+        .await;
+    let (unknown, _) = w.app.profile.profiles.shown(&w.carol.actor_uri).await;
+
+    assert_eq!(known, StatusCode::ACCEPTED);
+    let kept = kept.unwrap();
+    assert_eq!(kept.bio.as_deref(), Some("Tom & Jerry\nkia ora"));
+    assert_eq!(kept.pronouns, Some(domain::profile::Pronouns::NonBinary));
+    assert_eq!(unknown.unwrap().pronouns, None);
+}

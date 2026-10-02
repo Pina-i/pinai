@@ -102,6 +102,7 @@ struct FriendViewRow {
     avatar_url: Option<String>,
     friend_actor_uri: String,
     instance: String,
+    accepted_at: time::OffsetDateTime,
 }
 
 impl TryFrom<FriendViewRow> for FriendView {
@@ -115,6 +116,7 @@ impl TryFrom<FriendViewRow> for FriendView {
             actor_uri: ActorUri::parse(&row.friend_actor_uri)
                 .context("friendships.friend_actor_uri")?,
             instance: row.instance,
+            since: row.accepted_at,
         })
     }
 }
@@ -174,7 +176,7 @@ impl SocialGraph for PgSocialGraph {
     ) -> Result<ConversationId, SocialStoreError> {
         let mut tx = self.pool.begin().await.context("begin accept")?;
         let claimed: Option<uuid::Uuid> = sqlx::query_scalar(
-            "UPDATE friendships SET status = 'accepted', updated_at = now() \
+            "UPDATE friendships SET status = 'accepted', accepted_at = now(), updated_at = now() \
              WHERE id = $1 AND status = 'pending' AND direction = 'incoming' RETURNING id",
         )
         .bind(request.id.as_uuid())
@@ -184,9 +186,11 @@ impl SocialGraph for PgSocialGraph {
         if claimed.is_none() {
             return Err(SocialStoreError::Conflict);
         }
-        // The requester's side, when they are local; a remote requester's IdP holds theirs.
+        // The requester's side, when they are local; a remote requester's IdP holds theirs. `now()`
+        // is the transaction's, so both sides share one date.
         sqlx::query(
-            "UPDATE friendships SET status = 'accepted', updated_at = now() \
+            "UPDATE friendships SET status = 'accepted', \
+                    accepted_at = COALESCE(accepted_at, now()), updated_at = now() \
              WHERE friend_actor_uri = $1 \
                AND owner_user_id = (SELECT id FROM users WHERE actor_uri = $2)",
         )
@@ -338,7 +342,8 @@ impl SocialGraph for PgSocialGraph {
                     CASE WHEN u.id IS NULL THEN f.friend_avatar_url ELSE u.avatar_url END \
                         AS avatar_url, \
                     f.friend_actor_uri, \
-                    COALESCE(ra.instance, 'local') AS instance \
+                    COALESCE(ra.instance, 'local') AS instance, \
+                    f.accepted_at \
              FROM friendships f \
              LEFT JOIN users u ON f.friend_actor_uri = u.actor_uri \
              LEFT JOIN remote_actors ra ON f.friend_actor_uri = ra.actor_uri \
@@ -378,7 +383,7 @@ impl SocialGraph for PgSocialGraph {
     ) -> Result<Option<(Friendship, ConversationId)>, SocialStoreError> {
         let mut tx = self.pool.begin().await.context("begin accept_outgoing")?;
         let accepted: Option<FriendshipRow> = sqlx::query_as(&format!(
-            "UPDATE friendships SET status = 'accepted', updated_at = now() \
+            "UPDATE friendships SET status = 'accepted', accepted_at = now(), updated_at = now() \
              WHERE owner_user_id = $1 AND friend_actor_uri = $2 \
                AND status = 'pending' AND direction = 'outgoing' \
              RETURNING {COLUMNS}"

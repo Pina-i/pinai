@@ -91,9 +91,11 @@ pub trait DeviceAttester: Send + Sync {
     ) -> SignedAttestation;
 }
 
-/// Tells an account's live sessions that one of its devices registered for the first time.
+/// Tells an account's live sessions about its devices: one registered for the first time, or
+/// their KeyPackages are running out.
 pub trait DeviceNotifier: Send + Sync {
     fn device_joined(&self, owner: UserId, actor: &ActorUri, device: DeviceId, key: &DeviceRootKey);
+    fn key_packages_low(&self, owner: UserId);
 }
 
 /// Claims a KeyPackage from the instance hosting `target`, as the local account `sender`.
@@ -156,11 +158,19 @@ pub struct OutgoingWelcome {
     pub roster: Option<GroupSnapshot>,
 }
 
-/// Commits and Welcomes for members on other instances, best effort: a missed commit is caught
-/// up through the log, a missed Welcome by pairing again.
+/// Commits and Welcomes for members on other instances, best effort: nothing is sent again, and
+/// a member catches up only from its own instance's log. A group's commit therefore carries its
+/// roster, so it lands even ahead of the Welcome that would have brought the group there.
 pub trait MlsFederation: Send + Sync {
-    /// To each remote member, reached as `MessageFederation::send_to_group` reaches them.
-    fn send_commit(&self, from: &ActorUri, to: &[ActorUri], commit: &Commit);
+    /// To each remote member, reached as `MessageFederation::send_to_group` reaches them;
+    /// `roster` is `None` for a DM.
+    fn send_commit(
+        &self,
+        from: &ActorUri,
+        to: &[ActorUri],
+        commit: &Commit,
+        roster: Option<&GroupSnapshot>,
+    );
     fn send_welcome(&self, from: &ActorUri, to: &RemoteActor, welcome: &OutgoingWelcome);
 }
 

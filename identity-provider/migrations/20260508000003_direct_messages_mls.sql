@@ -1,6 +1,6 @@
 -- Phase 3 of MLS rollout: rip plaintext message content out of the schema.
 -- Pre-deployment treatment — no backfill, no compatibility shim, no DEFAULT.
--- See specs/05-e2ee.md § 5 and docs/plans/2026-05-08-mls-e2ee-implementation.md.
+-- See identity-provider/specs/e2ee.md § 4 and docs/plans/2026-05-08-mls-e2ee-implementation.md.
 
 -- 1) Drop the plaintext column. The MLS body lives in `mls_ciphertext` from
 --    here on; reply previews and reaction state move into the encrypted

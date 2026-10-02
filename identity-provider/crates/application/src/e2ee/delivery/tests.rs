@@ -117,9 +117,13 @@ async fn world() -> World {
         ),
         receive_commit: ReceiveCommit::new(
             accounts.clone(),
+            remote_actors.clone(),
             store.clone(),
             delivery.clone(),
+            reach.clone(),
             notifier.clone(),
+            groups.clone(),
+            store.clone(),
         ),
         receive_welcome: ReceiveWelcome::new(
             accounts,
@@ -212,14 +216,39 @@ async fn a_members_commit_is_stored_and_reaches_every_member() {
     let mut members = vec![w.alice.id, w.bob.id];
     members.sort();
     assert_eq!(told, members, "the proposer's own sessions too");
+    let roster = GroupSnapshot::of(
+        &w.store.find(w.group).await.unwrap().expect("the group"),
+        &w.store.memberships(w.group).await.unwrap(),
+    );
     assert_eq!(
         w.federation.sent(),
         vec![SentMls::Commit {
             from: w.alice.actor_uri.clone(),
             to: w.carol.actor_uri.clone(),
             commit,
+            roster: Some(roster),
         }]
     );
+}
+
+#[tokio::test]
+async fn a_dms_commit_travels_without_a_roster() {
+    let w = world().await;
+    let dm = w
+        .store
+        .open_dm(&w.alice.actor_uri, &w.carol.actor_uri, None)
+        .await
+        .unwrap();
+
+    w.append
+        .execute(w.alice.id, dm, epoch(1), commit_blob(1))
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        &w.federation.sent()[..],
+        [SentMls::Commit { roster: None, .. }]
+    ));
 }
 
 #[tokio::test]
@@ -507,10 +536,12 @@ async fn a_member_who_left_hands_out_no_welcome() {
 async fn an_inbound_commit_from_outside_the_conversation_is_refused() {
     let w = world().await;
     let from = |proposer: &ActorUri, conversation| IncomingCommit {
+        recipient: w.alice.id,
         proposer: proposer.clone(),
         conversation,
         epoch: epoch(9),
         blob: commit_blob(9),
+        roster: None,
     };
 
     let outsider = w
@@ -580,10 +611,12 @@ async fn an_inbound_dm_welcome_that_outruns_its_dm_opens_it() {
 async fn an_inbound_commit_is_stored_once_and_reaches_the_local_members() {
     let w = world().await;
     let incoming = || IncomingCommit {
+        recipient: w.alice.id,
         proposer: w.carol.actor_uri.clone(),
         conversation: w.group,
         epoch: epoch(5),
         blob: commit_blob(5),
+        roster: None,
     };
 
     w.receive_commit.execute(incoming()).await.unwrap();
@@ -876,4 +909,84 @@ async fn an_inbound_welcome_into_a_dm_the_two_already_share_is_checked_too() {
         "{refused:?}"
     );
     assert!(w.notifier.welcomes_ready().is_empty());
+}
+
+/// The commit adding someone is sent before their Welcome, and may arrive first: it holds the group
+/// then, or the members who joined before it could never catch up on it.
+#[tokio::test]
+async fn an_inbound_commit_that_outruns_the_welcome_mirrors_the_group_and_is_stored() {
+    let w = world().await;
+    let group = ConversationId::generate();
+    let roster = unstamped(
+        Some("crew"),
+        &[
+            member(&w.carol.actor_uri, Role::Admin),
+            member(&w.alice.actor_uri, Role::Member),
+        ],
+    );
+
+    w.receive_commit
+        .execute(IncomingCommit {
+            recipient: w.alice.id,
+            proposer: w.carol.actor_uri.clone(),
+            conversation: group,
+            epoch: epoch(1),
+            blob: commit_blob(1),
+            roster: Some(roster.clone()),
+        })
+        .await
+        .unwrap();
+    w.receive_welcome
+        .execute(w.incoming_welcome(&w.carol.actor_uri, group, Some(roster)))
+        .await
+        .unwrap();
+
+    assert_eq!(w.stored(group).await.len(), 1);
+    assert_eq!(w.store.members(group).await.unwrap().len(), 2);
+    assert_eq!(
+        w.groups.sent(),
+        vec![GroupNotice::Joined(
+            w.alice.id,
+            group,
+            w.carol.actor_uri.clone()
+        )]
+    );
+    let lines: Vec<_> = w
+        .groups
+        .events()
+        .into_iter()
+        .map(|(to, named)| (to, named.event.kind_name(), named.event.by.clone()))
+        .collect();
+    assert_eq!(
+        lines,
+        vec![(w.alice.id, "added", w.carol.actor_uri.clone())],
+        "once, though the Welcome came after"
+    );
+    assert_eq!(w.notifier.welcomes_ready().len(), 1);
+}
+
+#[tokio::test]
+async fn an_inbound_commit_that_would_bring_someone_in_from_who_they_do_not_admit_is_dropped() {
+    for kept_out in [BLOCKED, KEPT_OUT_BY_THE_SETTING] {
+        let w = world().await;
+        let group = ConversationId::generate();
+        w.reach.set(w.alice.id, &w.carol.actor_uri, kept_out);
+
+        let dropped = w
+            .receive_commit
+            .execute(IncomingCommit {
+                recipient: w.alice.id,
+                proposer: w.carol.actor_uri.clone(),
+                conversation: group,
+                epoch: epoch(1),
+                blob: commit_blob(1),
+                roster: Some(crew_with_alice(&w)),
+            })
+            .await;
+
+        assert!(dropped.is_ok(), "{dropped:?}");
+        assert_eq!(Conversations::find(&*w.store, group).await.unwrap(), None);
+        assert!(w.stored(group).await.is_empty());
+        assert!(w.groups.sent().is_empty());
+    }
 }

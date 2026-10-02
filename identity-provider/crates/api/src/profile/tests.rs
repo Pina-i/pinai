@@ -1,9 +1,12 @@
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
 use domain::UserId;
+use domain::identity::ActorUri;
+use domain::identity::testing::remote_actor;
 use domain::profile::testing::{ProfileSeeds, own_profile};
-use domain::profile::{ImageKind, OwnProfile, Profiles};
+use domain::profile::{ImageKind, OwnProfile, Profiles, Pronouns};
 use serde_json::json;
+use time::format_description::well_known::Rfc3339;
 
 use crate::testing::TestApp;
 
@@ -194,4 +197,105 @@ async fn a_deleted_avatar_is_no_longer_shown() {
     assert_eq!(status, StatusCode::NO_CONTENT);
     let shown = app.profile.profiles.find(alice.id).await.unwrap().unwrap();
     assert_eq!(shown.avatar_url, None);
+}
+
+fn card_of(actor: &ActorUri) -> String {
+    let query: String = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("actor", actor.as_str())
+        .finish();
+    format!("/api/profiles?{query}")
+}
+
+/// `alice` reads the cards; `bob` is an account here with pronouns and a bio.
+async fn cards() -> (TestApp, OwnProfile, OwnProfile) {
+    let alice = own_profile("alice");
+    let bob = OwnProfile {
+        pronouns: Some(Pronouns::He),
+        bio: Some("kia ora".to_owned()),
+        ..own_profile("bob")
+    };
+    let app = TestApp::with([alice.account().unwrap()], []);
+    for profile in [&alice, &bob] {
+        app.profile.profiles.sign_up(profile).await;
+    }
+    (app, alice, bob)
+}
+
+#[tokio::test]
+async fn a_profile_card_answers_what_the_account_shows() {
+    let (app, alice, bob) = cards().await;
+    let bob_uri = bob.actor_uri.clone().unwrap();
+
+    let (status, body) = app
+        .call(Method::GET, &card_of(&bob_uri), Some(alice.id), None)
+        .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body,
+        json!({
+            "actor_uri": "http://localhost:8080/users/bob_t3st0",
+            "display_name": "bob",
+            "avatar_url": null,
+            "pronouns": "he",
+            "bio": "kia ora",
+            "friends_since": null,
+        })
+    );
+}
+
+#[tokio::test]
+async fn a_friends_card_dates_the_friendship() {
+    let (app, alice, bob) = cards().await;
+    let bob_uri = bob.actor_uri.clone().unwrap();
+    app.profile
+        .profiles
+        .befriend(alice.id, &bob_uri, true, None)
+        .await;
+
+    let (status, body) = app
+        .call(Method::GET, &card_of(&bob_uri), Some(alice.id), None)
+        .await;
+
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let since = body["friends_since"].as_str().expect("an RFC 3339 date");
+    time::OffsetDateTime::parse(since, &Rfc3339).unwrap();
+}
+
+#[tokio::test]
+async fn a_card_the_viewer_may_not_read_is_not_found() {
+    let (app, alice, _) = cards().await;
+    let erin = remote_actor("erin_k2m9x@idp.erin.test");
+    app.profile.profiles.remember(&erin).await;
+    let stranger = remote_actor("zed_k2m9x@idp.far.test");
+
+    for actor in [&erin, &stranger] {
+        let (status, body) = app
+            .call(
+                Method::GET,
+                &card_of(&actor.actor_uri),
+                Some(alice.id),
+                None,
+            )
+            .await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND, "{}", actor.actor_uri);
+        assert_eq!(body["error_description"], "User not found");
+    }
+}
+
+#[tokio::test]
+async fn a_card_asked_without_an_actor_uri_is_a_bad_request() {
+    let (app, alice, _) = cards().await;
+
+    let (status, body) = app
+        .call(Method::GET, "/api/profiles?actor=bob", Some(alice.id), None)
+        .await;
+    let (missing, _) = app
+        .call(Method::GET, "/api/profiles", Some(alice.id), None)
+        .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error_description"], "`actor` is not an actor URI");
+    assert_eq!(missing, StatusCode::BAD_REQUEST);
 }

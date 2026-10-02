@@ -3,13 +3,16 @@
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::UserId;
+use time::OffsetDateTime;
+
 use crate::identity::testing::account;
 use crate::identity::{Account, ActorUri, RemoteActor};
+use crate::{ConversationId, UserId};
 
 use super::{
-    AvatarImage, AvatarStore, ImageKind, OwnProfile, PeerProfiles, ProfileAudience, ProfileEdit,
-    ProfileError, ProfileFederation, ProfileNotifier, Profiles, PublicProfile,
+    AvatarImage, AvatarStore, CardFacts, ImageKind, OwnProfile, PeerProfiles, ProfileAudience,
+    ProfileCards, ProfileEdit, ProfileError, ProfileFederation, ProfileNotifier, ProfileRefresh,
+    Profiles, Pronouns, PublicProfile,
 };
 
 /// A confirmed local account on `http://localhost:8080` showing its name only, as
@@ -48,6 +51,9 @@ pub trait ProfileSeeds: Send + Sync {
     );
     /// The name and avatar cached for `actor`, and the avatar each friendship with it keeps.
     async fn shown(&self, actor: &ActorUri) -> (Option<PublicProfile>, Vec<Option<String>>);
+    /// A conversation the members are all in.
+    async fn converse(&self, members: &[&ActorUri]) -> ConversationId;
+    async fn leave(&self, conversation: ConversationId, member: &ActorUri);
 }
 
 struct Friendship {
@@ -55,13 +61,24 @@ struct Friendship {
     friend: ActorUri,
     accepted: bool,
     avatar_url: Option<String>,
+    since: Option<OffsetDateTime>,
+}
+
+/// A remote actor as this instance caches it: how to reach it, and what it shows.
+struct Cached {
+    actor: RemoteActor,
+    pronouns: Option<Pronouns>,
+    bio: Option<String>,
+    fetched_at: OffsetDateTime,
 }
 
 #[derive(Default)]
 struct World {
     accounts: Vec<OwnProfile>,
-    remote: Vec<RemoteActor>,
+    remote: Vec<Cached>,
     friendships: Vec<Friendship>,
+    /// Each conversation's members, and whether they are still in it.
+    conversations: Vec<(ConversationId, Vec<(ActorUri, bool)>)>,
 }
 
 /// The accounts, the remote actors and the friendships between them, behind every store port.
@@ -79,6 +96,18 @@ impl InMemoryProfiles {
 
     fn writable(&self) -> Result<(), ProfileError> {
         refused_if(&self.refusing_writes, "the account store refuses writes")
+    }
+
+    /// `actor`'s cached profile was last heard at `at`.
+    pub fn heard_at(&self, actor: &ActorUri, at: OffsetDateTime) {
+        let mut world = self.world.lock().unwrap();
+        for cached in world
+            .remote
+            .iter_mut()
+            .filter(|c| &c.actor.actor_uri == actor)
+        {
+            cached.fetched_at = at;
+        }
     }
 }
 
@@ -129,13 +158,15 @@ impl Profiles for InMemoryProfiles {
 impl PeerProfiles for InMemoryProfiles {
     async fn record(&self, profile: &PublicProfile) -> Result<(), ProfileError> {
         let mut world = self.world.lock().unwrap();
-        for actor in world
+        for cached in world
             .remote
             .iter_mut()
-            .filter(|a| a.actor_uri == profile.actor)
+            .filter(|c| c.actor.actor_uri == profile.actor)
         {
-            actor.display_name = profile.display_name.clone();
-            actor.avatar_url = profile.avatar_url.clone();
+            cached.actor.display_name = profile.display_name.clone();
+            cached.actor.avatar_url = profile.avatar_url.clone();
+            cached.pronouns = profile.pronouns;
+            cached.bio = profile.bio.clone();
         }
         for friendship in world
             .friendships
@@ -166,8 +197,8 @@ impl ProfileAudience for InMemoryProfiles {
             .friendships
             .iter()
             .filter(|f| f.accepted && f.owner == user)
-            .filter_map(|f| world.remote.iter().find(|a| a.actor_uri == f.friend))
-            .cloned()
+            .filter_map(|f| world.remote.iter().find(|c| c.actor.actor_uri == f.friend))
+            .map(|c| c.actor.clone())
             .collect())
     }
 }
@@ -179,7 +210,12 @@ impl ProfileSeeds for InMemoryProfiles {
     }
 
     async fn remember(&self, actor: &RemoteActor) {
-        self.world.lock().unwrap().remote.push(actor.clone());
+        self.world.lock().unwrap().remote.push(Cached {
+            actor: actor.clone(),
+            pronouns: None,
+            bio: None,
+            fetched_at: OffsetDateTime::now_utc(),
+        });
     }
 
     async fn befriend(
@@ -194,6 +230,7 @@ impl ProfileSeeds for InMemoryProfiles {
             friend: friend.clone(),
             accepted,
             avatar_url: avatar_url.map(str::to_owned),
+            since: accepted.then(OffsetDateTime::now_utc),
         });
     }
 
@@ -202,11 +239,13 @@ impl ProfileSeeds for InMemoryProfiles {
         let cached = world
             .remote
             .iter()
-            .find(|a| &a.actor_uri == actor)
-            .map(|a| PublicProfile {
-                actor: a.actor_uri.clone(),
-                display_name: a.display_name.clone(),
-                avatar_url: a.avatar_url.clone(),
+            .find(|c| &c.actor.actor_uri == actor)
+            .map(|c| PublicProfile {
+                actor: c.actor.actor_uri.clone(),
+                display_name: c.actor.display_name.clone(),
+                avatar_url: c.actor.avatar_url.clone(),
+                pronouns: c.pronouns,
+                bio: c.bio.clone(),
             });
         let kept = world
             .friendships
@@ -215,6 +254,78 @@ impl ProfileSeeds for InMemoryProfiles {
             .map(|f| f.avatar_url.clone())
             .collect();
         (cached, kept)
+    }
+
+    async fn converse(&self, members: &[&ActorUri]) -> ConversationId {
+        let id = ConversationId::generate();
+        let members = members.iter().map(|m| ((*m).clone(), true)).collect();
+        self.world.lock().unwrap().conversations.push((id, members));
+        id
+    }
+
+    async fn leave(&self, conversation: ConversationId, member: &ActorUri) {
+        let mut world = self.world.lock().unwrap();
+        for (_, members) in world
+            .conversations
+            .iter_mut()
+            .filter(|(id, _)| *id == conversation)
+        {
+            for (_, active) in members.iter_mut().filter(|(a, _)| a == member) {
+                *active = false;
+            }
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ProfileCards for InMemoryProfiles {
+    async fn facts(
+        &self,
+        viewer: &Account,
+        actor: &ActorUri,
+    ) -> Result<Option<CardFacts>, ProfileError> {
+        let world = self.world.lock().unwrap();
+        let friends_since = world
+            .friendships
+            .iter()
+            .find(|f| f.owner == viewer.id && &f.friend == actor && f.accepted)
+            .and_then(|f| f.since);
+        let shares_a_conversation = world.conversations.iter().any(|(_, members)| {
+            let active = |who: &ActorUri| members.iter().any(|(a, active)| a == who && *active);
+            active(&viewer.actor_uri) && active(actor)
+        });
+        let local = world
+            .accounts
+            .iter()
+            .find(|a| a.actor_uri.as_ref() == Some(actor))
+            .and_then(OwnProfile::public)
+            .map(|profile| (profile, None));
+        let remote = || {
+            world
+                .remote
+                .iter()
+                .find(|c| &c.actor.actor_uri == actor)
+                .map(|c| {
+                    let profile = PublicProfile {
+                        actor: actor.clone(),
+                        display_name: c.actor.display_name.clone(),
+                        avatar_url: c.actor.avatar_url.clone(),
+                        pronouns: c.pronouns,
+                        bio: c.bio.clone(),
+                    };
+                    (profile, Some(c.fetched_at))
+                })
+        };
+        let is_local = local.is_some();
+        Ok(local
+            .or_else(remote)
+            .map(|(profile, fetched_at)| CardFacts {
+                profile,
+                local: is_local,
+                known: friends_since.is_some() || shares_a_conversation,
+                friends_since,
+                fetched_at,
+            }))
     }
 }
 
@@ -288,24 +399,46 @@ impl ProfileNotifier for RecordingProfileNotifier {
     }
 }
 
-/// Records every `Update{Person}` sent: the sender as it was, and the friend it went to.
+/// Records each account a stale card asked its instance for again.
+#[derive(Default)]
+pub struct RecordingProfileRefresh {
+    asked: Mutex<Vec<ActorUri>>,
+}
+
+impl RecordingProfileRefresh {
+    pub fn asked(&self) -> Vec<ActorUri> {
+        self.asked.lock().unwrap().clone()
+    }
+}
+
+impl ProfileRefresh for RecordingProfileRefresh {
+    fn refresh(&self, actor: &ActorUri) {
+        self.asked.lock().unwrap().push(actor.clone());
+    }
+}
+
+/// Records every `Update{Person}` sent: the profile it carried, and the friend it went to.
 #[derive(Default)]
 pub struct RecordingProfileFederation {
-    sent: Mutex<Vec<(Account, ActorUri)>>,
+    sent: Mutex<Vec<(PublicProfile, ActorUri)>>,
 }
 
 impl RecordingProfileFederation {
-    pub fn sent(&self) -> Vec<(Account, ActorUri)> {
+    pub fn sent(&self) -> Vec<(PublicProfile, ActorUri)> {
         self.sent.lock().unwrap().clone()
     }
 }
 
 impl ProfileFederation for RecordingProfileFederation {
-    fn send_update(&self, from: &Account, to: &RemoteActor) {
+    fn send_update(&self, from: &Account, profile: &PublicProfile, to: &RemoteActor) {
+        assert_eq!(
+            from.actor_uri, profile.actor,
+            "an account sends its own profile"
+        );
         self.sent
             .lock()
             .unwrap()
-            .push((from.clone(), to.actor_uri.clone()));
+            .push((profile.clone(), to.actor_uri.clone()));
     }
 }
 
@@ -313,7 +446,6 @@ impl ProfileFederation for RecordingProfileFederation {
 pub mod contract {
     use super::*;
     use crate::identity::testing::remote_actor;
-    use crate::profile::Pronouns;
 
     pub async fn an_account_is_found_with_its_profile(
         profiles: &dyn Profiles,
@@ -407,6 +539,8 @@ pub mod contract {
             actor: carol.actor_uri.clone(),
             display_name: Some("Carol R.".to_owned()),
             avatar_url: Some("http://idp.carol.test/avatars/carol.png?v=3".to_owned()),
+            pronouns: Some(Pronouns::NonBinary),
+            bio: Some("kia ora".to_owned()),
         };
 
         peers.record(&update).await.unwrap();
@@ -414,8 +548,126 @@ pub mod contract {
         let (cached, kept) = seeds.shown(&carol.actor_uri).await;
         assert_eq!(cached, Some(update.clone()));
         assert_eq!(kept, vec![update.avatar_url.clone(); 2]);
+        let cleared = PublicProfile {
+            pronouns: None,
+            bio: None,
+            ..update.clone()
+        };
+        peers.record(&cleared).await.unwrap();
+        assert_eq!(
+            seeds.shown(&carol.actor_uri).await.0,
+            Some(cleared),
+            "a field left out clears"
+        );
         let (_, untouched) = seeds.shown(&dave.actor_uri).await;
         assert_eq!(untouched, vec![Some("http://old/dave".to_owned())]);
+    }
+
+    pub async fn a_card_holds_what_an_account_here_shows_and_dates_a_friendship(
+        cards: &dyn ProfileCards,
+        seeds: &dyn ProfileSeeds,
+    ) {
+        let alice = own_profile("alice");
+        let bob = OwnProfile {
+            pronouns: Some(Pronouns::He),
+            bio: Some("kia ora".to_owned()),
+            ..own_profile("bob")
+        };
+        for profile in [&alice, &bob] {
+            seeds.sign_up(profile).await;
+        }
+        let (viewer, bob_uri) = (alice.account().unwrap(), bob.actor_uri.clone().unwrap());
+
+        let as_stranger = cards.facts(&viewer, &bob_uri).await.unwrap();
+        seeds.befriend(alice.id, &bob_uri, true, None).await;
+        let as_friend = cards.facts(&viewer, &bob_uri).await.unwrap().unwrap();
+
+        assert_eq!(
+            as_stranger,
+            Some(CardFacts {
+                profile: bob.public().unwrap(),
+                local: true,
+                known: false,
+                friends_since: None,
+                fetched_at: None,
+            })
+        );
+        assert!(as_friend.known);
+        assert!(as_friend.friends_since.is_some());
+    }
+
+    pub async fn a_card_knows_another_instances_account_by_a_friendship_or_a_conversation(
+        cards: &dyn ProfileCards,
+        peers: &dyn PeerProfiles,
+        seeds: &dyn ProfileSeeds,
+    ) {
+        let alice = own_profile("alice");
+        seeds.sign_up(&alice).await;
+        let remote = |name: &str| remote_actor(&format!("{name}_k2m9x@idp.peer.test"));
+        let names = ["carol", "dave", "erin", "frank", "gina", "hana"];
+        let [carol, dave, erin, frank, gina, hana] = names.map(remote);
+        for actor in [&carol, &dave, &erin, &frank, &gina, &hana] {
+            seeds.remember(actor).await;
+        }
+        let me = alice.actor_uri.clone().unwrap();
+        seeds.befriend(alice.id, &carol.actor_uri, true, None).await;
+        seeds.befriend(alice.id, &dave.actor_uri, false, None).await;
+        seeds.converse(&[&me, &erin.actor_uri]).await;
+        let left = seeds.converse(&[&me, &frank.actor_uri]).await;
+        seeds.leave(left, &frank.actor_uri).await;
+        let gone = seeds.converse(&[&me, &hana.actor_uri]).await;
+        seeds.leave(gone, &me).await;
+        let carols = PublicProfile {
+            actor: carol.actor_uri.clone(),
+            display_name: Some("Carol R.".to_owned()),
+            avatar_url: None,
+            pronouns: Some(Pronouns::She),
+            bio: Some("kia ora".to_owned()),
+        };
+        peers.record(&carols).await.unwrap();
+        let viewer = alice.account().unwrap();
+
+        let knowing = [
+            (&carol, true),
+            (&dave, false),
+            (&erin, true),
+            (&frank, false),
+            (&gina, false),
+            (&hana, false),
+        ];
+        for (actor, known) in knowing {
+            let facts = cards
+                .facts(&viewer, &actor.actor_uri)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(facts.known, known, "{}", actor.actor_uri);
+            assert!(!facts.local);
+            assert!(facts.fetched_at.is_some());
+            assert_eq!(facts.friends_since.is_some(), actor == &carol);
+        }
+        let facts = cards
+            .facts(&viewer, &carol.actor_uri)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(facts.profile, carols);
+    }
+
+    pub async fn no_card_for_an_account_this_instance_does_not_hold(
+        cards: &dyn ProfileCards,
+        seeds: &dyn ProfileSeeds,
+    ) {
+        let alice = own_profile("alice");
+        seeds.sign_up(&alice).await;
+        let stranger = remote_actor("zed_k2m9x@idp.far.test").actor_uri;
+
+        let facts = cards
+            .facts(&alice.account().unwrap(), &stranger)
+            .await
+            .unwrap();
+
+        assert_eq!(facts, None);
     }
 
     pub async fn an_actor_is_heard_of_by_the_accounts_that_befriended_it(

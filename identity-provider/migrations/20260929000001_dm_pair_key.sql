@@ -1,4 +1,4 @@
--- One DM per pair of actors (identity-provider/specs/03-direct-messages.md § Conversation IDs).
+-- One DM per pair of actors (identity-provider/specs/direct-messages.md § 1).
 -- Opening a DM looked for the pair's conversation, then created one: two concurrent first
 -- messages or accepts each created their own. A DM now carries its pair, normalised (the
 -- smaller actor URI first), and the pair is unique among DMs.

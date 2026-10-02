@@ -3,7 +3,7 @@
 ## 1. Profile editing API
 
 An account edits its name, pronouns, bio and avatar through three Bearer-auth endpoints, and reads
-them back on `/userinfo`:
+them back on `/userinfo`; it reads another account's on `/api/profiles` (§ 1, Profile card):
 
 | Endpoint | Body | Answer |
 |---|---|---|
@@ -11,6 +11,7 @@ them back on `/userinfo`:
 | `PATCH /api/profile` | `{ display_name, pronouns?, bio? }` | The new `/userinfo` document. |
 | `PUT /api/avatar` | the raw image, typed by its `Content-Type`: `image/jpeg`, `image/png`, `image/webp` or `image/gif` | `{ avatar_url }` |
 | `DELETE /api/avatar` | — | `204` |
+| `GET /api/profiles?actor={actor URI}` | — | The card: `{ actor_uri, display_name, avatar_url, pronouns, bio, friends_since }`. |
 
 ### Profile rules
 
@@ -26,8 +27,28 @@ cannot be blank`, `pronouns must be one of: he, she, non-binary`, …). An avata
 of one of the four types, else `400` (`Content-Type must be image/jpeg, image/png, image/webp, or
 image/gif`, `Body cannot be empty`).
 
-Only the display name and the avatar federate (§ 3); pronouns and bio stay on the home IdP.
-Mastodon-style `summary` (bio) and `attachment[].PropertyValue` (pronouns) are the upgrade path.
+The whole profile — name, avatar, pronouns and bio — federates to the account's friends (§ 3).
+
+### Profile card
+
+`GET /api/profiles?actor=` answers what the caller is shown of an account, here or elsewhere:
+
+- `pronouns` and `bio` as the profile rules have them, `null` when none.
+- `friends_since` — when the friendship was accepted on the caller's side (RFC 3339,
+  `identity-provider/specs/social.md § 1`), `null` unless they are friends.
+
+An account of this instance is shown to every account here, as its `Person` is to anyone (§ 3).
+One of another instance is shown from `remote_actors`, and only to a caller who counts it among
+their accepted friends or shares a conversation with it, both still members — the rule presence
+follows (`identity-provider/specs/presence.md`, What a peer is told). Any other actor is `404 not_found` (`User not
+found`), cached or not: the cache never tells who here has met whom
+(`identity-provider/specs/identity.md § 2`). An `actor` that is no actor URI is `400`
+(`` `actor` is not an actor URI ``).
+
+A non-friend's cached profile is only as fresh as the last time anyone here resolved them, and a
+friend's misses an `Update{Person}` that was lost. So a card whose `remote_actors.fetched_at` is
+more than 24 h old is answered as cached, and the account is discovered again in the background
+(`identity-provider/specs/identity.md § 2`) for the next read.
 
 ### Avatar storage
 
@@ -133,8 +154,8 @@ sequenceDiagram
 
 ## 3. Real-time profile propagation
 
-An account's display name and avatar are shown by its friends' clients, here and on other
-instances; a change reaches them at once.
+An account's profile — display name, avatar, pronouns and bio — is shown by its friends'
+clients, here and on other instances; a change reaches them at once.
 
 ```mermaid
 sequenceDiagram
@@ -159,6 +180,11 @@ account, to the inbox of each accepted friend on another instance — one first 
 `Follow` is reached at `{actor_uri}/inbox`. Delivery is best-effort
 (`identity-provider/specs/event-delivery.md § 2`): the change is saved whatever becomes of it.
 
+A new friend on another instance is sent one too, once the friendship is accepted: by the
+accepter's IdP after its `Accept`, and by the requester's when the `Accept` arrives. Each instance
+read the other's `Person` when the request was made, and an edit while it was pending reached
+nobody.
+
 ```json
 {
   "@context": "https://www.w3.org/ns/activitystreams",
@@ -169,13 +195,17 @@ account, to the inbox of each accepted friend on another instance — one first 
     "id": "https://idp.bob.com/users/bob_k2m9x",
     "preferredUsername": "bob_k2m9x",
     "name": "New Bob",
-    "icon": { "type": "Image", "url": "https://s3.bob.com/avatars/<id>.webp?v=1790762965" }
+    "icon": { "type": "Image", "url": "https://s3.bob.com/avatars/<id>.webp?v=1790762965" },
+    "summary": "Kia ora &lt;3<br>Wellington",
+    "pronouns": "he"
   }
 }
 ```
 
 The `Person` carries the whole shown profile — no `name` without a display name, no `icon`
-without an avatar — so each `Update` replaces what the peer knew.
+without an avatar, no `summary` or `pronouns` without them — so each `Update` replaces what the
+peer knew. `summary` is the bio as HTML, as ActivityPub has it: `&`, `<`, `>`, `"` and `'`
+escaped, a line break as `<br>`. `pronouns` is a Pina'i extension: `he`, `she` or `non-binary`.
 
 ### Inbound
 
@@ -188,11 +218,14 @@ An `Update{Person}` at `POST /users/:username/inbox`, past the three inbound che
   the activity, not whose profile it names.
 - **Within this instance's limits.** The name is taken as a local display name is (trimmed,
   1–50 characters), the avatar only at an `http(s)` URL of at most 2048 bytes, since every
-  friend's client loads it. Anything else is taken as not given. The name an actor document gives
+  friend's client loads it. The `summary` is reduced to text — tags dropped, `<br>` and `</p>` as
+  line breaks, character references decoded — and kept within the bio rule (§ 1); pronouns other
+  than the three are none. Anything else is taken as not given. The name an actor document gives
   when the actor is discovered or resolved (`identity-provider/specs/identity.md § 2`) goes through the same rule.
-- The name and avatar replace those in `remote_actors`, the avatar that of every friendship
-  naming the actor, and `friend_profile_updated` goes to the local accounts that count it among
-  their accepted friends. A `Person` whose `id` is no actor URI is ignored.
+- The name, avatar, pronouns and bio replace those in `remote_actors` — one the `Person` lacks is
+  cleared — the avatar that of every friendship naming the actor, and `friend_profile_updated`
+  goes to the local accounts that count it among their accepted friends. A `Person` whose `id` is
+  no actor URI is ignored.
 
 ### The event
 
@@ -207,7 +240,8 @@ An `Update{Person}` at `POST /users/:username/inbox`, past the three inbound che
 }
 ```
 
-`displayName` and `avatarUrl` are `null` once cleared. The client updates the friend at once.
+`displayName` and `avatarUrl` are `null` once cleared. The client updates the friend at once, and
+reads their card again (§ 1) if it shows it.
 
 ### Summary
 

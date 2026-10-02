@@ -387,11 +387,12 @@ async fn seed_friendship_half(
 
     sqlx::query(
         r#"
-        INSERT INTO friendships (owner_user_id, friend_actor_uri, status, direction)
-        VALUES ($1, $2, 'accepted', 'incoming')
+        INSERT INTO friendships (owner_user_id, friend_actor_uri, status, direction, accepted_at)
+        VALUES ($1, $2, 'accepted', 'incoming', now())
         ON CONFLICT (owner_user_id, friend_actor_uri) DO UPDATE SET
-            status     = 'accepted',
-            updated_at = now()
+            status      = 'accepted',
+            accepted_at = COALESCE(friendships.accepted_at, now()),
+            updated_at  = now()
         "#,
     )
     .bind(owner_id)

@@ -1,7 +1,9 @@
 use crate::UserId;
 use crate::identity::{Account, ActorUri, RemoteActor};
 
-use super::{AvatarImage, ImageKind, OwnProfile, ProfileEdit, ProfileError, PublicProfile};
+use super::{
+    AvatarImage, CardFacts, ImageKind, OwnProfile, ProfileEdit, ProfileError, PublicProfile,
+};
 
 /// Local accounts' profiles, as their owners edit them.
 #[async_trait::async_trait]
@@ -23,6 +25,22 @@ pub trait Profiles: Send + Sync {
 #[async_trait::async_trait]
 pub trait PeerProfiles: Send + Sync {
     async fn record(&self, profile: &PublicProfile) -> Result<(), ProfileError>;
+}
+
+/// What the profile card reads of an account, for one viewer.
+#[async_trait::async_trait]
+pub trait ProfileCards: Send + Sync {
+    /// `None` when the account is neither one of this instance's nor one it caches.
+    async fn facts(
+        &self,
+        viewer: &Account,
+        actor: &ActorUri,
+    ) -> Result<Option<CardFacts>, ProfileError>;
+}
+
+/// Asks another instance for one of its accounts again, off the request that found it stale.
+pub trait ProfileRefresh: Send + Sync {
+    fn refresh(&self, actor: &ActorUri);
 }
 
 /// Who hears of an account's profile.
@@ -48,7 +66,8 @@ pub trait ProfileNotifier: Send + Sync {
     fn friend_profile_updated(&self, to: UserId, profile: &PublicProfile);
 }
 
-/// Tells a friend on another instance the account's name and avatar, in the background.
+/// Tells a friend on another instance the whole profile the account shows, in the background,
+/// signed as the account.
 pub trait ProfileFederation: Send + Sync {
-    fn send_update(&self, from: &Account, to: &RemoteActor);
+    fn send_update(&self, from: &Account, profile: &PublicProfile, to: &RemoteActor);
 }

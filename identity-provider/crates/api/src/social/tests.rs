@@ -193,10 +193,17 @@ async fn an_accepted_request_answers_204_and_lists_both_as_friends() {
         .await;
 
     assert_eq!(status, StatusCode::NO_CONTENT);
+    let (listed, friends) = w
+        .app
+        .call(Method::GET, "/api/friends", Some(w.alice.id), None)
+        .await;
+    let since = friends[0]["since"].as_str().unwrap_or_default().to_owned();
+    assert!(
+        time::OffsetDateTime::parse(&since, &time::format_description::well_known::Rfc3339).is_ok(),
+        "since {since:?} is an RFC 3339 date"
+    );
     assert_eq!(
-        w.app
-            .call(Method::GET, "/api/friends", Some(w.alice.id), None)
-            .await,
+        (listed, friends),
         (
             StatusCode::OK,
             json!([{
@@ -205,6 +212,7 @@ async fn an_accepted_request_answers_204_and_lists_both_as_friends() {
                 "avatar_url": null,
                 "friend_actor_uri": w.bob.actor_uri.as_str(),
                 "instance": "local",
+                "since": since,
             }])
         )
     );

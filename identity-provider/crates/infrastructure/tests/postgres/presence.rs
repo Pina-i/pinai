@@ -12,8 +12,9 @@ struct PgRelationships(PgPool);
 impl Relationships for PgRelationships {
     async fn befriend(&self, owner: &Account, friend: &ActorUri, accepted: bool) {
         sqlx::query(
-            "INSERT INTO friendships (owner_user_id, friend_actor_uri, status, direction) \
-             VALUES ($1, $2, $3, 'outgoing')",
+            "INSERT INTO friendships (owner_user_id, friend_actor_uri, status, direction, \
+                                      accepted_at) \
+             VALUES ($1, $2, $3, 'outgoing', CASE WHEN $3 = 'accepted' THEN now() END)",
         )
         .bind(owner.id.as_uuid())
         .bind(friend.as_str())

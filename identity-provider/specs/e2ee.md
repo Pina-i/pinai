@@ -193,9 +193,20 @@ with — which peers verify its messages and commits against. Every key the
 device published stays in its MLS store, and a key it binds later, after a
 reload, signs only where its leaf carries that key.
 
-The device replenishes its KeyPackage stash as the server reports
-`needs_refill = true`. The stash cap is 100 per device by default;
-refill threshold 20.
+A device keeps its stash topped up to the cap — 100 per device by
+default — whenever the server reports it at or below the refill
+threshold (20, `needs_refill = true`), or doesn't list the device at
+all. It checks when it enters the app, every 6 hours while it stays
+open, and whenever the IdP pushes `key_packages_low`: each live
+session reads its own device's count from `GET
+/api/keys/packages/status` and uploads the difference (§ 6.9).
+
+The IdP pushes `key_packages_low` to the owner's live sessions when a
+claim leaves one of their devices at the threshold, or finds no
+package left; a refused claim pushes nothing. An offline device makes
+up a missed push on its next start. KeyPackages live 30 days, so a
+device left unopened for longer can't be added to a group until it is
+opened again.
 
 ### 3.5 24-word recovery passphrase
 
@@ -294,6 +305,8 @@ All Bearer-auth except where noted. Cross-IdP paths use HTTP Signatures — see
   account, `403` the claimer kept out, `409` no KeyPackage left, `429` rate-limited. An instance
   that fails to answer is `502`. A peer's own claim must name an account of this instance (`400`)
   — peers never relay through another instance.
+- **A claim tells the owner to refill** when it leaves one of their devices at the refill
+  threshold, or finds no package left: `key_packages_low` to their live sessions (§ 3.4).
 - **A claim is how someone adds a device to a group**, so it follows who may add the account
   (`identity-provider/specs/social.md § 2`): a claimer the account doesn't admit —
   a block or its contact setting — is refused with `403 Can't add this person` before a package is
@@ -312,7 +325,7 @@ All Bearer-auth except where noted. Cross-IdP paths use HTTP Signatures — see
 
 | Endpoint | Description |
 |---|---|
-| `POST /api/mls/groups/:conversation_id/commits` | Append an MLS Commit at the next epoch, then push it to every member — the proposer's own sessions included — and send it to the members' instances. `409` on epoch race carries the winning commit |
+| `POST /api/mls/groups/:conversation_id/commits` | Append an MLS Commit at the next epoch, then push it to every member — the proposer's own sessions included — and send it to the members' instances, a group's with its roster so it lands there even ahead of the Welcome (`identity-provider/specs/groups.md § 7`). `409` on epoch race carries the winning commit |
 | `GET /api/mls/groups/:conversation_id/commits?since=<epoch>` | Catch-up: the commits after `since`, in epoch order, 256 a page with `has_more` |
 | `GET /api/mls/welcomes?device_id=<uuid>` | Atomically claim every pending Welcome targeted at the calling device |
 | `POST /api/mls/welcomes` | Hand a Welcome bundle to the sender's IdP. The IdP routes off `recipient_actor_uri`: local → row + WS push, remote → signed AP `Create{Note}` with `mlsKind: welcome` (the answer's `id` is then nil). For a group, the Note also carries the roster so the recipient's IdP can materialise the conversation — see `identity-provider/specs/groups.md § 7` |
@@ -323,7 +336,10 @@ The server cannot read an MLS message, so its rules are about who may speak for 
 and they hold for what peers deliver as much as for local clients.
 
 - **A conversation exists before its MLS group** — a DM from the friendship's acceptance, a
-  group from its creation. A commit or a catch-up for an unknown conversation is `404`.
+  group from its creation. A commit or a catch-up for an unknown conversation is `404`. A peer's
+  commit for a group unknown here materialises it from the roster it carries, under the rules of
+  a group message (`identity-provider/specs/groups.md § 7`); one without a roster is refused
+  (`400`).
 - **Only active members commit** (`403`). A commit from a peer's actor outside the conversation
   is refused too: it would take an epoch the members need, and the group could not advance.
 - **A Welcome goes from an active member to an active member** (`403` either way) and never
@@ -369,6 +385,7 @@ and they hold for what peers deliver as much as for local clients.
 | `mls_welcome_ready` | A Welcome bundle was just deposited for one of the recipient's devices |
 | `group_created` | The recipient's IdP materialised a federated group from an inbound Note's roster snapshot |
 | `device_joined` | A new device of *this user* completed first-time DRK registration. Other live sessions of the same user run the multi-device fanout |
+| `key_packages_low` | A claim left one of *this user's* devices at the refill threshold, or found none left. Each live session tops its own device up (§ 3.4) |
 | `dm_delivery_failed`, `friend_request`, `friend_accepted`, `friend_removed`, `presence_update`, `typing`, `heartbeat_ack` | (Out of scope for this spec — see other specs) |
 
 ---
@@ -647,6 +664,31 @@ Renewal reuses the existing DRK — only the attestation's `expires_at`
 moves forward. KeyPackages already in the server's stash stay valid.
 New KeyPackages built after renewal carry the fresh attestation.
 
+### 6.9 Keeping the KeyPackage stash topped up
+
+```mermaid
+sequenceDiagram
+    participant Claimer as Claimer (via its IdP)
+    participant IdP as Alice's IdP
+    participant Web as Alice's device
+
+    Claimer->>IdP: POST /api/keys/packages/claim {actor: alice}
+    IdP->>IdP: take the oldest package — 20 left on the device
+    IdP-->>Claimer: KeyPackage
+    IdP-->>Web: WS key_packages_low
+    Web->>IdP: GET /api/keys/packages/status
+    IdP-->>Web: {devices: [{device_id, available: 20, needs_refill: true}], cap: 100}
+    Web->>Web: generate 80 KeyPackages
+    Web->>IdP: POST /api/keys/packages {batch}
+```
+
+The device runs the same top-up when it enters the app and every 6
+hours while it stays open, so a push it missed while offline is made
+up on its next start. A claim that finds nothing answers `409` and
+still pushes: once the owner's device has refilled, adding them again
+succeeds. The status lists only devices with a package left, so a
+device it doesn't list is refilled the same way, to the cap.
+
 ---
 
 ## 7. Wire formats
@@ -779,6 +821,10 @@ threat model as the rest of the IDB content.
 - **Background streaming of large archives.** The restore page pulls
   pages serially. For users with very large histories this is
   noticeable; a progressive streaming UI is a future enhancement.
+- **A commit that never reaches an instance.** Commits are sent once, best effort, and members
+  catch up only from their own instance's log. A commit lost to a network failure leaves that
+  instance's members who joined before it unable to read anything sent after it, until they are
+  removed and added back. Its roster only covers the commit that outruns a Welcome.
 - **Out-of-band fingerprint verification.** No user-facing UI for
   comparing device attestations out of band. Trust on first use plus
   IdP-attestation is the baseline; an opt-in verification surface

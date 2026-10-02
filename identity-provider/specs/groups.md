@@ -206,9 +206,35 @@ The receiving IdP creates the conversation under the advertised `context` UUID
 with `kind = 'group'`, upserts every member, and pushes `group_created` to the
 recipient — once per recipient, gated on their own membership row being new,
 so the second welcome into an already-materialised group still notifies its
-target. Both Welcomes and group `Create{Note}`s carry the snapshot, so a group
-whose Welcome never landed still materialises on the first message to arrive.
-1:1 DMs never carry one: their row is minted on both IdPs at friendship-accept.
+target. Welcomes, commits and group messages all carry the snapshot, so the
+group materialises on whichever arrives first — a group whose Welcome never
+landed included. 1:1 DMs never carry one: their row is minted on both IdPs at
+friendship-accept.
+
+**A commit can outrun the Welcome.** The client posts the commit that adds
+someone, then their Welcome, and each travels to the other IdP as a request of
+its own, in no set order. An IdP refuses a commit for a group it doesn't hold,
+and members catch up only from their own IdP's log: a commit refused there
+would be lost for good to every member of that IdP who joined before it, who
+could then read nothing sent after it. Carrying the roster, the first of the two
+to arrive materialises the group, and the commit is stored either way. Whichever
+brings the recipient in records the line their conversation starts with, by its
+sender; the other finds them there already.
+
+```mermaid
+sequenceDiagram
+  participant A as Alice's client
+  participant IA as idp.alice.com
+  participant IB as idp.bob.com
+  A->>IA: POST /api/mls/groups/:id/commits (epoch n adds Pierre)
+  A->>IA: POST /api/mls/welcomes (Pierre's device)
+  par in no set order
+    IA->>IB: Create{Note} mlsKind=commit + mlsGroup
+  and
+    IA->>IB: Create{Note} mlsKind=welcome + mlsGroup
+  end
+  Note over IB: the first to arrive materialises the group;<br/>the commit is stored at epoch n either way
+```
 
 Each change to a group is sent on its own to the other IdPs holding its
 members (§ 8). The snapshot heals a copy that missed one: the
@@ -262,8 +288,9 @@ by sending a Note that lists it.
 
 A recipient who isn't an active member yet is mirrored into a group only by someone they admit
 (`identity-provider/specs/social.md § 2`): a Welcome from someone else is refused
-(403), and a group Note is dropped (202) when its sender isn't admitted or its roster holds someone
-the recipient blocked — the Note is then neither mirrored nor filed as a 1:1.
+(403), and a group message or commit is dropped (202) when its sender isn't admitted or its roster
+holds someone the recipient blocked — the Note is then neither mirrored nor filed as a 1:1. A
+dropped commit is no loss to the members already there: each gets its own copy at their inbox.
 
 ## 8. Group changes
 

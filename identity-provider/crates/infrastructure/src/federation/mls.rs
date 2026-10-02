@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use domain::e2ee::{Commit, MlsFederation, OutgoingWelcome};
 use domain::identity::{ActorUri, RemoteActor};
+use domain::messaging::GroupSnapshot;
 use federation_transport::UrlPolicy;
 use jwt_utils::EdKeyPair;
 use serde_json::{Map, Value, json};
@@ -28,10 +29,21 @@ impl ApMlsFederation {
 }
 
 impl MlsFederation for ApMlsFederation {
-    fn send_commit(&self, from: &ActorUri, to: &[ActorUri], commit: &Commit) {
+    fn send_commit(
+        &self,
+        from: &ActorUri,
+        to: &[ActorUri],
+        commit: &Commit,
+        roster: Option<&GroupSnapshot>,
+    ) {
         let posts = to
             .iter()
-            .map(|member| (member.clone(), commit_activity(from, member, commit)))
+            .map(|member| {
+                (
+                    member.clone(),
+                    commit_activity(from, member, commit, roster),
+                )
+            })
             .collect();
         self.delivery
             .post_each_in_background(&self.inboxes, from, posts);
@@ -58,9 +70,17 @@ fn create(from: &ActorUri, to: &ActorUri, note: impl FnOnce(&str) -> Value) -> V
     })
 }
 
-fn commit_activity(from: &ActorUri, to: &ActorUri, commit: &Commit) -> Value {
+fn commit_activity(
+    from: &ActorUri,
+    to: &ActorUri,
+    commit: &Commit,
+    group: Option<&GroupSnapshot>,
+) -> Value {
     let mut extra = Map::new();
     extra.insert("mlsEpoch".to_owned(), json!(commit.epoch.value()));
+    if let Some(group) = group {
+        extra.insert("mlsGroup".to_owned(), roster(group));
+    }
     create(from, to, |id| {
         mls_note(
             id,

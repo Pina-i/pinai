@@ -36,14 +36,15 @@ async fn an_edit_is_told_to_the_friends_here_and_elsewhere() {
         .await
         .unwrap();
 
-    let alice = w.read_userinfo().execute(w.alice.id).await.unwrap().profile;
-    let account = alice.account().unwrap();
-    assert_eq!(
-        w.notifier.notified(),
-        vec![(w.bob.id, PublicProfile::from(&account))]
-    );
-    assert_eq!(account.display_name.as_deref(), Some("Aroha"));
-    assert_eq!(w.federation.sent(), vec![(account, w.carol.actor_uri)]);
+    let shown = PublicProfile {
+        actor: w.alice.actor_uri.clone().unwrap(),
+        display_name: Some("Aroha".to_owned()),
+        avatar_url: None,
+        pronouns: Some(Pronouns::She),
+        bio: Some("kia ora".to_owned()),
+    };
+    assert_eq!(w.notifier.notified(), vec![(w.bob.id, shown.clone())]);
+    assert_eq!(w.federation.sent(), vec![(shown, w.carol.actor_uri)]);
 }
 
 #[tokio::test]

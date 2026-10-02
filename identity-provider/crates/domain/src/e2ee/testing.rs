@@ -8,6 +8,7 @@ use crate::identity::ActorUri;
 use crate::{DeviceId, UserId};
 
 use crate::identity::RemoteActor;
+use crate::messaging::GroupSnapshot;
 use crate::{CommitId, ConversationId, WelcomeId};
 
 use super::{
@@ -246,11 +247,16 @@ impl DeviceAttester for PlainAttester {
 #[derive(Default)]
 pub struct RecordingDeviceNotifier {
     joined: Mutex<Vec<(UserId, ActorUri, DeviceId)>>,
+    low: Mutex<Vec<UserId>>,
 }
 
 impl RecordingDeviceNotifier {
     pub fn joined(&self) -> Vec<(UserId, ActorUri, DeviceId)> {
         self.joined.lock().unwrap().clone()
+    }
+
+    pub fn key_packages_low(&self) -> Vec<UserId> {
+        self.low.lock().unwrap().clone()
     }
 }
 
@@ -266,6 +272,10 @@ impl DeviceNotifier for RecordingDeviceNotifier {
             .lock()
             .unwrap()
             .push((owner, actor.clone(), device));
+    }
+
+    fn key_packages_low(&self, owner: UserId) {
+        self.low.lock().unwrap().push(owner);
     }
 }
 
@@ -449,6 +459,7 @@ pub enum SentMls {
         from: ActorUri,
         to: ActorUri,
         commit: Commit,
+        roster: Option<GroupSnapshot>,
     },
     Welcome {
         from: ActorUri,
@@ -469,12 +480,19 @@ impl RecordingMlsFederation {
 }
 
 impl MlsFederation for RecordingMlsFederation {
-    fn send_commit(&self, from: &ActorUri, to: &[ActorUri], commit: &Commit) {
+    fn send_commit(
+        &self,
+        from: &ActorUri,
+        to: &[ActorUri],
+        commit: &Commit,
+        roster: Option<&GroupSnapshot>,
+    ) {
         let mut sent = self.sent.lock().unwrap();
         sent.extend(to.iter().map(|member| SentMls::Commit {
             from: from.clone(),
             to: member.clone(),
             commit: commit.clone(),
+            roster: roster.cloned(),
         }));
     }
 

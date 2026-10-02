@@ -1,5 +1,5 @@
 -- MLS key directory: per-user identity keys, KeyPackage stash, optional
--- passphrase-wrapped Recovery Key. See specs/05-e2ee.md.
+-- passphrase-wrapped Recovery Key. See identity-provider/specs/e2ee.md.
 --
 -- The IdP holds public material only — every private key (MSK, SSK, USK,
 -- per-device leaf) lives exclusively on user devices. The Recovery Key

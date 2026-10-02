@@ -220,3 +220,63 @@ fn an_empty_collection_still_lists_an_items_array() {
     assert_eq!(collection["totalItems"], 0);
     assert_eq!(collection["orderedItems"], json!([]));
 }
+
+// ─── Bio and pronouns ────────────────────────────────────────────────────────
+
+#[test]
+fn a_bio_is_published_as_escaped_html_and_read_back_as_it_was() {
+    let bio = "Tom & Jerry <3 \"quotes\" 'too'\nkia ora";
+
+    let actor = Actor::person(BASE, HANDLE, "Alice", PEM).with_profile(Some(bio), Some("she"));
+    let published = json_of(&actor);
+
+    assert_eq!(
+        published["summary"],
+        "Tom &amp; Jerry &lt;3 &quot;quotes&quot; &#39;too&#39;<br>kia ora"
+    );
+    assert_eq!(published["pronouns"], "she");
+    let parsed: Actor = serde_json::from_value(published).unwrap();
+    assert_eq!(parsed.bio().as_deref(), Some(bio));
+    assert_eq!(parsed.pronouns.as_deref(), Some("she"));
+}
+
+#[test]
+fn a_peers_html_summary_is_read_as_text() {
+    let summary =
+        "<p>Hi <a href=\"https://x.test\">there</a>!</p><p>Second&nbsp;line &#x2764;&#65;</p>";
+
+    assert_eq!(summary_text(summary), "Hi there!\nSecond line ❤A");
+    assert_eq!(summary_text("<p></p>  "), "");
+}
+
+#[test]
+fn an_actor_without_a_bio_or_pronouns_carries_neither() {
+    let actor = json_of(&Actor::person(BASE, HANDLE, "Alice", PEM).with_profile(None, None));
+
+    assert!(actor.get("summary").is_none());
+    assert!(actor.get("pronouns").is_none());
+}
+
+#[test]
+fn an_update_person_carries_the_whole_shown_profile() {
+    let update = json_of(&Activity::update_person(
+        ACTOR,
+        HANDLE,
+        Some("Alice"),
+        Some("https://s3.test/a.png"),
+        Some("a & b"),
+        Some("non-binary"),
+    ));
+    let person = &update["object"];
+
+    assert_eq!(person["name"], "Alice");
+    assert_eq!(person["icon"]["url"], "https://s3.test/a.png");
+    assert_eq!(person["summary"], "a &amp; b");
+    assert_eq!(person["pronouns"], "non-binary");
+    let bare = json_of(&Activity::update_person(
+        ACTOR, HANDLE, None, None, None, None,
+    ));
+    for field in ["name", "icon", "summary", "pronouns"] {
+        assert!(bare["object"].get(field).is_none(), "{field}");
+    }
+}

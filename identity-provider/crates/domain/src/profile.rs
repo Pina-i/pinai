@@ -3,6 +3,7 @@
 //! identity-provider/specs/profile-and-settings.md § 1 and § 3.
 
 mod avatar;
+mod card;
 mod edit;
 mod error;
 mod ports;
@@ -11,9 +12,11 @@ pub mod testing;
 mod views;
 
 pub use avatar::{AvatarImage, ImageKind, published_url};
+pub use card::{CardFacts, ProfileCard};
 pub use edit::{Bio, DisplayName, ProfileEdit, Pronouns};
 pub use error::ProfileError;
 pub use ports::{
-    AvatarStore, PeerProfiles, ProfileAudience, ProfileFederation, ProfileNotifier, Profiles,
+    AvatarStore, PeerProfiles, ProfileAudience, ProfileCards, ProfileFederation, ProfileNotifier,
+    ProfileRefresh, Profiles,
 };
 pub use views::{OwnProfile, PublicProfile};

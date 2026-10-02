@@ -63,6 +63,7 @@ use domain::presence::testing::{
 use domain::presence::{ConnectionTracker, PresenceBoard};
 use domain::profile::testing::{
     InMemoryAvatars, InMemoryProfiles, RecordingProfileFederation, RecordingProfileNotifier,
+    RecordingProfileRefresh,
 };
 use domain::settings::testing::{InMemorySettingsStore, RecordingSettingsNotifier};
 use domain::social::testing::{
@@ -91,6 +92,7 @@ pub struct ProfileFakes {
     pub avatars: Arc<InMemoryAvatars>,
     pub notifier: Arc<RecordingProfileNotifier>,
     pub federation: Arc<RecordingProfileFederation>,
+    pub refresh: Arc<RecordingProfileRefresh>,
 }
 
 /// Behind the inbox: what peers' activities change here.
@@ -157,6 +159,7 @@ impl TestApp {
         let audience = Arc::new(InMemoryAudience::default());
         let bus = Arc::new(RecordingBus::default());
         let mls_notifier = Arc::new(RecordingMlsNotifier::default());
+        let device_notifier = Arc::new(RecordingDeviceNotifier::default());
         let mls_federation = Arc::new(RecordingMlsFederation::default());
         let key_policy = KeyPackagePolicy {
             cap_per_device: 100,
@@ -189,6 +192,7 @@ impl TestApp {
             avatars: Arc::new(InMemoryAvatars::default()),
             notifier: Arc::new(RecordingProfileNotifier::default()),
             federation: Arc::new(RecordingProfileFederation::default()),
+            refresh: Arc::new(RecordingProfileRefresh::default()),
         };
         let state = AppState {
             auth: tokens.clone(),
@@ -276,6 +280,11 @@ impl TestApp {
             cors_origins: Vec::new(),
             public_key_pem: PublicKeyPem(Arc::from(PUBLIC_KEY_PEM)),
             find_account: Arc::new(FindAccount::new(origin.clone(), accounts.clone())),
+            show_person: Arc::new(application::profile::ShowPerson::new(
+                origin.clone(),
+                accounts.clone(),
+                profile.profiles.clone(),
+            )),
             web_finger: Arc::new(WebFinger::new(origin.clone(), accounts.clone())),
             search_accounts: Arc::new(SearchAccounts::new(accounts.clone())),
             receive_follow: Arc::new(ReceiveFollow::new(
@@ -292,6 +301,8 @@ impl TestApp {
                 graph.clone(),
                 notifier.clone(),
                 presence.clone(),
+                profile.profiles.clone(),
+                profile.federation.clone(),
             )),
             receive_reject: Arc::new(ReceiveReject::new(graph.clone())),
             receive_undo_follow: Arc::new(ReceiveUndoFollow::new(
@@ -319,9 +330,13 @@ impl TestApp {
             )),
             receive_commit: Arc::new(ReceiveCommit::new(
                 accounts.clone(),
+                remote_actors.clone(),
                 store.clone(),
                 delivery.clone(),
+                reach.clone(),
                 mls_notifier.clone(),
+                group_notifier.clone(),
+                store.clone(),
             )),
             receive_welcome: Arc::new(ReceiveWelcome::new(
                 accounts.clone(),
@@ -354,6 +369,11 @@ impl TestApp {
                 profile.profiles.clone(),
                 settings.clone(),
                 contact_policies.clone(),
+            )),
+            read_profile: Arc::new(application::profile::ReadProfile::new(
+                accounts.clone(),
+                profile.profiles.clone(),
+                profile.refresh.clone(),
             )),
             edit_profile: Arc::new(EditProfile::new(
                 origin.clone(),
@@ -398,6 +418,8 @@ impl TestApp {
                 notifier.clone(),
                 federation.clone(),
                 presence.clone(),
+                profile.profiles.clone(),
+                profile.federation.clone(),
             )),
             decline_friend_request: Arc::new(DeclineFriendRequest::new(
                 accounts.clone(),
@@ -545,7 +567,7 @@ impl TestApp {
                 accounts.clone(),
                 keys.clone(),
                 Arc::new(PlainAttester),
-                Arc::new(RecordingDeviceNotifier::default()),
+                device_notifier.clone(),
             )),
             list_devices: Arc::new(ListDevices::new(keys.clone())),
             revoke_device: Arc::new(RevokeDevice::new(keys.clone())),
@@ -561,6 +583,7 @@ impl TestApp {
                 keys.clone(),
                 Arc::new(InMemoryRemoteKeyPackages::default()),
                 reach.clone(),
+                device_notifier,
             )),
             key_package_status: Arc::new(KeyPackageStatus::new(key_policy, keys)),
             claim_limiter: Arc::new(RateLimiter::new(60, 1.0)),

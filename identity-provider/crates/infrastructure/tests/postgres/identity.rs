@@ -158,15 +158,23 @@ async fn a_peer_naming_dave(name: &str) -> ActorUri {
 
 /// … and with `icon` as its avatar.
 async fn a_peer_describing_dave(name: &str, icon: Option<&str>) -> ActorUri {
+    a_peer_serving_dave(name, icon, None, None).await
+}
+
+/// … and with `bio` and `pronouns`.
+async fn a_peer_serving_dave(
+    name: &str,
+    icon: Option<&str>,
+    bio: Option<&str>,
+    pronouns: Option<&str>,
+) -> ActorUri {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let at: SocketAddr = listener.local_addr().unwrap();
     let base = format!("http://{at}");
-    let mut document = serde_json::to_value(activitypub::Actor::person(
-        &base,
-        "dave_k2m9x",
-        name,
-        "-----BEGIN PUBLIC KEY-----",
-    ))
+    let mut document = serde_json::to_value(
+        activitypub::Actor::person(&base, "dave_k2m9x", name, "-----BEGIN PUBLIC KEY-----")
+            .with_profile(bio, pronouns),
+    )
     .unwrap();
     if let Some(url) = icon {
         document["icon"] = serde_json::json!({ "type": "Image", "url": url });
@@ -228,4 +236,61 @@ async fn an_avatar_anywhere_but_at_an_http_url_is_not_taken_from_a_peer(pool: Pg
     let discovered = remote_actors(pool).discover(&dave).await.unwrap();
 
     assert_eq!(discovered.avatar_url, None);
+}
+
+async fn pronouns_and_bio(pool: &PgPool, actor: &ActorUri) -> (Option<String>, Option<String>) {
+    sqlx::query_as("SELECT pronouns, bio FROM remote_actors WHERE actor_uri = $1")
+        .bind(actor.as_str())
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn remembered_with(pool: &PgPool, actor: &ActorUri, pronouns: &str, bio: &str) {
+    sqlx::query(
+        "INSERT INTO remote_actors (actor_uri, instance, pronouns, bio) VALUES ($1, 'peer', $2, $3) \
+         ON CONFLICT (actor_uri) DO UPDATE SET pronouns = $2, bio = $3",
+    )
+    .bind(actor.as_str())
+    .bind(pronouns)
+    .bind(bio)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn an_actor_is_discovered_with_the_bio_and_pronouns_its_document_gives(pool: PgPool) {
+    let dave = a_peer_serving_dave("Dave", None, Some("Tom & Jerry"), Some("he")).await;
+
+    remote_actors(pool.clone()).discover(&dave).await.unwrap();
+
+    assert_eq!(
+        pronouns_and_bio(&pool, &dave).await,
+        (Some("he".to_owned()), Some("Tom & Jerry".to_owned()))
+    );
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn a_document_without_them_clears_the_bio_and_pronouns_and_an_unreachable_one_keeps_them(
+    pool: PgPool,
+) {
+    let unreachable = ActorUri::parse(UNREACHABLE).unwrap();
+    remembered_with(&pool, &unreachable, "she", "kept").await;
+    let dave = a_peer_serving_dave("Dave", None, None, Some("xe")).await;
+    remembered_with(&pool, &dave, "she", "gone").await;
+    let actors = remote_actors(pool.clone());
+
+    actors.discover(&unreachable).await.unwrap();
+    actors.discover(&dave).await.unwrap();
+
+    assert_eq!(
+        pronouns_and_bio(&pool, &unreachable).await,
+        (Some("she".to_owned()), Some("kept".to_owned()))
+    );
+    assert_eq!(
+        pronouns_and_bio(&pool, &dave).await,
+        (None, None),
+        "an unknown pronoun is none"
+    );
 }

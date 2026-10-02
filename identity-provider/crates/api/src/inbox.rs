@@ -10,7 +10,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use domain::ConversationId;
 use domain::identity::ActorUri;
-use domain::profile::{ProfileError, PublicProfile};
+use domain::profile::{ProfileError, Pronouns, PublicProfile};
 use domain::social::SocialError;
 use serde_json::Value;
 
@@ -126,6 +126,9 @@ async fn profile_update(
     let profile = PublicProfile {
         display_name: text(person.get("name")),
         avatar_url: text(person.get("icon").and_then(|icon| icon.get("url"))),
+        // A pronoun this instance doesn't know reads as none.
+        pronouns: text(person.get("pronouns")).and_then(|p| Pronouns::parse(&p).ok()),
+        bio: text(person.get("summary")).map(|html| activitypub::summary_text(&html)),
         actor,
     };
     let actor = profile.actor.clone();

@@ -3,6 +3,7 @@ use domain::messaging::{
     Conversations, GroupEvent, GroupEvents, GroupNotifier, GroupSnapshot, MAX_MEMBERS, Member,
     MessagingError, NamedEvent,
 };
+use domain::social::Reachability;
 use domain::{ConversationId, UserId};
 use time::OffsetDateTime;
 
@@ -176,4 +177,35 @@ pub(crate) async fn mirror(
         notifier.joined(recipient.id, &group, snapshot.creator(sender));
     }
     Ok(joined_at)
+}
+
+/// Whether a group Note may bring `recipient` into the group it names: only from someone they
+/// admit, and with nobody they blocked on its roster. Someone already in it is not asked again.
+pub(crate) async fn admits_group_note(
+    conversations: &dyn Conversations,
+    reach: &dyn Reachability,
+    recipient: &Account,
+    sender: &ActorUri,
+    id: ConversationId,
+    roster: &GroupSnapshot,
+) -> Result<bool, MessagingError> {
+    let joins = !conversations
+        .members(id)
+        .await?
+        .iter()
+        .any(|m| m.actor_uri == recipient.actor_uri);
+    if !joins {
+        return Ok(true);
+    }
+    let listed: Vec<ActorUri> = roster
+        .members
+        .iter()
+        .map(|m| m.member.actor_uri.clone())
+        .collect();
+    let roster_holds_someone_blocked = reach.blocks_any(recipient.id, &listed).await?;
+    Ok(reach
+        .relation(recipient.id, sender)
+        .await?
+        .admits_group_from(roster_holds_someone_blocked)
+        .is_ok())
 }

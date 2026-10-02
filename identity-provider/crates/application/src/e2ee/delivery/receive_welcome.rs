@@ -3,11 +3,12 @@ use std::sync::Arc;
 use domain::e2ee::{DeliveryError, MlsNotifier, NewWelcome, WelcomeBlob, Welcomes, check_welcome};
 use domain::identity::{Accounts, ActorUri, RemoteActors};
 use domain::messaging::{
-    ConversationKind, Conversations, GroupChangeKind, GroupEvent, GroupEventKind, GroupEvents,
-    GroupNotifier, GroupSnapshot,
+    ConversationKind, Conversations, GroupEvents, GroupNotifier, GroupSnapshot,
 };
 use domain::social::Reachability;
 use domain::{ConversationId, DeviceId, UserId};
+
+use super::group_roster::Mirror;
 
 /// A Welcome another instance delivered for a device of one of our accounts.
 pub struct IncomingWelcome {
@@ -84,34 +85,15 @@ impl ReceiveWelcome {
                 .admits()?;
         }
         if let Some(roster) = &incoming.roster {
-            let joined_at = crate::messaging::shared::mirror(
-                &*self.conversations,
-                &*self.groups,
-                &recipient,
-                &incoming.sender,
-                incoming.conversation,
-                roster,
-            )
-            .await?;
-            // The Welcome's sender is who added them: the line their conversation starts with.
-            if let Some(at) = joined_at {
-                let added = GroupEvent {
-                    at,
-                    kind: GroupEventKind::Changed(GroupChangeKind::Added(
-                        recipient.actor_uri.clone(),
-                    )),
-                    ..GroupEvent::created(incoming.conversation, incoming.sender.clone(), at)
-                };
-                let members = self.conversations.members(incoming.conversation).await?;
-                crate::messaging::shared::Timeline {
-                    accounts: &*self.accounts,
-                    remote_actors: &*self.remote_actors,
-                    events: &*self.events,
-                    notifier: &*self.groups,
-                }
-                .record(&members, added)
-                .await?;
+            Mirror {
+                accounts: &*self.accounts,
+                remote_actors: &*self.remote_actors,
+                conversations: &*self.conversations,
+                groups: &*self.groups,
+                events: &*self.events,
             }
+            .apply(&recipient, &incoming.sender, incoming.conversation, roster)
+            .await?;
         }
         let members = match self.conversations.find(incoming.conversation).await? {
             Some(_) => self.conversations.members(incoming.conversation).await?,

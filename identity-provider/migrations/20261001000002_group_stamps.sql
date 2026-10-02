@@ -1,6 +1,6 @@
 -- When a group's name and each member's role were last set, wherever that was: a copy of a group
 -- takes a change only if it is newer than what it holds — see
--- identity-provider/specs/03-direct-messages.md § Federated groups.
+-- identity-provider/specs/groups.md § 7.
 ALTER TABLE conversations ADD COLUMN name_at TIMESTAMPTZ;
 UPDATE conversations SET name_at = created_at;
 ALTER TABLE conversations

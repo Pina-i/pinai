@@ -1,5 +1,5 @@
 -- A group's changes as its conversation shows them, between the messages — see
--- identity-provider/specs/03-direct-messages.md § 10. `created_at` is the change's stamp.
+-- identity-provider/specs/groups.md § 6. `created_at` is the change's stamp.
 CREATE TABLE conversation_events (
     id               UUID PRIMARY KEY,
     conversation_id  UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,

@@ -33,6 +33,8 @@ pub struct InMemorySocialGraph {
     met_with: Mutex<HashMap<(UserId, ActorUri), String>>,
     /// `(owner, actor, when)`, oldest first.
     blocks: Mutex<Vec<(UserId, ActorUri, OffsetDateTime)>>,
+    /// When each accepted side was accepted.
+    accepted_at: Mutex<HashMap<FriendshipId, OffsetDateTime>>,
 }
 
 impl InMemorySocialGraph {
@@ -47,9 +49,19 @@ impl InMemorySocialGraph {
         }
     }
 
-    /// Seed a side as a test's starting state.
+    /// Seed a side as a test's starting state; an accepted one dates from now.
     pub fn insert(&self, side: Friendship) {
+        if side.status == FriendshipStatus::Accepted {
+            self.accepted(&[side.id], OffsetDateTime::now_utc());
+        }
         self.sides.lock().unwrap().push(side);
+    }
+
+    fn accepted(&self, sides: &[FriendshipId], at: OffsetDateTime) {
+        let mut accepted_at = self.accepted_at.lock().unwrap();
+        for side in sides {
+            accepted_at.insert(*side, at);
+        }
     }
 
     /// The pending-request upsert: a pending side is taken over by the new request, an accepted
@@ -140,13 +152,16 @@ impl SocialGraph for InMemorySocialGraph {
             })
             .ok_or(SocialStoreError::Conflict)?;
         side.status = FriendshipStatus::Accepted;
+        let mut stamped = vec![side.id];
         let requester_side = sides.iter_mut().find(|s| {
             s.friend == accepter.actor_uri
                 && locals.get(&s.owner).map(|a| &a.actor_uri) == Some(&request.friend)
         });
         if let Some(requester_side) = requester_side {
             requester_side.status = FriendshipStatus::Accepted;
+            stamped.push(requester_side.id);
         }
+        self.accepted(&stamped, OffsetDateTime::now_utc());
         let mut dms = self.dms.lock().unwrap();
         let (a, b) = (&accepter.actor_uri, &request.friend);
         let existing = dms
@@ -272,6 +287,7 @@ impl SocialGraph for InMemorySocialGraph {
         let locals = self.locals.lock().unwrap();
         let sides = self.sides.lock().unwrap();
         let met_with = self.met_with.lock().unwrap();
+        let accepted_at = self.accepted_at.lock().unwrap();
         Ok(sides
             .iter()
             .filter(|s| s.owner == owner && s.status == FriendshipStatus::Accepted)
@@ -289,6 +305,7 @@ impl SocialGraph for InMemorySocialGraph {
                         Some(_) => "local".to_owned(),
                         None => s.friend.domain().to_string(),
                     },
+                    since: accepted_at[&s.id],
                 }
             })
             .collect())
@@ -327,6 +344,7 @@ impl SocialGraph for InMemorySocialGraph {
         };
         side.status = FriendshipStatus::Accepted;
         let side = side.clone();
+        self.accepted(&[side.id], OffsetDateTime::now_utc());
         let mut dms = self.dms.lock().unwrap();
         let (a, b) = (&owner.actor_uri, accepter);
         let existing = dms
@@ -663,6 +681,7 @@ pub mod contract {
         SocialStoreError,
     };
     use crate::{ConversationId, UserId};
+    use time::{Duration, OffsetDateTime};
 
     pub fn remote_bob() -> ActorUri {
         ActorUri::parse("https://idp.bob.test/users/bob_k2m9x").unwrap()
@@ -854,6 +873,7 @@ pub mod contract {
                 avatar_url: None,
                 actor_uri: bob.actor_uri.clone(),
                 instance: "local".to_owned(),
+                since: friends[0].since,
             }]
         );
     }
@@ -875,6 +895,7 @@ pub mod contract {
             .unwrap()
             .target_side;
         graph.accept(&request, alice).await.unwrap();
+        let since = graph.friends(alice.id).await.unwrap()[0].since;
         let listed = |bob: &Account| {
             vec![FriendView {
                 username: Some(bob.username.clone()),
@@ -882,6 +903,7 @@ pub mod contract {
                 avatar_url: bob.avatar_url.clone(),
                 actor_uri: bob.actor_uri.clone(),
                 instance: "local".to_owned(),
+                since,
             }]
         };
 
@@ -899,6 +921,91 @@ pub mod contract {
         };
         edits.save(&bare).await;
         assert_eq!(graph.friends(alice.id).await.unwrap(), listed(&bare));
+    }
+
+    /// When `owner` and `friend` became friends, as the owner's list says.
+    async fn friends_since(
+        graph: &dyn SocialGraph,
+        owner: UserId,
+        friend: &ActorUri,
+    ) -> OffsetDateTime {
+        graph
+            .friends(owner)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|f| &f.actor_uri == friend)
+            .expect("listed among the owner's friends")
+            .since
+    }
+
+    /// The store stamps with its own clock, to its own precision: a second either side is the
+    /// acceptance as far as a reader can tell.
+    fn around(stamp: OffsetDateTime, before: OffsetDateTime, after: OffsetDateTime) -> bool {
+        before - Duration::seconds(1) <= stamp && stamp <= after + Duration::seconds(1)
+    }
+
+    pub async fn a_friendship_is_dated_from_its_acceptance_on_both_sides_once(
+        graph: &dyn SocialGraph,
+        alice: &Account,
+        bob: &Account,
+    ) {
+        let request = graph
+            .record_local_request(alice, bob)
+            .await
+            .unwrap()
+            .target_side;
+        let before = OffsetDateTime::now_utc();
+        graph.accept(&request, bob).await.unwrap();
+        let after = OffsetDateTime::now_utc();
+
+        let alices = friends_since(graph, alice.id, &bob.actor_uri).await;
+        assert!(
+            around(alices, before, after),
+            "{alices} not within {before}..{after}"
+        );
+        assert_eq!(friends_since(graph, bob.id, &alice.actor_uri).await, alices);
+        graph.record_local_request(bob, alice).await.unwrap();
+        assert_eq!(
+            friends_since(graph, alice.id, &bob.actor_uri).await,
+            alices,
+            "a request to a friend keeps the date"
+        );
+    }
+
+    pub async fn an_accepted_outgoing_request_is_dated_once(
+        graph: &dyn SocialGraph,
+        alice: &Account,
+    ) {
+        graph
+            .record_outgoing(alice.id, &remote_bob(), None)
+            .await
+            .unwrap();
+        let before = OffsetDateTime::now_utc();
+        graph
+            .accept_outgoing(alice, &remote_bob(), None)
+            .await
+            .unwrap();
+        let after = OffsetDateTime::now_utc();
+
+        let since = friends_since(graph, alice.id, &remote_bob()).await;
+        assert!(
+            around(since, before, after),
+            "{since} not within {before}..{after}"
+        );
+        graph
+            .accept_outgoing(alice, &remote_bob(), None)
+            .await
+            .unwrap();
+        graph
+            .record_outgoing(alice.id, &remote_bob(), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            friends_since(graph, alice.id, &remote_bob()).await,
+            since,
+            "a redelivered accept or a new request keeps the date"
+        );
     }
 
     /// The friends list is compared on avatars only: a remote actor the store does not cache

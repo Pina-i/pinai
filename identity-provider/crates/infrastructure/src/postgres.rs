@@ -25,7 +25,7 @@ pub use identity::PgAccounts;
 pub use key_directory::{PgDevices, PgKeyPackages};
 pub use messaging::{PgConversations, PgMessages};
 pub use presence::PgPresenceAudience;
-pub use profile::{PgPeerProfiles, PgProfileAudience, PgProfiles};
+pub use profile::{PgPeerProfiles, PgProfileAudience, PgProfileCards, PgProfiles};
 pub use reach::{PgContactPolicies, PgReachability};
 pub use settings::PgSettingsStore;
 pub use social::PgSocialGraph;

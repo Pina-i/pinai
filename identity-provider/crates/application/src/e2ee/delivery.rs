@@ -4,6 +4,7 @@
 mod append_commit;
 mod catch_up_commits;
 mod claim_welcomes;
+mod group_roster;
 mod receive_commit;
 mod receive_welcome;
 mod send_welcome;

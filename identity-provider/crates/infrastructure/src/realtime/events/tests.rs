@@ -81,6 +81,16 @@ fn blocks_updated_carries_nothing_but_its_type() {
     );
 }
 
+#[test]
+fn key_packages_low_carries_nothing_but_its_type() {
+    let json = serde_json::to_value(WsEvent::KeyPackagesLow(KeyPackagesLowPayload {})).unwrap();
+
+    assert_eq!(
+        json,
+        serde_json::json!({ "type": "key_packages_low", "data": {} })
+    );
+}
+
 /// The heartbeat ack is `api::ws`'s own frame; the rest of the wire format is here.
 #[test]
 fn every_event_is_a_type_and_its_data() {

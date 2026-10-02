@@ -94,6 +94,37 @@ async fn an_accounts_person_carries_its_avatar_and_none_without_one() {
 }
 
 #[tokio::test]
+async fn an_accounts_person_carries_its_bio_and_pronouns_and_none_it_lacks() {
+    use domain::profile::testing::{ProfileSeeds, own_profile};
+    let (alice, bob) = (account("alice"), account("bob"));
+    let app = TestApp::with([alice.clone(), bob.clone()], []);
+    app.profile
+        .profiles
+        .sign_up(&domain::profile::OwnProfile {
+            id: alice.id,
+            pronouns: Some(domain::profile::Pronouns::She),
+            bio: Some("Tom & Jerry\nkia ora".to_owned()),
+            ..own_profile("alice")
+        })
+        .await;
+    app.profile
+        .profiles
+        .sign_up(&domain::profile::OwnProfile {
+            id: bob.id,
+            ..own_profile("bob")
+        })
+        .await;
+
+    let (_, _, with) = get(&app, "/users/alice_t3st0").await;
+    let (_, _, without) = get(&app, "/users/bob_t3st0").await;
+
+    assert_eq!(with["summary"], "Tom &amp; Jerry<br>kia ora");
+    assert_eq!(with["pronouns"], "she");
+    assert!(without.get("summary").is_none(), "{without}");
+    assert!(without.get("pronouns").is_none(), "{without}");
+}
+
+#[tokio::test]
 async fn an_account_without_a_display_name_is_named_by_its_handle() {
     let alice = domain::identity::Account {
         display_name: None,

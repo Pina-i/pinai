@@ -46,6 +46,8 @@ pub struct FriendBody {
     avatar_url: Option<String>,
     friend_actor_uri: String,
     instance: String,
+    #[serde(with = "time::serde::rfc3339")]
+    since: time::OffsetDateTime,
 }
 
 pub async fn send_request(
@@ -156,6 +158,7 @@ impl From<FriendView> for FriendBody {
             avatar_url: friend.avatar_url,
             friend_actor_uri: friend.actor_uri.as_str().to_owned(),
             instance: friend.instance,
+            since: friend.since,
         }
     }
 }

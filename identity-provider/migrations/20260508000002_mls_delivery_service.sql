@@ -1,6 +1,6 @@
 -- MLS Delivery Service: per-conversation commit log + offline welcome dispatch.
 -- Both blobs are opaque to the server — it just orders, persists, and routes.
--- See specs/05-e2ee.md § 4.
+-- See identity-provider/specs/e2ee.md § 4.
 
 -- Strict per-group total order of commits, enforced by UNIQUE(conversation_id, epoch).
 -- The DS hands one back at a time to clients catching up, and rejects any

@@ -1,14 +1,17 @@
-//! `/userinfo`, the profile and the avatar — see
+//! `/userinfo`, the profile, the avatar and the profile card — see
 //! identity-provider/specs/profile-and-settings.md § 1.
 
 use std::sync::Arc;
 
-use application::profile::{ClearAvatar, EditProfile, ReadUserinfo, SetAvatar, Userinfo};
+use application::profile::{
+    ClearAvatar, EditProfile, ReadProfile, ReadUserinfo, SetAvatar, Userinfo,
+};
 use axum::Json;
 use axum::body::Bytes;
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
-use domain::profile::{AvatarImage, ProfileEdit, ProfileError};
+use domain::identity::ActorUri;
+use domain::profile::{AvatarImage, ProfileCard, ProfileEdit, ProfileError};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use time::OffsetDateTime;
@@ -121,6 +124,51 @@ pub async fn delete_avatar(
     clear.execute(user).await?;
     tracing::info!(user_id = %user, "avatar deleted");
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CardQuery {
+    actor: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CardResponse {
+    actor_uri: String,
+    display_name: Option<String>,
+    avatar_url: Option<String>,
+    pronouns: Option<&'static str>,
+    bio: Option<String>,
+    #[serde(with = "time::serde::rfc3339::option")]
+    friends_since: Option<OffsetDateTime>,
+}
+
+impl From<ProfileCard> for CardResponse {
+    fn from(card: ProfileCard) -> Self {
+        let profile = card.profile;
+        Self {
+            actor_uri: profile.actor.as_str().to_owned(),
+            display_name: profile.display_name,
+            avatar_url: profile.avatar_url,
+            pronouns: profile.pronouns.map(|p| p.as_str()),
+            bio: profile.bio,
+            friends_since: card.friends_since,
+        }
+    }
+}
+
+/// `GET /api/profiles?actor=`: the card one account reads of another.
+pub async fn card(
+    State(read): State<Arc<ReadProfile>>,
+    Authenticated(user): Authenticated,
+    Query(query): Query<CardQuery>,
+) -> Result<Json<CardResponse>, ApiError> {
+    let actor = ActorUri::parse(&query.actor)
+        .map_err(|_| ApiError::bad_request("`actor` is not an actor URI"))?;
+    let card = read
+        .execute(user, &actor)
+        .await?
+        .ok_or_else(|| ApiError::not_found("User not found"))?;
+    Ok(Json(card.into()))
 }
 
 impl From<ProfileError> for ApiError {
