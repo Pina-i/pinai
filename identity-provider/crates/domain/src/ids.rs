@@ -48,6 +48,7 @@ id!(ConnectionId);
 id!(ConversationId);
 id!(DeviceId);
 id!(FriendshipId);
+id!(GroupEventId);
 id!(MessageId);
 id!(TicketId);
 id!(UserId);

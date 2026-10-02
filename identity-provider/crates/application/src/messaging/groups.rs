@@ -1,9 +1,11 @@
 //! Group management: creating a group, and its members, roles and name. Admins manage; members
-//! of this instance are told; members elsewhere learn it from MLS commits and message rosters.
+//! of this instance are told; the other instances holding members are sent each change.
 
 mod add_group_member;
 mod create_group;
+mod dismiss_group;
 mod list_group_members;
+mod receive_group_change;
 mod remove_group_member;
 mod rename_group;
 mod set_member_role;
@@ -12,7 +14,9 @@ mod tests;
 
 pub use add_group_member::AddGroupMember;
 pub use create_group::CreateGroup;
+pub use dismiss_group::DismissGroup;
 pub use list_group_members::ListGroupMembers;
+pub use receive_group_change::ReceiveGroupChange;
 pub use remove_group_member::RemoveGroupMember;
 pub use rename_group::RenameGroup;
 pub use set_member_role::SetMemberRole;
@@ -21,7 +25,10 @@ use domain::ConversationId;
 use domain::identity::{
     Account, Accounts, ActorUri, InstanceOrigin, RemoteActors, RemoteActorsError,
 };
-use domain::messaging::{Conversation, ConversationKind, Conversations, Member, MessagingError};
+use domain::messaging::{
+    Conversation, ConversationKind, Conversations, GroupChange, GroupFederation, Member,
+    MessagingError,
+};
 use domain::social::Reachability;
 
 use super::shared::display_name_of;
@@ -136,6 +143,21 @@ async fn group_members(
         Some(c) if c.kind == ConversationKind::Group => Ok(conversations.members(group).await?),
         _ => Err(MessagingError::ConversationNotFound),
     }
+}
+
+/// Send a change made here to the other instances holding any of `members`.
+async fn announce(
+    accounts: &dyn Accounts,
+    federation: &dyn GroupFederation,
+    by: &Account,
+    members: &[Member],
+    change: GroupChange,
+) -> Result<(), MessagingError> {
+    let (_, remote) = crate::messaging::shared::audience(accounts, members, &by.actor_uri).await?;
+    if !remote.is_empty() {
+        federation.announce(by, &remote, &change);
+    }
+    Ok(())
 }
 
 /// The members with an account here: the ones this instance tells.

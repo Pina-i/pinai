@@ -3,6 +3,7 @@ mod attachments;
 mod auth;
 mod delivery;
 mod dm;
+mod group_events;
 mod identity;
 mod key_directory;
 mod messaging;
@@ -19,6 +20,7 @@ pub use auth::{
     PgSignupCodes,
 };
 pub use delivery::{PgCommitLog, PgWelcomes};
+pub use group_events::PgGroupEvents;
 pub use identity::PgAccounts;
 pub use key_directory::{PgDevices, PgKeyPackages};
 pub use messaging::{PgConversations, PgMessages};

@@ -5,10 +5,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use application::messaging::{
-    AddGroupMember, CreateGroup, DeliverDirectMessage, EditMessage, ListConversations,
-    ListGroupMembers, LoadHistory, MarkRead, OpenAttachment, ReadBlob, ReceiveEdit, ReceiveMessage,
-    RemoveGroupMember, RenameGroup, SendDirectMessage, SendGroupMessage, ServePeerContent,
-    SetMemberRole, SweepOrphanAttachments, SweepStaleDeliveries, UploadAttachments,
+    AddGroupMember, CreateGroup, DeliverDirectMessage, DismissGroup, EditMessage,
+    ListConversations, ListGroupMembers, LoadHistory, MarkRead, OpenAttachment, ReadBlob,
+    ReceiveEdit, ReceiveGroupChange, ReceiveMessage, RemoveGroupMember, RenameGroup,
+    SendDirectMessage, SendGroupMessage, ServePeerContent, SetMemberRole, SweepOrphanAttachments,
+    SweepStaleDeliveries, UploadAttachments,
 };
 use application::social::{
     AcceptFriendRequest, Block, DeclineFriendRequest, ListBlocks, ListFriends,
@@ -180,6 +181,11 @@ impl Application {
                 origin.scheme().to_owned(),
                 url_policy,
             ));
+        // One for both fan-outs, so an actor that couldn't be resolved is left alone by both.
+        let inboxes = Arc::new(infrastructure::federation::Inboxes::new(
+            origin.clone(),
+            Arc::clone(&remote_actors),
+        ));
         let graph: Arc<dyn domain::social::SocialGraph> =
             Arc::new(infrastructure::postgres::PgSocialGraph::new(pool.clone()));
         let reach: Arc<dyn domain::social::Reachability> =
@@ -208,10 +214,19 @@ impl Application {
         let group_notifier: Arc<dyn domain::messaging::GroupNotifier> = Arc::new(
             infrastructure::realtime::HubGroupNotifier::new(Arc::clone(&hub)),
         );
+        let group_events: Arc<dyn domain::messaging::GroupEvents> =
+            Arc::new(infrastructure::postgres::PgGroupEvents::new(pool.clone()));
+        let group_federation: Arc<dyn domain::messaging::GroupFederation> =
+            Arc::new(infrastructure::federation::ApGroupFederation::new(
+                Arc::clone(&keypair),
+                url_policy,
+                Arc::clone(&inboxes),
+            ));
         let message_federation: Arc<dyn domain::messaging::MessageFederation> =
             Arc::new(infrastructure::federation::ApMessageFederation::new(
                 Arc::clone(&keypair),
                 url_policy,
+                Arc::clone(&inboxes),
                 config.issuer(),
             ));
         let attachment_limits = domain::messaging::AttachmentLimits {
@@ -361,9 +376,12 @@ impl Application {
         let mls_notifier: Arc<dyn domain::e2ee::MlsNotifier> = Arc::new(
             infrastructure::realtime::HubMlsNotifier::new(Arc::clone(&hub)),
         );
-        let mls_federation: Arc<dyn domain::e2ee::MlsFederation> = Arc::new(
-            infrastructure::federation::ApMlsFederation::new(Arc::clone(&keypair), url_policy),
-        );
+        let mls_federation: Arc<dyn domain::e2ee::MlsFederation> =
+            Arc::new(infrastructure::federation::ApMlsFederation::new(
+                Arc::clone(&keypair),
+                url_policy,
+                Arc::clone(&inboxes),
+            ));
         let receive_commit = Arc::new(application::e2ee::ReceiveCommit::new(
             Arc::clone(&accounts),
             Arc::clone(&conversations),
@@ -372,17 +390,18 @@ impl Application {
         ));
         let receive_welcome = Arc::new(application::e2ee::ReceiveWelcome::new(
             Arc::clone(&accounts),
+            Arc::clone(&remote_actors),
             Arc::clone(&conversations),
             Arc::clone(&welcomes),
             Arc::clone(&reach),
             Arc::clone(&mls_notifier),
             Arc::clone(&group_notifier),
+            Arc::clone(&group_events),
         ));
         let sweep_welcomes = Arc::new(application::e2ee::SweepWelcomes::new(Arc::clone(&welcomes)));
         let send_group_message = Arc::new(SendGroupMessage::new(
             config.attachment_max_files_per_message,
             Arc::clone(&accounts),
-            Arc::clone(&remote_actors),
             Arc::clone(&conversations),
             Arc::clone(&messages),
             Arc::clone(&message_notifier),
@@ -390,7 +409,6 @@ impl Application {
         ));
         let edit_message = Arc::new(EditMessage::new(
             Arc::clone(&accounts),
-            Arc::clone(&remote_actors),
             Arc::clone(&conversations),
             Arc::clone(&messages),
             Arc::clone(&reach),
@@ -402,6 +420,7 @@ impl Application {
             Arc::clone(&remote_actors),
             Arc::clone(&conversations),
             Arc::clone(&messages),
+            Arc::clone(&group_events),
         ));
         let mark_read = Arc::new(MarkRead::new(
             Arc::clone(&accounts),
@@ -688,6 +707,7 @@ impl Application {
                 Arc::clone(&conversations),
                 Arc::clone(&reach),
                 Arc::clone(&group_notifier),
+                Arc::clone(&group_events),
             )),
             list_group_members: Arc::new(ListGroupMembers::new(
                 Arc::clone(&accounts),
@@ -701,23 +721,43 @@ impl Application {
                 Arc::clone(&conversations),
                 Arc::clone(&reach),
                 Arc::clone(&group_notifier),
+                Arc::clone(&group_federation),
+                Arc::clone(&group_events),
             )),
             remove_group_member: Arc::new(RemoveGroupMember::new(
                 Arc::clone(&accounts),
+                Arc::clone(&remote_actors),
                 Arc::clone(&conversations),
                 Arc::clone(&group_notifier),
+                Arc::clone(&group_federation),
+                Arc::clone(&group_events),
+            )),
+            dismiss_group: Arc::new(DismissGroup::new(
+                Arc::clone(&accounts),
+                Arc::clone(&conversations),
+            )),
+            receive_group_change: Arc::new(ReceiveGroupChange::new(
+                Arc::clone(&accounts),
+                Arc::clone(&remote_actors),
+                Arc::clone(&conversations),
+                Arc::clone(&group_notifier),
+                Arc::clone(&group_events),
             )),
             rename_group: Arc::new(RenameGroup::new(
                 Arc::clone(&accounts),
                 Arc::clone(&remote_actors),
                 Arc::clone(&conversations),
                 Arc::clone(&group_notifier),
+                Arc::clone(&group_federation),
+                Arc::clone(&group_events),
             )),
             set_member_role: Arc::new(SetMemberRole::new(
                 Arc::clone(&accounts),
                 Arc::clone(&remote_actors),
                 Arc::clone(&conversations),
                 Arc::clone(&group_notifier),
+                Arc::clone(&group_federation),
+                Arc::clone(&group_events),
             )),
             attachment_limits: attachment_limits.clone(),
             upload_attachments,
@@ -762,7 +802,6 @@ impl Application {
             claim_limiter: Arc::new(api::RateLimiter::new(60, 1.0)),
             append_commit: Arc::new(application::e2ee::AppendCommit::new(
                 Arc::clone(&accounts),
-                Arc::clone(&remote_actors),
                 Arc::clone(&conversations),
                 Arc::clone(&commits),
                 Arc::clone(&mls_notifier),

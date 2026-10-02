@@ -106,17 +106,31 @@ pub struct InMemoryRemoteActors {
     actors: Mutex<Vec<RemoteActor>>,
     /// Remembered here, but their instance no longer knows them.
     cached_only: Mutex<Vec<RemoteActor>>,
+    /// Known to their own instance, not to this one yet: resolving one remembers them.
+    uncached: Mutex<Vec<RemoteActor>>,
     /// Instances that fail to answer.
     down: Mutex<Vec<String>>,
+    /// How many times an instance was asked.
+    lookups: Mutex<usize>,
 }
 
 impl InMemoryRemoteActors {
     pub fn with(actors: impl IntoIterator<Item = RemoteActor>) -> Self {
         Self {
             actors: Mutex::new(actors.into_iter().collect()),
-            cached_only: Mutex::default(),
-            down: Mutex::default(),
+            ..Self::default()
         }
+    }
+
+    /// Also `elsewhere`: accounts their own instance knows, never resolved here.
+    pub fn and_uncached(self, elsewhere: impl IntoIterator<Item = RemoteActor>) -> Self {
+        self.uncached.lock().unwrap().extend(elsewhere);
+        self
+    }
+
+    /// How many times `resolve` asked an instance.
+    pub fn lookups(&self) -> usize {
+        *self.lookups.lock().unwrap()
     }
 
     /// `domain`'s instance fails to answer: resolving anyone there is `Unavailable`.
@@ -157,6 +171,7 @@ impl RemoteActors for InMemoryRemoteActors {
     }
 
     async fn resolve(&self, address: &FederatedAddress) -> Result<RemoteActor, RemoteActorsError> {
+        *self.lookups.lock().unwrap() += 1;
         if self
             .down
             .lock()
@@ -168,13 +183,18 @@ impl RemoteActors for InMemoryRemoteActors {
                 "connection refused".to_owned(),
             ));
         }
-        self.actors
-            .lock()
-            .unwrap()
+        let named = |a: &RemoteActor| a.actor_uri.federated_address().as_ref() == Some(address);
+        if let Some(known) = self.actors.lock().unwrap().iter().find(|a| named(a)) {
+            return Ok(known.clone());
+        }
+        let mut uncached = self.uncached.lock().unwrap();
+        let at = uncached
             .iter()
-            .find(|a| a.actor_uri.federated_address().as_ref() == Some(address))
-            .cloned()
-            .ok_or(RemoteActorsError::NotFound)
+            .position(named)
+            .ok_or(RemoteActorsError::NotFound)?;
+        let resolved = uncached.remove(at);
+        self.actors.lock().unwrap().push(resolved.clone());
+        Ok(resolved)
     }
 }
 

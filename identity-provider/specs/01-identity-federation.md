@@ -124,6 +124,15 @@ CREATE TABLE friendships (
 > document no instance would send — is `502 the account's instance did not answer`: for a friend
 > request, a DM to an address not cached here, and a group invitee (with its `actor_uri`). An
 > instance that answers it knows no such account is `404`.
+>
+> A group's members reach this instance in the rosters other members' instances send, so a member
+> may be someone nobody here has met. What goes to each remote member — a group message, an edit,
+> an MLS commit — is delivered at the inbox cached for them, else at the one their instance names
+> over WebFinger, asked in the background so that no request waits on a slow peer, and cached from
+> then on (`infrastructure::federation::Inboxes`). A send asks at most 10 instances; a member whose
+> instance didn't answer, knew no such account or named another actor gets nothing and isn't asked
+> for again for 10 minutes, so a dead or made-up member costs one lookup. An account of this
+> instance is never looked up.
 
 > **What peers read of an account**
 >

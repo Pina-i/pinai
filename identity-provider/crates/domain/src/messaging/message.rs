@@ -92,11 +92,11 @@ impl Message {
     }
 }
 
-/// The oldest message of the page already read.
+/// The oldest item — a message, or a group's event — of the page already read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HistoryCursor {
     pub created_at: OffsetDateTime,
-    pub id: MessageId,
+    pub id: uuid::Uuid,
 }
 
 #[cfg(test)]

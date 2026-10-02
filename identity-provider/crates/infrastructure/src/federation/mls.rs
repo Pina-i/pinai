@@ -10,29 +10,31 @@ use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
 use super::delivery::SignedDelivery;
+use super::inboxes::Inboxes;
 use super::messaging::{mls_note, roster};
 
 pub struct ApMlsFederation {
     delivery: SignedDelivery,
+    inboxes: Arc<Inboxes>,
 }
 
 impl ApMlsFederation {
-    pub fn new(keypair: Arc<EdKeyPair>, policy: UrlPolicy) -> Self {
+    pub fn new(keypair: Arc<EdKeyPair>, policy: UrlPolicy, inboxes: Arc<Inboxes>) -> Self {
         Self {
             delivery: SignedDelivery::new(keypair, policy),
+            inboxes,
         }
     }
 }
 
 impl MlsFederation for ApMlsFederation {
-    fn send_commit(&self, from: &ActorUri, to: &[RemoteActor], commit: &Commit) {
-        for member in to {
-            self.delivery.post_in_background(
-                from,
-                &member.inbox,
-                commit_activity(from, &member.actor_uri, commit),
-            );
-        }
+    fn send_commit(&self, from: &ActorUri, to: &[ActorUri], commit: &Commit) {
+        let posts = to
+            .iter()
+            .map(|member| (member.clone(), commit_activity(from, member, commit)))
+            .collect();
+        self.delivery
+            .post_each_in_background(&self.inboxes, from, posts);
     }
 
     fn send_welcome(&self, from: &ActorUri, to: &RemoteActor, welcome: &OutgoingWelcome) {

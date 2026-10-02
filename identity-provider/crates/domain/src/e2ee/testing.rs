@@ -469,11 +469,11 @@ impl RecordingMlsFederation {
 }
 
 impl MlsFederation for RecordingMlsFederation {
-    fn send_commit(&self, from: &ActorUri, to: &[RemoteActor], commit: &Commit) {
+    fn send_commit(&self, from: &ActorUri, to: &[ActorUri], commit: &Commit) {
         let mut sent = self.sent.lock().unwrap();
         sent.extend(to.iter().map(|member| SentMls::Commit {
             from: from.clone(),
-            to: member.actor_uri.clone(),
+            to: member.clone(),
             commit: commit.clone(),
         }));
     }

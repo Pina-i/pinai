@@ -159,7 +159,8 @@ pub struct OutgoingWelcome {
 /// Commits and Welcomes for members on other instances, best effort: a missed commit is caught
 /// up through the log, a missed Welcome by pairing again.
 pub trait MlsFederation: Send + Sync {
-    fn send_commit(&self, from: &ActorUri, to: &[RemoteActor], commit: &Commit);
+    /// To each remote member, reached as `MessageFederation::send_to_group` reaches them.
+    fn send_commit(&self, from: &ActorUri, to: &[ActorUri], commit: &Commit);
     fn send_welcome(&self, from: &ActorUri, to: &RemoteActor, welcome: &OutgoingWelcome);
 }
 

@@ -99,10 +99,10 @@ impl SendWelcome {
             return Ok(Some(welcome));
         }
         let roster = match self.conversations.find(conversation).await? {
-            Some(group) if group.kind == ConversationKind::Group => Some(GroupSnapshot {
-                name: group.name,
-                members,
-            }),
+            Some(group) if group.kind == ConversationKind::Group => {
+                let held = self.conversations.memberships(conversation).await?;
+                Some(GroupSnapshot::of(&group, &held))
+            }
             _ => None,
         };
         let to = match self.remote_actors.find(recipient).await? {

@@ -1,9 +1,9 @@
 use anyhow::Context;
 use domain::identity::ActorUri;
 use domain::messaging::{
-    AttachmentView, Conversation, ConversationSummary, Conversations, DeliveryStatus, GroupName,
-    GroupSnapshot, HistoryCursor, Member, MemberView, Message, MessageStoreError, Messages,
-    MlsCiphertext, NewMessage, RemoteAttachment, Role,
+    AttachmentView, Conversation, ConversationSummary, Conversations, DeliveryStatus, Departure,
+    GroupChanges, GroupName, HistoryCursor, Member, MemberView, Membership, Message,
+    MessageStoreError, Messages, MlsCiphertext, NewMessage, RemoteAttachment, Role,
 };
 use domain::{ConversationId, MessageId, UserId};
 use sqlx::{PgConnection, PgPool};
@@ -38,6 +38,7 @@ struct ConversationRow {
     id: uuid::Uuid,
     kind: String,
     name: Option<String>,
+    name_at: OffsetDateTime,
     created_at: OffsetDateTime,
 }
 
@@ -49,6 +50,7 @@ impl TryFrom<ConversationRow> for Conversation {
             id: row.id.into(),
             kind: row.kind.parse().context("conversations.kind")?,
             name: row.name,
+            name_at: row.name_at,
             created_at: row.created_at,
         })
     }
@@ -61,6 +63,15 @@ struct MemberRow {
 }
 
 #[derive(sqlx::FromRow)]
+struct MembershipRow {
+    actor_uri: String,
+    role: String,
+    joined_at: OffsetDateTime,
+    role_at: OffsetDateTime,
+    left_at: Option<OffsetDateTime>,
+}
+
+#[derive(sqlx::FromRow)]
 struct SummaryRow {
     conversation_id: uuid::Uuid,
     kind: String,
@@ -69,6 +80,7 @@ struct SummaryRow {
     last_message_sender: Option<String>,
     unread_count: i64,
     members: serde_json::Value,
+    removed_at: Option<OffsetDateTime>,
 }
 
 #[derive(serde::Deserialize)]
@@ -105,11 +117,12 @@ impl TryFrom<SummaryRow> for ConversationSummary {
                 .and_then(|uri| ActorUri::parse(&uri).ok()),
             unread_count: row.unread_count,
             last_message_at: row.last_message_at,
+            removed_at: row.removed_at,
         })
     }
 }
 
-/// Joins, rejoins after leaving, or takes the role.
+/// Joins, rejoins after leaving, or takes the role, stamped now: a change made here.
 async fn hold_member(
     c: &mut PgConnection,
     id: uuid::Uuid,
@@ -117,7 +130,10 @@ async fn hold_member(
 ) -> Result<(), MessageStoreError> {
     sqlx::query(
         "INSERT INTO conversation_members (conversation_id, actor_uri, role) VALUES ($1, $2, $3) \
-         ON CONFLICT (conversation_id, actor_uri) DO UPDATE SET left_at = NULL, role = EXCLUDED.role",
+         ON CONFLICT (conversation_id, actor_uri) DO UPDATE SET \
+             joined_at = CASE WHEN conversation_members.left_at IS NULL \
+                 THEN conversation_members.joined_at ELSE now() END, \
+             left_at = NULL, role = EXCLUDED.role, role_at = now()",
     )
     .bind(id)
     .bind(member.actor_uri.as_str())
@@ -128,32 +144,59 @@ async fn hold_member(
     Ok(())
 }
 
+/// Holds a membership exactly as another instance stamped it.
+async fn hold_membership(
+    c: &mut PgConnection,
+    id: uuid::Uuid,
+    membership: &Membership,
+) -> Result<(), MessageStoreError> {
+    sqlx::query(
+        "INSERT INTO conversation_members (conversation_id, actor_uri, role, joined_at, role_at) \
+         VALUES ($1, $2, $3, $4, $5) \
+         ON CONFLICT (conversation_id, actor_uri) DO UPDATE SET left_at = NULL, \
+             role = EXCLUDED.role, joined_at = EXCLUDED.joined_at, role_at = EXCLUDED.role_at",
+    )
+    .bind(id)
+    .bind(membership.member.actor_uri.as_str())
+    .bind(membership.member.role.as_str())
+    .bind(membership.joined_at)
+    .bind(membership.role_at)
+    .execute(c)
+    .await
+    .context("hold a mirrored membership")?;
+    Ok(())
+}
+
 async fn find_conversation(
     c: &mut PgConnection,
     id: uuid::Uuid,
 ) -> Result<Option<Conversation>, MessageStoreError> {
-    let row: Option<ConversationRow> =
-        sqlx::query_as("SELECT id, kind, name, created_at FROM conversations WHERE id = $1")
-            .bind(id)
-            .fetch_optional(c)
-            .await
-            .context("find a conversation")?;
+    let row: Option<ConversationRow> = sqlx::query_as(
+        "SELECT id, kind, name, name_at, created_at FROM conversations WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_optional(c)
+    .await
+    .context("find a conversation")?;
     Ok(row.map(Conversation::try_from).transpose()?)
 }
 
+/// `name_at` is now unless another instance stamped the name.
 async fn create_conversation(
     c: &mut PgConnection,
     id: Option<uuid::Uuid>,
     kind: &str,
     name: Option<&str>,
+    name_at: Option<OffsetDateTime>,
 ) -> Result<uuid::Uuid, MessageStoreError> {
     Ok(sqlx::query_scalar(
-        "INSERT INTO conversations (id, kind, name) VALUES (COALESCE($1, gen_random_uuid()), $2, $3) \
-         RETURNING id",
+        "INSERT INTO conversations (id, kind, name, name_at) \
+         VALUES (COALESCE($1, gen_random_uuid()), $2, $3, COALESCE($4, now())) RETURNING id",
     )
     .bind(id)
     .bind(kind)
     .bind(name)
+    .bind(name_at)
     .fetch_one(c)
     .await
     .context("create a conversation")?)
@@ -201,6 +244,34 @@ impl Conversations for PgConversations {
         Ok(members)
     }
 
+    async fn memberships(&self, id: ConversationId) -> Result<Vec<Membership>, MessageStoreError> {
+        let rows: Vec<MembershipRow> = sqlx::query_as(
+            "SELECT actor_uri, role, joined_at, role_at, left_at FROM conversation_members \
+             WHERE conversation_id = $1",
+        )
+        .bind(id.as_uuid())
+        .fetch_all(&self.pool)
+        .await
+        .context("list conversation memberships")?;
+        let mut held = Vec::with_capacity(rows.len());
+        for row in rows {
+            let Ok(actor_uri) = ActorUri::parse(&row.actor_uri) else {
+                tracing::warn!(conversation = %id, actor_uri = %row.actor_uri, "member with an invalid actor URI skipped");
+                continue;
+            };
+            held.push(Membership {
+                member: Member {
+                    actor_uri,
+                    role: row.role.parse().context("conversation_members.role")?,
+                },
+                joined_at: row.joined_at,
+                role_at: row.role_at,
+                left_at: row.left_at,
+            });
+        }
+        Ok(held)
+    }
+
     async fn ever_held(
         &self,
         actor: &ActorUri,
@@ -222,7 +293,7 @@ impl Conversations for PgConversations {
     async fn mirror_group(
         &self,
         id: ConversationId,
-        snapshot: &GroupSnapshot,
+        changes: &GroupChanges,
     ) -> Result<Conversation, MessageStoreError> {
         let mut tx = self.pool.begin().await.context("begin mirror_group")?;
         if find_conversation(&mut tx, id.as_uuid()).await?.is_none() {
@@ -230,19 +301,23 @@ impl Conversations for PgConversations {
                 &mut tx,
                 Some(id.as_uuid()),
                 "group",
-                snapshot.name.as_deref(),
+                changes.name.as_ref().and_then(|n| n.name.as_deref()),
+                changes.name.as_ref().map(|n| n.at),
             )
             .await?;
-        } else if let Some(name) = &snapshot.name {
-            sqlx::query("UPDATE conversations SET name = $2 WHERE id = $1 AND kind = 'group'")
-                .bind(id.as_uuid())
-                .bind(name)
-                .execute(&mut *tx)
-                .await
-                .context("rename a mirrored group")?;
+        } else if let Some(named) = &changes.name {
+            sqlx::query(
+                "UPDATE conversations SET name = $2, name_at = $3 WHERE id = $1 AND kind = 'group'",
+            )
+            .bind(id.as_uuid())
+            .bind(named.name.as_deref())
+            .bind(named.at)
+            .execute(&mut *tx)
+            .await
+            .context("rename a mirrored group")?;
         }
-        for member in &snapshot.members {
-            hold_member(&mut tx, id.as_uuid(), member).await?;
+        for membership in &changes.members {
+            hold_membership(&mut tx, id.as_uuid(), membership).await?;
         }
         let group = find_conversation(&mut tx, id.as_uuid())
             .await?
@@ -295,7 +370,8 @@ impl Conversations for PgConversations {
                        AND cm_other.left_at IS NULL
                        AND cm_other.actor_uri != $1),
                     '[]'
-                ) AS members
+                ) AS members,
+                NULL::timestamptz AS removed_at
             FROM conversation_members cm_self
             JOIN conversations c ON c.id = cm_self.conversation_id
             LEFT JOIN ranked_messages rm ON rm.conversation_id = c.id
@@ -310,9 +386,40 @@ impl Conversations for PgConversations {
         .fetch_all(&self.pool)
         .await
         .context("list conversations")?;
-        rows.into_iter()
+        // The groups the account was removed from, as they stood then.
+        let removed_from: Vec<SummaryRow> = sqlx::query_as(
+            r#"
+            SELECT
+                c.id AS conversation_id,
+                c.kind,
+                cm.departure_view->>'name' AS name,
+                (SELECT MAX(dm.created_at) FROM direct_messages dm
+                 WHERE dm.conversation_id = c.id AND dm.deleted_at IS NULL
+                   AND dm.created_at <= cm.left_at) AS last_message_at,
+                (SELECT dm.sender_actor_uri FROM direct_messages dm
+                 WHERE dm.conversation_id = c.id AND dm.deleted_at IS NULL
+                   AND dm.created_at <= cm.left_at
+                 ORDER BY dm.created_at DESC, dm.id DESC LIMIT 1) AS last_message_sender,
+                0::BIGINT AS unread_count,
+                COALESCE(cm.departure_view->'members', '[]') AS members,
+                cm.left_at AS removed_at
+            FROM conversation_members cm
+            JOIN conversations c ON c.id = cm.conversation_id
+            WHERE cm.actor_uri = $1 AND cm.left_at IS NOT NULL
+              AND cm.removed_by IS NOT NULL AND cm.dismissed_at IS NULL
+            "#,
+        )
+        .bind(actor.as_str())
+        .fetch_all(&self.pool)
+        .await
+        .context("list the groups an account was removed from")?;
+        let mut listed = rows
+            .into_iter()
+            .chain(removed_from)
             .map(|row| ConversationSummary::try_from(row).map_err(MessageStoreError::from))
-            .collect()
+            .collect::<Result<Vec<_>, _>>()?;
+        listed.sort_by_key(|s| std::cmp::Reverse(s.last_message_at));
+        Ok(listed)
     }
 
     async fn mark_read(&self, user: UserId, id: ConversationId) -> Result<(), MessageStoreError> {
@@ -335,7 +442,8 @@ impl Conversations for PgConversations {
         roster: &[Member],
     ) -> Result<Conversation, MessageStoreError> {
         let mut tx = self.pool.begin().await.context("begin create_group")?;
-        let id = create_conversation(&mut tx, None, "group", name.map(GroupName::as_str)).await?;
+        let id =
+            create_conversation(&mut tx, None, "group", name.map(GroupName::as_str), None).await?;
         for member in roster {
             hold_member(&mut tx, id, member).await?;
         }
@@ -359,17 +467,89 @@ impl Conversations for PgConversations {
         &self,
         id: ConversationId,
         actor: &ActorUri,
+        removed_by: Option<&ActorUri>,
+        at: Option<OffsetDateTime>,
     ) -> Result<bool, MessageStoreError> {
+        // The view is read before the update applies: the group as the removed member saw it,
+        // everyone named as their list names them.
         let left = sqlx::query(
-            "UPDATE conversation_members SET left_at = now() \
-             WHERE conversation_id = $1 AND actor_uri = $2 AND left_at IS NULL",
+            r#"
+            UPDATE conversation_members SET left_at = COALESCE($4, now()), removed_by = $3,
+                dismissed_at = NULL,
+                departure_view = CASE WHEN $3::text IS NULL THEN NULL ELSE (
+                    SELECT JSON_BUILD_OBJECT(
+                        'name', c.name,
+                        'members', COALESCE((
+                            SELECT JSON_AGG(JSON_BUILD_OBJECT(
+                                'actorUri',    o.actor_uri,
+                                'displayName', COALESCE(u.display_name, ra.display_name),
+                                'avatarUrl',   COALESCE(u.avatar_url, ra.avatar_url)
+                            ))
+                            FROM conversation_members o
+                            LEFT JOIN users u ON u.actor_uri = o.actor_uri
+                            LEFT JOIN remote_actors ra ON ra.actor_uri = o.actor_uri
+                            WHERE o.conversation_id = $1 AND o.left_at IS NULL
+                              AND o.actor_uri != $2
+                        ), '[]'::json)
+                    )::jsonb
+                    FROM conversations c WHERE c.id = $1
+                ) END
+            WHERE conversation_id = $1 AND actor_uri = $2 AND left_at IS NULL
+            "#,
+        )
+        .bind(id.as_uuid())
+        .bind(actor.as_str())
+        .bind(removed_by.map(ActorUri::as_str))
+        .bind(at)
+        .execute(&self.pool)
+        .await
+        .context("remove a member")?;
+        Ok(left.rows_affected() > 0)
+    }
+
+    async fn departure(
+        &self,
+        id: ConversationId,
+        actor: &ActorUri,
+    ) -> Result<Option<Departure>, MessageStoreError> {
+        let row: Option<(OffsetDateTime, Option<String>, Option<OffsetDateTime>)> = sqlx::query_as(
+            "SELECT left_at, removed_by, dismissed_at FROM conversation_members \
+                 WHERE conversation_id = $1 AND actor_uri = $2 AND left_at IS NOT NULL",
+        )
+        .bind(id.as_uuid())
+        .bind(actor.as_str())
+        .fetch_optional(&self.pool)
+        .await
+        .context("find how a member left")?;
+        let Some((left_at, removed_by, dismissed_at)) = row else {
+            return Ok(None);
+        };
+        Ok(Some(Departure {
+            left_at,
+            removed_by: removed_by
+                .map(|uri| ActorUri::parse(&uri))
+                .transpose()
+                .context("conversation_members.removed_by")?,
+            dismissed: dismissed_at.is_some(),
+        }))
+    }
+
+    async fn dismiss(
+        &self,
+        id: ConversationId,
+        actor: &ActorUri,
+    ) -> Result<bool, MessageStoreError> {
+        let dismissed = sqlx::query(
+            "UPDATE conversation_members SET dismissed_at = now() \
+             WHERE conversation_id = $1 AND actor_uri = $2 AND left_at IS NOT NULL \
+               AND removed_by IS NOT NULL AND dismissed_at IS NULL",
         )
         .bind(id.as_uuid())
         .bind(actor.as_str())
         .execute(&self.pool)
         .await
-        .context("remove a member")?;
-        Ok(left.rows_affected() > 0)
+        .context("dismiss a group")?;
+        Ok(dismissed.rows_affected() > 0)
     }
 
     async fn set_role(
@@ -379,7 +559,7 @@ impl Conversations for PgConversations {
         role: Role,
     ) -> Result<Option<Member>, MessageStoreError> {
         let changed: Option<String> = sqlx::query_scalar(
-            "UPDATE conversation_members SET role = $3 \
+            "UPDATE conversation_members SET role = $3, role_at = now() \
              WHERE conversation_id = $1 AND actor_uri = $2 AND left_at IS NULL \
              RETURNING role",
         )
@@ -405,8 +585,8 @@ impl Conversations for PgConversations {
         name: &GroupName,
     ) -> Result<Option<Conversation>, MessageStoreError> {
         let row: Option<ConversationRow> = sqlx::query_as(
-            "UPDATE conversations SET name = $2 WHERE id = $1 AND kind = 'group' \
-             RETURNING id, kind, name, created_at",
+            "UPDATE conversations SET name = $2, name_at = now() WHERE id = $1 AND kind = 'group' \
+             RETURNING id, kind, name, name_at, created_at",
         )
         .bind(id.as_uuid())
         .bind(name.as_str())
@@ -666,6 +846,7 @@ impl Messages for PgMessages {
         &self,
         conversation: ConversationId,
         before: Option<HistoryCursor>,
+        until: Option<OffsetDateTime>,
         limit: i64,
     ) -> Result<Vec<Message>, MessageStoreError> {
         let mut c = self.pool.acquire().await.context("acquire")?;
@@ -673,12 +854,14 @@ impl Messages for PgMessages {
             "SELECT {MESSAGE_COLUMNS} FROM direct_messages \
              WHERE conversation_id = $1 AND deleted_at IS NULL \
                AND ($2::timestamptz IS NULL OR (created_at, id) < ($2, $3)) \
+               AND ($5::timestamptz IS NULL OR created_at <= $5) \
              ORDER BY created_at DESC, id DESC LIMIT $4"
         ))
         .bind(conversation.as_uuid())
         .bind(before.map(|c| c.created_at))
-        .bind(before.map(|c| c.id.as_uuid()))
+        .bind(before.map(|c| c.id))
         .bind(limit)
+        .bind(until)
         .fetch_all(&mut *c)
         .await
         .context("load conversation history")?;

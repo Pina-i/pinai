@@ -11,9 +11,11 @@ use base64::engine::general_purpose::STANDARD as B64;
 use domain::e2ee::{CommitBlob, DeliveryError, Epoch, WelcomeBlob};
 use domain::identity::{Account, ActorUri};
 use domain::messaging::{
-    GroupSnapshot, Member, MessagingError, MlsCiphertext, OfferedAttachment, Role,
+    GroupSnapshot, Member, MessagingError, MlsCiphertext, OfferedAttachment, Role, SnapshotMember,
 };
 use serde_json::Value;
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
 
 use crate::{ApiError, AppState};
@@ -190,9 +192,16 @@ pub(super) async fn update(
         .map_err(messaging_refused)
 }
 
-/// The `mlsGroup` roster a group Note carries; entries that name no actor or role are skipped.
+/// The `mlsGroup` roster a group Note carries; entries that name no actor or role are skipped,
+/// and a stamp that is no RFC 3339 time counts as none.
 fn group_snapshot(note: &Value) -> Option<GroupSnapshot> {
     let snapshot = note.get("mlsGroup")?;
+    let stamp = |value: &Value, key: &str| {
+        value
+            .get(key)
+            .and_then(Value::as_str)
+            .and_then(|at| OffsetDateTime::parse(at, &Rfc3339).ok())
+    };
     let members = snapshot
         .get("members")
         .and_then(Value::as_array)
@@ -200,9 +209,13 @@ fn group_snapshot(note: &Value) -> Option<GroupSnapshot> {
             members
                 .iter()
                 .filter_map(|m| {
-                    Some(Member {
-                        actor_uri: ActorUri::parse(m.get("actorUri")?.as_str()?).ok()?,
-                        role: m.get("role")?.as_str()?.parse::<Role>().ok()?,
+                    Some(SnapshotMember {
+                        member: Member {
+                            actor_uri: ActorUri::parse(m.get("actorUri")?.as_str()?).ok()?,
+                            role: m.get("role")?.as_str()?.parse::<Role>().ok()?,
+                        },
+                        joined_at: stamp(m, "joinedAt"),
+                        role_at: stamp(m, "roleAt"),
                     })
                 })
                 .collect()
@@ -213,6 +226,7 @@ fn group_snapshot(note: &Value) -> Option<GroupSnapshot> {
             .get("name")
             .and_then(Value::as_str)
             .map(str::to_owned),
+        name_at: stamp(snapshot, "nameAt"),
         members,
     })
 }

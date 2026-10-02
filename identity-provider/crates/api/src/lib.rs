@@ -39,10 +39,10 @@ use application::e2ee::{
 };
 use application::identity::{FindAccount, SearchAccounts, WebFinger};
 use application::messaging::{
-    AddGroupMember, CreateGroup, DeliverDirectMessage, EditMessage, ListConversations,
-    ListGroupMembers, LoadHistory, MarkRead, OpenAttachment, ReadBlob, ReceiveEdit, ReceiveMessage,
-    RemoveGroupMember, RenameGroup, SendDirectMessage, SendGroupMessage, ServePeerContent,
-    SetMemberRole, UploadAttachments,
+    AddGroupMember, CreateGroup, DeliverDirectMessage, DismissGroup, EditMessage,
+    ListConversations, ListGroupMembers, LoadHistory, MarkRead, OpenAttachment, ReadBlob,
+    ReceiveEdit, ReceiveGroupChange, ReceiveMessage, RemoveGroupMember, RenameGroup,
+    SendDirectMessage, SendGroupMessage, ServePeerContent, SetMemberRole, UploadAttachments,
 };
 use application::presence::{
     Connect, Disconnect, Heartbeat, OpenPeerStream, ReadPresence, ServePeerPresence, SetPresence,
@@ -145,6 +145,8 @@ pub struct AppState {
     pub list_group_members: Arc<ListGroupMembers>,
     pub add_group_member: Arc<AddGroupMember>,
     pub remove_group_member: Arc<RemoveGroupMember>,
+    pub dismiss_group: Arc<DismissGroup>,
+    pub receive_group_change: Arc<ReceiveGroupChange>,
     pub rename_group: Arc<RenameGroup>,
     pub set_member_role: Arc<SetMemberRole>,
     pub attachment_limits: AttachmentLimits,
@@ -288,7 +290,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/dm/{conversation_id}/read", post(messaging::mark_read))
         .route("/api/dm/{message_id}/edit", patch(messaging::edit))
         .route("/api/groups", post(groups::create))
-        .route("/api/groups/{conversation_id}", patch(groups::rename))
+        .route(
+            "/api/groups/{conversation_id}",
+            patch(groups::rename).delete(groups::dismiss),
+        )
         .route(
             "/api/groups/{conversation_id}/messages",
             post(messaging::send_group_message),

@@ -22,11 +22,11 @@ pub use attachments::{
 pub use deliver_direct_message::DeliverDirectMessage;
 pub use edit_message::EditMessage;
 pub use groups::{
-    AddGroupMember, CreateGroup, GroupView, ListGroupMembers, MemberProfile, RemoveGroupMember,
-    RenameGroup, SetMemberRole,
+    AddGroupMember, CreateGroup, DismissGroup, GroupView, ListGroupMembers, MemberProfile,
+    ReceiveGroupChange, RemoveGroupMember, RenameGroup, SetMemberRole,
 };
 pub use list_conversations::ListConversations;
-pub use load_history::{HistoryEntry, LoadHistory};
+pub use load_history::{HistoryEntry, LoadHistory, TimelineEntry};
 pub use mark_read::MarkRead;
 pub use receive_edit::{IncomingEdit, ReceiveEdit};
 pub use receive_message::{IncomingMessage, ReceiveMessage};

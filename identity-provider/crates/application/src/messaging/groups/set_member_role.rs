@@ -2,12 +2,13 @@ use std::sync::Arc;
 
 use domain::identity::{Accounts, ActorUri, RemoteActors};
 use domain::messaging::{
-    Conversations, GroupNotifier, MessagingError, Role, authorize_admin, may_stop_being_admin,
+    Conversations, GroupChange, GroupChangeKind, GroupEvent, GroupEvents, GroupFederation,
+    GroupNotifier, MessagingError, Role, authorize_admin, may_stop_being_admin,
 };
 use domain::{ConversationId, UserId};
 
-use super::{MemberProfile, group_members, local_accounts, profile_of};
-use crate::messaging::shared::caller as caller_account;
+use super::{MemberProfile, announce, group_members, local_accounts, profile_of};
+use crate::messaging::shared::{Timeline, caller as caller_account};
 
 /// `POST /api/groups/{id}/members/{actor}/role`, by an admin.
 pub struct SetMemberRole {
@@ -15,6 +16,8 @@ pub struct SetMemberRole {
     remote_actors: Arc<dyn RemoteActors>,
     conversations: Arc<dyn Conversations>,
     notifier: Arc<dyn GroupNotifier>,
+    federation: Arc<dyn GroupFederation>,
+    events: Arc<dyn GroupEvents>,
 }
 
 impl SetMemberRole {
@@ -23,12 +26,16 @@ impl SetMemberRole {
         remote_actors: Arc<dyn RemoteActors>,
         conversations: Arc<dyn Conversations>,
         notifier: Arc<dyn GroupNotifier>,
+        federation: Arc<dyn GroupFederation>,
+        events: Arc<dyn GroupEvents>,
     ) -> Self {
         Self {
             accounts,
             remote_actors,
             conversations,
             notifier,
+            federation,
+            events,
         }
     }
 
@@ -50,11 +57,42 @@ impl SetMemberRole {
             .set_role(group, &actor, role)
             .await?
             .ok_or(MessagingError::MemberNotFound)?;
-        let members = self.conversations.members(group).await?;
+        let held = self.conversations.memberships(group).await?;
+        let role_at = held
+            .iter()
+            .find(|m| m.is_active() && m.member.actor_uri == changed.actor_uri)
+            .map(|m| m.role_at)
+            .ok_or_else(|| anyhow::anyhow!("the member is no longer in the group"))?;
+        let members: Vec<_> = held
+            .into_iter()
+            .filter(|m| m.is_active())
+            .map(|m| m.member)
+            .collect();
         for local in local_accounts(&*self.accounts, &members).await? {
             self.notifier
                 .role_changed(local.id, group, &changed, &admin.actor_uri);
         }
+        let change = GroupChange {
+            group,
+            by: admin.actor_uri.clone(),
+            at: role_at,
+            kind: GroupChangeKind::RoleChanged(changed.actor_uri.clone(), changed.role),
+        };
+        self.timeline()
+            .record(&members, GroupEvent::of(&change))
+            .await?;
+        announce(&*self.accounts, &*self.federation, &admin, &members, change).await?;
         profile_of(&*self.accounts, &*self.remote_actors, &changed).await
+    }
+}
+
+impl SetMemberRole {
+    fn timeline(&self) -> Timeline<'_> {
+        Timeline {
+            accounts: &*self.accounts,
+            remote_actors: &*self.remote_actors,
+            events: &*self.events,
+            notifier: &*self.notifier,
+        }
     }
 }

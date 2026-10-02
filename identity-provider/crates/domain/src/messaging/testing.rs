@@ -5,7 +5,7 @@ use std::sync::Mutex;
 
 use time::OffsetDateTime;
 
-use crate::identity::{Account, ActorUri, InstanceOrigin, RemoteActor};
+use crate::identity::{Account, ActorUri, InstanceOrigin};
 use crate::{AttachmentId, ConversationId, MessageId, UserId};
 
 use bytes::Bytes;
@@ -13,11 +13,35 @@ use bytes::Bytes;
 use super::{
     Attachment, Attachments, BlobTokenError, BlobTokens, ByteStream, Conversation,
     ConversationKind, ConversationSummary, Conversations, DeliveryFailed, DeliveryStatus,
-    DirectDelivery, GroupName, GroupNotifier, GroupSnapshot, HistoryCursor, Member, MemberView,
-    Message, MessageEvent, MessageFederation, MessageNotifier, MessageStoreError, Messages,
-    MlsCiphertext, NewMessage, ObjectStore, ObjectStoreError, RemoteAttachment, RemoteFiles, Role,
-    may_hold_dm,
+    Departure, DirectDelivery, EventWindow, GroupChange, GroupChanges, GroupEvent, GroupEvents,
+    GroupFederation, GroupName, GroupNotifier, GroupSnapshot, HistoryCursor, Member, MemberView,
+    Membership, Message, MessageEvent, MessageFederation, MessageNotifier, MessageStoreError,
+    Messages, MlsCiphertext, NamedEvent, NewMessage, ObjectStore, ObjectStoreError,
+    RemoteAttachment, RemoteFiles, Role, SnapshotMember, may_hold_dm,
 };
+
+/// A snapshot as an instance that predates stamps sends it.
+pub fn unstamped(name: Option<&str>, members: &[Member]) -> GroupSnapshot {
+    GroupSnapshot {
+        name: name.map(str::to_owned),
+        name_at: None,
+        members: members.iter().map(listed).collect(),
+    }
+}
+
+/// `member` as an unstamped snapshot lists them.
+pub fn listed(member: &Member) -> SnapshotMember {
+    SnapshotMember {
+        member: member.clone(),
+        joined_at: None,
+        role_at: None,
+    }
+}
+
+/// What a group new here takes from `snapshot`: how a test seeds a store with a group.
+pub fn as_new(snapshot: &GroupSnapshot) -> GroupChanges {
+    snapshot.changes(None, &[], OffsetDateTime::now_utc())
+}
 
 /// Seeds what the stores read but do not write: uploads come from the attachments context.
 #[async_trait::async_trait]
@@ -35,17 +59,26 @@ pub struct InMemoryMessaging {
 #[derive(Default)]
 struct State {
     conversations: Vec<Conversation>,
-    /// Every membership ever held; `active` is false once the member left.
-    members: Vec<Membership>,
+    /// Every membership ever held.
+    members: Vec<Held>,
     messages: Vec<Message>,
     uploads: Vec<Upload>,
     reads: HashMap<(UserId, ConversationId), OffsetDateTime>,
+    events: Vec<GroupEvent>,
 }
 
-struct Membership {
+struct Held {
     conversation: ConversationId,
-    member: Member,
-    active: bool,
+    membership: Membership,
+    /// Set once the member is out: how, and the group as it stood then.
+    departed: Option<Departed>,
+}
+
+struct Departed {
+    removed_by: Option<ActorUri>,
+    name: Option<String>,
+    others: Vec<ActorUri>,
+    dismissed: bool,
 }
 
 struct Upload {
@@ -57,9 +90,34 @@ impl State {
     fn active_members(&self, id: ConversationId) -> Vec<Member> {
         self.members
             .iter()
-            .filter(|m| m.conversation == id && m.active)
-            .map(|m| m.member.clone())
+            .filter(|m| m.conversation == id && m.membership.is_active())
+            .map(|m| m.membership.member.clone())
             .collect()
+    }
+
+    fn row_mut(&mut self, id: ConversationId, actor: &ActorUri) -> Option<&mut Held> {
+        self.members
+            .iter_mut()
+            .find(|m| m.conversation == id && &m.membership.member.actor_uri == actor)
+    }
+
+    fn held_mut(&mut self, id: ConversationId, actor: &ActorUri) -> Option<&mut Membership> {
+        self.row_mut(id, actor).map(|m| &mut m.membership)
+    }
+
+    /// Hold `membership` exactly as given.
+    fn hold(&mut self, id: ConversationId, membership: &Membership) {
+        match self.row_mut(id, &membership.member.actor_uri) {
+            Some(row) => {
+                row.membership = membership.clone();
+                row.departed = None;
+            }
+            None => self.members.push(Held {
+                conversation: id,
+                membership: membership.clone(),
+                departed: None,
+            }),
+        }
     }
 
     fn is_active(&self, id: ConversationId, actor: &ActorUri) -> bool {
@@ -76,42 +134,54 @@ impl State {
             .find(|id| self.is_active(*id, a) && self.is_active(*id, b))
     }
 
-    fn create(&mut self, id: ConversationId, kind: ConversationKind, name: Option<String>) {
+    fn create(
+        &mut self,
+        id: ConversationId,
+        kind: ConversationKind,
+        name: Option<String>,
+        name_at: OffsetDateTime,
+    ) {
         self.conversations.push(Conversation {
             id,
             kind,
             name,
+            name_at,
             created_at: OffsetDateTime::now_utc(),
         });
     }
 
     /// Joins, or re-joins in the role it already had.
     fn add(&mut self, id: ConversationId, actor: &ActorUri) {
-        match self
-            .members
-            .iter_mut()
-            .find(|m| m.conversation == id && &m.member.actor_uri == actor)
-        {
-            Some(existing) => existing.active = true,
-            None => self.members.push(Membership {
+        let now = OffsetDateTime::now_utc();
+        match self.row_mut(id, actor) {
+            Some(row) => {
+                if !row.membership.is_active() {
+                    row.membership.left_at = None;
+                    row.membership.joined_at = now;
+                    row.departed = None;
+                }
+            }
+            None => self.members.push(Held {
                 conversation: id,
-                member: Member {
-                    actor_uri: actor.clone(),
-                    role: Role::Member,
+                membership: Membership {
+                    member: Member {
+                        actor_uri: actor.clone(),
+                        role: Role::Member,
+                    },
+                    joined_at: now,
+                    role_at: now,
+                    left_at: None,
                 },
-                active: true,
+                departed: None,
             }),
         }
     }
 
     fn add_in_role(&mut self, id: ConversationId, member: &Member) {
         self.add(id, &member.actor_uri);
-        let held = self
-            .members
-            .iter_mut()
-            .find(|m| m.conversation == id && m.member.actor_uri == member.actor_uri)
-            .expect("just added");
+        let held = self.held_mut(id, &member.actor_uri).expect("just added");
         held.member.role = member.role;
+        held.role_at = OffsetDateTime::now_utc();
     }
 
     fn with_attachments(&self, message: &Message) -> Message {
@@ -181,6 +251,34 @@ impl State {
 }
 
 #[async_trait::async_trait]
+impl GroupEvents for InMemoryMessaging {
+    async fn record(&self, event: &GroupEvent) -> Result<(), MessageStoreError> {
+        self.state.lock().unwrap().events.push(event.clone());
+        Ok(())
+    }
+
+    async fn page(
+        &self,
+        conversation: ConversationId,
+        before: Option<HistoryCursor>,
+        window: EventWindow,
+        limit: i64,
+    ) -> Result<Vec<GroupEvent>, MessageStoreError> {
+        let state = self.state.lock().unwrap();
+        let mut page: Vec<GroupEvent> = state
+            .events
+            .iter()
+            .filter(|e| e.group == conversation && window.contains(e.at))
+            .filter(|e| before.is_none_or(|c| (e.at, e.id.as_uuid()) < (c.created_at, c.id)))
+            .cloned()
+            .collect();
+        page.sort_by_key(|e| std::cmp::Reverse((e.at, e.id)));
+        page.truncate(usize::try_from(limit).unwrap_or(0));
+        Ok(page)
+    }
+}
+
+#[async_trait::async_trait]
 impl Uploads for InMemoryMessaging {
     async fn upload(&self, owner: &ActorUri) -> AttachmentId {
         let id = AttachmentId::generate();
@@ -214,7 +312,12 @@ impl Conversations for InMemoryMessaging {
             (Some(existing), None) => existing,
             (None, Some(pinned)) => match state.conversations.iter().find(|c| c.id == pinned) {
                 None => {
-                    state.create(pinned, ConversationKind::Dm, None);
+                    state.create(
+                        pinned,
+                        ConversationKind::Dm,
+                        None,
+                        OffsetDateTime::now_utc(),
+                    );
                     pinned
                 }
                 Some(existing) => {
@@ -222,20 +325,20 @@ impl Conversations for InMemoryMessaging {
                         .members
                         .iter()
                         .filter(|m| m.conversation == pinned)
-                        .map(|m| m.member.actor_uri.clone())
+                        .map(|m| m.membership.member.actor_uri.clone())
                         .collect();
                     if may_hold_dm(existing.kind, &ever, a, b) {
                         pinned
                     } else {
                         let id = ConversationId::generate();
-                        state.create(id, ConversationKind::Dm, None);
+                        state.create(id, ConversationKind::Dm, None, OffsetDateTime::now_utc());
                         id
                     }
                 }
             },
             (None, None) => {
                 let id = ConversationId::generate();
-                state.create(id, ConversationKind::Dm, None);
+                state.create(id, ConversationKind::Dm, None, OffsetDateTime::now_utc());
                 id
             }
         };
@@ -253,6 +356,16 @@ impl Conversations for InMemoryMessaging {
         Ok(self.state.lock().unwrap().active_members(id))
     }
 
+    async fn memberships(&self, id: ConversationId) -> Result<Vec<Membership>, MessageStoreError> {
+        let state = self.state.lock().unwrap();
+        Ok(state
+            .members
+            .iter()
+            .filter(|m| m.conversation == id)
+            .map(|m| m.membership.clone())
+            .collect())
+    }
+
     async fn ever_held(
         &self,
         actor: &ActorUri,
@@ -262,7 +375,7 @@ impl Conversations for InMemoryMessaging {
         let mut held: Vec<ConversationId> = state
             .members
             .iter()
-            .filter(|m| &m.member.actor_uri == actor && ids.contains(&m.conversation))
+            .filter(|m| &m.membership.member.actor_uri == actor && ids.contains(&m.conversation))
             .map(|m| m.conversation)
             .collect();
         held.sort();
@@ -273,21 +386,28 @@ impl Conversations for InMemoryMessaging {
     async fn mirror_group(
         &self,
         id: ConversationId,
-        snapshot: &GroupSnapshot,
+        changes: &GroupChanges,
     ) -> Result<Conversation, MessageStoreError> {
         let mut state = self.state.lock().unwrap();
         match state.conversations.iter_mut().find(|c| c.id == id) {
             Some(existing) => {
-                if let Some(name) = &snapshot.name
+                if let Some(named) = &changes.name
                     && existing.kind == ConversationKind::Group
                 {
-                    existing.name = Some(name.clone());
+                    existing.name = named.name.clone();
+                    existing.name_at = named.at;
                 }
             }
-            None => state.create(id, ConversationKind::Group, snapshot.name.clone()),
+            None => {
+                let (name, at) = changes.name.as_ref().map_or_else(
+                    || (None, OffsetDateTime::now_utc()),
+                    |named| (named.name.clone(), named.at),
+                );
+                state.create(id, ConversationKind::Group, name, at);
+            }
         }
-        for member in &snapshot.members {
-            state.add_in_role(id, member);
+        for membership in &changes.members {
+            state.hold(id, membership);
         }
         let group = state.conversations.iter().find(|c| c.id == id).cloned();
         Ok(group.expect("just mirrored"))
@@ -331,9 +451,43 @@ impl Conversations for InMemoryMessaging {
                         .filter(|m| &m.sender != actor && read.is_none_or(|r| m.created_at > *r))
                         .count() as i64,
                     last_message_at: last.map(|m| m.created_at),
+                    removed_at: None,
                 }
             })
             .collect();
+        let removed_from = state.members.iter().filter_map(|row| {
+            let departed = row.departed.as_ref()?;
+            let left_at = row.membership.left_at?;
+            (&row.membership.member.actor_uri == actor
+                && departed.removed_by.is_some()
+                && !departed.dismissed)
+                .then_some((row.conversation, departed, left_at))
+        });
+        for (id, departed, left_at) in removed_from {
+            let last = state
+                .messages
+                .iter()
+                .filter(|m| m.conversation == id && m.created_at <= left_at)
+                .max_by_key(|m| (m.created_at, m.id));
+            listed.push(ConversationSummary {
+                id,
+                kind: ConversationKind::Group,
+                name: departed.name.clone(),
+                members: departed
+                    .others
+                    .iter()
+                    .map(|actor_uri| MemberView {
+                        actor_uri: actor_uri.clone(),
+                        display_name: None,
+                        avatar_url: None,
+                    })
+                    .collect(),
+                last_message_sender: last.map(|m| m.sender.clone()),
+                unread_count: 0,
+                last_message_at: last.map(|m| m.created_at),
+                removed_at: Some(left_at),
+            });
+        }
         // Most recent first; never-active conversations last.
         listed.sort_by_key(|s| std::cmp::Reverse(s.last_message_at));
         Ok(listed)
@@ -356,12 +510,22 @@ impl Conversations for InMemoryMessaging {
             id,
             ConversationKind::Group,
             name.map(|n| n.as_str().to_owned()),
+            OffsetDateTime::now_utc(),
         );
+        let group = state.conversations.last().cloned().expect("just created");
+        // All in one step, as a store's transaction stamps it.
         for member in roster {
-            state.add_in_role(id, member);
+            state.hold(
+                id,
+                &Membership {
+                    member: member.clone(),
+                    joined_at: group.created_at,
+                    role_at: group.created_at,
+                    left_at: None,
+                },
+            );
         }
-        let group = state.conversations.iter().find(|c| c.id == id).cloned();
-        Ok(group.expect("just created"))
+        Ok(group)
     }
 
     async fn add_member(
@@ -377,13 +541,63 @@ impl Conversations for InMemoryMessaging {
         &self,
         id: ConversationId,
         actor: &ActorUri,
+        removed_by: Option<&ActorUri>,
+        at: Option<OffsetDateTime>,
     ) -> Result<bool, MessageStoreError> {
         let mut state = self.state.lock().unwrap();
-        let held = state
-            .members
-            .iter_mut()
-            .find(|m| m.conversation == id && &m.member.actor_uri == actor && m.active);
-        Ok(held.map(|m| m.active = false).is_some())
+        let name = state
+            .conversations
+            .iter()
+            .find(|c| c.id == id)
+            .and_then(|c| c.name.clone());
+        let others: Vec<ActorUri> = state
+            .active_members(id)
+            .into_iter()
+            .map(|m| m.actor_uri)
+            .filter(|a| a != actor)
+            .collect();
+        let Some(row) = state
+            .row_mut(id, actor)
+            .filter(|r| r.membership.is_active())
+        else {
+            return Ok(false);
+        };
+        row.membership.left_at = Some(at.unwrap_or_else(OffsetDateTime::now_utc));
+        row.departed = Some(Departed {
+            removed_by: removed_by.cloned(),
+            name,
+            others,
+            dismissed: false,
+        });
+        Ok(true)
+    }
+
+    async fn departure(
+        &self,
+        id: ConversationId,
+        actor: &ActorUri,
+    ) -> Result<Option<Departure>, MessageStoreError> {
+        let mut state = self.state.lock().unwrap();
+        Ok(state.row_mut(id, actor).and_then(|row| {
+            Some(Departure {
+                left_at: row.membership.left_at?,
+                removed_by: row.departed.as_ref().and_then(|d| d.removed_by.clone()),
+                dismissed: row.departed.as_ref().is_some_and(|d| d.dismissed),
+            })
+        }))
+    }
+
+    async fn dismiss(
+        &self,
+        id: ConversationId,
+        actor: &ActorUri,
+    ) -> Result<bool, MessageStoreError> {
+        let mut state = self.state.lock().unwrap();
+        let removed = state
+            .row_mut(id, actor)
+            .and_then(|row| row.departed.as_mut())
+            .filter(|d| d.removed_by.is_some() && !d.dismissed);
+        Ok(removed.map(|d| d.dismissed = true).is_some())
     }
 
     async fn set_role(
@@ -393,12 +607,10 @@ impl Conversations for InMemoryMessaging {
         role: Role,
     ) -> Result<Option<Member>, MessageStoreError> {
         let mut state = self.state.lock().unwrap();
-        let held = state
-            .members
-            .iter_mut()
-            .find(|m| m.conversation == id && &m.member.actor_uri == actor && m.active);
+        let held = state.held_mut(id, actor).filter(|m| m.is_active());
         Ok(held.map(|m| {
             m.member.role = role;
+            m.role_at = OffsetDateTime::now_utc();
             m.member.clone()
         }))
     }
@@ -415,6 +627,7 @@ impl Conversations for InMemoryMessaging {
             .find(|c| c.id == id && c.kind == ConversationKind::Group);
         Ok(group.map(|g| {
             g.name = Some(name.as_str().to_owned());
+            g.name_at = OffsetDateTime::now_utc();
             g.clone()
         }))
     }
@@ -510,6 +723,7 @@ impl Messages for InMemoryMessaging {
         &self,
         conversation: ConversationId,
         before: Option<HistoryCursor>,
+        until: Option<OffsetDateTime>,
         limit: i64,
     ) -> Result<Vec<Message>, MessageStoreError> {
         let state = self.state.lock().unwrap();
@@ -517,7 +731,10 @@ impl Messages for InMemoryMessaging {
             .messages
             .iter()
             .filter(|m| m.conversation == conversation)
-            .filter(|m| before.is_none_or(|c| (m.created_at, m.id) < (c.created_at, c.id)))
+            .filter(|m| {
+                before.is_none_or(|c| (m.created_at, m.id.as_uuid()) < (c.created_at, c.id))
+            })
+            .filter(|m| until.is_none_or(|until| m.created_at <= until))
             .map(|m| state.with_attachments(m))
             .collect();
         page.sort_by_key(|m| std::cmp::Reverse((m.created_at, m.id)));
@@ -557,8 +774,8 @@ impl Messages for InMemoryMessaging {
                         .any(|c| c.id == m.conversation && c.kind == ConversationKind::Dm)
                     && state.members.iter().any(|held| {
                         held.conversation == m.conversation
-                            && held.member.actor_uri != m.sender
-                            && !here.owns(&held.member.actor_uri)
+                            && held.membership.member.actor_uri != m.sender
+                            && !here.owns(&held.membership.member.actor_uri)
                     })
             })
             .map(|m| m.id)
@@ -850,9 +1067,15 @@ pub enum GroupNotice {
 #[derive(Default)]
 pub struct RecordingGroupNotifier {
     sent: Mutex<Vec<GroupNotice>>,
+    events: Mutex<Vec<(UserId, NamedEvent)>>,
 }
 
 impl RecordingGroupNotifier {
+    /// The conversation lines pushed, apart from the other notices.
+    pub fn events(&self) -> Vec<(UserId, NamedEvent)> {
+        self.events.lock().unwrap().clone()
+    }
+
     pub fn sent(&self) -> Vec<GroupNotice> {
         self.sent.lock().unwrap().clone()
     }
@@ -908,6 +1131,10 @@ impl GroupNotifier for RecordingGroupNotifier {
             by.clone(),
         ));
     }
+
+    fn event(&self, to: UserId, event: &NamedEvent) {
+        self.events.lock().unwrap().push((to, event.clone()));
+    }
 }
 
 /// What was sent to other instances.
@@ -926,6 +1153,35 @@ pub enum Outbound {
         to: ActorUri,
         message: MessageId,
     },
+}
+
+/// A group change told to other instances.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Announced {
+    pub from: ActorUri,
+    pub to: Vec<ActorUri>,
+    pub change: GroupChange,
+}
+
+#[derive(Default)]
+pub struct RecordingGroupFederation {
+    sent: Mutex<Vec<Announced>>,
+}
+
+impl RecordingGroupFederation {
+    pub fn sent(&self) -> Vec<Announced> {
+        self.sent.lock().unwrap().clone()
+    }
+}
+
+impl GroupFederation for RecordingGroupFederation {
+    fn announce(&self, from: &Account, to: &[ActorUri], change: &GroupChange) {
+        self.sent.lock().unwrap().push(Announced {
+            from: from.actor_uri.clone(),
+            to: to.to_vec(),
+            change: change.clone(),
+        });
+    }
 }
 
 /// Records every send; direct deliveries succeed unless built `unreachable`.
@@ -964,24 +1220,24 @@ impl MessageFederation for RecordingMessageFederation {
     fn send_to_group(
         &self,
         from: &Account,
-        to: &[RemoteActor],
+        to: &[ActorUri],
         message: &Message,
         reply_to: Option<&str>,
         group: &GroupSnapshot,
     ) {
         self.sent.lock().unwrap().push(Outbound::Group {
             from: from.actor_uri.clone(),
-            to: to.iter().map(|r| r.actor_uri.clone()).collect(),
+            to: to.to_vec(),
             message: message.id,
             reply_to: reply_to.map(str::to_owned),
             group: group.clone(),
         });
     }
 
-    fn send_edit(&self, from: &Account, to: &RemoteActor, message: &Message) {
+    fn send_edit(&self, from: &Account, to: &ActorUri, message: &Message) {
         self.sent.lock().unwrap().push(Outbound::Edit {
             from: from.actor_uri.clone(),
-            to: to.actor_uri.clone(),
+            to: to.clone(),
             message: message.id,
         });
     }
@@ -989,10 +1245,12 @@ impl MessageFederation for RecordingMessageFederation {
 
 pub mod contract {
     use crate::identity::{Account, ActorUri};
+    use time::OffsetDateTime;
+
     use crate::messaging::{
-        Attachment, Attachments, ConversationKind, Conversations, DeliveryStatus, GroupName,
-        GroupSnapshot, HistoryCursor, Member, MessageStoreError, Messages, MlsCiphertext,
-        NewMessage, RemoteAttachment, Role,
+        Attachment, Attachments, ConversationKind, Conversations, DeliveryStatus, GroupChanges,
+        GroupName, HistoryCursor, Member, Membership, MessageStoreError, Messages, MlsCiphertext,
+        NewMessage, RemoteAttachment, Role, StampedName,
     };
     use crate::{AttachmentId, ConversationId, MessageId};
 
@@ -1129,6 +1387,46 @@ pub mod contract {
         members
     }
 
+    /// `n` minutes into a mirrored group's life, as another instance stamped it.
+    fn stamp(n: i64) -> OffsetDateTime {
+        OffsetDateTime::UNIX_EPOCH + time::Duration::minutes(n)
+    }
+
+    fn holding(actor_uri: &ActorUri, role: Role, joined: i64, role_set: i64) -> Membership {
+        Membership {
+            member: member(actor_uri, role),
+            joined_at: stamp(joined),
+            role_at: stamp(role_set),
+            left_at: None,
+        }
+    }
+
+    fn named(name: &str, at: i64) -> Option<StampedName> {
+        Some(StampedName {
+            name: Some(name.to_owned()),
+            at: stamp(at),
+        })
+    }
+
+    fn by_actor(mut held: Vec<Membership>) -> Vec<Membership> {
+        held.sort_by(|a, b| a.member.actor_uri.as_str().cmp(b.member.actor_uri.as_str()));
+        held
+    }
+
+    async fn membership_of(
+        conversations: &dyn Conversations,
+        id: ConversationId,
+        actor: &ActorUri,
+    ) -> Membership {
+        conversations
+            .memberships(id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|m| &m.member.actor_uri == actor)
+            .expect("a membership")
+    }
+
     pub async fn a_dm_is_opened_once_for_a_pair_in_either_order(
         conversations: &dyn Conversations,
         alice: &Account,
@@ -1193,9 +1491,9 @@ pub mod contract {
         conversations
             .mirror_group(
                 group,
-                &GroupSnapshot {
+                &GroupChanges {
                     name: None,
-                    members: roster.clone(),
+                    members: vec![holding(&remote("ana"), Role::Admin, 0, 0)],
                 },
             )
             .await
@@ -1228,86 +1526,148 @@ pub mod contract {
         assert_eq!(conversations.members(theirs).await.unwrap().len(), 2);
     }
 
-    pub async fn a_mirrored_group_is_created_with_its_name_and_roster(
+    pub async fn a_mirrored_group_is_created_with_its_name_roster_and_stamps(
         conversations: &dyn Conversations,
         alice: &Account,
     ) {
         let id = ConversationId::generate();
-        let roster = vec![
-            member(&remote("ana"), Role::Admin),
-            member(&alice.actor_uri, Role::Member),
-        ];
+        let changes = GroupChanges {
+            name: named("crew", 10),
+            members: vec![
+                holding(&remote("ana"), Role::Admin, 0, 0),
+                holding(&alice.actor_uri, Role::Member, 5, 7),
+            ],
+        };
 
-        let group = conversations
+        let group = conversations.mirror_group(id, &changes).await.unwrap();
+
+        assert_eq!(
+            (group.id, group.kind, group.name.as_deref(), group.name_at),
+            (id, ConversationKind::Group, Some("crew"), stamp(10))
+        );
+        assert_eq!(conversations.find(id).await.unwrap(), Some(group));
+        assert_eq!(
+            by_actor(conversations.memberships(id).await.unwrap()),
+            by_actor(changes.members)
+        );
+    }
+
+    pub async fn mirroring_holds_each_member_as_given_and_leaves_the_others(
+        conversations: &dyn Conversations,
+        alice: &Account,
+    ) {
+        let id = ConversationId::generate();
+        conversations
             .mirror_group(
                 id,
-                &GroupSnapshot {
-                    name: Some("crew".to_owned()),
-                    members: roster.clone(),
+                &GroupChanges {
+                    name: named("crew", 10),
+                    members: vec![
+                        holding(&remote("ana"), Role::Admin, 0, 0),
+                        holding(&alice.actor_uri, Role::Member, 5, 5),
+                        holding(&remote("cy"), Role::Member, 5, 5),
+                    ],
                 },
             )
             .await
             .unwrap();
-
-        assert_eq!(
-            (group.id, group.kind, group.name.as_deref()),
-            (id, ConversationKind::Group, Some("crew"))
-        );
-        assert_eq!(conversations.find(id).await.unwrap(), Some(group));
-        assert_eq!(
-            sorted(conversations.members(id).await.unwrap()),
-            sorted(roster)
-        );
-    }
-
-    pub async fn mirroring_again_renames_and_converges_without_removing_anyone(
-        conversations: &dyn Conversations,
-        alice: &Account,
-    ) {
-        let id = ConversationId::generate();
-        let first = GroupSnapshot {
-            name: Some("crew".to_owned()),
-            members: vec![
-                member(&remote("ana"), Role::Admin),
-                member(&alice.actor_uri, Role::Member),
-            ],
-        };
-        conversations.mirror_group(id, &first).await.unwrap();
+        conversations
+            .remove_member(id, &remote("cy"), Some(&remote("ana")), None)
+            .await
+            .unwrap();
 
         let renamed = conversations
             .mirror_group(
                 id,
-                &GroupSnapshot {
-                    name: Some("new crew".to_owned()),
+                &GroupChanges {
+                    name: named("new crew", 20),
                     members: vec![
-                        member(&alice.actor_uri, Role::Admin),
-                        member(&remote("cy"), Role::Member),
+                        holding(&alice.actor_uri, Role::Admin, 5, 15),
+                        holding(&remote("cy"), Role::Member, 30, 30),
                     ],
                 },
             )
             .await
             .unwrap();
 
-        assert_eq!(renamed.name.as_deref(), Some("new crew"));
         assert_eq!(
-            sorted(conversations.members(id).await.unwrap()),
-            sorted(vec![
-                member(&remote("ana"), Role::Admin),
-                member(&alice.actor_uri, Role::Admin),
-                member(&remote("cy"), Role::Member),
+            (renamed.name.as_deref(), renamed.name_at),
+            (Some("new crew"), stamp(20))
+        );
+        assert_eq!(
+            by_actor(conversations.memberships(id).await.unwrap()),
+            by_actor(vec![
+                holding(&remote("ana"), Role::Admin, 0, 0),
+                holding(&alice.actor_uri, Role::Admin, 5, 15),
+                holding(&remote("cy"), Role::Member, 30, 30),
             ])
         );
+        assert_eq!(
+            conversations.departure(id, &remote("cy")).await.unwrap(),
+            None,
+            "a rejoin forgets the removal"
+        );
         let unnamed = conversations
-            .mirror_group(
-                id,
-                &GroupSnapshot {
-                    name: None,
-                    members: first.members,
-                },
+            .mirror_group(id, &GroupChanges::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            (unnamed.name.as_deref(), unnamed.name_at),
+            (Some("new crew"), stamp(20))
+        );
+    }
+
+    pub async fn a_change_made_here_is_stamped_now(
+        conversations: &dyn Conversations,
+        alice: &Account,
+        bob: &Account,
+    ) {
+        let before = OffsetDateTime::now_utc() - time::Duration::minutes(1);
+        let group = conversations
+            .create_group(
+                None,
+                &crew_of(&[
+                    (&alice.actor_uri, Role::Admin),
+                    (&bob.actor_uri, Role::Member),
+                ]),
             )
             .await
             .unwrap();
-        assert_eq!(unnamed.name.as_deref(), Some("new crew"));
+        let joined = membership_of(conversations, group.id, &bob.actor_uri).await;
+        assert!(group.name_at > before && joined.joined_at > before && joined.role_at > before);
+
+        conversations
+            .remove_member(group.id, &bob.actor_uri, None, None)
+            .await
+            .unwrap();
+        let left = membership_of(conversations, group.id, &bob.actor_uri).await;
+        let left_at = left.left_at.expect("left");
+        assert!(left_at > joined.joined_at);
+
+        conversations
+            .add_member(group.id, &member(&bob.actor_uri, Role::Member))
+            .await
+            .unwrap();
+        let back = membership_of(conversations, group.id, &bob.actor_uri).await;
+        assert!(back.is_active() && back.joined_at > left_at && back.role_at > left_at);
+
+        conversations
+            .set_role(group.id, &bob.actor_uri, Role::Admin)
+            .await
+            .unwrap();
+        let promoted = membership_of(conversations, group.id, &bob.actor_uri).await;
+        assert!(promoted.role_at > back.role_at);
+        assert_eq!(
+            promoted.joined_at, back.joined_at,
+            "a role change is no rejoin"
+        );
+
+        let renamed = conversations
+            .rename_group(group.id, &GroupName::parse("crew").unwrap())
+            .await
+            .unwrap()
+            .expect("a group");
+        assert!(renamed.name_at > group.name_at);
     }
 
     fn crew_of(names: &[(&ActorUri, Role)]) -> Vec<Member> {
@@ -1380,7 +1740,7 @@ pub mod contract {
             Some(Role::Admin)
         );
         conversations
-            .remove_member(group.id, &bob.actor_uri)
+            .remove_member(group.id, &bob.actor_uri, None, None)
             .await
             .unwrap();
         conversations
@@ -1406,7 +1766,7 @@ pub mod contract {
         let kept = conversations.create_group(None, &pair).await.unwrap().id;
         let left = conversations.create_group(None, &pair).await.unwrap().id;
         conversations
-            .remove_member(left, &bob.actor_uri)
+            .remove_member(left, &bob.actor_uri, None, None)
             .await
             .unwrap();
         let alone = conversations
@@ -1454,19 +1814,19 @@ pub mod contract {
 
         assert!(
             conversations
-                .remove_member(group.id, &bob.actor_uri)
+                .remove_member(group.id, &bob.actor_uri, None, None)
                 .await
                 .unwrap()
         );
         assert!(
             !conversations
-                .remove_member(group.id, &bob.actor_uri)
+                .remove_member(group.id, &bob.actor_uri, None, None)
                 .await
                 .unwrap()
         );
         assert!(
             !conversations
-                .remove_member(group.id, &remote("never"))
+                .remove_member(group.id, &remote("never"), None, None)
                 .await
                 .unwrap()
         );
@@ -1497,7 +1857,7 @@ pub mod contract {
             .await
             .unwrap();
         conversations
-            .remove_member(group.id, &bob.actor_uri)
+            .remove_member(group.id, &bob.actor_uri, None, None)
             .await
             .unwrap();
         let gone = conversations
@@ -1546,6 +1906,366 @@ pub mod contract {
                 .unwrap(),
             None
         );
+    }
+
+    fn uris_of(listed: &crate::messaging::ConversationSummary) -> Vec<String> {
+        let mut uris: Vec<String> = listed
+            .members
+            .iter()
+            .map(|m| m.actor_uri.to_string())
+            .collect();
+        uris.sort();
+        uris
+    }
+
+    pub async fn a_removed_member_keeps_the_group_as_it_stood_until_they_clear_it(
+        conversations: &dyn Conversations,
+        messages: &dyn Messages,
+        alice: &Account,
+        bob: &Account,
+    ) {
+        let group = conversations
+            .create_group(
+                Some(&GroupName::parse("crew").unwrap()),
+                &crew_of(&[
+                    (&alice.actor_uri, Role::Admin),
+                    (&bob.actor_uri, Role::Member),
+                    (&remote("cy"), Role::Member),
+                ]),
+            )
+            .await
+            .unwrap();
+        let before = messages
+            .record(&new_message(group.id, &alice.actor_uri))
+            .await
+            .unwrap();
+        conversations
+            .remove_member(group.id, &bob.actor_uri, Some(&alice.actor_uri), None)
+            .await
+            .unwrap();
+        conversations
+            .rename_group(group.id, &GroupName::parse("new crew").unwrap())
+            .await
+            .unwrap();
+        conversations
+            .add_member(group.id, &member(&remote("dave"), Role::Member))
+            .await
+            .unwrap();
+        messages
+            .record(&new_message(group.id, &alice.actor_uri))
+            .await
+            .unwrap();
+
+        let listed = conversations
+            .list_for(bob.id, &bob.actor_uri)
+            .await
+            .unwrap();
+        assert_eq!(listed.len(), 1);
+        let shown = &listed[0];
+        assert_eq!(
+            (shown.id, shown.name.as_deref(), shown.unread_count),
+            (group.id, Some("crew"), 0)
+        );
+        assert!(shown.removed_at.is_some());
+        let mut was_with = vec![alice.actor_uri.to_string(), remote("cy").to_string()];
+        was_with.sort();
+        assert_eq!(uris_of(shown), was_with, "the others then, not dave");
+        assert_eq!(
+            (shown.last_message_at, shown.last_message_sender.as_ref()),
+            (Some(before.created_at), Some(&alice.actor_uri))
+        );
+        let departure = conversations
+            .departure(group.id, &bob.actor_uri)
+            .await
+            .unwrap()
+            .expect("a departure");
+        assert_eq!(
+            (departure.removed_by, departure.dismissed, shown.removed_at),
+            (
+                Some(alice.actor_uri.clone()),
+                false,
+                Some(departure.left_at)
+            )
+        );
+
+        assert!(
+            conversations
+                .dismiss(group.id, &bob.actor_uri)
+                .await
+                .unwrap()
+        );
+        assert!(
+            conversations
+                .list_for(bob.id, &bob.actor_uri)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            !conversations
+                .dismiss(group.id, &bob.actor_uri)
+                .await
+                .unwrap()
+        );
+        assert!(
+            conversations
+                .departure(group.id, &bob.actor_uri)
+                .await
+                .unwrap()
+                .is_some_and(|d| d.dismissed)
+        );
+    }
+
+    pub async fn one_who_left_keeps_nothing_and_a_rejoin_forgets_a_removal(
+        conversations: &dyn Conversations,
+        alice: &Account,
+        bob: &Account,
+    ) {
+        let group = conversations
+            .create_group(
+                Some(&GroupName::parse("crew").unwrap()),
+                &crew_of(&[
+                    (&alice.actor_uri, Role::Admin),
+                    (&bob.actor_uri, Role::Member),
+                ]),
+            )
+            .await
+            .unwrap();
+        let listed = || async {
+            conversations
+                .list_for(bob.id, &bob.actor_uri)
+                .await
+                .unwrap()
+        };
+
+        conversations
+            .remove_member(group.id, &bob.actor_uri, None, None)
+            .await
+            .unwrap();
+        assert!(listed().await.is_empty(), "a left group is gone");
+        let left = conversations
+            .departure(group.id, &bob.actor_uri)
+            .await
+            .unwrap();
+        assert_eq!(left.map(|d| d.removed_by), Some(None));
+        assert!(
+            !conversations
+                .dismiss(group.id, &bob.actor_uri)
+                .await
+                .unwrap()
+        );
+
+        for cleared in [true, false] {
+            conversations
+                .add_member(group.id, &member(&bob.actor_uri, Role::Member))
+                .await
+                .unwrap();
+            conversations
+                .remove_member(group.id, &bob.actor_uri, Some(&alice.actor_uri), None)
+                .await
+                .unwrap();
+            let shown = listed().await;
+            assert!(
+                shown.len() == 1 && shown[0].removed_at.is_some(),
+                "each removal is shown, a cleared one before it or not"
+            );
+            if cleared {
+                assert!(
+                    conversations
+                        .dismiss(group.id, &bob.actor_uri)
+                        .await
+                        .unwrap()
+                );
+            }
+        }
+        conversations
+            .add_member(group.id, &member(&bob.actor_uri, Role::Member))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            conversations
+                .departure(group.id, &bob.actor_uri)
+                .await
+                .unwrap(),
+            None
+        );
+        let back = listed().await;
+        assert_eq!(back.len(), 1);
+        assert_eq!(
+            (back[0].removed_at, back[0].name.as_deref()),
+            (None, Some("crew"))
+        );
+        assert_eq!(uris_of(&back[0]), vec![alice.actor_uri.to_string()]);
+    }
+
+    pub async fn a_departure_made_elsewhere_keeps_its_stamp(
+        conversations: &dyn Conversations,
+        alice: &Account,
+        bob: &Account,
+    ) {
+        let group = conversations
+            .create_group(
+                None,
+                &crew_of(&[
+                    (&alice.actor_uri, Role::Admin),
+                    (&bob.actor_uri, Role::Member),
+                ]),
+            )
+            .await
+            .unwrap();
+        let elsewhere = OffsetDateTime::now_utc() + time::Duration::minutes(5);
+
+        conversations
+            .remove_member(
+                group.id,
+                &bob.actor_uri,
+                Some(&alice.actor_uri),
+                Some(elsewhere),
+            )
+            .await
+            .unwrap();
+
+        let departure = conversations
+            .departure(group.id, &bob.actor_uri)
+            .await
+            .unwrap()
+            .expect("a departure");
+        assert_eq!(
+            departure.left_at.unix_timestamp_nanos() / 1_000,
+            elsewhere.unix_timestamp_nanos() / 1_000,
+            "to the microsecond a store keeps"
+        );
+    }
+
+    pub async fn a_groups_events_are_paged_newest_first_within_the_readers_window(
+        conversations: &dyn Conversations,
+        events: &dyn crate::messaging::GroupEvents,
+        alice: &Account,
+    ) {
+        use crate::messaging::{EventWindow, GroupChangeKind, GroupEvent, GroupEventKind};
+        let crew = crew_of(&[(&alice.actor_uri, Role::Admin)]);
+        let group = conversations.create_group(None, &crew).await.unwrap().id;
+        let other = conversations.create_group(None, &crew).await.unwrap().id;
+        let at = |n: i64| OffsetDateTime::UNIX_EPOCH + time::Duration::minutes(n);
+        let event = |id: ConversationId, minute: i64| GroupEvent {
+            at: at(minute),
+            kind: GroupEventKind::Changed(GroupChangeKind::Added(remote(&format!("m{minute}")))),
+            ..GroupEvent::created(id, alice.actor_uri.clone(), at(minute))
+        };
+        let recorded: Vec<GroupEvent> = [10, 20, 30].map(|m| event(group, m)).to_vec();
+        for e in &recorded {
+            events.record(e).await.unwrap();
+        }
+        events.record(&event(other, 25)).await.unwrap();
+        let ids = |page: Vec<GroupEvent>| page.into_iter().map(|e| e.id).collect::<Vec<_>>();
+        let window = |since, until: Option<i64>| EventWindow {
+            since: at(since),
+            until: until.map(at),
+        };
+
+        assert_eq!(
+            ids(events.page(group, None, window(0, None), 10).await.unwrap()),
+            vec![recorded[2].id, recorded[1].id, recorded[0].id]
+        );
+        assert_eq!(
+            events.page(group, None, window(0, None), 10).await.unwrap()[0],
+            recorded[2],
+            "as recorded"
+        );
+        assert_eq!(
+            ids(events
+                .page(group, None, window(20, Some(20)), 10)
+                .await
+                .unwrap()),
+            vec![recorded[1].id],
+            "the window's ends included"
+        );
+        let cursor = HistoryCursor {
+            created_at: recorded[2].at,
+            id: recorded[2].id.as_uuid(),
+        };
+        assert_eq!(
+            ids(events
+                .page(group, Some(cursor), window(0, None), 1)
+                .await
+                .unwrap()),
+            vec![recorded[1].id]
+        );
+    }
+
+    pub async fn every_kind_of_event_comes_back_as_recorded(
+        conversations: &dyn Conversations,
+        events: &dyn crate::messaging::GroupEvents,
+        alice: &Account,
+    ) {
+        use crate::messaging::{EventWindow, GroupChangeKind, GroupEvent, GroupEventKind};
+        let crew = crew_of(&[(&alice.actor_uri, Role::Admin)]);
+        let group = conversations.create_group(None, &crew).await.unwrap().id;
+        let at = |n: i64| OffsetDateTime::UNIX_EPOCH + time::Duration::minutes(n);
+        let kinds = [
+            GroupEventKind::Created,
+            GroupEventKind::Changed(GroupChangeKind::Added(remote("bo"))),
+            GroupEventKind::Changed(GroupChangeKind::Removed(remote("bo"))),
+            GroupEventKind::Changed(GroupChangeKind::Left),
+            GroupEventKind::Changed(GroupChangeKind::Renamed(GroupName::parse("crew").unwrap())),
+            GroupEventKind::Changed(GroupChangeKind::RoleChanged(remote("cy"), Role::Admin)),
+        ];
+        let mut recorded = Vec::new();
+        for (minute, kind) in (1..).zip(kinds) {
+            let event = GroupEvent {
+                kind,
+                ..GroupEvent::created(group, alice.actor_uri.clone(), at(minute))
+            };
+            events.record(&event).await.unwrap();
+            recorded.push(event);
+        }
+
+        let mut page = events
+            .page(
+                group,
+                None,
+                EventWindow {
+                    since: at(0),
+                    until: None,
+                },
+                10,
+            )
+            .await
+            .unwrap();
+        page.reverse();
+
+        assert_eq!(page, recorded);
+    }
+
+    pub async fn history_until_a_moment_leaves_out_what_came_after(
+        conversations: &dyn Conversations,
+        messages: &dyn Messages,
+        alice: &Account,
+    ) {
+        let dm = conversations
+            .open_dm(&alice.actor_uri, &remote("bob"), None)
+            .await
+            .unwrap();
+        let first = messages
+            .record(&new_message(dm, &alice.actor_uri))
+            .await
+            .unwrap();
+        messages
+            .record(&new_message(dm, &alice.actor_uri))
+            .await
+            .unwrap();
+
+        let until = messages
+            .history(dm, None, Some(first.created_at), 10)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            until.iter().map(|m| m.id).collect::<Vec<_>>(),
+            vec![first.id]
+        );
+        assert_eq!(messages.history(dm, None, None, 10).await.unwrap().len(), 2);
     }
 
     pub async fn the_conversation_list_shows_the_others_the_last_message_and_unread_counts(
@@ -1858,7 +2578,7 @@ pub mod contract {
 
         assert!(first.is_some());
         assert_eq!(again, None, "already stored");
-        assert_eq!(messages.history(dm, None, 10).await.unwrap().len(), 1);
+        assert_eq!(messages.history(dm, None, None, 10).await.unwrap().len(), 1);
     }
 
     pub async fn a_delivery_left_pending_is_failed_once_stale(
@@ -1975,12 +2695,12 @@ pub mod contract {
             );
         }
 
-        let first = messages.history(dm, None, 2).await.unwrap();
+        let first = messages.history(dm, None, None, 2).await.unwrap();
         let cursor = HistoryCursor {
             created_at: first[1].created_at,
-            id: first[1].id,
+            id: first[1].id.as_uuid(),
         };
-        let second = messages.history(dm, Some(cursor), 2).await.unwrap();
+        let second = messages.history(dm, Some(cursor), None, 2).await.unwrap();
 
         assert_eq!(
             first.iter().map(|m| m.id).collect::<Vec<_>>(),
@@ -1994,7 +2714,13 @@ pub mod contract {
             .open_dm(&alice.actor_uri, &remote("cy"), None)
             .await
             .unwrap();
-        assert!(messages.history(other, None, 10).await.unwrap().is_empty());
+        assert!(
+            messages
+                .history(other, None, None, 10)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     pub async fn a_delivery_outcome_is_recorded_on_the_message(

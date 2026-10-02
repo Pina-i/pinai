@@ -6,7 +6,7 @@ use domain::messaging::testing::{MessageNotice, Outbound};
 use domain::social::testing::{BLOCKED, KEPT_OUT_BY_THE_SETTING, StubReachability};
 
 use super::*;
-use crate::messaging::send_group_message::tests::{Group, crew};
+use crate::messaging::send_group_message::tests::{Group, crew, dave};
 use crate::messaging::{GroupMessageCommand, SendGroupMessage};
 
 fn edit(g: &Group) -> EditMessage {
@@ -16,7 +16,6 @@ fn edit(g: &Group) -> EditMessage {
 fn edit_with(g: &Group, reach: Arc<StubReachability>) -> EditMessage {
     EditMessage::new(
         g.accounts.clone(),
-        g.remote_actors.clone(),
         g.store.clone(),
         g.store.clone(),
         reach,
@@ -61,7 +60,6 @@ async fn posted_by_alice(g: &Group) -> MessageId {
     let send = SendGroupMessage::new(
         2,
         g.accounts.clone(),
-        g.remote_actors.clone(),
         g.store.clone(),
         g.store.clone(),
         Arc::new(domain::messaging::testing::RecordingMessageNotifier::default()),
@@ -109,11 +107,13 @@ async fn an_edit_reaches_every_other_member_and_the_editors_sessions() {
     );
     assert_eq!(
         g.federation.sent(),
-        vec![Outbound::Edit {
-            from: g.alice.actor_uri.clone(),
-            to: g.carol.actor_uri.clone(),
-            message: id,
-        }]
+        [g.carol.actor_uri.clone(), dave()]
+            .map(|to| Outbound::Edit {
+                from: g.alice.actor_uri.clone(),
+                to,
+                message: id,
+            })
+            .to_vec()
     );
 }
 

@@ -1,5 +1,7 @@
 use domain::identity::testing::{account, remote_actor};
-use domain::messaging::{AttachmentView, DeliveryStatus, Member, MlsCiphertext, Role};
+use domain::messaging::{
+    AttachmentView, DeliveryStatus, Member, MlsCiphertext, Role, SnapshotMember,
+};
 use domain::{AttachmentId, ConversationId, MessageId};
 
 use super::*;
@@ -57,13 +59,19 @@ fn a_message_travels_as_a_create_whose_note_carries_the_opaque_body() {
 }
 
 #[test]
-fn a_group_message_carries_its_roster_and_a_reply_names_its_parent() {
+fn a_group_message_carries_its_roster_with_its_stamps_and_a_reply_names_its_parent() {
     let (alice, carol) = (account("alice"), remote_actor("carol_k2m9x@idp.carol.test"));
+    let at = |stamp: &str| Some(OffsetDateTime::parse(stamp, &Rfc3339).unwrap());
     let group = GroupSnapshot {
         name: Some("crew".to_owned()),
-        members: vec![Member {
-            actor_uri: alice.actor_uri.clone(),
-            role: Role::Admin,
+        name_at: at("2026-10-01T09:30:00Z"),
+        members: vec![SnapshotMember {
+            member: Member {
+                actor_uri: alice.actor_uri.clone(),
+                role: Role::Admin,
+            },
+            joined_at: at("2026-10-01T09:00:00Z"),
+            role_at: at("2026-10-01T09:15:00.25Z"),
         }],
     };
 
@@ -84,7 +92,13 @@ fn a_group_message_carries_its_roster_and_a_reply_names_its_parent() {
         note["mlsGroup"],
         json!({
             "name": "crew",
-            "members": [{ "actorUri": alice.actor_uri.as_str(), "role": "admin" }],
+            "nameAt": "2026-10-01T09:30:00Z",
+            "members": [{
+                "actorUri": alice.actor_uri.as_str(),
+                "role": "admin",
+                "joinedAt": "2026-10-01T09:00:00Z",
+                "roleAt": "2026-10-01T09:15:00.25Z",
+            }],
         })
     );
 }

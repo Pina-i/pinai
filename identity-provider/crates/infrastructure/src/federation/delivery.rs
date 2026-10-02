@@ -5,6 +5,8 @@ use federation_transport::{Signer, TransportError, UrlPolicy, signed_post};
 use jwt_utils::EdKeyPair;
 use serde_json::Value;
 
+use super::inboxes::{Inboxes, LOOKUPS_PER_SEND};
+
 /// Signs an activity with its sender's key and posts it to a peer's inbox.
 #[derive(Clone)]
 pub(crate) struct SignedDelivery {
@@ -48,6 +50,29 @@ impl SignedDelivery {
         tokio::spawn(async move {
             if let Err(e) = delivery.post(&from, &inbox, &activity).await {
                 tracing::warn!(%inbox, activity_type = %activity["type"], error = %e, "activity delivery failed");
+            }
+        });
+    }
+
+    /// Fire-and-forget, each activity to its actor at the inbox `inboxes` finds for them — found
+    /// here, off the request that sent them, since an unknown actor's instance may be slow to
+    /// answer. One with none found is not sent.
+    pub(crate) fn post_each_in_background(
+        &self,
+        inboxes: &Arc<Inboxes>,
+        from: &ActorUri,
+        posts: Vec<(ActorUri, Value)>,
+    ) {
+        let (delivery, inboxes, from) = (self.clone(), Arc::clone(inboxes), from.clone());
+        tokio::spawn(async move {
+            let mut lookups = LOOKUPS_PER_SEND;
+            for (to, activity) in posts {
+                match inboxes.of(&to, &mut lookups).await {
+                    Some(inbox) => delivery.post_in_background(&from, &inbox, activity),
+                    None => {
+                        tracing::debug!(%to, activity_type = %activity["type"], "no inbox found; not sent")
+                    }
+                }
             }
         });
     }

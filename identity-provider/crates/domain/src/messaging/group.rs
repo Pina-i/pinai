@@ -37,9 +37,16 @@ impl GroupName {
     }
 }
 
+/// How many members a group holds at most, its creator included. It also bounds what a roster
+/// another instance sends can make this one look up.
+pub const MAX_MEMBERS: usize = 50;
+
 /// The roster a new group starts with: its creator as admin, then each invited actor once, as a
-/// member.
-pub fn initial_roster(creator: &ActorUri, invited: &[ActorUri]) -> Vec<Member> {
+/// member — `MAX_MEMBERS` at most.
+pub fn initial_roster(
+    creator: &ActorUri,
+    invited: &[ActorUri],
+) -> Result<Vec<Member>, MessagingError> {
     let mut roster = vec![Member {
         actor_uri: creator.clone(),
         role: Role::Admin,
@@ -52,7 +59,15 @@ pub fn initial_roster(creator: &ActorUri, invited: &[ActorUri]) -> Vec<Member> {
             });
         }
     }
-    roster
+    if roster.len() > MAX_MEMBERS {
+        return Err(MessagingError::TooManyMembers(MAX_MEMBERS));
+    }
+    Ok(roster)
+}
+
+/// Whether a group with these active members can take one more.
+pub fn has_room(members: &[Member]) -> bool {
+    members.len() < MAX_MEMBERS
 }
 
 /// Only an admin manages a group. Someone outside it is told it does not exist.

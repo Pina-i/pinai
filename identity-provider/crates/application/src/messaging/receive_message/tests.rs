@@ -3,11 +3,16 @@ use std::sync::Arc;
 use domain::identity::testing::{InMemoryAccounts, InMemoryRemoteActors, account, remote_actor};
 use domain::identity::{Account, RemoteActor};
 use domain::messaging::testing::{
-    GroupNotice, InMemoryMessaging, MessageNotice, RecordingGroupNotifier, RecordingMessageNotifier,
+    GroupNotice, InMemoryMessaging, MessageNotice, RecordingGroupNotifier,
+    RecordingMessageNotifier, listed, unstamped,
 };
-use domain::messaging::{ConversationKind, Member, Message, MessageEvent, MessagingError, Role};
+use domain::messaging::{
+    ConversationKind, GroupSnapshot, Member, Message, MessageEvent, MessagingError, Role,
+    SnapshotMember,
+};
 use domain::social::testing::{BLOCKED, KEPT_OUT_BY_THE_SETTING, StubReachability};
 use domain::{AttachmentId, MessageId};
+use time::OffsetDateTime;
 
 use super::*;
 
@@ -85,14 +90,14 @@ fn crew(w: &World) -> GroupSnapshot {
         actor_uri: actor_uri.clone(),
         role,
     };
-    GroupSnapshot {
-        name: Some("crew".to_owned()),
-        members: vec![
+    unstamped(
+        Some("crew"),
+        &[
             member(&w.carol.actor_uri, Role::Admin),
             member(&w.alice.actor_uri, Role::Member),
             member(&w.bob.actor_uri, Role::Member),
         ],
-    }
+    )
 }
 
 #[tokio::test]
@@ -186,6 +191,168 @@ async fn a_group_message_mirrors_its_roster_and_announces_the_group_once() {
     );
 }
 
+/// The crew as Carol's instance stamped it, everyone in since `at`.
+fn crew_since(w: &World, at: OffsetDateTime) -> GroupSnapshot {
+    let snapshot = crew(w);
+    GroupSnapshot {
+        name_at: Some(at),
+        members: snapshot
+            .members
+            .into_iter()
+            .map(|m| SnapshotMember {
+                joined_at: Some(at),
+                role_at: Some(at),
+                ..m
+            })
+            .collect(),
+        ..snapshot
+    }
+}
+
+/// A crew Bob was in, then left here.
+async fn crew_bob_left(w: &World) -> ConversationId {
+    let group = ConversationId::generate();
+    let incoming = IncomingMessage {
+        group: Some(crew_since(w, OffsetDateTime::now_utc())),
+        ..from_carol(w, group)
+    };
+    receive(w).execute(incoming).await.unwrap();
+    w.store
+        .remove_member(group, &w.bob.actor_uri, None, None)
+        .await
+        .unwrap();
+    group
+}
+
+fn is_member(members: &[Member], account: &Account) -> bool {
+    members.iter().any(|m| m.actor_uri == account.actor_uri)
+}
+
+#[tokio::test]
+async fn a_roster_from_before_a_departure_brings_nobody_back() {
+    let w = world();
+    let group = crew_bob_left(&w).await;
+    let before = OffsetDateTime::now_utc() - time::Duration::hours(1);
+
+    for stale in [crew(&w), crew_since(&w, before)] {
+        let incoming = IncomingMessage {
+            group: Some(stale),
+            ..from_carol(&w, group)
+        };
+        receive(&w).execute(incoming).await.unwrap();
+
+        assert!(!is_member(&w.store.members(group).await.unwrap(), &w.bob));
+    }
+}
+
+#[tokio::test]
+async fn a_group_message_to_someone_no_longer_in_the_group_is_dropped() {
+    let w = world();
+    let group = crew_bob_left(&w).await;
+    let to_bob = IncomingMessage {
+        recipient: w.bob.id,
+        group: Some(crew(&w)),
+        ..from_carol(&w, group)
+    };
+    let activity = to_bob.activity_uri.clone();
+    let told = w.notifier.sent().len();
+
+    receive(&w).execute(to_bob).await.unwrap();
+
+    assert_eq!(w.store.find_by_activity(&activity).await.unwrap(), None);
+    assert_eq!(w.notifier.sent().len(), told, "nobody told");
+}
+
+#[tokio::test]
+async fn only_someone_coming_into_the_group_is_announced_a_join() {
+    let w = world();
+    let group = crew_bob_left(&w).await;
+    // Renamed, and Alice's role changed, after what this copy holds: news, but nobody joins.
+    let changed_at = |minutes: i64, w: &World| {
+        let later = OffsetDateTime::now_utc() + time::Duration::minutes(minutes);
+        let mut roster = crew(w);
+        roster.name_at = Some(later);
+        for m in &mut roster.members {
+            if m.member.actor_uri == w.alice.actor_uri {
+                m.role_at = Some(later);
+            }
+        }
+        roster
+    };
+    let announced = w.groups.sent().len();
+
+    for (recipient, minutes) in [(w.alice.id, 1), (w.bob.id, 2)] {
+        let incoming = IncomingMessage {
+            recipient,
+            group: Some(changed_at(minutes, &w)),
+            ..from_carol(&w, group)
+        };
+        receive(&w).execute(incoming).await.unwrap();
+    }
+
+    assert_eq!(w.groups.sent().len(), announced, "{:?}", w.groups.sent());
+}
+
+#[tokio::test]
+async fn a_rejoin_stamped_after_the_departure_brings_the_member_back() {
+    let w = world();
+    let group = crew_bob_left(&w).await;
+    let to_bob = IncomingMessage {
+        recipient: w.bob.id,
+        group: Some(crew_since(
+            &w,
+            OffsetDateTime::now_utc() + time::Duration::minutes(1),
+        )),
+        ..from_carol(&w, group)
+    };
+    let activity = to_bob.activity_uri.clone();
+
+    receive(&w).execute(to_bob).await.unwrap();
+
+    assert!(is_member(&w.store.members(group).await.unwrap(), &w.bob));
+    stored(&w, &activity).await;
+    assert!(
+        w.groups.sent().contains(&GroupNotice::Joined(
+            w.bob.id,
+            group,
+            w.carol.actor_uri.clone()
+        )),
+        "{:?}",
+        w.groups.sent()
+    );
+}
+
+#[tokio::test]
+async fn a_roster_listing_more_than_a_group_holds_is_refused_and_mirrors_nothing() {
+    let w = world();
+    let group = ConversationId::generate();
+    let mut oversized = crew(&w);
+    oversized
+        .members
+        .extend((0..domain::messaging::MAX_MEMBERS).map(|i| {
+            listed(&Member {
+                actor_uri: ActorUri::parse(&format!(
+                    "https://idp.guests.test/users/guest{i}_k2m9x"
+                ))
+                .unwrap(),
+                role: Role::Member,
+            })
+        }));
+
+    let refused = receive(&w)
+        .execute(IncomingMessage {
+            group: Some(oversized),
+            ..from_carol(&w, group)
+        })
+        .await;
+
+    assert!(
+        matches!(refused, Err(MessagingError::TooManyMembers(_))),
+        "{refused:?}"
+    );
+    assert_eq!(Conversations::find(&*w.store, group).await.unwrap(), None);
+}
+
 #[tokio::test]
 async fn a_group_message_is_filed_in_the_group_even_when_the_pair_shares_a_dm() {
     let w = world();
@@ -271,10 +438,10 @@ async fn a_group_message_from_a_non_member_is_refused_and_its_roster_ignored() {
         .unwrap();
     let mallory = ActorUri::parse("https://idp.mallory.test/users/mallory_k2m9x").unwrap();
     let mut forged = crew(&w);
-    forged.members.push(Member {
+    forged.members.push(listed(&Member {
         actor_uri: mallory.clone(),
         role: Role::Admin,
-    });
+    }));
     let before = w.notifier.sent().len();
 
     let refused = receive(&w)
@@ -300,7 +467,7 @@ async fn a_group_new_here_is_introduced_only_by_one_of_its_members() {
     let mut without_carol = crew(&w);
     without_carol
         .members
-        .retain(|m| m.actor_uri != w.carol.actor_uri);
+        .retain(|m| m.member.actor_uri != w.carol.actor_uri);
 
     let refused = receive(&w)
         .execute(IncomingMessage {

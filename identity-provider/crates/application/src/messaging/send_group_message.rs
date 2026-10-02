@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
-use domain::identity::{Accounts, RemoteActors};
+use domain::identity::Accounts;
 use domain::messaging::{
-    ConversationKind, Conversations, GroupSnapshot, Message, MessageEvent, MessageFederation,
-    MessageNotifier, Messages, MessagingError, MlsCiphertext, NewMessage,
+    ConversationKind, Conversations, GroupSnapshot, Member, Message, MessageEvent,
+    MessageFederation, MessageNotifier, Messages, MessagingError, MlsCiphertext, NewMessage,
 };
 use domain::{AttachmentId, ConversationId, MessageId, UserId};
 
@@ -27,7 +27,6 @@ pub struct Posted {
 pub struct SendGroupMessage {
     max_attachments: usize,
     accounts: Arc<dyn Accounts>,
-    remote_actors: Arc<dyn RemoteActors>,
     conversations: Arc<dyn Conversations>,
     messages: Arc<dyn Messages>,
     notifier: Arc<dyn MessageNotifier>,
@@ -38,7 +37,6 @@ impl SendGroupMessage {
     pub fn new(
         max_attachments: usize,
         accounts: Arc<dyn Accounts>,
-        remote_actors: Arc<dyn RemoteActors>,
         conversations: Arc<dyn Conversations>,
         messages: Arc<dyn Messages>,
         notifier: Arc<dyn MessageNotifier>,
@@ -47,7 +45,6 @@ impl SendGroupMessage {
         Self {
             max_attachments,
             accounts,
-            remote_actors,
             conversations,
             messages,
             notifier,
@@ -64,15 +61,20 @@ impl SendGroupMessage {
             return Err(MessagingError::TooManyAttachments(self.max_attachments));
         }
         let sender = caller(&*self.accounts, sender).await?;
-        let members = self.conversations.members(command.conversation).await?;
+        let held = self.conversations.memberships(command.conversation).await?;
+        let members: Vec<Member> = held
+            .iter()
+            .filter(|m| m.is_active())
+            .map(|m| m.member.clone())
+            .collect();
         if !members.iter().any(|m| m.actor_uri == sender.actor_uri) {
             return Err(MessagingError::ConversationNotFound);
         }
-        let name = self
+        let group = self
             .conversations
             .find(command.conversation)
             .await?
-            .and_then(|c| c.name);
+            .ok_or(MessagingError::ConversationNotFound)?;
         let parent = match command.reply_to {
             Some(id) => Some(
                 self.messages
@@ -104,13 +106,7 @@ impl SendGroupMessage {
             sender_display_name: Some(display_name_of(&sender)),
             client_id: None,
         };
-        let (local, remote) = audience(
-            &*self.accounts,
-            &*self.remote_actors,
-            &members,
-            &sender.actor_uri,
-        )
-        .await?;
+        let (local, remote) = audience(&*self.accounts, &members, &sender.actor_uri).await?;
         for member in &local {
             self.notifier.message(member.id, &event);
         }
@@ -121,7 +117,7 @@ impl SendGroupMessage {
             &remote,
             &message,
             parent.as_ref().map(|p| p.activity_uri.as_str()),
-            &GroupSnapshot { name, members },
+            &GroupSnapshot::of(&group, &held),
         );
         Ok(Posted {
             message,

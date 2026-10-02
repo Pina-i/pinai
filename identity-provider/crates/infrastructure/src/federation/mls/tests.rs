@@ -1,5 +1,6 @@
 use domain::e2ee::{CommitBlob, Epoch, WelcomeBlob};
 use domain::identity::testing::{account, remote_actor};
+use domain::messaging::testing::unstamped;
 use domain::messaging::{GroupSnapshot, Member, Role};
 use domain::{CommitId, ConversationId, DeviceId};
 
@@ -60,9 +61,9 @@ fn a_commit_travels_as_a_create_whose_note_names_its_epoch() {
 #[test]
 fn a_groups_welcome_carries_its_device_and_its_roster() {
     let (alice, carol) = (account("alice"), remote_actor("carol_k2m9x@idp.carol.test"));
-    let roster = GroupSnapshot {
-        name: Some("Weekend trip".to_owned()),
-        members: vec![
+    let roster = unstamped(
+        Some("Weekend trip"),
+        &[
             Member {
                 actor_uri: alice.actor_uri.clone(),
                 role: Role::Admin,
@@ -72,7 +73,7 @@ fn a_groups_welcome_carries_its_device_and_its_roster() {
                 role: Role::Member,
             },
         ],
-    };
+    );
     let w = welcome(Some(roster));
 
     let note = welcome_activity(&alice.actor_uri, &carol.actor_uri, &w)["object"].clone();
@@ -93,9 +94,10 @@ fn a_groups_welcome_carries_its_device_and_its_roster() {
         note["mlsGroup"],
         json!({
             "name": "Weekend trip",
+            "nameAt": null,
             "members": [
-                { "actorUri": alice.actor_uri.as_str(), "role": "admin" },
-                { "actorUri": carol.actor_uri.as_str(), "role": "member" },
+                { "actorUri": alice.actor_uri.as_str(), "role": "admin", "joinedAt": null, "roleAt": null },
+                { "actorUri": carol.actor_uri.as_str(), "role": "member", "joinedAt": null, "roleAt": null },
             ],
         })
     );

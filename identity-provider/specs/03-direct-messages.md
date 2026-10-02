@@ -26,6 +26,8 @@ CREATE TABLE conversations (
                                               -- Required for groups; defaults at creation to
                                               -- the joined display_names of all initial members
                                               -- e.g. "Alice, Bob, Harry" — editable afterwards
+  name_at      TIMESTAMPTZ NOT NULL DEFAULT now(),  -- when the name was set, wherever that was
+                                              -- (§ 10, Federated groups)
   created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
   dm_low       TEXT,                          -- a DM's pair of actor URIs, the smaller first;
   dm_high      TEXT,                          -- NULL for groups
@@ -41,15 +43,36 @@ CREATE UNIQUE INDEX conversations_dm_pair ON conversations (dm_low, dm_high)
 CREATE TABLE conversation_members (
   conversation_id  UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
   actor_uri        TEXT NOT NULL,             -- local or remote
-  joined_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  joined_at        TIMESTAMPTZ NOT NULL DEFAULT now(),  -- the latest join or rejoin
   left_at          TIMESTAMPTZ,               -- NULL = still a member
   role             TEXT NOT NULL DEFAULT 'member'
                      CHECK (role IN ('member', 'admin')),  -- group management gate; ignored for DMs
+  role_at          TIMESTAMPTZ NOT NULL DEFAULT now(),  -- when the role was set
+  -- The three stamps are set where a change is made, and copied as received elsewhere
+  -- (§ 10, Federated groups).
+  removed_by       TEXT,                      -- the admin who removed them; NULL for a leave
+  departure_view   JSONB,                     -- a removal's { name, members[] }: the group as
+                                              -- it stood, for the removed member's list
+  dismissed_at     TIMESTAMPTZ,               -- they cleared it from their list
+  -- Each departure sets these three anew (§ 10, A member removed from a group).
   PRIMARY KEY (conversation_id, actor_uri)
 );
 
 CREATE INDEX idx_conv_members_actor
   ON conversation_members (actor_uri) WHERE left_at IS NULL;
+
+-- A group's changes as its conversation shows them, between the messages (§ 10, A group's
+-- changes in its conversation). `created_at` is the change's stamp.
+CREATE TABLE conversation_events (
+  id               UUID PRIMARY KEY,
+  conversation_id  UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  kind             TEXT NOT NULL CHECK (kind IN
+                     ('created', 'added', 'removed', 'left', 'renamed', 'role_changed')),
+  actor_uri        TEXT NOT NULL,             -- who made the change
+  subject_uri      TEXT,                      -- whom it is about: added, removed, role_changed
+  detail           TEXT,                      -- the new name, or the new role
+  created_at       TIMESTAMPTZ NOT NULL
+);
 
 -- Messages — keyed by conversation_id instead of sender/recipient pair.
 -- Body is opaque MLS ciphertext; the server never decrypts.
@@ -235,6 +258,13 @@ ORDER BY created_at DESC, id DESC
 LIMIT 50;
 ```
 
+With `include=events`, a group's history is its **timeline**: its messages and its changes
+(§ 10, A group's changes in its conversation) in one keyset order on `(created_at, id)`, each item
+tagged `kind: "message"` or `kind: "event"`; the cursor names the oldest item read, of either
+kind. Without it, the history holds messages only, still tagged.
+
+A member removed from a group reads its history up to their removal (`created_at <= left_at`), until they clear the group (§ 10, A member removed from a group); anyone else outside the conversation is answered 404.
+
 The client keeps track of the oldest `(created_at, id)` it has received and passes it as the cursor for the next page request: `GET /api/dm/:conversation_id?cursor_created_at=<RFC 3339>&cursor_id=<uuid>&limit=<≤ 100>`, `cursor_created_at` exactly as the message's `created_at` was returned. Both halves are needed — either alone reads the first page, which also marks the conversation read.
 
 ---
@@ -332,6 +362,32 @@ Only messages **not sent by the caller** count as unread — this works correctl
 The `members` array contains all active participants **except the caller**. The client uses this to:
 - **DM** (`kind = 'dm'`): use `members[0].displayName` as the conversation title.
 - **Group** (`kind = 'group'`): use `conversations.name` as the title; display `members` list as the subtitle.
+
+The list also holds each group the caller was **removed** from and hasn't cleared, with
+`removed_at` set (it is `null` everywhere else). Such a row is the group as it stood at the
+removal — `name` and `members` from `departure_view`, `last_message_at` and
+`last_message_sender` from the messages up to `left_at` — with `unread_count` 0:
+
+```sql
+SELECT c.id AS conversation_id, c.kind,
+       cm.departure_view->>'name' AS name,
+       (SELECT MAX(dm.created_at) FROM direct_messages dm
+        WHERE dm.conversation_id = c.id AND dm.deleted_at IS NULL
+          AND dm.created_at <= cm.left_at) AS last_message_at,
+       (SELECT dm.sender_actor_uri FROM direct_messages dm
+        WHERE dm.conversation_id = c.id AND dm.deleted_at IS NULL
+          AND dm.created_at <= cm.left_at
+        ORDER BY dm.created_at DESC, dm.id DESC LIMIT 1) AS last_message_sender,
+       0 AS unread_count,
+       COALESCE(cm.departure_view->'members', '[]') AS members,
+       cm.left_at AS removed_at
+FROM conversation_members cm
+JOIN conversations c ON c.id = cm.conversation_id
+WHERE cm.actor_uri = $1 AND cm.left_at IS NOT NULL
+  AND cm.removed_by IS NOT NULL AND cm.dismissed_at IS NULL;
+```
+
+Both lists are merged, the most recently active first.
 
 ### Mark-as-read
 
@@ -703,6 +759,11 @@ a hard delete, so earlier messages stay attached to the conversation.
   for someone outside the group: a DM has no admin, no name and no leaving.
 - **Outsiders see nothing.** A non-member is told the group does not exist (404); a member who
   is not an admin is refused management (`403 Only group admins can do this`).
+- **A member removed from a group keeps it**, below; one who leaves doesn't.
+- **50 members at most**, the creator included (`domain::messaging::MAX_MEMBERS`). A creation
+  asking for more is `400 A group holds at most 50 members`, before any invitee is looked up; an
+  add to a full group is `409 The group is full: it holds at most 50 members`. It also bounds what
+  another instance's roster costs this one (Federated groups, below).
 - **Names** are trimmed and 1–100 characters (400 otherwise). A blank name at creation leaves
   the group unnamed, and clients title it by its members.
 - **Actor URIs** in a request are validated (400 for one that is not an actor URI); a group is
@@ -717,6 +778,7 @@ a hard delete, so earlier messages stay attached to the conversation.
 | `POST /api/groups/:id/members` | **admin** | Body `{ actor_uri }`. Adds the member as `member`; a member who left rejoins. Someone already in the group: `409 Already a member`, their role untouched. Emits `member_added`. |
 | `DELETE /api/groups/:id/members/:actor_uri` | **admin** or self | Sets `left_at`. `actor_uri` is percent-encoded; 404 `Member not found` when not a member. Emits `member_removed` to everyone who was a member, the removed one included (`removed_by_actor_uri` is `null` on self-leave). |
 | `PATCH /api/groups/:id` | **admin** | Body `{ name }` (1–100 characters). Renames the group and returns its view. Emits `group_renamed`. |
+| `DELETE /api/groups/:id` | removed member | Clears a group the caller was removed from from their list (`dismissed_at`): 204. `409 Leave the group first` for an active member, 404 for anyone else — one who left, a stranger, a DM. |
 | `POST /api/groups/:id/members/:actor_uri/role` | **admin** | Body `{ role: "admin" \| "member" }`. Promote/demote — never the last admin. Emits `member_role_changed`. |
 | `POST /api/groups/:id/messages` | member | Body `{ mls_ciphertext, reply_to_id?, attachment_ids? }`. Attachments follow the DM rules — as many as a DM may carry, each the sender's own upload, unlinked or linked to one of its `'failed'` messages — or the message is refused (400) and nothing is stored. See **Message fan-out** below. |
 
@@ -729,6 +791,42 @@ not, so neither the answer nor the names in the group view tell who here has met
 contact setting — refuses the whole request with 403 and the invitee's `actor_uri`
 (`identity-provider/specs/01-identity-federation.md § 1.7`). A remote invitee is refused by its
 own IdP, at the KeyPackage claim and on the Welcome.
+
+### A member removed from a group
+
+Removing someone (`DELETE /api/groups/:id/members/:actor_uri` by an admin) records, in the same
+statement as `left_at`, who removed them (`removed_by`) and the group as it stood then
+(`departure_view`: its name, and its other active members with the names and avatars their list
+showed). From then on, for the removed member:
+
+| | |
+|---|---|
+| `GET /api/dm` | The group stays, as it stood: `removed_at`, the frozen name and members, the last message before the removal, nothing unread |
+| `GET /api/dm/:id` | Its history up to the removal |
+| Everything else | As for anyone outside the group: the group routes 404, sending is refused, its messages no longer reach them (Federated groups, below) |
+| `member_removed` | Pushed to them as to every member, `removed_by_actor_uri` naming the admin |
+
+They learn nothing of the group after their removal: neither a rename, nor who joined, nor a
+message. `DELETE /api/groups/:id` clears it from their list, and their history of it goes too.
+Being added again brings the group back as it is now; a later removal is shown anew, whether or
+not they cleared the last one. Someone who **leaves** keeps nothing: the group leaves their list
+at once, and its history is 404 to them.
+
+```mermaid
+sequenceDiagram
+  participant A as Alice (admin)
+  participant IdP as identity-provider
+  participant B as Bob
+  A->>IdP: DELETE /api/groups/:id/members/bob
+  IdP->>IdP: left_at, removed_by = alice, departure_view = the group now
+  IdP-->>B: WS member_removed (removed_by alice)
+  B->>IdP: GET /api/dm
+  IdP-->>B: the group as it stood, removed_at
+  B->>IdP: GET /api/dm/:id
+  IdP-->>B: messages up to the removal
+  B->>IdP: DELETE /api/groups/:id
+  IdP-->>B: 204 — gone from his list
+```
 
 ### Message fan-out
 
@@ -748,7 +846,52 @@ MLS state (no per-message bootstrap), so there is no `ensureGroupExists` step.
 `group_renamed` are pushed to every **local** member of the conversation (same
 local-fanout pattern as `mls_commit`). A remote member receives `group_created`
 from their own IdP instead, the moment it materialises the group from an
-inbound snapshot — see **Federated groups** below.
+inbound snapshot — see **Federated groups** below. Each change's line in the
+conversation follows as `group_event` (A group's changes in its conversation,
+below).
+
+### A group's changes in its conversation
+
+Every change a group's copy takes is also recorded as an **event** of its conversation, a line
+clients show between the messages: "Alice created the group", "Alice added Dave", "Alice removed
+Bob", "Carol left", "Alice renamed the group to “Weekend trip”", "Alice made Dave an admin". The
+wording is the client's, from the event's `event`, names and detail.
+
+| `event` | Recorded when | `subject_uri` | Detail |
+|---|---|---|---|
+| `created` | a group is created here | — | — |
+| `added` | an add is made here or taken from elsewhere; a Welcome brings someone in (by its sender) | the member | — |
+| `removed` | a removal is made or taken | the member | — |
+| `left` | a leave is made or taken | — (the actor left) | — |
+| `renamed` | a rename is made or taken | — | `name` |
+| `role_changed` | a role change is made or taken | the member | `role` |
+
+- **Stamped as the change.** An event's `created_at` is the change's stamp, so it sits where the
+  change happened among the messages. It is written right after the change: a crash between the
+  two loses the line, never the change. A change taken only from a snapshot records nothing — a
+  snapshot doesn't say who made it; a Welcome does: its sender added its recipient.
+- **Seen from one's latest join on.** A member sees the events from their latest `joined_at` on,
+  so nobody learns what happened in a group before they were in it; a removed member sees them up
+  to and including their removal, until they clear the group (`domain::messaging::EventWindow`).
+- **In the history.** `GET /api/dm/:id?include=events` interleaves them with the messages:
+
+  ```json
+  { "kind": "event", "id": "…", "conversation_id": "…", "event": "removed",
+    "actor_uri": "https://idp.alice.com/users/alice_xK9mP", "actor_display_name": "alice",
+    "subject_uri": "https://idp.bob.com/users/pierre_q4Rt", "subject_display_name": "Pierre",
+    "created_at": "2026-10-01T10:00:00Z" }
+  ```
+
+  `name` and `role` appear for a rename and a role change; names are this instance's, as a
+  message's sender's are.
+- **Live.** Each is pushed, once recorded, to the local members who see it — those in the group
+  after the change, or before a departure — as `group_event`, the same fields in the WebSocket's
+  camelCase. A client adds the line to an open conversation and dedupes it against the history by
+  `id`.
+- **Not messages.** An event counts as no unread, plays no sound, and doesn't move the
+  conversation up the list.
+- **Trust.** Events are what the IdPs say, as the roster is; the MLS commits are the only
+  end-to-end proof of who added or removed whom.
 
 ### Federated groups
 
@@ -769,9 +912,12 @@ snapshot of the sender's roster beside the payload:
   "mlsRecipientDeviceId": "3b7e…",
   "mlsGroup": {
     "name": "Weekend trip",
+    "nameAt": "2026-10-01T09:30:00Z",
     "members": [
-      { "actorUri": "https://idp.alice.com/users/alice_xK9mP", "role": "admin" },
-      { "actorUri": "https://idp.bob.com/users/pierre_q4Rt",   "role": "member" }
+      { "actorUri": "https://idp.alice.com/users/alice_xK9mP", "role": "admin",
+        "joinedAt": "2026-10-01T09:00:00Z", "roleAt": "2026-10-01T09:00:00Z" },
+      { "actorUri": "https://idp.bob.com/users/pierre_q4Rt",   "role": "member",
+        "joinedAt": "2026-10-01T09:20:00Z", "roleAt": "2026-10-01T09:20:00Z" }
     ]
   }
 }
@@ -785,16 +931,50 @@ target. Both Welcomes and group `Create{Note}`s carry the snapshot, so a group
 whose Welcome never landed still materialises on the first message to arrive.
 1:1 DMs never carry one: their row is minted on both IdPs at friendship-accept.
 
-Because the snapshot is a point-in-time copy, an inbound Note is also what
-converges membership: the next Note a member receives upserts any roster entry
-their IdP is missing, so an add or a role change propagates without a dedicated
-activity. Convergence is **additive only** — a local member absent from the
-snapshot is left in place, because the snapshot reflects whatever the *sending*
-member's IdP mirrors and may itself be stale; honouring its absences would let
-one peer undo a removal another has already applied. A removal therefore
-converges on the hosting IdP alone. That costs nothing in confidentiality: the
-roster only routes ciphertext, and the MLS Remove commit has already cut the
-member off cryptographically.
+Each change to a group is sent on its own to the other IdPs holding its
+members (Group changes, below). The snapshot heals a copy that missed one: the
+next Note a member receives brings any add, rejoin, role change or rename it
+lacks.
+
+**The newer stamp wins, per field.** Every IdP holding a member keeps its own
+copy of the group, any admin on any of them may change it, and nothing orders
+the changes between instances. So each change is stamped once, where it is
+made — a join or rejoin `joined_at`, a departure `left_at`, a role `role_at`, a
+rename `name_at` — and every copy stores the stamps it receives as they are. A
+copy takes a field from a snapshot only when the snapshot's stamp is newer than
+its own (`domain::messaging::GroupSnapshot::changes`):
+
+| The snapshot lists… | The copy… |
+|---|---|
+| a member it never held | adds them, under the snapshot's stamps |
+| a member who left here, `joinedAt` later than the departure | takes them back: they rejoined since |
+| a member who left here, `joinedAt` earlier or missing | leaves them out: the sender's copy predates the departure |
+| an active member, a later `roleAt` | takes the role |
+| an active member, a later `joinedAt` | takes the stamp, so a departure stamped before that rejoin loses to it |
+| a later `nameAt` | takes the name |
+
+An entry without stamps — from an IdP that predates them — only ever adds a
+member never held, stamped on arrival; it changes no role, brings nobody back
+and renames nothing, except a group new here, which takes its name.
+
+No copy holds more than 50 members. A snapshot listing more is refused (400)
+and nothing is mirrored or stored; a copy takes newcomers — added or rejoining —
+only while it holds fewer than 50, in the snapshot's order. A full copy takes
+nobody new until one of its members leaves.
+
+The snapshot's absences mean nothing: it lists the sender's copy's active
+members, which may be stale, and honouring an absence would let one peer undo an
+add another has applied. A departure travels on its own, as a `Remove` or a
+`Leave` (Group changes, below).
+
+A group Note for someone who isn't an active member once its snapshot is applied
+was fanned out from a copy that still lists them: it is accepted (202) and
+dropped, neither stored nor announced. A Welcome for them is refused
+(`RecipientNotAMember`).
+
+A member's IdP fans a group message out to every remote member of its copy, met here or not:
+each is reached at their inbox as `identity-provider/specs/01-identity-federation.md § Remote
+actor cache` describes.
 
 Only a **member asserts a roster**. A group Note or Welcome is accepted from an actor this IdP
 holds as an active member of the group, or — for a group new here — one the snapshot itself
@@ -806,6 +986,70 @@ A recipient who isn't an active member yet is mirrored into a group only by some
 (`identity-provider/specs/01-identity-federation.md § 1.7`): a Welcome from someone else is refused
 (403), and a group Note is dropped (202) when its sender isn't admitted or its roster holds someone
 the recipient blocked — the Note is then neither mirrored nor filed as a 1:1.
+
+### Group changes
+
+Every change to a group made on an IdP — an add, a removal, a leave, a rename, a role — is sent,
+signed as whoever made it, to each remote member of its copy: those in the group before a removal
+or a leave, the member removed included, and those after an add, the one added included. Each
+goes to the member's inbox as a group message does, and like any activity it is best-effort.
+
+| Change | Activity | `object` |
+|---|---|---|
+| An admin adds someone | `Add` | the member's actor URI |
+| An admin removes someone | `Remove` | the member's actor URI |
+| A member leaves | `Leave`, by the member | the group's id |
+| An admin renames the group | `Update` | `{ "type": "Group", "name": "…" }` |
+| An admin changes a role | `Update` | `{ "type": "Membership", "member": "<actor URI>", "role": "admin" }` |
+
+Every one carries the group's id in `context` and the change's stamp in `published` — the
+`joined_at`, `left_at`, `name_at` or `role_at` it set where it was made:
+
+```json
+{
+  "type": "Remove",
+  "actor": "https://idp.alice.com/users/alice_xK9mP",
+  "object": "https://idp.bob.com/users/pierre_q4Rt",
+  "context": "9f1c…",
+  "published": "2026-10-01T10:00:00Z"
+}
+```
+
+The receiving IdP takes a change (`application::messaging::ReceiveGroupChange`) only when:
+
+- the group is one it holds;
+- it came through the inbox of one of the group's active members here, or of the member it adds
+  — a peer acts on a group here only through its members;
+- whoever made it may (`GroupChange::is_entitled`): an active admin as this copy holds them, or for
+  a `Leave`, the member leaving;
+- it is newer than what the copy holds (`GroupChange::effect`), as for a snapshot: a removal or a
+  leave of an active member after their join, an add of someone not in it — never held, or out
+  since before it — while the copy has room, a role or a name newer than the one held. An add of
+  someone already in the group moves their join stamp forward and tells nobody anything.
+
+Then it applies the change with the stamp it carries, and tells its local members as for a change
+made here: `member_removed` to those in the group before (the one removed included), and for the
+rest to those in it after — `group_created` to a local account the add brings in,
+`member_added` to the others, `group_renamed`, `member_role_changed`. A local account removed this
+way keeps the group as § "A member removed from a group" says. Anything else is answered 202 and
+ignored, so a peer learns nothing of who is in a group here; an activity that doesn't parse — no
+`context`, no `published`, a name outside 1–100 characters, a role neither `admin` nor `member` —
+is 400.
+
+```mermaid
+sequenceDiagram
+  participant A as Alice (admin, idp.alice.com)
+  participant IA as idp.alice.com
+  participant IB as idp.bob.com
+  participant P as Pierre (idp.bob.com)
+  A->>IA: DELETE /api/groups/:id/members/pierre
+  IA->>IA: left_at, removed_by — Pierre's departure here
+  IA->>IB: Remove { object: pierre, context, published } — to each member there
+  IB->>IB: Alice an admin here? newer than Pierre's join? — take it, stamped as sent
+  IB-->>P: WS member_removed (removed_by alice)
+  P->>IB: GET /api/dm
+  IB-->>P: the group as it stood, removed_at
+```
 
 An inbound group `Create{Note}` is filed under its `context` UUID directly.
 Opening a DM is reserved for `kind = 'dm'`:

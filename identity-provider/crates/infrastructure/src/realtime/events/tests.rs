@@ -94,3 +94,39 @@ fn every_event_is_a_type_and_its_data() {
     assert_eq!(json["type"], "dm_delivery_failed");
     assert!(json["data"].is_object());
 }
+
+/// A role change names its maker, its subject and the role, and leaves out what it hasn't.
+#[test]
+fn a_group_event_serializes_to_the_line_clients_show() {
+    let (id, conversation_id) = (Uuid::new_v4(), Uuid::new_v4());
+    let created_at = OffsetDateTime::UNIX_EPOCH;
+    let event = WsEvent::GroupEvent(GroupEventPayload {
+        id,
+        conversation_id,
+        event: "role_changed",
+        actor_uri: "https://idp.test/users/ana".to_owned(),
+        actor_display_name: Some("Ana".to_owned()),
+        subject_uri: Some("https://idp.test/users/bo".to_owned()),
+        subject_display_name: None,
+        name: None,
+        role: Some("admin"),
+        created_at,
+    });
+
+    assert_eq!(
+        serde_json::to_value(&event).unwrap(),
+        serde_json::json!({
+            "type": "group_event",
+            "data": {
+                "id": id.to_string(),
+                "conversationId": conversation_id.to_string(),
+                "event": "role_changed",
+                "actorUri": "https://idp.test/users/ana",
+                "actorDisplayName": "Ana",
+                "subjectUri": "https://idp.test/users/bo",
+                "role": "admin",
+                "createdAt": "1970-01-01T00:00:00Z",
+            },
+        })
+    );
+}

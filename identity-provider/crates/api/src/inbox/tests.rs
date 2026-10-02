@@ -483,6 +483,152 @@ async fn a_group_new_here_from_someone_who_cannot_reach_the_recipient_is_accepte
     assert!(w.app.peers.message_notifier.sent().is_empty());
 }
 
+/// Each field of a roster is taken only when its stamp is newer than the one held here.
+#[tokio::test]
+async fn a_rosters_stamps_are_read_and_an_older_name_or_role_undoes_nothing() {
+    let w = world();
+    let group = ConversationId::generate();
+    let roster = |name: &str, name_at: &str, alices_role: &str, role_at: &str| {
+        w.mls_note(
+            "application",
+            json!({
+                "context": group.to_string(),
+                "mlsGroup": {
+                    "name": name,
+                    "nameAt": name_at,
+                    "members": [
+                        { "actorUri": w.carol.actor_uri.as_str(), "role": "admin",
+                          "joinedAt": "2026-10-01T09:00:00Z", "roleAt": "2026-10-01T09:00:00Z" },
+                        { "actorUri": w.alice.actor_uri.as_str(), "role": alices_role,
+                          "joinedAt": "2026-10-01T09:00:00Z", "roleAt": role_at },
+                    ],
+                },
+            }),
+        )
+    };
+    let held = || async {
+        let (_, listed) = w
+            .app
+            .call(Method::GET, "/api/dm", Some(w.alice.id), None)
+            .await;
+        let (_, members) = w
+            .app
+            .call(
+                Method::GET,
+                &format!("/api/groups/{group}/members"),
+                Some(w.alice.id),
+                None,
+            )
+            .await;
+        let alices_role = members
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["actorUri"] == json!(w.alice.actor_uri.as_str()))
+            .map(|m| m["role"].clone());
+        (listed[0]["name"].clone(), alices_role)
+    };
+
+    for (note, expected) in [
+        (
+            roster(
+                "crew",
+                "2026-10-01T10:00:00Z",
+                "admin",
+                "2026-10-01T10:00:00Z",
+            ),
+            (json!("crew"), Some(json!("admin"))),
+        ),
+        (
+            roster(
+                "old crew",
+                "2026-10-01T09:30:00Z",
+                "member",
+                "2026-10-01T09:30:00Z",
+            ),
+            (json!("crew"), Some(json!("admin"))),
+        ),
+        (
+            roster(
+                "new crew",
+                "2026-10-01T11:00:00Z",
+                "member",
+                "2026-10-01T11:00:00Z",
+            ),
+            (json!("new crew"), Some(json!("member"))),
+        ),
+    ] {
+        let (status, _) = w
+            .deliver(&w.carol.actor_uri, w.by_carol("Create", note))
+            .await;
+
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(held().await, expected);
+    }
+}
+
+/// Carol's group, Alice in it: what Carol changes there reaches Alice's copy here.
+#[tokio::test]
+async fn a_group_change_from_its_admin_elsewhere_is_taken_and_a_malformed_one_refused() {
+    let w = world();
+    let group = ConversationId::generate();
+    let note = w.mls_note(
+        "application",
+        json!({
+            "context": group.to_string(),
+            "mlsGroup": {
+                "name": "crew",
+                "members": [
+                    { "actorUri": w.carol.actor_uri.as_str(), "role": "admin" },
+                    { "actorUri": w.alice.actor_uri.as_str(), "role": "member" },
+                ],
+            },
+        }),
+    );
+    let (mirrored, _) = w
+        .deliver(&w.carol.actor_uri, w.by_carol("Create", note))
+        .await;
+    assert_eq!(mirrored, StatusCode::ACCEPTED);
+    let stamp = (time::OffsetDateTime::now_utc() + time::Duration::minutes(1))
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap();
+    let change = |kind: &str, object: Value| {
+        let mut activity = w.by_carol(kind, object);
+        activity["context"] = json!(group.to_string());
+        activity["published"] = json!(stamp);
+        activity
+    };
+    let listed = || async {
+        w.app
+            .call(Method::GET, "/api/dm", Some(w.alice.id), None)
+            .await
+            .1[0]
+            .clone()
+    };
+
+    let (renamed, _) = w
+        .deliver(
+            &w.carol.actor_uri,
+            change("Update", json!({ "type": "Group", "name": "new crew" })),
+        )
+        .await;
+    assert_eq!(renamed, StatusCode::ACCEPTED);
+    assert_eq!(listed().await["name"], "new crew");
+
+    let (removed, _) = w
+        .deliver(
+            &w.carol.actor_uri,
+            change("Remove", json!(w.alice.actor_uri.as_str())),
+        )
+        .await;
+    assert_eq!(removed, StatusCode::ACCEPTED);
+    assert!(listed().await["removed_at"].is_string());
+
+    let undated = w.by_carol("Remove", json!(w.alice.actor_uri.as_str()));
+    let (refused, _) = w.deliver(&w.carol.actor_uri, undated).await;
+    assert_eq!(refused, StatusCode::BAD_REQUEST);
+}
+
 #[tokio::test]
 async fn a_note_that_is_not_mls_is_dropped() {
     let w = world();

@@ -6,27 +6,37 @@ use std::sync::Arc;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use domain::ConversationId;
-use domain::identity::{Account, ActorUri, RemoteActor};
+use domain::identity::{Account, ActorUri};
 use domain::messaging::{
     DeliveryFailed, DirectDelivery, GroupSnapshot, Message, MessageFederation,
 };
 use federation_transport::UrlPolicy;
 use jwt_utils::EdKeyPair;
 use serde_json::{Map, Value, json};
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
 
 use super::delivery::SignedDelivery;
+use super::inboxes::Inboxes;
 
 pub struct ApMessageFederation {
     delivery: SignedDelivery,
+    inboxes: Arc<Inboxes>,
     /// This instance's issuer: attachments are fetched from it by peers.
     issuer: String,
 }
 
 impl ApMessageFederation {
-    pub fn new(keypair: Arc<EdKeyPair>, policy: UrlPolicy, issuer: String) -> Self {
+    pub fn new(
+        keypair: Arc<EdKeyPair>,
+        policy: UrlPolicy,
+        inboxes: Arc<Inboxes>,
+        issuer: String,
+    ) -> Self {
         Self {
             delivery: SignedDelivery::new(keypair, policy),
+            inboxes,
             issuer,
         }
     }
@@ -51,30 +61,26 @@ impl MessageFederation for ApMessageFederation {
     fn send_to_group(
         &self,
         from: &Account,
-        to: &[RemoteActor],
+        to: &[ActorUri],
         message: &Message,
         reply_to: Option<&str>,
         group: &GroupSnapshot,
     ) {
-        for member in to {
-            let activity = create(
-                &self.issuer,
-                message,
-                &member.actor_uri,
-                reply_to,
-                Some(group),
-            );
-            self.delivery
-                .post_in_background(&from.actor_uri, &member.inbox, activity);
-        }
+        let posts = to
+            .iter()
+            .map(|member| {
+                let activity = create(&self.issuer, message, member, reply_to, Some(group));
+                (member.clone(), activity)
+            })
+            .collect();
+        self.delivery
+            .post_each_in_background(&self.inboxes, &from.actor_uri, posts);
     }
 
-    fn send_edit(&self, from: &Account, to: &RemoteActor, message: &Message) {
-        self.delivery.post_in_background(
-            &from.actor_uri,
-            &to.inbox,
-            update(message, &to.actor_uri),
-        );
+    fn send_edit(&self, from: &Account, to: &ActorUri, message: &Message) {
+        let posts = vec![(to.clone(), update(message, to))];
+        self.delivery
+            .post_each_in_background(&self.inboxes, &from.actor_uri, posts);
     }
 }
 
@@ -106,14 +112,22 @@ pub(super) fn mls_note(
     note
 }
 
-/// The `mlsGroup` a group Note carries: how the recipient's instance holds the group.
+/// The `mlsGroup` a group Note carries: how the recipient's instance holds the group, with the
+/// stamp of every field so the copy there takes only what is newer.
 pub(super) fn roster(group: &GroupSnapshot) -> Value {
+    let stamp = |at: Option<OffsetDateTime>| at.and_then(|at| at.format(&Rfc3339).ok());
     json!({
         "name": group.name,
+        "nameAt": stamp(group.name_at),
         "members": group
             .members
             .iter()
-            .map(|m| json!({ "actorUri": m.actor_uri.as_str(), "role": m.role.as_str() }))
+            .map(|m| json!({
+                "actorUri": m.member.actor_uri.as_str(),
+                "role": m.member.role.as_str(),
+                "joinedAt": stamp(m.joined_at),
+                "roleAt": stamp(m.role_at),
+            }))
             .collect::<Vec<_>>(),
     })
 }

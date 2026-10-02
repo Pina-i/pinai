@@ -71,8 +71,11 @@ impl ReceiveMessage {
                 .iter()
                 .any(|m| m.actor_uri == recipient.actor_uri);
             if joins {
-                let roster: Vec<ActorUri> =
-                    group.members.iter().map(|m| m.actor_uri.clone()).collect();
+                let roster: Vec<ActorUri> = group
+                    .members
+                    .iter()
+                    .map(|m| m.member.actor_uri.clone())
+                    .collect();
                 let roster_holds_someone_blocked =
                     self.reach.blocks_any(recipient.id, &roster).await?;
                 let admitted = self
@@ -103,6 +106,11 @@ impl ReceiveMessage {
                 let members = self.conversations.members(c.id).await?;
                 if !members.iter().any(|m| m.actor_uri == incoming.sender) {
                     return Err(MessagingError::ConversationNotFound);
+                }
+                // Fanned out from a copy of the group that still lists them.
+                if !members.iter().any(|m| m.actor_uri == recipient.actor_uri) {
+                    tracing::debug!(sender = %incoming.sender, "group message to a non-member dropped");
+                    return Ok(());
                 }
                 (c.id, ConversationKind::Group)
             }

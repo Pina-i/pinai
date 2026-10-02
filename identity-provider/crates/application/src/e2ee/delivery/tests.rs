@@ -9,7 +9,9 @@ use domain::e2ee::{
 };
 use domain::identity::testing::{InMemoryAccounts, InMemoryRemoteActors, account, remote_actor};
 use domain::identity::{Account, ActorUri, InstanceOrigin, RemoteActor};
-use domain::messaging::testing::{GroupNotice, InMemoryMessaging, RecordingGroupNotifier};
+use domain::messaging::testing::{
+    GroupNotice, InMemoryMessaging, RecordingGroupNotifier, unstamped,
+};
 use domain::messaging::{Conversations, GroupName, GroupSnapshot, Member, Role};
 use domain::social::testing::{BLOCKED, KEPT_OUT_BY_THE_SETTING, StubReachability};
 use domain::{ConversationId, DeviceId, UserId};
@@ -96,7 +98,6 @@ async fn world() -> World {
     World {
         append: AppendCommit::new(
             accounts.clone(),
-            remote_actors.clone(),
             store.clone(),
             delivery.clone(),
             notifier.clone(),
@@ -107,7 +108,7 @@ async fn world() -> World {
         send: SendWelcome::new(
             InstanceOrigin::parse("http://localhost:8080").unwrap(),
             accounts.clone(),
-            remote_actors,
+            remote_actors.clone(),
             store.clone(),
             delivery.clone(),
             reach.clone(),
@@ -122,11 +123,13 @@ async fn world() -> World {
         ),
         receive_welcome: ReceiveWelcome::new(
             accounts,
+            remote_actors.clone(),
             store.clone(),
             delivery.clone(),
             reach.clone(),
             notifier.clone(),
             groups.clone(),
+            store.clone(),
         ),
         sweep: SweepWelcomes::new(delivery.clone()),
         alice,
@@ -369,10 +372,10 @@ async fn a_welcome_for_a_remote_member_travels_with_the_groups_roster() {
         .unwrap();
 
     assert_eq!(sent, None);
-    let roster = GroupSnapshot {
-        name: Some("crew".to_owned()),
-        members: w.store.members(w.group).await.unwrap(),
-    };
+    let roster = GroupSnapshot::of(
+        &w.store.find(w.group).await.unwrap().expect("the group"),
+        &w.store.memberships(w.group).await.unwrap(),
+    );
     assert_eq!(
         w.federation.sent(),
         vec![SentMls::Welcome {
@@ -471,7 +474,7 @@ async fn a_welcome_goes_from_a_member_to_a_member_and_makes_nobody_one() {
 async fn a_member_who_left_hands_out_no_welcome() {
     let w = world().await;
     w.store
-        .remove_member(w.group, &w.bob.actor_uri)
+        .remove_member(w.group, &w.bob.actor_uri, None, None)
         .await
         .unwrap();
 
@@ -600,13 +603,13 @@ async fn an_inbound_commit_is_stored_once_and_reaches_the_local_members() {
 async fn an_inbound_welcome_mirrors_the_group_and_announces_it_to_the_newcomer_once() {
     let w = world().await;
     let group = ConversationId::generate();
-    let roster = GroupSnapshot {
-        name: Some("crew".to_owned()),
-        members: vec![
+    let roster = unstamped(
+        Some("crew"),
+        &[
             member(&w.carol.actor_uri, Role::Admin),
             member(&w.alice.actor_uri, Role::Member),
         ],
-    };
+    );
 
     for _ in 0..2 {
         w.receive_welcome
@@ -631,6 +634,62 @@ async fn an_inbound_welcome_mirrors_the_group_and_announces_it_to_the_newcomer_o
         .map(|(to, welcome)| (*to, welcome.conversation))
         .collect();
     assert_eq!(ready, vec![(w.alice.id, group), (w.alice.id, group)]);
+    let lines: Vec<_> = w
+        .groups
+        .events()
+        .into_iter()
+        .map(|(to, named)| {
+            (
+                to,
+                named.event.kind_name(),
+                named.event.by.clone(),
+                named.event.subject().cloned(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        lines,
+        vec![(
+            w.alice.id,
+            "added",
+            w.carol.actor_uri.clone(),
+            Some(w.alice.actor_uri.clone())
+        )],
+        "the Welcome's sender added her: once"
+    );
+}
+
+#[tokio::test]
+async fn a_welcome_from_before_the_recipients_departure_is_refused_and_brings_nobody_back() {
+    let w = world().await;
+    let group = ConversationId::generate();
+    let roster = unstamped(
+        Some("crew"),
+        &[
+            member(&w.carol.actor_uri, Role::Admin),
+            member(&w.alice.actor_uri, Role::Member),
+        ],
+    );
+    w.receive_welcome
+        .execute(w.incoming_welcome(&w.carol.actor_uri, group, Some(roster.clone())))
+        .await
+        .unwrap();
+    w.store
+        .remove_member(group, &w.alice.actor_uri, None, None)
+        .await
+        .unwrap();
+
+    let refused = w
+        .receive_welcome
+        .execute(w.incoming_welcome(&w.carol.actor_uri, group, Some(roster)))
+        .await;
+
+    assert!(
+        matches!(refused, Err(DeliveryError::RecipientNotAMember)),
+        "{refused:?}"
+    );
+    assert_eq!(w.store.members(group).await.unwrap().len(), 1);
+    assert_eq!(w.notifier.welcomes_ready().len(), 1, "only the first one");
 }
 
 #[tokio::test]
@@ -643,10 +702,7 @@ async fn an_inbound_welcome_with_an_empty_roster_mirrors_nothing_and_admits_nobo
         .execute(w.incoming_welcome(
             &w.carol.actor_uri,
             group,
-            Some(GroupSnapshot {
-                name: Some("crew".to_owned()),
-                members: Vec::new(),
-            }),
+            Some(unstamped(Some("crew"), &[])),
         ))
         .await;
 
@@ -659,10 +715,7 @@ async fn an_inbound_welcome_with_an_empty_roster_mirrors_nothing_and_admits_nobo
 #[tokio::test]
 async fn an_inbound_welcome_whose_roster_its_sender_may_not_assert_is_refused() {
     let w = world().await;
-    let roster = GroupSnapshot {
-        name: Some("crew".to_owned()),
-        members: vec![member(&w.alice.actor_uri, Role::Member)],
-    };
+    let roster = unstamped(Some("crew"), &[member(&w.alice.actor_uri, Role::Member)]);
     let group = ConversationId::generate();
 
     let refused = w
@@ -702,13 +755,13 @@ async fn claimed_welcomes_are_swept_once_their_grace_is_over() {
 }
 
 fn crew_with_alice(w: &World) -> GroupSnapshot {
-    GroupSnapshot {
-        name: Some("crew".to_owned()),
-        members: vec![
+    unstamped(
+        Some("crew"),
+        &[
             member(&w.carol.actor_uri, Role::Admin),
             member(&w.alice.actor_uri, Role::Member),
         ],
-    }
+    )
 }
 
 #[tokio::test]
@@ -786,14 +839,14 @@ async fn an_inbound_welcome_into_a_group_new_here_from_someone_kept_out_mirrors_
 async fn an_inbound_welcome_into_a_group_the_recipient_is_in_is_never_checked() {
     let w = world().await;
     w.reach.set(w.alice.id, &w.carol.actor_uri, BLOCKED);
-    let roster = GroupSnapshot {
-        name: Some("crew".to_owned()),
-        members: vec![
+    let roster = unstamped(
+        Some("crew"),
+        &[
             member(&w.alice.actor_uri, Role::Admin),
             member(&w.bob.actor_uri, Role::Member),
             member(&w.carol.actor_uri, Role::Member),
         ],
-    };
+    );
 
     let welcomed = w
         .receive_welcome

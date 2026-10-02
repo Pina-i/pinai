@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use application::messaging::{
-    AddGroupMember, CreateGroup, GroupView, ListGroupMembers, MemberProfile, RemoveGroupMember,
-    RenameGroup, SetMemberRole,
+    AddGroupMember, CreateGroup, DismissGroup, GroupView, ListGroupMembers, MemberProfile,
+    RemoveGroupMember, RenameGroup, SetMemberRole,
 };
 use axum::Json;
 use axum::extract::{Path, State};
@@ -148,6 +148,16 @@ pub async fn remove(
     remove
         .execute(user, group.into(), member_uri(&actor)?)
         .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `DELETE /api/groups/{conversation_id}`: clear a group the caller was removed from.
+pub async fn dismiss(
+    State(dismiss): State<Arc<DismissGroup>>,
+    Authenticated(user): Authenticated,
+    Path(group): Path<Uuid>,
+) -> Result<StatusCode, ApiError> {
+    dismiss.execute(user, group.into()).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

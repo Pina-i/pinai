@@ -45,6 +45,8 @@ pub enum WsEvent {
     MemberRoleChanged(MemberRoleChangedPayload),
     /// A group was renamed.
     GroupRenamed(GroupRenamedPayload),
+    /// A line a group's change adds to its conversation, for a member who sees it.
+    GroupEvent(GroupEventPayload),
     /// The account's settings changed, from one of the user's sessions. Sent
     /// to all of them, the one that made the change included.
     SettingsUpdated(SettingsPayload),
@@ -234,6 +236,29 @@ pub struct GroupRenamedPayload {
     pub conversation_id: Uuid,
     pub name: Option<String>,
     pub renamed_by_actor_uri: String,
+}
+
+/// One of a group's events, named as this instance names people — the history's event items carry
+/// the same fields.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupEventPayload {
+    pub id: Uuid,
+    pub conversation_id: Uuid,
+    /// `created`, `added`, `removed`, `left`, `renamed` or `role_changed`.
+    pub event: &'static str,
+    pub actor_uri: String,
+    pub actor_display_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subject_uri: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subject_display_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<&'static str>,
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: OffsetDateTime,
 }
 
 /// The account's whole settings document after a change — see

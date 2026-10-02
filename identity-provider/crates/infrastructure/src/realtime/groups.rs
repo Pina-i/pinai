@@ -2,12 +2,12 @@ use std::sync::Arc;
 
 use connections::Hub;
 use domain::identity::ActorUri;
-use domain::messaging::{Conversation, GroupNotifier, Member};
+use domain::messaging::{Conversation, GroupNotifier, Member, NamedEvent};
 use domain::{ConversationId, UserId};
 
 use super::events::{
-    GroupCreatedPayload, GroupRenamedPayload, MemberAddedPayload, MemberRemovedPayload,
-    MemberRoleChangedPayload, WsEvent,
+    GroupCreatedPayload, GroupEventPayload, GroupRenamedPayload, MemberAddedPayload,
+    MemberRemovedPayload, MemberRoleChangedPayload, WsEvent,
 };
 
 /// Pushes membership events to an account's live sessions; clients refetch the group on
@@ -87,6 +87,25 @@ impl GroupNotifier for HubGroupNotifier {
                 actor_uri: member.actor_uri.to_string(),
                 role: member.role.as_str().to_owned(),
                 changed_by_actor_uri: by.to_string(),
+            }),
+        );
+    }
+
+    fn event(&self, to: UserId, named: &NamedEvent) {
+        let event = &named.event;
+        self.push(
+            to,
+            WsEvent::GroupEvent(GroupEventPayload {
+                id: event.id.as_uuid(),
+                conversation_id: event.group.as_uuid(),
+                event: event.kind_name(),
+                actor_uri: event.by.to_string(),
+                actor_display_name: named.by_name.clone(),
+                subject_uri: event.subject().map(ToString::to_string),
+                subject_display_name: named.subject_name.clone(),
+                name: event.name().map(str::to_owned),
+                role: event.role().map(|role| role.as_str()),
+                created_at: event.at,
             }),
         );
     }

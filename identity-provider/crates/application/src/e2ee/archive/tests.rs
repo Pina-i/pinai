@@ -44,7 +44,7 @@ async fn world() -> World {
         .unwrap()
         .id;
     conversations
-        .remove_member(left, &alice.actor_uri)
+        .remove_member(left, &alice.actor_uri, None, None)
         .await
         .unwrap();
     let elsewhere = conversations

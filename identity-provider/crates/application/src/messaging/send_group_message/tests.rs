@@ -4,7 +4,7 @@ use domain::identity::testing::{InMemoryAccounts, InMemoryRemoteActors, account,
 use domain::identity::{Account, ActorUri, RemoteActor};
 use domain::messaging::testing::{
     InMemoryMessaging, MessageNotice, Outbound, RecordingMessageFederation,
-    RecordingMessageNotifier,
+    RecordingMessageNotifier, as_new, unstamped,
 };
 use domain::messaging::{ConversationKind, GroupSnapshot, Member, MessageEvent, Role};
 
@@ -16,7 +16,6 @@ pub(crate) struct Group {
     pub eve: Account,
     pub carol: RemoteActor,
     pub id: ConversationId,
-    pub snapshot: GroupSnapshot,
     pub store: Arc<InMemoryMessaging>,
     pub notifier: Arc<RecordingMessageNotifier>,
     pub federation: Arc<RecordingMessageFederation>,
@@ -24,28 +23,28 @@ pub(crate) struct Group {
     pub remote_actors: Arc<InMemoryRemoteActors>,
 }
 
-/// "crew": alice (admin) and bob here, carol on another instance, and dave, whose instance this
+/// "crew": alice (admin) and bob here, carol on another instance, and dave, whom this
 /// one has never heard of. Eve is local but not in it.
 pub(crate) async fn crew() -> Group {
     let (alice, bob, eve) = (account("alice"), account("bob"), account("eve"));
     let carol = remote_actor("carol_k2m9x@idp.carol.test");
-    let dave = ActorUri::parse("https://idp.dave.test/users/dave_k2m9x").unwrap();
+    let dave = dave();
     let member = |actor_uri: &ActorUri, role| Member {
         actor_uri: actor_uri.clone(),
         role,
     };
-    let snapshot = GroupSnapshot {
-        name: Some("crew".to_owned()),
-        members: vec![
+    let snapshot = unstamped(
+        Some("crew"),
+        &[
             member(&alice.actor_uri, Role::Admin),
             member(&bob.actor_uri, Role::Member),
             member(&carol.actor_uri, Role::Member),
             member(&dave, Role::Member),
         ],
-    };
+    );
     let store = Arc::new(InMemoryMessaging::default());
     let id = ConversationId::generate();
-    store.mirror_group(id, &snapshot).await.unwrap();
+    store.mirror_group(id, &as_new(&snapshot)).await.unwrap();
     Group {
         accounts: Arc::new(InMemoryAccounts::with([
             alice.clone(),
@@ -58,18 +57,20 @@ pub(crate) async fn crew() -> Group {
         eve,
         carol,
         id,
-        snapshot,
         store,
         notifier: Arc::new(RecordingMessageNotifier::default()),
         federation: Arc::new(RecordingMessageFederation::default()),
     }
 }
 
+pub(crate) fn dave() -> ActorUri {
+    ActorUri::parse("https://idp.dave.test/users/dave_k2m9x").unwrap()
+}
+
 fn send(g: &Group) -> SendGroupMessage {
     SendGroupMessage::new(
         2,
         g.accounts.clone(),
-        g.remote_actors.clone(),
         g.store.clone(),
         g.store.clone(),
         g.notifier.clone(),
@@ -112,13 +113,24 @@ async fn a_group_message_reaches_the_local_members_and_goes_out_to_the_remote_on
         g.federation.sent(),
         vec![Outbound::Group {
             from: g.alice.actor_uri.clone(),
-            to: vec![g.carol.actor_uri.clone()],
+            to: vec![g.carol.actor_uri.clone(), dave()],
             message: m.id,
             reply_to: None,
-            group: g.snapshot.clone(),
+            group: held_here(&g).await,
         }],
-        "carol gets it with the roster; dave's instance is unknown here"
+        "carol and dave get it with the roster: the federation finds dave's inbox"
     );
+}
+
+/// The group as this instance holds it, every stamp included: what its messages carry.
+pub(crate) async fn held_here(g: &Group) -> GroupSnapshot {
+    GroupSnapshot::of(
+        &Conversations::find(&*g.store, g.id)
+            .await
+            .unwrap()
+            .expect("the group"),
+        &g.store.memberships(g.id).await.unwrap(),
+    )
 }
 
 #[tokio::test]

@@ -72,19 +72,19 @@ async fn a_group_both_are_in_is_a_tie_and_one_left_or_a_dm_is_not(pool: PgPool) 
     conversations
         .create_group(
             None,
-            &initial_roster(&alice.actor_uri, &[remote_dave(), carol.actor_uri.clone()]),
+            &initial_roster(&alice.actor_uri, &[remote_dave(), carol.actor_uri.clone()]).unwrap(),
         )
         .await
         .unwrap();
     let left = conversations
         .create_group(
             None,
-            &initial_roster(&alice.actor_uri, std::slice::from_ref(&bob.actor_uri)),
+            &initial_roster(&alice.actor_uri, std::slice::from_ref(&bob.actor_uri)).unwrap(),
         )
         .await
         .unwrap();
     conversations
-        .remove_member(left.id, &bob.actor_uri)
+        .remove_member(left.id, &bob.actor_uri, None, None)
         .await
         .unwrap();
     // The DM an unfriend keeps.

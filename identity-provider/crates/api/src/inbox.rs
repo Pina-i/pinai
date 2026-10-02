@@ -3,6 +3,7 @@
 //! accounts; a redelivery is a no-op. The three inbound checks come first:
 //! specs/06-federation-authentication.md § Inbound.
 
+mod groups;
 mod notes;
 
 use axum::extract::{Path, State};
@@ -69,6 +70,9 @@ pub async fn receive(
             notes::update(&state, note, &recipient, signer).await?
         }
         ("Update", Some(person), Some("Person")) => profile_update(&state, person, signer).await?,
+        ("Add" | "Remove" | "Leave", ..) | ("Update", Some(_), Some("Group" | "Membership")) => {
+            groups::change(&state, &activity, &recipient, signer).await?
+        }
         ("Undo" | "Create" | "Update", ..) => {}
         (other, ..) => tracing::warn!(activity_type = %other, "unhandled activity type in inbox"),
     }

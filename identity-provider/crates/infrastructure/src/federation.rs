@@ -1,6 +1,8 @@
 //! Other instances, reached over ActivityPub.
 
 mod delivery;
+mod groups;
+mod inboxes;
 mod key_packages;
 mod messaging;
 mod mls;
@@ -11,6 +13,8 @@ mod remote_files;
 mod signatures;
 mod social;
 
+pub use groups::ApGroupFederation;
+pub use inboxes::Inboxes;
 pub use key_packages::SignedRemoteKeyPackages;
 pub use messaging::ApMessageFederation;
 pub use mls::ApMlsFederation;

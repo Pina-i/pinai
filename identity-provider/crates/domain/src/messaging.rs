@@ -5,7 +5,9 @@ mod attachment;
 mod ciphertext;
 mod conversation;
 mod error;
+mod event;
 mod group;
+mod group_change;
 mod message;
 mod ports;
 #[cfg(any(test, feature = "test-utils"))]
@@ -17,14 +19,18 @@ pub use attachment::{
 };
 pub use ciphertext::MlsCiphertext;
 pub use conversation::{
-    Conversation, ConversationKind, ConversationSummary, GroupSnapshot, Member, MemberView, Role,
-    may_hold_dm,
+    Conversation, ConversationKind, ConversationSummary, Departure, GroupChanges, GroupSnapshot,
+    Member, MemberView, Membership, Role, SnapshotMember, StampedName, may_hold_dm,
 };
 pub use error::{AttachmentError, MessageStoreError, MessagingError, ObjectStoreError};
-pub use group::{GroupName, authorize_admin, initial_roster, may_stop_being_admin};
+pub use event::{EventWindow, GroupEvent, GroupEventKind, NamedEvent};
+pub use group::{
+    GroupName, MAX_MEMBERS, authorize_admin, has_room, initial_roster, may_stop_being_admin,
+};
+pub use group_change::{GroupChange, GroupChangeKind, GroupEffect};
 pub use message::{DeliveryStatus, HistoryCursor, Message, NewMessage};
 pub use ports::{
     Attachments, BlobTokenError, BlobTokens, Conversations, DeliveryFailed, DirectDelivery,
-    GroupNotifier, MessageEvent, MessageFederation, MessageNotifier, Messages, ObjectStore,
-    RemoteFiles,
+    GroupEvents, GroupFederation, GroupNotifier, MessageEvent, MessageFederation, MessageNotifier,
+    Messages, ObjectStore, RemoteFiles,
 };

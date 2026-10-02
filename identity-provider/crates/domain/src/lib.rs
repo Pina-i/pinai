@@ -10,7 +10,7 @@ pub mod social;
 pub mod validation;
 
 pub use ids::{
-    AttachmentId, CommitId, ConnectionId, ConversationId, DeviceId, FriendshipId, MessageId,
-    TicketId, UserId, WelcomeId,
+    AttachmentId, CommitId, ConnectionId, ConversationId, DeviceId, FriendshipId, GroupEventId,
+    MessageId, TicketId, UserId, WelcomeId,
 };
 pub use validation::ValidationError;

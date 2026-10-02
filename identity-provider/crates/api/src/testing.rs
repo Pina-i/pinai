@@ -13,10 +13,10 @@ use application::e2ee::{
 };
 use application::identity::{FindAccount, SearchAccounts, WebFinger};
 use application::messaging::{
-    AddGroupMember, CreateGroup, DeliverDirectMessage, EditMessage, ListConversations,
-    ListGroupMembers, LoadHistory, MarkRead, OpenAttachment, ReadBlob, ReceiveEdit, ReceiveMessage,
-    RemoveGroupMember, RenameGroup, SendDirectMessage, SendGroupMessage, ServePeerContent,
-    SetMemberRole, UploadAttachments,
+    AddGroupMember, CreateGroup, DeliverDirectMessage, DismissGroup, EditMessage,
+    ListConversations, ListGroupMembers, LoadHistory, MarkRead, OpenAttachment, ReadBlob,
+    ReceiveEdit, ReceiveGroupChange, ReceiveMessage, RemoveGroupMember, RenameGroup,
+    SendDirectMessage, SendGroupMessage, ServePeerContent, SetMemberRole, UploadAttachments,
 };
 use application::presence::{
     Connect, Disconnect, Heartbeat, OpenPeerStream, ReadPresence, ServePeerPresence, SetPresence,
@@ -54,7 +54,8 @@ use domain::identity::{Account, Accounts, ActorUri, InstanceOrigin, RemoteActor,
 use domain::messaging::AttachmentLimits;
 use domain::messaging::testing::{
     InMemoryMessaging, InMemoryObjects, InMemoryRemoteFiles, PlainBlobTokens,
-    RecordingGroupNotifier, RecordingMessageFederation, RecordingMessageNotifier,
+    RecordingGroupFederation, RecordingGroupNotifier, RecordingMessageFederation,
+    RecordingMessageNotifier,
 };
 use domain::presence::testing::{
     InMemoryAudience, InMemoryMissedEvents, QueuedFeed, RecordingBus, RecordingPeerStreams,
@@ -140,6 +141,7 @@ impl TestApp {
         let message_notifier = Arc::new(RecordingMessageNotifier::default());
         let message_federation = Arc::new(RecordingMessageFederation::default());
         let group_notifier = Arc::new(RecordingGroupNotifier::default());
+        let group_federation = Arc::new(RecordingGroupFederation::default());
         let objects = Arc::new(InMemoryObjects::default());
         let limits = AttachmentLimits {
             max_files: 5,
@@ -323,11 +325,13 @@ impl TestApp {
             )),
             receive_welcome: Arc::new(ReceiveWelcome::new(
                 accounts.clone(),
+                remote_actors.clone(),
                 store.clone(),
                 delivery.clone(),
                 reach.clone(),
                 mls_notifier.clone(),
                 group_notifier.clone(),
+                store.clone(),
             )),
             receive_profile_update: Arc::new(ReceiveProfileUpdate::new(
                 origin.clone(),
@@ -439,7 +443,6 @@ impl TestApp {
             send_group_message: Arc::new(SendGroupMessage::new(
                 5,
                 accounts.clone(),
-                remote_actors.clone(),
                 store.clone(),
                 store.clone(),
                 message_notifier.clone(),
@@ -447,7 +450,6 @@ impl TestApp {
             )),
             edit_message: Arc::new(EditMessage::new(
                 accounts.clone(),
-                remote_actors.clone(),
                 store.clone(),
                 store.clone(),
                 reach.clone(),
@@ -457,6 +459,7 @@ impl TestApp {
             load_history: Arc::new(LoadHistory::new(
                 accounts.clone(),
                 remote_actors.clone(),
+                store.clone(),
                 store.clone(),
                 store.clone(),
             )),
@@ -469,6 +472,7 @@ impl TestApp {
                 store.clone(),
                 reach.clone(),
                 group_notifier.clone(),
+                store.clone(),
             )),
             list_group_members: Arc::new(ListGroupMembers::new(
                 accounts.clone(),
@@ -482,23 +486,40 @@ impl TestApp {
                 store.clone(),
                 reach.clone(),
                 group_notifier.clone(),
+                group_federation.clone(),
+                store.clone(),
             )),
             remove_group_member: Arc::new(RemoveGroupMember::new(
                 accounts.clone(),
+                remote_actors.clone(),
                 store.clone(),
                 group_notifier.clone(),
+                group_federation.clone(),
+                store.clone(),
+            )),
+            dismiss_group: Arc::new(DismissGroup::new(accounts.clone(), store.clone())),
+            receive_group_change: Arc::new(ReceiveGroupChange::new(
+                accounts.clone(),
+                remote_actors.clone(),
+                store.clone(),
+                group_notifier.clone(),
+                store.clone(),
             )),
             rename_group: Arc::new(RenameGroup::new(
                 accounts.clone(),
                 remote_actors.clone(),
                 store.clone(),
                 group_notifier.clone(),
+                group_federation.clone(),
+                store.clone(),
             )),
             set_member_role: Arc::new(SetMemberRole::new(
                 accounts.clone(),
                 remote_actors.clone(),
                 store.clone(),
                 group_notifier,
+                group_federation,
+                store.clone(),
             )),
             attachment_limits: limits.clone(),
             upload_attachments: Arc::new(UploadAttachments::new(
@@ -545,7 +566,6 @@ impl TestApp {
             claim_limiter: Arc::new(RateLimiter::new(60, 1.0)),
             append_commit: Arc::new(AppendCommit::new(
                 accounts.clone(),
-                remote_actors.clone(),
                 store.clone(),
                 delivery.clone(),
                 mls_notifier.clone(),

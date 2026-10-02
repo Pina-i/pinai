@@ -34,6 +34,12 @@ pub enum MessagingError {
     LastAdmin,
     #[error("already a member of the group")]
     AlreadyAMember,
+    #[error("a group holds at most {0} members")]
+    TooManyMembers(usize),
+    #[error("the group is full: it holds at most {0} members")]
+    GroupFull(usize),
+    #[error("only a group one was removed from can be cleared from one's list")]
+    StillAMember,
     #[error("the sender blocked the recipient")]
     YouBlocked,
     /// A local invitee who doesn't admit the adder, whatever the cause.

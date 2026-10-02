@@ -27,19 +27,26 @@ async fn a_pair_that_shares_a_dm_keeps_it_whatever_id_is_pinned() {
 }
 
 #[tokio::test]
-async fn a_mirrored_group_is_created_with_its_name_and_roster() {
+async fn a_mirrored_group_is_created_with_its_name_roster_and_stamps() {
     let store = InMemoryMessaging::default();
-    contract::a_mirrored_group_is_created_with_its_name_and_roster(&store, &account("alice")).await;
-}
-
-#[tokio::test]
-async fn mirroring_again_renames_and_converges_without_removing_anyone() {
-    let store = InMemoryMessaging::default();
-    contract::mirroring_again_renames_and_converges_without_removing_anyone(
+    contract::a_mirrored_group_is_created_with_its_name_roster_and_stamps(
         &store,
         &account("alice"),
     )
     .await;
+}
+
+#[tokio::test]
+async fn mirroring_holds_each_member_as_given_and_leaves_the_others() {
+    let store = InMemoryMessaging::default();
+    contract::mirroring_holds_each_member_as_given_and_leaves_the_others(&store, &account("alice"))
+        .await;
+}
+
+#[tokio::test]
+async fn a_change_made_here_is_stamped_now() {
+    let store = InMemoryMessaging::default();
+    contract::a_change_made_here_is_stamped_now(&store, &account("alice"), &account("bob")).await;
 }
 
 #[tokio::test]
@@ -252,4 +259,62 @@ async fn the_conversations_an_actor_ever_held_include_those_it_left() {
         &account("bob"),
     )
     .await;
+}
+
+#[tokio::test]
+async fn a_removed_member_keeps_the_group_as_it_stood_until_they_clear_it() {
+    let store = InMemoryMessaging::default();
+    contract::a_removed_member_keeps_the_group_as_it_stood_until_they_clear_it(
+        &store,
+        &store,
+        &account("alice"),
+        &account("bob"),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn one_who_left_keeps_nothing_and_a_rejoin_forgets_a_removal() {
+    let store = InMemoryMessaging::default();
+    contract::one_who_left_keeps_nothing_and_a_rejoin_forgets_a_removal(
+        &store,
+        &account("alice"),
+        &account("bob"),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn history_until_a_moment_leaves_out_what_came_after() {
+    let store = InMemoryMessaging::default();
+    contract::history_until_a_moment_leaves_out_what_came_after(&store, &store, &account("alice"))
+        .await;
+}
+
+#[tokio::test]
+async fn a_departure_made_elsewhere_keeps_its_stamp() {
+    let store = InMemoryMessaging::default();
+    contract::a_departure_made_elsewhere_keeps_its_stamp(
+        &store,
+        &account("alice"),
+        &account("bob"),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_groups_events_are_paged_newest_first_within_the_readers_window() {
+    let store = InMemoryMessaging::default();
+    contract::a_groups_events_are_paged_newest_first_within_the_readers_window(
+        &store,
+        &store,
+        &account("alice"),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn every_kind_of_event_comes_back_as_recorded() {
+    let store = InMemoryMessaging::default();
+    contract::every_kind_of_event_comes_back_as_recorded(&store, &store, &account("alice")).await;
 }

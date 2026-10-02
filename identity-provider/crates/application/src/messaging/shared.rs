@@ -1,6 +1,10 @@
-use domain::identity::{Account, Accounts, ActorUri, RemoteActor, RemoteActors};
-use domain::messaging::{Conversations, GroupNotifier, GroupSnapshot, Member, MessagingError};
+use domain::identity::{Account, Accounts, ActorUri, RemoteActors};
+use domain::messaging::{
+    Conversations, GroupEvent, GroupEvents, GroupNotifier, GroupSnapshot, MAX_MEMBERS, Member,
+    MessagingError, NamedEvent,
+};
 use domain::{ConversationId, UserId};
+use time::OffsetDateTime;
 
 /// How a local account signs its messages: `user@domain`.
 pub(crate) fn address_of(account: &Account) -> String {
@@ -32,20 +36,18 @@ pub(crate) async fn caller(accounts: &dyn Accounts, id: UserId) -> Result<Accoun
         .ok_or_else(|| MessagingError::Unexpected(anyhow::anyhow!("the caller's account is gone")))
 }
 
-/// Who a conversation's other members are: accounts of this instance, and remote actors it
-/// knows. A member it knows nothing of can't be reached and is left out.
+/// Who a conversation's other members are: accounts of this instance, and the others, whom the
+/// federation reaches at their inboxes.
 pub(crate) async fn audience(
     accounts: &dyn Accounts,
-    remote_actors: &dyn RemoteActors,
     members: &[Member],
     except: &ActorUri,
-) -> Result<(Vec<Account>, Vec<RemoteActor>), MessagingError> {
+) -> Result<(Vec<Account>, Vec<ActorUri>), MessagingError> {
     let (mut local, mut remote) = (Vec::new(), Vec::new());
     for member in members.iter().filter(|m| &m.actor_uri != except) {
-        if let Some(account) = accounts.find_by_uri(&member.actor_uri).await? {
-            local.push(account);
-        } else if let Some(actor) = remote_actors.find(&member.actor_uri).await? {
-            remote.push(actor);
+        match accounts.find_by_uri(&member.actor_uri).await? {
+            Some(account) => local.push(account),
+            None => remote.push(member.actor_uri.clone()),
         }
     }
     Ok((local, remote))
@@ -82,8 +84,55 @@ pub(crate) async fn sender_name(
         .and_then(|actor| actor.display_name))
 }
 
-/// Mirror the roster a group message or Welcome carries. Every one re-asserts it, so an add or
-/// a role change converges on the next one a member receives.
+/// An event with the names this instance shows its maker and its subject by.
+pub(crate) async fn name_event(
+    accounts: &dyn Accounts,
+    remote_actors: &dyn RemoteActors,
+    event: GroupEvent,
+) -> Result<NamedEvent, MessagingError> {
+    let by_name = sender_name(accounts, remote_actors, &event.by).await?;
+    let subject_name = match event.subject() {
+        Some(subject) => sender_name(accounts, remote_actors, subject).await?,
+        None => None,
+    };
+    Ok(NamedEvent {
+        event,
+        by_name,
+        subject_name,
+    })
+}
+
+/// A group's changes as lines of its conversation: each recorded, then pushed to the members of
+/// this instance who see it.
+pub(crate) struct Timeline<'a> {
+    pub(crate) accounts: &'a dyn Accounts,
+    pub(crate) remote_actors: &'a dyn RemoteActors,
+    pub(crate) events: &'a dyn GroupEvents,
+    pub(crate) notifier: &'a dyn GroupNotifier,
+}
+
+impl Timeline<'_> {
+    /// `members` see it: those in the group after the change, or before a departure.
+    pub(crate) async fn record(
+        &self,
+        members: &[Member],
+        event: GroupEvent,
+    ) -> Result<(), MessagingError> {
+        self.events.record(&event).await?;
+        let named = name_event(self.accounts, self.remote_actors, event).await?;
+        for member in members {
+            if let Some(local) = self.accounts.find_by_uri(&member.actor_uri).await? {
+                self.notifier.event(local.id, &named);
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Mirror the roster a group message or Welcome carries, taking from it only what is newer than
+/// this copy holds (`GroupSnapshot::changes`): an add or a role change converges on the next one
+/// a member receives, and a stale one undoes nothing. Answers the recipient's join stamp when it
+/// brings them in.
 pub(crate) async fn mirror(
     conversations: &dyn Conversations,
     notifier: &dyn GroupNotifier,
@@ -91,25 +140,40 @@ pub(crate) async fn mirror(
     sender: &ActorUri,
     id: ConversationId,
     snapshot: &GroupSnapshot,
-) -> Result<(), MessagingError> {
+) -> Result<Option<OffsetDateTime>, MessagingError> {
     if snapshot.members.is_empty() {
-        return Ok(());
+        return Ok(None);
+    }
+    // No copy of a group holds more: this one is not a group's.
+    if snapshot.members.len() > MAX_MEMBERS {
+        return Err(MessagingError::TooManyMembers(MAX_MEMBERS));
     }
     let local = conversations.find(id).await?;
-    let members = conversations.members(id).await?;
+    let held = conversations.memberships(id).await?;
+    let members: Vec<Member> = held
+        .iter()
+        .filter(|m| m.is_active())
+        .map(|m| m.member.clone())
+        .collect();
     // A roster only a member may assert: anyone else could add themselves to the group here.
     if !snapshot.may_be_asserted_by(sender, local.as_ref(), &members) {
         return Err(MessagingError::ConversationNotFound);
     }
-    if snapshot.is_mirrored_by(local.as_ref(), &members) {
-        return Ok(());
+    let changes = snapshot.changes(local.as_ref(), &held, OffsetDateTime::now_utc());
+    if changes.is_empty() {
+        return Ok(None);
     }
-    let joins = !members.iter().any(|m| m.actor_uri == recipient.actor_uri);
-    let group = conversations.mirror_group(id, snapshot).await?;
+    let joined_at = changes
+        .members
+        .iter()
+        .find(|m| m.member.actor_uri == recipient.actor_uri)
+        .map(|m| m.joined_at)
+        .filter(|_| !members.iter().any(|m| m.actor_uri == recipient.actor_uri));
+    let group = conversations.mirror_group(id, &changes).await?;
     // Gated on the recipient's own membership: a second member's first message lands in a group
     // already mirrored here, and still has to reach them.
-    if joins {
+    if joined_at.is_some() {
         notifier.joined(recipient.id, &group, snapshot.creator(sender));
     }
-    Ok(())
+    Ok(joined_at)
 }

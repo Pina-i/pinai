@@ -5,7 +5,8 @@ use crate::{AttachmentId, ConversationId, MessageId, UserId};
 
 use super::{
     Attachment, ByteStream, Conversation, ConversationKind, ConversationSummary, DeliveryStatus,
-    GroupName, GroupSnapshot, HistoryCursor, Member, Message, MessageStoreError, MlsCiphertext,
+    Departure, EventWindow, GroupChange, GroupChanges, GroupEvent, GroupName, GroupSnapshot,
+    HistoryCursor, Member, Membership, Message, MessageStoreError, MlsCiphertext, NamedEvent,
     NewMessage, ObjectStoreError, RemoteAttachment, Role,
 };
 
@@ -26,6 +27,9 @@ pub trait Conversations: Send + Sync {
     /// The active members, in their roles.
     async fn members(&self, id: ConversationId) -> Result<Vec<Member>, MessageStoreError>;
 
+    /// Every membership ever held, active or not, with its stamps.
+    async fn memberships(&self, id: ConversationId) -> Result<Vec<Membership>, MessageStoreError>;
+
     /// The conversations among `ids` that `actor` is, or once was, a member of.
     async fn ever_held(
         &self,
@@ -33,16 +37,17 @@ pub trait Conversations: Send + Sync {
         ids: &[ConversationId],
     ) -> Result<Vec<ConversationId>, MessageStoreError>;
 
-    /// Mirror a group another instance advertised: create it when new, take its name, and hold
-    /// every member of the snapshot in its role.
+    /// Take what another instance's snapshot changed (`GroupSnapshot::changes`): create the group
+    /// when new, under the name the changes carry, and hold each member exactly as given.
     async fn mirror_group(
         &self,
         id: ConversationId,
-        snapshot: &GroupSnapshot,
+        changes: &GroupChanges,
     ) -> Result<Conversation, MessageStoreError>;
 
-    /// The account's conversations, the most recently active first. Messages from actors the
-    /// account blocked never count as unread.
+    /// The account's conversations, the most recently active first, and the groups it was
+    /// removed from and hasn't cleared, as they stood then. Messages from actors the account
+    /// blocked never count as unread.
     async fn list_for(
         &self,
         user: UserId,
@@ -51,7 +56,8 @@ pub trait Conversations: Send + Sync {
 
     async fn mark_read(&self, user: UserId, id: ConversationId) -> Result<(), MessageStoreError>;
 
-    /// A new group with its whole roster, in one step.
+    /// A new group with its whole roster, in one step. This and the changes below are made here,
+    /// so they are stamped now.
     async fn create_group(
         &self,
         name: Option<&GroupName>,
@@ -66,8 +72,28 @@ pub trait Conversations: Send + Sync {
         member: &Member,
     ) -> Result<(), MessageStoreError>;
 
-    /// `false` when `actor` was not an active member.
+    /// `false` when `actor` was not an active member. `removed_by` is the admin who removed them,
+    /// `None` when they leave: a removed member keeps the group's name and its other members as
+    /// they stand now, for their list, until they clear it. `at` is the departure's stamp when
+    /// another instance made it; `None` stamps it now.
     async fn remove_member(
+        &self,
+        id: ConversationId,
+        actor: &ActorUri,
+        removed_by: Option<&ActorUri>,
+        at: Option<OffsetDateTime>,
+    ) -> Result<bool, MessageStoreError>;
+
+    /// How `actor` left the group: `None` while they're in it, or if they never were.
+    async fn departure(
+        &self,
+        id: ConversationId,
+        actor: &ActorUri,
+    ) -> Result<Option<Departure>, MessageStoreError>;
+
+    /// Clear a group `actor` was removed from from their list. `false` when they weren't removed
+    /// from it, or already cleared it.
+    async fn dismiss(
         &self,
         id: ConversationId,
         actor: &ActorUri,
@@ -125,11 +151,13 @@ pub trait Messages: Send + Sync {
         ciphertext: &MlsCiphertext,
     ) -> Result<Option<Message>, MessageStoreError>;
 
-    /// A page of a conversation, newest first, before `cursor`; deleted messages left out.
+    /// A page of a conversation, newest first, before `cursor` and no later than `until`;
+    /// deleted messages left out.
     async fn history(
         &self,
         conversation: ConversationId,
         before: Option<HistoryCursor>,
+        until: Option<OffsetDateTime>,
         limit: i64,
     ) -> Result<Vec<Message>, MessageStoreError>;
 
@@ -189,6 +217,30 @@ pub trait GroupNotifier: Send + Sync {
     );
     fn renamed(&self, to: UserId, group: &Conversation, by: &ActorUri);
     fn role_changed(&self, to: UserId, group: ConversationId, member: &Member, by: &ActorUri);
+    /// The line a change adds to the conversation, for a member who sees it.
+    fn event(&self, to: UserId, event: &NamedEvent);
+}
+
+/// The changes each group's conversation shows between its messages.
+#[async_trait::async_trait]
+pub trait GroupEvents: Send + Sync {
+    async fn record(&self, event: &GroupEvent) -> Result<(), MessageStoreError>;
+
+    /// A page of a conversation's events, newest first, before `cursor` and within `window`.
+    async fn page(
+        &self,
+        conversation: ConversationId,
+        before: Option<HistoryCursor>,
+        window: EventWindow,
+        limit: i64,
+    ) -> Result<Vec<GroupEvent>, MessageStoreError>;
+}
+
+/// The group changes made here, told to the other instances holding the group's members.
+pub trait GroupFederation: Send + Sync {
+    /// To each of `to`, reached as `MessageFederation::send_to_group` reaches them.
+    /// Fire-and-forget: a copy that misses one converges on the next change about that member.
+    fn announce(&self, from: &Account, to: &[ActorUri], change: &GroupChange);
 }
 
 /// A 1:1 message on its way to the recipient's instance.
@@ -211,19 +263,21 @@ pub trait MessageFederation: Send + Sync {
     /// Deliver a 1:1 message. Awaited, so that its outcome can be recorded on the message.
     async fn deliver_direct(&self, delivery: &DirectDelivery) -> Result<(), DeliveryFailed>;
 
-    /// Fan a group message out to its remote members, each copy carrying the roster.
-    /// Fire-and-forget: a group message has no delivery status.
+    /// Fan a group message out to its remote members, each copy carrying the roster. Each is
+    /// reached at the inbox this instance cached, else the one their own instance names — a
+    /// member none of this instance's accounts ever met is still a member. Fire-and-forget: a
+    /// group message has no delivery status.
     fn send_to_group(
         &self,
         from: &Account,
-        to: &[RemoteActor],
+        to: &[ActorUri],
         message: &Message,
         reply_to: Option<&str>,
         group: &GroupSnapshot,
     );
 
-    /// A message's new ciphertext. Fire-and-forget.
-    fn send_edit(&self, from: &Account, to: &RemoteActor, message: &Message);
+    /// A message's new ciphertext, reached as `send_to_group` reaches them. Fire-and-forget.
+    fn send_edit(&self, from: &Account, to: &ActorUri, message: &Message);
 }
 
 /// Attachments' records: uploads here, and those recorded for delivered messages.

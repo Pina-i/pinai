@@ -19,7 +19,8 @@ fn a_group_name_is_trimmed_and_never_empty() {
 
 #[test]
 fn a_new_group_starts_with_its_creator_as_admin_and_each_invitee_once() {
-    let roster = initial_roster(&uri("ana"), &[uri("bo"), uri("ana"), uri("cy"), uri("bo")]);
+    let roster =
+        initial_roster(&uri("ana"), &[uri("bo"), uri("ana"), uri("cy"), uri("bo")]).unwrap();
 
     assert_eq!(
         roster,
@@ -29,6 +30,45 @@ fn a_new_group_starts_with_its_creator_as_admin_and_each_invitee_once() {
             member("cy", Role::Member),
         ]
     );
+}
+
+fn invitees(count: usize) -> Vec<ActorUri> {
+    (0..count).map(|i| uri(&format!("guest{i}"))).collect()
+}
+
+#[test]
+fn a_new_group_holds_fifty_members_its_creator_included() {
+    let mut full = invitees(MAX_MEMBERS - 1);
+
+    assert_eq!(
+        initial_roster(&uri("ana"), &full).unwrap().len(),
+        MAX_MEMBERS
+    );
+    full.extend([uri("ana"), full[0].clone()]);
+    assert!(
+        initial_roster(&uri("ana"), &full).is_ok(),
+        "the creator and repeats count once"
+    );
+    assert!(matches!(
+        initial_roster(&uri("ana"), &invitees(MAX_MEMBERS)),
+        Err(MessagingError::TooManyMembers(MAX_MEMBERS))
+    ));
+}
+
+#[test]
+fn a_group_has_room_until_it_holds_fifty_members() {
+    let members = |count: usize| -> Vec<Member> {
+        invitees(count)
+            .into_iter()
+            .map(|actor_uri| Member {
+                actor_uri,
+                role: Role::Member,
+            })
+            .collect()
+    };
+
+    assert!(has_room(&members(MAX_MEMBERS - 1)));
+    assert!(!has_room(&members(MAX_MEMBERS)));
 }
 
 #[test]

@@ -1,31 +1,50 @@
 use std::sync::Arc;
 
-use domain::identity::{Accounts, ActorUri};
+use domain::identity::{Accounts, ActorUri, RemoteActors};
 use domain::messaging::{
-    Conversations, GroupNotifier, MessagingError, authorize_admin, may_stop_being_admin,
+    Conversations, GroupChange, GroupChangeKind, GroupEvent, GroupEvents, GroupFederation,
+    GroupNotifier, MessagingError, authorize_admin, may_stop_being_admin,
 };
 use domain::{ConversationId, UserId};
 
-use super::{group_members, local_accounts};
-use crate::messaging::shared::caller as caller_account;
+use super::{announce, group_members, local_accounts};
+use crate::messaging::shared::{Timeline, caller as caller_account};
 
 /// `DELETE /api/groups/{id}/members/{actor}`: an admin removes a member, or a member leaves.
 pub struct RemoveGroupMember {
     accounts: Arc<dyn Accounts>,
+    remote_actors: Arc<dyn RemoteActors>,
     conversations: Arc<dyn Conversations>,
     notifier: Arc<dyn GroupNotifier>,
+    federation: Arc<dyn GroupFederation>,
+    events: Arc<dyn GroupEvents>,
 }
 
 impl RemoveGroupMember {
     pub fn new(
         accounts: Arc<dyn Accounts>,
+        remote_actors: Arc<dyn RemoteActors>,
         conversations: Arc<dyn Conversations>,
         notifier: Arc<dyn GroupNotifier>,
+        federation: Arc<dyn GroupFederation>,
+        events: Arc<dyn GroupEvents>,
     ) -> Self {
         Self {
             accounts,
+            remote_actors,
             conversations,
             notifier,
+            federation,
+            events,
+        }
+    }
+
+    fn timeline(&self) -> Timeline<'_> {
+        Timeline {
+            accounts: &*self.accounts,
+            remote_actors: &*self.remote_actors,
+            events: &*self.events,
+            notifier: &*self.notifier,
         }
     }
 
@@ -45,13 +64,45 @@ impl RemoveGroupMember {
         if !may_stop_being_admin(&members, &actor) {
             return Err(MessagingError::LastAdmin);
         }
-        if !self.conversations.remove_member(group, &actor).await? {
+        let by = (!leaving).then_some(&remover.actor_uri);
+        if !self
+            .conversations
+            .remove_member(group, &actor, by, None)
+            .await?
+        {
             return Err(MessagingError::MemberNotFound);
         }
-        let by = (!leaving).then_some(&remover.actor_uri);
         for local in local_accounts(&*self.accounts, &members).await? {
             self.notifier.member_removed(local.id, group, &actor, by);
         }
-        Ok(())
+        let left_at = self
+            .conversations
+            .departure(group, &actor)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("the member removed is still in the group"))?
+            .left_at;
+        let kind = if leaving {
+            GroupChangeKind::Left
+        } else {
+            GroupChangeKind::Removed(actor)
+        };
+        let change = GroupChange {
+            group,
+            by: remover.actor_uri.clone(),
+            at: left_at,
+            kind,
+        };
+        self.timeline()
+            .record(&members, GroupEvent::of(&change))
+            .await?;
+        // To everyone who was in it, the member removed too.
+        announce(
+            &*self.accounts,
+            &*self.federation,
+            &remover,
+            &members,
+            change,
+        )
+        .await
     }
 }

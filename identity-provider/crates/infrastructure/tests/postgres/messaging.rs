@@ -3,7 +3,9 @@ use domain::messaging::testing::{Uploads, contract};
 use domain::messaging::{Conversations, Messages, MlsCiphertext, NewMessage, initial_roster};
 use domain::social::SocialGraph;
 use domain::{AttachmentId, MessageId};
-use infrastructure::postgres::{PgAttachments, PgConversations, PgMessages, PgSocialGraph};
+use infrastructure::postgres::{
+    PgAttachments, PgConversations, PgGroupEvents, PgMessages, PgSocialGraph,
+};
 use sqlx::PgPool;
 
 use super::an_account;
@@ -62,9 +64,9 @@ async fn a_pair_that_shares_a_dm_keeps_it_whatever_id_is_pinned(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "infrastructure::MIGRATOR")]
-async fn a_mirrored_group_is_created_with_its_name_and_roster(pool: PgPool) {
+async fn a_mirrored_group_is_created_with_its_name_roster_and_stamps(pool: PgPool) {
     let alice = an_account(&pool, "alice").await;
-    contract::a_mirrored_group_is_created_with_its_name_and_roster(
+    contract::a_mirrored_group_is_created_with_its_name_roster_and_stamps(
         &PgConversations::new(pool.clone()),
         &alice,
     )
@@ -72,13 +74,21 @@ async fn a_mirrored_group_is_created_with_its_name_and_roster(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "infrastructure::MIGRATOR")]
-async fn mirroring_again_renames_and_converges_without_removing_anyone(pool: PgPool) {
+async fn mirroring_holds_each_member_as_given_and_leaves_the_others(pool: PgPool) {
     let alice = an_account(&pool, "alice").await;
-    contract::mirroring_again_renames_and_converges_without_removing_anyone(
+    contract::mirroring_holds_each_member_as_given_and_leaves_the_others(
         &PgConversations::new(pool.clone()),
         &alice,
     )
     .await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn a_change_made_here_is_stamped_now(pool: PgPool) {
+    let alice = an_account(&pool, "alice").await;
+    let bob = an_account(&pool, "bob").await;
+    contract::a_change_made_here_is_stamped_now(&PgConversations::new(pool.clone()), &alice, &bob)
+        .await;
 }
 
 #[sqlx::test(migrator = "infrastructure::MIGRATOR")]
@@ -403,7 +413,7 @@ async fn messages_from_someone_the_reader_blocked_are_never_unread(pool: PgPool)
     let group = conversations
         .create_group(
             None,
-            &initial_roster(&alice.actor_uri, &[bob.actor_uri.clone(), carol.clone()]),
+            &initial_roster(&alice.actor_uri, &[bob.actor_uri.clone(), carol.clone()]).unwrap(),
         )
         .await
         .unwrap();
@@ -433,4 +443,74 @@ async fn messages_from_someone_the_reader_blocked_are_never_unread(pool: PgPool)
     };
     assert_eq!(unread(&alice).await, 1, "bob's message only");
     assert_eq!(unread(&bob).await, 2, "a block is its owner's");
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn a_removed_member_keeps_the_group_as_it_stood_until_they_clear_it(pool: PgPool) {
+    let alice = an_account(&pool, "alice").await;
+    let bob = an_account(&pool, "bob").await;
+    contract::a_removed_member_keeps_the_group_as_it_stood_until_they_clear_it(
+        &PgConversations::new(pool.clone()),
+        &PgMessages::new(pool.clone()),
+        &alice,
+        &bob,
+    )
+    .await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn one_who_left_keeps_nothing_and_a_rejoin_forgets_a_removal(pool: PgPool) {
+    let alice = an_account(&pool, "alice").await;
+    let bob = an_account(&pool, "bob").await;
+    contract::one_who_left_keeps_nothing_and_a_rejoin_forgets_a_removal(
+        &PgConversations::new(pool.clone()),
+        &alice,
+        &bob,
+    )
+    .await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn history_until_a_moment_leaves_out_what_came_after(pool: PgPool) {
+    let alice = an_account(&pool, "alice").await;
+    contract::history_until_a_moment_leaves_out_what_came_after(
+        &PgConversations::new(pool.clone()),
+        &PgMessages::new(pool.clone()),
+        &alice,
+    )
+    .await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn a_departure_made_elsewhere_keeps_its_stamp(pool: PgPool) {
+    let alice = an_account(&pool, "alice").await;
+    let bob = an_account(&pool, "bob").await;
+    contract::a_departure_made_elsewhere_keeps_its_stamp(
+        &PgConversations::new(pool.clone()),
+        &alice,
+        &bob,
+    )
+    .await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn a_groups_events_are_paged_newest_first_within_the_readers_window(pool: PgPool) {
+    let alice = an_account(&pool, "alice").await;
+    contract::a_groups_events_are_paged_newest_first_within_the_readers_window(
+        &PgConversations::new(pool.clone()),
+        &PgGroupEvents::new(pool.clone()),
+        &alice,
+    )
+    .await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn every_kind_of_event_comes_back_as_recorded(pool: PgPool) {
+    let alice = an_account(&pool, "alice").await;
+    contract::every_kind_of_event_comes_back_as_recorded(
+        &PgConversations::new(pool.clone()),
+        &PgGroupEvents::new(pool.clone()),
+        &alice,
+    )
+    .await;
 }

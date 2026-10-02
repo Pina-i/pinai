@@ -4,7 +4,7 @@ use domain::e2ee::{
     Append, Commit, CommitBlob, CommitLog, DeliveryError, Epoch, MlsFederation, MlsNotifier,
     NewCommit, may_commit,
 };
-use domain::identity::{Accounts, RemoteActors};
+use domain::identity::Accounts;
 use domain::messaging::Conversations;
 use domain::{ConversationId, UserId};
 
@@ -12,7 +12,6 @@ use domain::{ConversationId, UserId};
 /// member — the proposer's own sessions too, so its other tabs keep up.
 pub struct AppendCommit {
     accounts: Arc<dyn Accounts>,
-    remote_actors: Arc<dyn RemoteActors>,
     conversations: Arc<dyn Conversations>,
     commits: Arc<dyn CommitLog>,
     notifier: Arc<dyn MlsNotifier>,
@@ -22,7 +21,6 @@ pub struct AppendCommit {
 impl AppendCommit {
     pub fn new(
         accounts: Arc<dyn Accounts>,
-        remote_actors: Arc<dyn RemoteActors>,
         conversations: Arc<dyn Conversations>,
         commits: Arc<dyn CommitLog>,
         notifier: Arc<dyn MlsNotifier>,
@@ -30,7 +28,6 @@ impl AppendCommit {
     ) -> Self {
         Self {
             accounts,
-            remote_actors,
             conversations,
             commits,
             notifier,
@@ -74,8 +71,8 @@ impl AppendCommit {
         for member in &members {
             if let Some(local) = self.accounts.find_by_uri(&member.actor_uri).await? {
                 self.notifier.committed(local.id, &commit);
-            } else if let Some(actor) = self.remote_actors.find(&member.actor_uri).await? {
-                remote.push(actor);
+            } else {
+                remote.push(member.actor_uri.clone());
             }
         }
         self.federation

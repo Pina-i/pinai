@@ -1,8 +1,11 @@
 use std::sync::Arc;
 
 use domain::e2ee::{DeliveryError, MlsNotifier, NewWelcome, WelcomeBlob, Welcomes, check_welcome};
-use domain::identity::{Accounts, ActorUri};
-use domain::messaging::{ConversationKind, Conversations, GroupNotifier, GroupSnapshot};
+use domain::identity::{Accounts, ActorUri, RemoteActors};
+use domain::messaging::{
+    ConversationKind, Conversations, GroupChangeKind, GroupEvent, GroupEventKind, GroupEvents,
+    GroupNotifier, GroupSnapshot,
+};
 use domain::social::Reachability;
 use domain::{ConversationId, DeviceId, UserId};
 
@@ -20,29 +23,36 @@ pub struct IncomingWelcome {
 /// The inbox's `Create{Note}` carrying an MLS Welcome.
 pub struct ReceiveWelcome {
     accounts: Arc<dyn Accounts>,
+    remote_actors: Arc<dyn RemoteActors>,
     conversations: Arc<dyn Conversations>,
     welcomes: Arc<dyn Welcomes>,
     reach: Arc<dyn Reachability>,
     notifier: Arc<dyn MlsNotifier>,
     groups: Arc<dyn GroupNotifier>,
+    events: Arc<dyn GroupEvents>,
 }
 
 impl ReceiveWelcome {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         accounts: Arc<dyn Accounts>,
+        remote_actors: Arc<dyn RemoteActors>,
         conversations: Arc<dyn Conversations>,
         welcomes: Arc<dyn Welcomes>,
         reach: Arc<dyn Reachability>,
         notifier: Arc<dyn MlsNotifier>,
         groups: Arc<dyn GroupNotifier>,
+        events: Arc<dyn GroupEvents>,
     ) -> Self {
         Self {
             accounts,
+            remote_actors,
             conversations,
             welcomes,
             reach,
             notifier,
             groups,
+            events,
         }
     }
 
@@ -74,7 +84,7 @@ impl ReceiveWelcome {
                 .admits()?;
         }
         if let Some(roster) = &incoming.roster {
-            crate::messaging::shared::mirror(
+            let joined_at = crate::messaging::shared::mirror(
                 &*self.conversations,
                 &*self.groups,
                 &recipient,
@@ -83,6 +93,25 @@ impl ReceiveWelcome {
                 roster,
             )
             .await?;
+            // The Welcome's sender is who added them: the line their conversation starts with.
+            if let Some(at) = joined_at {
+                let added = GroupEvent {
+                    at,
+                    kind: GroupEventKind::Changed(GroupChangeKind::Added(
+                        recipient.actor_uri.clone(),
+                    )),
+                    ..GroupEvent::created(incoming.conversation, incoming.sender.clone(), at)
+                };
+                let members = self.conversations.members(incoming.conversation).await?;
+                crate::messaging::shared::Timeline {
+                    accounts: &*self.accounts,
+                    remote_actors: &*self.remote_actors,
+                    events: &*self.events,
+                    notifier: &*self.groups,
+                }
+                .record(&members, added)
+                .await?;
+            }
         }
         let members = match self.conversations.find(incoming.conversation).await? {
             Some(_) => self.conversations.members(incoming.conversation).await?,

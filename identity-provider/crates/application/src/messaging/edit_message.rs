@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use domain::identity::{Accounts, RemoteActors};
+use domain::identity::Accounts;
 use domain::messaging::{
     ConversationKind, Conversations, MessageFederation, MessageNotifier, Messages, MessagingError,
     MlsCiphertext,
@@ -16,7 +16,6 @@ use super::shared::{self, audience, display_name_of};
 /// to.
 pub struct EditMessage {
     accounts: Arc<dyn Accounts>,
-    remote_actors: Arc<dyn RemoteActors>,
     conversations: Arc<dyn Conversations>,
     messages: Arc<dyn Messages>,
     reach: Arc<dyn Reachability>,
@@ -27,7 +26,6 @@ pub struct EditMessage {
 impl EditMessage {
     pub fn new(
         accounts: Arc<dyn Accounts>,
-        remote_actors: Arc<dyn RemoteActors>,
         conversations: Arc<dyn Conversations>,
         messages: Arc<dyn Messages>,
         reach: Arc<dyn Reachability>,
@@ -36,7 +34,6 @@ impl EditMessage {
     ) -> Self {
         Self {
             accounts,
-            remote_actors,
             conversations,
             messages,
             reach,
@@ -83,13 +80,7 @@ impl EditMessage {
             .edit(message, &editor.actor_uri, &ciphertext)
             .await?
             .ok_or(MessagingError::MessageNotFound)?;
-        let (local, remote) = audience(
-            &*self.accounts,
-            &*self.remote_actors,
-            &members,
-            &editor.actor_uri,
-        )
-        .await?;
+        let (local, remote) = audience(&*self.accounts, &members, &editor.actor_uri).await?;
         for member in &local {
             self.notifier.edited(member.id, &edited);
         }

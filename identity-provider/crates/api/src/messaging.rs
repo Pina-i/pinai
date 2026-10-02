@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use application::messaging::{
     DeliverDirectMessage, DirectMessageCommand, EditMessage, GroupMessageCommand, HistoryEntry,
-    ListConversations, LoadHistory, MarkRead, SendDirectMessage, SendGroupMessage,
+    ListConversations, LoadHistory, MarkRead, SendDirectMessage, SendGroupMessage, TimelineEntry,
 };
 use axum::Json;
 use axum::extract::{Path, Query, State};
@@ -13,7 +13,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use domain::identity::InstanceOrigin;
 use domain::messaging::{
-    ConversationSummary, HistoryCursor, Message, MessagingError, MlsCiphertext,
+    ConversationSummary, HistoryCursor, Message, MessagingError, MlsCiphertext, NamedEvent,
 };
 use domain::{AttachmentId, ConversationId, MessageId};
 use serde::{Deserialize, Serialize};
@@ -57,6 +57,56 @@ pub struct HistoryQuery {
     cursor_created_at: Option<OffsetDateTime>,
     cursor_id: Option<Uuid>,
     limit: Option<i64>,
+    /// `events`: the group's changes too, between the messages.
+    include: Option<String>,
+}
+
+/// One item of `GET /api/dm/{id}`: a message, or — asked for with `include=events` — a change
+/// to the group.
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TimelineItemBody {
+    Message(MessageBody),
+    Event(EventBody),
+}
+
+/// The same fields as the `group_event` the WebSocket pushes, in this API's casing.
+#[derive(Serialize)]
+pub struct EventBody {
+    id: Uuid,
+    conversation_id: Uuid,
+    /// `created`, `added`, `removed`, `left`, `renamed` or `role_changed`.
+    event: &'static str,
+    actor_uri: String,
+    actor_display_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    subject_uri: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    subject_display_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    role: Option<&'static str>,
+    #[serde(with = "time::serde::rfc3339")]
+    created_at: OffsetDateTime,
+}
+
+impl From<NamedEvent> for EventBody {
+    fn from(named: NamedEvent) -> Self {
+        let event = &named.event;
+        Self {
+            id: event.id.as_uuid(),
+            conversation_id: event.group.as_uuid(),
+            event: event.kind_name(),
+            actor_uri: event.by.to_string(),
+            actor_display_name: named.by_name.clone(),
+            subject_uri: event.subject().map(ToString::to_string),
+            subject_display_name: named.subject_name.clone(),
+            name: event.name().map(str::to_owned),
+            role: event.role().map(|role| role.as_str()),
+            created_at: event.at,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -107,6 +157,9 @@ pub struct ConversationBody {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(with = "time::serde::rfc3339::option")]
     last_message_at: Option<OffsetDateTime>,
+    /// A group the caller was removed from: shown as it stood then.
+    #[serde(with = "time::serde::rfc3339::option")]
+    removed_at: Option<OffsetDateTime>,
 }
 
 fn ciphertext(b64: &str) -> Result<MlsCiphertext, ApiError> {
@@ -166,6 +219,7 @@ impl From<ConversationSummary> for ConversationBody {
             last_message_sender: summary.last_message_sender.map(|s| s.to_string()),
             unread_count: summary.unread_count,
             last_message_at: summary.last_message_at,
+            removed_at: summary.removed_at,
         }
     }
 }
@@ -261,26 +315,31 @@ pub async fn history(
     Authenticated(user): Authenticated,
     Path(conversation): Path<Uuid>,
     Query(query): Query<HistoryQuery>,
-) -> Result<Json<Vec<MessageBody>>, ApiError> {
+) -> Result<Json<Vec<TimelineItemBody>>, ApiError> {
     // A cursor needs both halves; either alone reads the first page.
     let before = match (query.cursor_created_at, query.cursor_id) {
-        (Some(created_at), Some(id)) => Some(HistoryCursor {
-            created_at,
-            id: id.into(),
-        }),
+        (Some(created_at), Some(id)) => Some(HistoryCursor { created_at, id }),
         _ => None,
     };
+    let include_events = query.include.as_deref() == Some("events");
     let page = load
-        .execute(user, conversation.into(), before, query.limit)
+        .execute(
+            user,
+            conversation.into(),
+            before,
+            query.limit,
+            include_events,
+        )
         .await?;
     Ok(Json(
         page.into_iter()
-            .map(
-                |HistoryEntry {
-                     message,
-                     sender_display_name,
-                 }| { MessageBody::new(message, sender_display_name) },
-            )
+            .map(|entry| match entry {
+                TimelineEntry::Message(HistoryEntry {
+                    message,
+                    sender_display_name,
+                }) => TimelineItemBody::Message(MessageBody::new(message, sender_display_name)),
+                TimelineEntry::Event(named) => TimelineItemBody::Event(named.into()),
+            })
             .collect(),
     ))
 }
@@ -337,6 +396,17 @@ impl From<MessagingError> for ApiError {
             }
             MessagingError::AlreadyAMember => {
                 ApiError::new(StatusCode::CONFLICT, "conflict", "Already a member")
+            }
+            MessagingError::TooManyMembers(max) => {
+                ApiError::bad_request(format!("A group holds at most {max} members"))
+            }
+            MessagingError::GroupFull(max) => ApiError::new(
+                StatusCode::CONFLICT,
+                "conflict",
+                format!("The group is full: it holds at most {max} members"),
+            ),
+            MessagingError::StillAMember => {
+                ApiError::new(StatusCode::CONFLICT, "conflict", "Leave the group first")
             }
             MessagingError::LastAdmin => ApiError::new(
                 StatusCode::CONFLICT,
