@@ -85,8 +85,9 @@ device attestation doesn't lower the ceiling, only makes it explicit.
 
 What this trust does **not** grant:
 - Reading historical messages — MLS forward secrecy means past
-  per-message keys are deleted after use, and the IdP doesn't see the
-  history archive's HAK
+  per-message keys are deleted after use (a device keeps only those of
+  messages it hasn't read yet, from its last five epochs — § 6.3), and
+  the IdP doesn't see the history archive's HAK
 - Impersonating the user to peer IdPs in a way they can detect on
   rotation — peer IdPs cache the user's JWKS and notice key changes
 - Reading the user's local cached passphrase or attestation — the
@@ -210,14 +211,21 @@ opened again.
 
 ### 3.5 24-word recovery passphrase
 
-A BIP-39 mnemonic generated client-side on first sign-in. Its only job
-is to derive the History Archive Key — losing it means losing past
-messages on a fresh device, not losing your account.
+A BIP-39 mnemonic generated client-side by an account's first device,
+on its first sign-in. Its only job is to derive the History Archive Key
+— losing it means losing past messages on a fresh device, not losing
+your account.
 
-Each device of the same user generates its own passphrase. Users
-typically write one down; the others can sit unsaved. The passphrase
-is stored locally encrypted under the device's AES-GCM key for
-revealability in Settings → Devices.
+It belongs to the account, not to a device. A device signing in to an
+account that already has an archive (a history salt on the server) is
+asked for the words instead (`/onboarding/recovery-restore`, § 6.4):
+typing them restores the archive, and the device keeps them, so it
+archives under the same key from then on. "Start fresh on this device"
+leaves it without a passphrase: it reads its conversations from then on
+but archives nothing, until the words are entered from Settings →
+Devices → "Restore history". A device's passphrase is stored locally,
+encrypted under its AES-GCM key, for revealability in Settings →
+Devices.
 
 ### 3.6 History Archive Key (HAK)
 
@@ -444,10 +452,9 @@ sequenceDiagram
     Mobile->>IdP: POST /api/keys/devices
     IdP-->>Mobile: attestation
     Mobile->>IdP: POST /api/keys/packages (initial batch)
-    Mobile->>Mobile: gen passphrase + salt
-    Mobile->>IdP: POST /api/history/salt (idempotent)
-    IdP-->>Mobile: existing salt (laptop won earlier)
-    Note over Mobile: shows its own 24 words<br/>(different from laptop's)
+    Mobile->>IdP: GET /api/history/salt
+    IdP-->>Mobile: salt (the account has an archive)
+    Note over Mobile: asks for the account's 24 words (§ 6.4)<br/>or starts fresh, without a passphrase
     IdP-->>Laptop: WS device_joined {actor, new_device_id, drk_pub}
     Laptop->>Laptop: useDeviceFanout.onDeviceJoined
     loop for each conversation laptop is in
@@ -486,7 +493,10 @@ every conversation.
   DS's log, and the leaves are looked at again: another of the user's devices
   may have added this one meanwhile. At most five times; a commit lost any other
   way is dropped too, so the group can commit again on the next run.
-- Runs on one device take turns. A run goes over every conversation the device
+- A device makes one change to a conversation's MLS state at a time — a commit
+  of its own, a catch-up, a join from a Welcome, a group dropped — so it never
+  applies a commit, its own pushed back by the DS included, over one it is still
+  making. A run goes over every conversation the device
   holds keys for: it first applies the commits the DS holds past its epoch, then
   adds the siblings missing. It runs when the device list refreshes (the
   `device_joined` push only refreshes it), when the conversation list changes,
@@ -540,6 +550,15 @@ sequenceDiagram
 The server only sees the MLS ciphertext (per-message) and later the
 HAK-encrypted plaintext copy in the archive. Neither lets it read the
 message content without breaking the underlying cryptography.
+
+**A message overtaken by a commit.** A message and a commit travel
+separately, and one sent just before a commit can arrive after it —
+from another instance especially, and often, since each device added to
+a conversation is a commit. Each device therefore keeps, for its last
+five epochs, the keys of the messages it hasn't read yet (openmls
+`max_past_epochs`, set where a group is created and where one is joined):
+such a message decrypts once the commit is applied. Each key is still
+deleted once used, so what has been read stays out of reach.
 
 ### 6.4 Restoring history on a new device
 
@@ -611,6 +630,14 @@ The verification step on Alice's side — "fetch BobIdP JWKS" — is the
 moment Alice's client decides whether to trust this leaf as belonging
 to Bob. JWKS is cached for an hour; rotation safety comes from
 `invalidate(issuer)` and retry on verify-failure.
+
+A device founds a conversation's group only when it holds none, and two
+sends at once found it once. If the first add fails — most often because
+another device founded the group first, and the commit at epoch 1 is taken
+(`409`) — the device drops the group it founded rather than keep one that
+holds only itself, where what it sends would be read by nobody. The send
+fails, and the device joins the real group once one of its siblings adds
+it (§ 6.2), or the other side does.
 
 ### 6.6 Revoking a compromised device
 
@@ -863,6 +890,10 @@ threat model as the rest of the IDB content.
   catch up only from their own instance's log. A commit lost to a network failure leaves that
   instance's members who joined before it unable to read anything sent after it, until they are
   removed and added back. Its roster only covers the commit that outruns a Welcome.
+- **A message more than five commits behind.** A device that applies six
+  or more commits before a message sent ahead of them can't decrypt it
+  (§ 6.3); only the history archive can bring it back, from a device of
+  the user's that did read it.
 - **Out-of-band fingerprint verification.** No user-facing UI for
   comparing device attestations out of band. Trust on first use plus
   IdP-attestation is the baseline; an opt-in verification surface
