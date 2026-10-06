@@ -599,7 +599,6 @@ impl Application {
             log_out: Arc::new(application::auth::LogOut::new(clients)),
             login_attempts: api::LoginAttempts::new(),
             origin: origin.clone(),
-            cors_origins: config.cors_origins.clone(),
             public_key_pem: api::PublicKeyPem(Arc::from(keypair.public_key_pem.as_str())),
             find_account: Arc::new(application::identity::FindAccount::new(
                 origin.clone(),

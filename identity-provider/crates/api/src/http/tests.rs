@@ -65,3 +65,64 @@ mod logging {
         assert_eq!(errors.0.load(Ordering::SeqCst), 1);
     }
 }
+
+mod cors {
+    use axum::Router;
+    use axum::body::Body;
+    use axum::http::{Method, Request, StatusCode, header};
+    use axum::routing::get;
+    use tower::ServiceExt;
+
+    use crate::http::cors;
+
+    fn app() -> Router {
+        Router::new()
+            .route("/api/thing", get(|| async { "ok" }))
+            .layer(cors())
+    }
+
+    #[tokio::test]
+    async fn a_page_on_any_origin_may_read_an_answer() {
+        for origin in ["https://chat.bob.example", "app://pinai"] {
+            let response = app()
+                .oneshot(
+                    Request::get("/api/thing")
+                        .header(header::ORIGIN, origin)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(response.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN], "*");
+        }
+    }
+
+    #[tokio::test]
+    async fn any_origin_may_send_a_bearer_token_but_never_credentials() {
+        let response = app()
+            .oneshot(
+                Request::builder()
+                    .method(Method::OPTIONS)
+                    .uri("/api/thing")
+                    .header(header::ORIGIN, "app://pinai")
+                    .header(header::ACCESS_CONTROL_REQUEST_METHOD, "GET")
+                    .header(header::ACCESS_CONTROL_REQUEST_HEADERS, "authorization")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let headers = response.headers();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(headers[header::ACCESS_CONTROL_ALLOW_ORIGIN], "*");
+        assert!(
+            headers[header::ACCESS_CONTROL_ALLOW_HEADERS]
+                .to_str()
+                .unwrap()
+                .contains("authorization")
+        );
+        assert!(!headers.contains_key(header::ACCESS_CONTROL_ALLOW_CREDENTIALS));
+    }
+}

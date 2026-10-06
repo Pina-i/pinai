@@ -84,7 +84,6 @@ pub async fn spawn_app() -> TestApp {
         port,
         session_secret: hex::encode(rand::random::<[u8; 32]>()),
         frontend_url: "http://localhost:5173".into(),
-        cors_origins: vec!["http://localhost:5173".into()],
         redis_url: std::env::var("TEST_REDIS_URL")
             .unwrap_or_else(|_| "redis://localhost:56479".into()),
         storage_endpoint: None,

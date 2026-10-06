@@ -277,7 +277,6 @@ impl TestApp {
             )),
             signatures: Arc::new(TrustedSignatures),
             origin: origin.clone(),
-            cors_origins: Vec::new(),
             public_key_pem: PublicKeyPem(Arc::from(PUBLIC_KEY_PEM)),
             find_account: Arc::new(FindAccount::new(origin.clone(), accounts.clone())),
             show_person: Arc::new(application::profile::ShowPerson::new(

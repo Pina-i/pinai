@@ -100,9 +100,6 @@ pub struct AppState {
     pub dev_routes: bool,
     pub signatures: Arc<dyn SignatureVerifier>,
     pub origin: InstanceOrigin,
-    /// The web client's origins, allowed cross-origin.
-    #[from_ref(skip)]
-    pub cors_origins: Vec<String>,
     pub public_key_pem: PublicKeyPem,
     pub find_account: Arc<FindAccount>,
     pub show_person: Arc<application::profile::ShowPerson>,
@@ -192,7 +189,6 @@ pub struct AppState {
 
 pub fn router(state: AppState) -> Router {
     let dev_routes = state.dev_routes;
-    let cors = http::cors(&state.cors_origins);
     // Every file of an upload at its largest, plus headroom for the multipart framing.
     let upload_limit = state.attachment_limits.max_files
         * usize::try_from(state.attachment_limits.max_bytes).unwrap_or(usize::MAX)
@@ -323,6 +319,6 @@ pub fn router(state: AppState) -> Router {
             Router::new()
         })
         .with_state(state)
-        .layer(cors)
+        .layer(http::cors())
         .layer(http::trace())
 }

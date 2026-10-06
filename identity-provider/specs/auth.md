@@ -117,6 +117,20 @@ A bearer token that is missing or unusable is answered `401 invalid_token`, with
 RFC 6750 § 3 asks for: `WWW-Authenticate: Bearer` when none was sent, `Bearer
 error="invalid_token"` when one was.
 
+### Calls from a browser
+
+Every route answers CORS for any origin (`Access-Control-Allow-Origin: *`), because pages served
+elsewhere call this instance: another instance's web client fetching its JWKS to verify a member's
+device, and the desktop app.
+
+Nothing is given away by it. The API is authorised by the bearer token alone, which a page holds
+only once signed in. The session cookie serves only the sign-in flow the browser itself navigates
+through: `/authorize`, the login, sign-up and code forms, and `/logout`. Under `*` a browser never
+exposes the answer to a credentialed request.
+
+The allowed request headers are listed, `Authorization` among them, rather than `*`, which Firefox
+reads as not covering `Authorization`.
+
 ### `GET /logout`
 
 Drops the session cookie and redirects to `post_logout_redirect_uri` — only when it is an

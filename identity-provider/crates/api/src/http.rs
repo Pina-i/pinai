@@ -1,20 +1,19 @@
-//! The layers every route goes through: CORS for the web client, and one span per request.
+//! The layers every route goes through: CORS for any client, and one span per request.
 
 use axum::body::Body;
-use axum::http::{HeaderName, HeaderValue, Method, Request, Uri};
+use axum::http::{HeaderName, Method, Request, Uri};
 use tower_http::classify::{ServerErrorsAsFailures, SharedClassifier};
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::{
     DefaultOnBodyChunk, DefaultOnEos, DefaultOnRequest, DefaultOnResponse, MakeSpan, TraceLayer,
 };
 use tracing::{Level, Span};
 
-pub fn cors(origins: &[String]) -> CorsLayer {
-    let origins: Vec<HeaderValue> = origins.iter().filter_map(|o| o.parse().ok()).collect();
-    // Listed, not `*`: Firefox reads `Access-Control-Allow-Headers: *` as not covering
-    // `Authorization`, which would drop the bearer token on every cross-origin request.
+pub fn cors() -> CorsLayer {
     CorsLayer::new()
-        .allow_origin(origins)
+        // Every origin, for other instances' web clients and the desktop app. Safe: the API is
+        // authorised by bearer tokens, and under `*` a browser never exposes a credentialed response.
+        .allow_origin(Any)
         .allow_methods([
             Method::GET,
             Method::POST,
@@ -23,6 +22,8 @@ pub fn cors(origins: &[String]) -> CorsLayer {
             Method::PATCH,
             Method::OPTIONS,
         ])
+        // Listed, not `*`: Firefox reads `Access-Control-Allow-Headers: *` as not covering
+        // `Authorization`, which would drop the bearer token on every cross-origin request.
         .allow_headers([
             HeaderName::from_static("authorization"),
             HeaderName::from_static("content-type"),

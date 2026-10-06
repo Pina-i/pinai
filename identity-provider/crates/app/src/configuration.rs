@@ -35,10 +35,6 @@ pub struct Config {
     /// Base URL of the web-client, e.g. "http://localhost:5173".
     /// Used to redirect to the hosted login/register page instead of serving HTML.
     pub frontend_url: String,
-    /// Allowed CORS origins, parsed from the `CORS_ORIGINS` env var
-    /// (comma-separated, e.g. "https://app.example.com,https://admin.example.com").
-    /// Defaults to localhost dev origins when unset.
-    pub cors_origins: Vec<String>,
 
     // ── Redis (Message Broker) ───────────────────────────────────────────
     /// Redis connection URL for the event broker (Streams + pub-sub).
@@ -155,12 +151,6 @@ impl Config {
             session_secret: session_secret(environment, env_var("SESSION_SECRET").ok())?,
             frontend_url: env_var("FRONTEND_URL")
                 .unwrap_or_else(|_| "http://localhost:5173".into()),
-            cors_origins: env_var("CORS_ORIGINS")
-                .unwrap_or_else(|_| "http://localhost:5173,http://localhost:3000".into())
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect(),
             redis_url: env_var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into()),
             storage_endpoint: env_var("STORAGE_ENDPOINT").ok(),
             storage_access_key: env_var("STORAGE_ACCESS_KEY").ok(),

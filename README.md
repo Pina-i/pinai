@@ -276,7 +276,7 @@ All `make` targets are run from the repo root.
 - **PostgreSQL** — `POSTGRES_*`; `DATABASE_URL` is built from them
 - **Server** — `IDP_ENV`, `DOMAIN`, `PORT`
 - **Keys** — `IDP_KEYS_DIR`, `JWT_PRIVATE_KEY_PATH`, `JWT_KEY_ID`
-- **Session / frontend** — `SESSION_SECRET`, `FRONTEND_URL`, `CORS_ORIGINS`
+- **Session / frontend** — `SESSION_SECRET`, `FRONTEND_URL`
 - **Redis** — `REDIS_PORT`, from which `REDIS_URL` is built (event streams and presence pub-sub)
 - **Object storage** — `RUSTFS_PORT`, from which `STORAGE_ENDPOINT` is built, `STORAGE_ACCESS_KEY`, `STORAGE_SECRET_KEY`, optional `STORAGE_PUBLIC_URL` and bucket names
 - **Email** — `SMTP_*`, `EMAIL_OTP_PEPPER`, `MAILPIT_*` ports

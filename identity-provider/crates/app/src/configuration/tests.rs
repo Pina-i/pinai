@@ -11,7 +11,6 @@ fn config() -> Config {
         port: 8080,
         session_secret: "x".repeat(64),
         frontend_url: "https://alice.com".into(),
-        cors_origins: vec!["https://alice.com".into()],
         redis_url: "redis://127.0.0.1:6379".into(),
         storage_endpoint: None,
         storage_access_key: None,
