@@ -17,3 +17,9 @@ async fn a_search_takes_its_query_literally() {
     contract::a_search_takes_its_query_literally(&InMemoryAccounts::with([alice.clone()]), &alice)
         .await;
 }
+
+#[tokio::test]
+async fn every_account_counts() {
+    contract::every_account_counts(&InMemoryAccounts::with([account("alice"), account("bob")]))
+        .await;
+}

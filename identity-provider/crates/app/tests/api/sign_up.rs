@@ -47,14 +47,45 @@ async fn a_confirmed_account_signs_in_again_with_its_password() {
         .await;
     assert_eq!(status, 200);
     assert_eq!(wrong.status(), 303);
-    assert_eq!(
-        query_of(&location(&wrong))["error"],
-        "Invalid email or password"
-    );
+    assert_eq!(query_of(&location(&wrong))["error"], "invalid_credentials");
     assert_eq!(
         app.mail.count_for(&alice.email),
         1,
         "one code, for the sign-up"
     );
+    app.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn the_instance_describes_itself_on_its_login_page_and_in_its_nodeinfo() {
+    let app = spawn_app().await;
+    app.sign_up("alice").await;
+    let host = app.domain.clone();
+
+    let request: Vec<(&str, String)> = app.the_request();
+    let page = app
+        .http
+        .get(format!("{}/login", app.address))
+        .query(&request)
+        .send()
+        .await
+        .unwrap();
+    let status = page.status();
+    let html = page.text().await.unwrap();
+    let nodeinfo: serde_json::Value = app
+        .http
+        .get(format!("{}/nodeinfo/2.1", app.address))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    assert_eq!(status, 200);
+    assert!(html.contains(&format!("Sign in to {host}")), "{html}");
+    assert!(html.contains("1 person"), "{html}");
+    assert_eq!(nodeinfo["usage"]["users"]["total"], 1);
+    assert_eq!(nodeinfo["metadata"]["nodeName"], host);
     app.stop().await.unwrap();
 }

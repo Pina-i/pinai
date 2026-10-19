@@ -7,6 +7,7 @@ use domain::auth::{
     check_password,
 };
 use domain::identity::{Handle, InstanceOrigin, UsernameChoice};
+use domain::profile::DisplayName;
 use time::OffsetDateTime;
 
 use super::mail_signup_code;
@@ -16,7 +17,7 @@ const SUFFIX_DRAWS: usize = 3;
 
 #[derive(Debug, Clone)]
 pub struct RegisterCommand {
-    pub username: String,
+    pub display_name: String,
     pub email: String,
     pub password: String,
 }
@@ -73,13 +74,14 @@ impl Register {
         request: Option<&AuthorizationRequest>,
         now: OffsetDateTime,
     ) -> Result<Registered, AuthError> {
-        let blank = [&command.username, &command.email, &command.password]
+        let blank = [&command.display_name, &command.email, &command.password]
             .iter()
             .any(|field| field.is_empty());
         if request.is_none() && blank {
             return Err(AuthError::MissingField);
         }
-        let choice = UsernameChoice::parse(&command.username).map_err(AuthError::BadUsername)?;
+        let name = DisplayName::parse(&command.display_name).map_err(AuthError::BadDisplayName)?;
+        let choice = UsernameChoice::derived_from(name.as_str());
         let email = Email::parse(&command.email).map_err(AuthError::BadEmail)?;
         check_password(&command.password)?;
         if self.accounts.by_email(&email).await?.is_some() {
@@ -104,7 +106,7 @@ impl Register {
                 id: UserId::generate(),
                 actor_uri: self.origin.actor_uri(&handle),
                 username: handle,
-                display_name: command.username.clone(),
+                display_name: name.as_str().to_owned(),
                 email: email.clone(),
                 password_hash: password_hash.clone(),
             };

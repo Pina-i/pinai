@@ -11,22 +11,30 @@ use crate::{TicketId, UserId};
 
 use super::{
     AuthError, Authenticator, AuthorizationCode, AuthorizationCodes, AuthorizationRequest,
-    CODE_ATTEMPTS, Client, ClientId, Clients, CodeAttempt, CodeChallenge, Email, Grant,
-    HandleSuffixes, LOGIN_TICKET_TTL, LoginTickets, NewAccount, OtpCode, PasswordHash,
-    PasswordHasher, RECOVERY_CODES, Registration, SIGNUP_CODE_TTL, SecondFactors, SignInAccount,
-    SignInAccounts, SignUps, SignupCodes, SignupMailer, TICKET_ATTEMPTS, Ticket, TicketAttempt,
-    TokenIssuer, Tokens, TotpSecret,
+    CODE_ATTEMPTS, Client, ClientDocument, ClientId, ClientKind, ClientPolicy, ClientSignIn,
+    ClientSignIns, Clients, CodeAttempt, CodeChallenge, Email, Grant, HandleSuffixes,
+    LOGIN_TICKET_TTL, LoginTickets, NewAccount, OtpCode, PasswordHash, PasswordHasher,
+    RECOVERY_CODES, Registration, SIGNUP_CODE_TTL, SecondFactors, SignInAccount, SignInAccounts,
+    SignUps, SignupCodes, SignupMailer, TICKET_ATTEMPTS, Ticket, TicketAttempt, TokenIssuer,
+    Tokens, TotpSecret,
 };
 
+pub const CLIENT_ID: &str = "http://localhost:5173/oauth-client.json";
 pub const REDIRECT_URI: &str = "http://localhost:5173/callback";
+pub const POST_LOGOUT_URI: &str = "http://localhost:5173/";
 // RFC 7636 appendix B.
 pub const VERIFIER: &str = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
 pub const CHALLENGE: &str = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
 
+/// The web client in development, as its `/oauth-client.json` describes it.
 pub fn web_client() -> Client {
     Client {
-        id: ClientId::parse("web-client").unwrap(),
+        id: ClientId::parse(CLIENT_ID).unwrap(),
+        name: "Pīna'i".to_owned(),
+        kind: ClientKind::Web,
         redirect_uris: vec![REDIRECT_URI.to_owned()],
+        post_logout_redirect_uris: vec![POST_LOGOUT_URI.to_owned()],
+        offline_access: false,
     }
 }
 
@@ -79,9 +87,54 @@ impl Clients for InMemoryClients {
             .find(|client| client.id == *id)
             .cloned())
     }
+}
 
-    async fn all(&self) -> Result<Vec<Client>, AuthError> {
-        Ok(self.clients.lock().unwrap().clone())
+#[derive(Default)]
+pub struct InMemoryClientSignIns {
+    sign_ins: Mutex<Vec<(ClientSignIn, OffsetDateTime)>>,
+}
+
+impl InMemoryClientSignIns {
+    /// What is remembered, first remembered first.
+    pub fn remembered(&self) -> Vec<ClientSignIn> {
+        self.sign_ins
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(sign_in, _)| sign_in.clone())
+            .collect()
+    }
+}
+
+#[async_trait::async_trait]
+impl ClientSignIns for InMemoryClientSignIns {
+    async fn remember(&self, sign_in: &ClientSignIn, at: OffsetDateTime) -> Result<(), AuthError> {
+        let mut sign_ins = self.sign_ins.lock().unwrap();
+        let known = sign_ins
+            .iter_mut()
+            .find(|(known, _)| known.user == sign_in.user && known.client == sign_in.client);
+        match known {
+            Some((known, when)) => {
+                known.offline_access |= sign_in.offline_access;
+                *when = at;
+            }
+            None => sign_ins.push((sign_in.clone(), at)),
+        }
+        Ok(())
+    }
+
+    async fn find(
+        &self,
+        user: UserId,
+        client: &ClientId,
+    ) -> Result<Option<ClientSignIn>, AuthError> {
+        Ok(self
+            .sign_ins
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(known, _)| known.user == user && known.client == *client)
+            .map(|(known, _)| known.clone()))
     }
 }
 
@@ -796,11 +849,18 @@ impl SignupMailer for RecordingMailer {
     }
 }
 
-/// Seeds what the sign-in stores read: accounts and clients are written by other contexts.
+/// Seeds what the sign-in stores read: accounts are written by other contexts.
 #[async_trait::async_trait]
 pub trait SignInSeeds: Send + Sync {
     async fn sign_up(&self, account: &SignInAccount);
-    async fn register(&self, client: &Client);
+}
+
+/// Publishes client documents where a [`Clients`] adapter will look for them.
+#[async_trait::async_trait]
+pub trait ClientSeeds: Send + Sync {
+    /// Where documents are published, e.g. `http://127.0.0.1:41234`.
+    fn origin(&self) -> String;
+    async fn publish(&self, path: &str, document: &ClientDocument);
 }
 
 #[async_trait::async_trait]
@@ -811,16 +871,19 @@ impl SignInSeeds for InMemorySignInAccounts {
             .unwrap()
             .push((account.clone(), OffsetDateTime::now_utc()));
     }
-
-    async fn register(&self, _: &Client) {}
 }
 
 #[async_trait::async_trait]
-impl SignInSeeds for InMemoryClients {
-    async fn sign_up(&self, _: &SignInAccount) {}
+impl ClientSeeds for InMemoryClients {
+    fn origin(&self) -> String {
+        "http://localhost:5173".to_owned()
+    }
 
-    async fn register(&self, client: &Client) {
-        self.clients.lock().unwrap().push(client.clone());
+    async fn publish(&self, path: &str, document: &ClientDocument) {
+        let id = ClientId::parse(&format!("{}{path}", self.origin())).unwrap();
+        let client =
+            Client::from_document(id, document.clone(), ClientPolicy { allow_http: true }).unwrap();
+        self.clients.lock().unwrap().push(client);
     }
 }
 
@@ -828,36 +891,42 @@ impl SignInSeeds for InMemoryClients {
 pub mod contract {
     use super::*;
 
-    pub async fn a_client_is_found_by_its_id(clients: &dyn Clients, seeds: &dyn SignInSeeds) {
-        let desktop = Client {
-            id: ClientId::parse("desktop-client").unwrap(),
-            redirect_uris: vec![
-                "http://127.0.0.1:7777/callback".to_owned(),
-                "pinai://callback".to_owned(),
-            ],
-        };
-        seeds.register(&desktop).await;
+    pub async fn a_published_client_is_found_by_its_url(
+        clients: &dyn Clients,
+        seeds: &dyn ClientSeeds,
+    ) {
+        let origin = seeds.origin();
+        let id = format!("{origin}/clients/web.json");
+        seeds
+            .publish(
+                "/clients/web.json",
+                &ClientDocument {
+                    client_id: id.clone(),
+                    client_name: Some("Pīna'i".to_owned()),
+                    application_type: None,
+                    redirect_uris: vec![format!("{origin}/callback")],
+                    post_logout_redirect_uris: vec![format!("{origin}/")],
+                    scope: None,
+                    token_endpoint_auth_method: None,
+                },
+            )
+            .await;
 
-        assert_eq!(clients.find(&desktop.id).await.unwrap(), Some(desktop));
+        let found = clients
+            .find(&ClientId::parse(&id).unwrap())
+            .await
+            .unwrap()
+            .expect("the published client");
+        assert_eq!(found.name, "Pīna'i");
+        assert!(found.allows(&format!("{origin}/callback")));
+        assert!(found.may_return_to(&format!("{origin}/")));
         assert_eq!(
             clients
-                .find(&ClientId::parse("nobody").unwrap())
+                .find(&ClientId::parse(&format!("{origin}/clients/nobody.json")).unwrap())
                 .await
                 .unwrap(),
             None
         );
-    }
-
-    pub async fn every_client_is_listed(clients: &dyn Clients, seeds: &dyn SignInSeeds) {
-        let desktop = Client {
-            id: ClientId::parse("desktop-client").unwrap(),
-            redirect_uris: vec!["http://127.0.0.1:7777/callback".to_owned()],
-        };
-        seeds.register(&desktop).await;
-
-        let all = clients.all().await.unwrap();
-
-        assert!(all.contains(&desktop), "{all:?}");
     }
 
     pub async fn an_account_is_found_by_email_and_id_with_its_sign_in_state(
@@ -1283,6 +1352,44 @@ pub mod contract {
             ]
         );
         assert_eq!((expired, spent), (TicketAttempt::Gone, TicketAttempt::Gone));
+    }
+
+    /// `user` and `other` are two accounts.
+    pub async fn an_app_signed_in_to_is_remembered_and_staying_signed_in_kept(
+        sign_ins: &dyn ClientSignIns,
+        user: UserId,
+        other: UserId,
+    ) {
+        let now = OffsetDateTime::now_utc();
+        let web = ClientSignIn::of(user, &a_request());
+        let staying = ClientSignIn {
+            offline_access: true,
+            ..web.clone()
+        };
+
+        let before = sign_ins.find(user, &web.client).await.unwrap();
+        sign_ins.remember(&web, now).await.unwrap();
+        let remembered = sign_ins.find(user, &web.client).await.unwrap();
+        sign_ins.remember(&staying, now).await.unwrap();
+        sign_ins.remember(&web, now).await.unwrap();
+        let kept = sign_ins.find(user, &web.client).await.unwrap();
+        let another_app = sign_ins
+            .find(
+                user,
+                &ClientId::parse("https://other.test/oauth-client.json").unwrap(),
+            )
+            .await
+            .unwrap();
+        let another_account = sign_ins.find(other, &web.client).await.unwrap();
+
+        assert_eq!(before, None);
+        assert_eq!(remembered, Some(web));
+        assert_eq!(
+            kept,
+            Some(staying),
+            "staying signed in, once given, is kept"
+        );
+        assert_eq!((another_app, another_account), (None, None));
     }
 
     pub async fn an_open_ticket_is_found_until_spent_or_expired(

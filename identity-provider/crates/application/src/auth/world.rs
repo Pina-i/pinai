@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use domain::auth::SignInAccount;
 use domain::auth::testing::{
-    CountingSuffixes, InMemoryClients, InMemoryCodes, InMemorySecondFactors,
+    CountingSuffixes, InMemoryClientSignIns, InMemoryClients, InMemoryCodes, InMemorySecondFactors,
     InMemorySignInAccounts, InMemorySignupCodes, PlainHasher, RecordingMailer, RecordingTickets,
     SignInSeeds, SpelledTokens, StepAuthenticator, signed_up, web_client,
 };
@@ -14,7 +14,8 @@ use time::OffsetDateTime;
 
 use super::{
     Authorize, ConfirmTotpEnrollment, DisableTotp, ExchangeCode, LogIn, LogOut, PassSecondFactor,
-    RegenerateRecoveryCodes, Register, ResendCode, StartTotpEnrollment, SweepSignups, VerifyEmail,
+    RegenerateRecoveryCodes, Register, ResendCode, ShowSignIn, StartTotpEnrollment, SweepSignups,
+    VerifyEmail,
 };
 
 pub struct World {
@@ -25,6 +26,7 @@ pub struct World {
     pub tickets: Arc<RecordingTickets>,
     pub signup_codes: Arc<InMemorySignupCodes>,
     pub mailer: Arc<RecordingMailer>,
+    pub sign_ins: Arc<InMemoryClientSignIns>,
     pub authorize: Authorize,
     pub log_in: LogIn,
     pub exchange: ExchangeCode,
@@ -33,6 +35,7 @@ pub struct World {
     pub verify: VerifyEmail,
     pub resend: ResendCode,
     pub sweep: SweepSignups,
+    pub show: ShowSignIn,
     pub factors: Arc<InMemorySecondFactors>,
     pub pass: PassSecondFactor,
     pub enroll: StartTotpEnrollment,
@@ -54,6 +57,7 @@ pub async fn world() -> World {
     let tickets = Arc::new(RecordingTickets::default());
     let signup_codes = Arc::new(InMemorySignupCodes::confirming(accounts.clone()));
     let mailer = Arc::new(RecordingMailer::default());
+    let sign_ins = Arc::new(InMemoryClientSignIns::default());
     let factors = Arc::new(InMemorySecondFactors::for_accounts(accounts.clone()));
     let authenticator = Arc::new(StepAuthenticator::default());
     let origin = InstanceOrigin::parse("http://localhost:8080").unwrap();
@@ -63,6 +67,7 @@ pub async fn world() -> World {
             factors.clone(),
             authenticator.clone(),
             codes.clone(),
+            sign_ins.clone(),
         ),
         enroll: StartTotpEnrollment::new(
             origin.clone(),
@@ -78,7 +83,12 @@ pub async fn world() -> World {
             authenticator.clone(),
         ),
         factors,
-        authorize: Authorize::new(clients.clone(), accounts.clone(), codes.clone()),
+        authorize: Authorize::new(
+            clients.clone(),
+            accounts.clone(),
+            codes.clone(),
+            sign_ins.clone(),
+        ),
         log_in: LogIn::new(
             clients.clone(),
             accounts.clone(),
@@ -87,6 +97,7 @@ pub async fn world() -> World {
             tickets.clone(),
             signup_codes.clone(),
             mailer.clone(),
+            sign_ins.clone(),
         ),
         exchange: ExchangeCode::new(
             clients.clone(),
@@ -110,9 +121,11 @@ pub async fn world() -> World {
             accounts.clone(),
             signup_codes.clone(),
             codes.clone(),
+            sign_ins.clone(),
         ),
         resend: ResendCode::new(accounts.clone(), signup_codes.clone(), mailer.clone()),
         sweep: SweepSignups::new(signup_codes.clone(), tickets.clone(), accounts.clone()),
+        show: ShowSignIn::new(clients.clone(), tickets.clone()),
         alice,
         accounts,
         codes,
@@ -120,6 +133,7 @@ pub async fn world() -> World {
         tickets,
         signup_codes,
         mailer,
+        sign_ins,
     }
 }
 

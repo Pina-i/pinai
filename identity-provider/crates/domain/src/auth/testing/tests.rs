@@ -3,15 +3,9 @@ use std::sync::Arc;
 use super::*;
 
 #[tokio::test]
-async fn a_client_is_found_by_its_id() {
+async fn a_published_client_is_found_by_its_url() {
     let clients = InMemoryClients::default();
-    contract::a_client_is_found_by_its_id(&clients, &clients).await;
-}
-
-#[tokio::test]
-async fn every_client_is_listed() {
-    let clients = InMemoryClients::default();
-    contract::every_client_is_listed(&clients, &clients).await;
+    contract::a_published_client_is_found_by_its_url(&clients, &clients).await;
 }
 
 #[tokio::test]
@@ -141,6 +135,16 @@ async fn a_time_step_is_used_once_and_only_forward() {
 async fn a_ticket_gives_five_attempts_until_spent_or_expired() {
     contract::a_ticket_gives_five_attempts_until_spent_or_expired(
         &RecordingTickets::default(),
+        UserId::generate(),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn an_app_signed_in_to_is_remembered_and_staying_signed_in_kept() {
+    contract::an_app_signed_in_to_is_remembered_and_staying_signed_in_kept(
+        &InMemoryClientSignIns::default(),
+        UserId::generate(),
         UserId::generate(),
     )
     .await;

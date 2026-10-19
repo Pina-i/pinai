@@ -89,6 +89,15 @@ impl Accounts for PgAccounts {
             .map(Account::try_from)
             .collect::<Result<_, _>>()?)
     }
+
+    async fn count(&self) -> Result<u64, AccountsError> {
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE actor_uri IS NOT NULL")
+                .fetch_one(&self.pool)
+                .await
+                .context("count the accounts")?;
+        Ok(u64::try_from(count).unwrap_or(0))
+    }
 }
 
 /// `fragment` as a `LIKE` pattern that matches only itself.

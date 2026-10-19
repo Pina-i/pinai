@@ -8,7 +8,7 @@ use super::*;
 
 fn bob() -> RegisterCommand {
     RegisterCommand {
-        username: "bob".to_owned(),
+        display_name: "Bōb".to_owned(),
         email: "bob@idp.test".to_owned(),
         password: "bob-password".to_owned(),
     }
@@ -25,7 +25,7 @@ async fn registering_creates_an_unconfirmed_account_and_mails_it_a_code() {
         Registered {
             user: registered.user,
             username: "bob_sfx01".to_owned(),
-            display_name: "bob".to_owned(),
+            display_name: "Bōb".to_owned(),
             email: "bob@idp.test".to_owned(),
         }
     );
@@ -34,7 +34,7 @@ async fn registering_creates_an_unconfirmed_account_and_mails_it_a_code() {
         vec![NewAccount {
             id: registered.user,
             username: Handle::parse("bob_sfx01").unwrap(),
-            display_name: "bob".to_owned(),
+            display_name: "Bōb".to_owned(),
             email: Email::parse("bob@idp.test").unwrap(),
             password_hash: PlainHasher::hash("bob-password"),
             actor_uri: ActorUri::parse("http://localhost:8080/users/bob_sfx01").unwrap(),
@@ -46,7 +46,7 @@ async fn registering_creates_an_unconfirmed_account_and_mails_it_a_code() {
         w.mailer.sent(),
         vec![Mail {
             to: "bob@idp.test".to_owned(),
-            name: "bob".to_owned(),
+            name: "Bōb".to_owned(),
             code: w.signup_codes.issued()[0].1.clone(),
         }]
     );
@@ -58,16 +58,14 @@ async fn a_registration_is_refused_with_the_rule_it_breaks() {
     let refused = async |command: RegisterCommand| {
         w.register.execute(command, None, now()).await.unwrap_err()
     };
-    let named = |username: &str| RegisterCommand {
-        username: username.to_owned(),
+    let named = |display_name: &str| RegisterCommand {
+        display_name: display_name.to_owned(),
         ..bob()
     };
 
     let names = [
-        refused(named("b")).await,
-        refused(named("Bob")).await,
-        refused(named("bob/admin")).await,
-        refused(named("bob@idp.test")).await,
+        refused(named("   ")).await,
+        refused(named(&"b".repeat(51))).await,
     ];
     let address = refused(RegisterCommand {
         email: "bob".to_owned(),
@@ -91,7 +89,7 @@ async fn a_registration_is_refused_with_the_rule_it_breaks() {
     .await;
 
     for name in &names {
-        assert!(matches!(name, AuthError::BadUsername(_)), "{name:?}");
+        assert!(matches!(name, AuthError::BadDisplayName(_)), "{name:?}");
     }
     assert!(matches!(address, AuthError::BadEmail(_)), "{address:?}");
     assert!(
@@ -136,7 +134,7 @@ async fn an_address_is_kept_lowercase_and_a_handle_taken_by_chance_drawn_again()
 async fn a_registration_continuing_a_sign_in_is_refused_for_a_request_not_from_a_client() {
     let w = world().await;
     let stranger = AuthorizationRequest {
-        client: ClientId::parse("stranger").unwrap(),
+        client: ClientId::parse("http://localhost:5173/stranger.json").unwrap(),
         ..a_request()
     };
     let elsewhere = AuthorizationRequest {

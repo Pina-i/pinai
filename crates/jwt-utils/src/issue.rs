@@ -5,11 +5,13 @@ use time::OffsetDateTime;
 use crate::{EdKeyPair, JwtUtilsError};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+/// RFC 9068: the audience is the API the token is for, and `client_id` the client it was issued to.
 pub struct AccessTokenClaims {
     pub iss: String,
     pub sub: String, // user UUID as string
-    pub aud: String, // client_id
-    pub exp: i64,    // unix timestamp
+    pub aud: String,
+    pub client_id: String,
+    pub exp: i64, // unix timestamp
     pub iat: i64,
     pub email: String,
     pub preferred_username: String,
@@ -28,11 +30,13 @@ pub struct IdTokenClaims {
     pub nonce: Option<String>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn issue_access_token(
     keypair: &EdKeyPair,
     issuer: &str,
-    subject: &str,  // user UUID
-    audience: &str, // client_id
+    subject: &str, // user UUID
+    audience: &str,
+    client_id: &str,
     email: &str,
     username: &str,
     ttl_seconds: i64,
@@ -42,6 +46,7 @@ pub fn issue_access_token(
         iss: issuer.to_owned(),
         sub: subject.to_owned(),
         aud: audience.to_owned(),
+        client_id: client_id.to_owned(),
         exp: now + ttl_seconds,
         iat: now,
         email: email.to_owned(),

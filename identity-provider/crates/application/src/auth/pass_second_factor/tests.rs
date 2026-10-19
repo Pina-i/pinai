@@ -1,5 +1,5 @@
 use domain::auth::testing::{StepAuthenticator, a_request, signed_up};
-use domain::auth::{LOGIN_TICKET_TTL, LoginTickets, SignInAccount};
+use domain::auth::{Grant, LOGIN_TICKET_TTL, LoginTickets, SignInAccount};
 
 use crate::auth::world::{World, now, world};
 
@@ -49,6 +49,10 @@ async fn the_apps_code_ends_the_sign_in_with_a_code_for_the_request() {
     );
     assert_eq!(issued[0].1, Grant::answering(bob.id, &a_request()));
     assert_eq!(w.tickets.find(ticket, now()).await.unwrap(), None);
+    assert_eq!(
+        w.sign_ins.remembered(),
+        vec![domain::auth::ClientSignIn::of(bob.id, &a_request())]
+    );
 }
 
 #[tokio::test]

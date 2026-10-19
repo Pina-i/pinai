@@ -1,0 +1,24 @@
+{% extends "sign-in/base.html" %}
+{% import "sign-in/icons.html" as icon %}
+{% block title %}Sign in{% endblock %}
+{% block back %}<a class="back" href="{{ back }}">← Another home</a>{% endblock %}
+{% block content %}
+<h2 class="auth-title">Sign in to {{ frame.name }}</h2>
+<p class="for">to continue to <span class="for-name">{{ app_name }}</span>{% if let Some(app_host) = app_host %} <span class="fact fact--plain">{{ app_host }}</span>{% endif %}</p>
+<nav class="tabs">
+<a class="tab{% if !register %} tab--on{% endif %}" href="{{ sign_in_href }}"{% if !register %} aria-current="page"{% endif %}>Sign in</a>
+<a class="tab{% if register %} tab--on{% endif %}" href="{{ register_href }}"{% if register %} aria-current="page"{% endif %}>Register</a>
+</nav>
+{% if let Some(alert) = alert %}<p class="alert" role="alert">{{ alert }}</p>{% endif %}
+{% if let Some(note) = note %}<p class="note" role="status">{{ note }}</p>{% endif %}
+<form class="stack" method="post" action="{% if register %}/register-and-login{% else %}/login{% endif %}">
+{% include "sign-in/carried.html" %}
+{% if register -%}
+<div class="lfield"><label class="eye" for="display_name">Display name</label><span class="field{% if bad == "display_name" %} field--err{% endif %}"><input id="display_name" name="display_name" placeholder="Hōkū" autocomplete="nickname" maxlength="50" required autofocus></span></div>
+{%- endif %}
+<div class="lfield"><label class="eye" for="email">Email</label><span class="field{% if bad == "email" %} field--err{% endif %}">{% call icon::mail(15) %}{% endcall %}<input id="email" name="email" type="email" placeholder="hoku@{{ email_host }}" autocomplete="email" required{% if !register %} autofocus{% endif %}></span></div>
+<div class="lfield"><label class="eye" for="password">Password</label><span class="field{% if bad == "password" %} field--err{% endif %}">{% call icon::lock_keyhole(15) %}{% endcall %}<input id="password" name="password" type="password" placeholder="••••••••••" {% if register %}autocomplete="new-password" minlength="8"{% else %}autocomplete="current-password"{% endif %} required></span></div>
+<button class="btn btn1" type="submit">{% if register %}Create account{% else %}Sign in{% endif %}{% call icon::spinner() %}{% endcall %}</button>
+</form>
+<p class="fact fact--plain auth-foot">{% call icon::shield_check(11) %}{% endcall %}<span>Your password goes to {{ frame.host }}, never to Pīna'i</span></p>
+{% endblock %}

@@ -34,6 +34,10 @@ impl InMemoryAccounts {
             accounts: Mutex::new(accounts.into_iter().collect()),
         }
     }
+
+    pub fn add(&self, account: Account) {
+        self.accounts.lock().unwrap().push(account);
+    }
 }
 
 #[async_trait::async_trait]
@@ -81,6 +85,10 @@ impl Accounts for InMemoryAccounts {
         found.sort_by(|a, b| a.username.cmp(&b.username));
         found.truncate(usize::try_from(limit).unwrap_or(0));
         Ok(found)
+    }
+
+    async fn count(&self) -> Result<u64, AccountsError> {
+        Ok(self.accounts.lock().unwrap().len() as u64)
     }
 }
 
@@ -301,6 +309,11 @@ pub mod contract {
             "at most the limit"
         );
         assert!(accounts.search("zzz", 20).await.unwrap().is_empty());
+    }
+
+    /// Takes the store holding exactly `alice` and `bob`.
+    pub async fn every_account_counts(accounts: &dyn Accounts) {
+        assert_eq!(accounts.count().await.unwrap(), 2);
     }
 
     /// `%` and `_` are no wildcards: `alice` holds `lic`, not `l_c` nor `%e`.

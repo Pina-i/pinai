@@ -53,12 +53,18 @@ redis                = { version = "0.27", features = ["aio", "tokio-comp", "con
 [dev-dependencies]
 domain          = { package = "idp-domain", path = "../domain", features = ["test-utils"] }
 http-signatures = { workspace = true }
-tokio  = { workspace = true }
-uuid   = { workspace = true }
+tokio    = { workspace = true }
+uuid     = { workspace = true }
+wiremock = { workspace = true }
 
 [features]
 # Tests that need Docker (Postgres); run by `make test-integration`.
 integration = []
+
+# Client documents, served by wiremock: no Docker.
+[[test]]
+name = "clients"
+path = "tests/clients/main.rs"
 
 [[test]]
 name              = "postgres"

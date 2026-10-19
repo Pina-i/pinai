@@ -12,6 +12,8 @@ mod inbox;
 mod key_directory;
 mod messaging;
 mod mls;
+mod nodeinfo;
+mod pages;
 mod presence;
 mod privacy;
 mod profile;
@@ -37,7 +39,7 @@ use application::e2ee::{
     KeyPackageStatus, ListDevices, LoadArchiveSalt, ReadArchive, ReceiveCommit, ReceiveWelcome,
     RegisterDevice, RevokeDevice, SendWelcome, SetArchiveSalt, UploadKeyPackages,
 };
-use application::identity::{FindAccount, SearchAccounts, WebFinger};
+use application::identity::{DescribeInstance, FindAccount, SearchAccounts, WebFinger};
 use application::messaging::{
     AddGroupMember, CreateGroup, DeliverDirectMessage, DismissGroup, EditMessage,
     ListConversations, ListGroupMembers, LoadHistory, MarkRead, OpenAttachment, ReadBlob,
@@ -70,8 +72,9 @@ use tokio_util::sync::CancellationToken;
 
 pub use actors::PublicKeyPem;
 pub use error::ApiError;
+pub use pages::SignInPages;
 pub use rate_limit::RateLimiter;
-pub use sign_in::{Jwks, LoginAttempts, SignInPages};
+pub use sign_in::{Jwks, LoginAttempts};
 
 /// What handlers reach through `State`, built in the composition root.
 #[derive(Clone, FromRef)]
@@ -100,6 +103,8 @@ pub struct AppState {
     pub dev_routes: bool,
     pub signatures: Arc<dyn SignatureVerifier>,
     pub origin: InstanceOrigin,
+    /// What the instance says of itself, to NodeInfo and on the sign-in pages.
+    pub describe_instance: Arc<DescribeInstance>,
     pub public_key_pem: PublicKeyPem,
     pub find_account: Arc<FindAccount>,
     pub show_person: Arc<application::profile::ShowPerson>,
@@ -205,15 +210,27 @@ pub fn router(state: AppState) -> Router {
         .route("/api/users/search", get(accounts::search))
         .route("/.well-known/openid-configuration", get(sign_in::discovery))
         .route("/.well-known/jwks.json", get(sign_in::jwks))
+        .route(
+            domain::auth::DESKTOP_DOCUMENT_PATH,
+            get(sign_in::desktop_document),
+        )
+        .route("/.well-known/nodeinfo", get(nodeinfo::discovery))
+        .route("/nodeinfo/2.1", get(nodeinfo::document))
         .route("/authorize", get(sign_in::authorize))
-        .route("/login", post(sign_in::log_in))
+        .route("/login", get(sign_in::login_page).post(sign_in::log_in))
         .route("/token", post(sign_in::token))
         .route("/logout", get(sign_in::log_out))
+        .route("/signed-out", get(sign_in::signed_out))
         .route("/register", post(sign_up::register))
         .route("/register-and-login", post(sign_up::register_and_log_in))
+        .route("/verify-email", get(sign_up::verify_page))
         .route("/verify-email-and-login", post(sign_up::verify_email))
         .route("/verify-email/resend", post(sign_up::resend))
-        .route("/login/totp", post(second_factor::pass))
+        .route(
+            "/login/totp",
+            get(second_factor::page).post(second_factor::pass),
+        )
+        .route("/assets/{*path}", get(pages::asset))
         .route("/api/totp/enroll", post(second_factor::enroll))
         .route("/api/totp/enroll/verify", post(second_factor::confirm))
         .route("/api/totp/disable", post(second_factor::disable))

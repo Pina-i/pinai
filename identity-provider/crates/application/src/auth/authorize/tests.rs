@@ -1,4 +1,5 @@
 use domain::auth::testing::{CHALLENGE, REDIRECT_URI, a_request};
+use domain::auth::{ClientSignIn, Grant};
 
 use crate::auth::world::{now, world};
 
@@ -19,8 +20,12 @@ fn command() -> AuthorizeCommand {
 }
 
 #[tokio::test]
-async fn a_browser_signed_in_already_is_handed_a_code_at_once() {
+async fn a_browser_signed_in_already_to_this_app_is_handed_a_code_at_once() {
     let w = world().await;
+    w.sign_ins
+        .remember(&ClientSignIn::of(w.alice.id, &a_request()), now())
+        .await
+        .unwrap();
 
     let authorized = w
         .authorize
@@ -37,6 +42,43 @@ async fn a_browser_signed_in_already_is_handed_a_code_at_once() {
         }
     );
     assert_eq!(issued[0].1, Grant::answering(w.alice.id, &a_request()));
+}
+
+#[tokio::test]
+async fn a_session_never_signs_in_silently_to_an_app_its_account_did_not_sign_in_to() {
+    let w = world().await;
+    let bob = domain::auth::testing::signed_up("bob");
+    w.sign_up(&bob).await;
+    w.sign_ins
+        .remember(&ClientSignIn::of(bob.id, &a_request()), now())
+        .await
+        .unwrap();
+    let staying = AuthorizeCommand {
+        scope: "openid profile email offline_access".to_owned(),
+        ..command()
+    };
+
+    let never = w
+        .authorize
+        .execute(command(), Some(w.alice.id), now())
+        .await
+        .unwrap();
+    let longer = w
+        .authorize
+        .execute(staying, Some(bob.id), now())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        never,
+        Authorized::SignIn(a_request()),
+        "another account's app"
+    );
+    assert!(
+        matches!(longer, Authorized::SignIn(_)),
+        "staying signed in asks the password: {longer:?}"
+    );
+    assert!(w.codes.issued().is_empty());
 }
 
 #[tokio::test]

@@ -1,5 +1,5 @@
 use domain::UserId;
-use domain::auth::testing::{REDIRECT_URI, VERIFIER, a_request};
+use domain::auth::testing::{CLIENT_ID, REDIRECT_URI, VERIFIER, a_request};
 use domain::auth::{AuthorizationCodes, Grant};
 use time::Duration;
 
@@ -22,7 +22,7 @@ fn command(code: &AuthorizationCode) -> TokenCommand {
         grant_type: "authorization_code".to_owned(),
         code: code.as_str().to_owned(),
         redirect_uri: REDIRECT_URI.to_owned(),
-        client_id: "web-client".to_owned(),
+        client_id: CLIENT_ID.to_owned(),
         code_verifier: VERIFIER.to_owned(),
     }
 }
@@ -38,8 +38,8 @@ async fn a_code_is_exchanged_once_for_the_accounts_tokens() {
     assert_eq!(
         tokens,
         Tokens {
-            access_token: format!("access:{}:web-client", w.alice.id),
-            id_token: format!("id:{}:web-client:{}:the-nonce", w.alice.id, w.alice.email),
+            access_token: format!("access:{}:{CLIENT_ID}", w.alice.id),
+            id_token: format!("id:{}:{CLIENT_ID}:{}:the-nonce", w.alice.id, w.alice.email),
             expires_in: Duration::hours(1),
         }
     );
@@ -63,7 +63,7 @@ async fn an_exchange_is_refused_for_another_grant_client_or_redirect_and_a_wrong
     })
     .await;
     let stranger = refused(|c| TokenCommand {
-        client_id: "stranger".to_owned(),
+        client_id: "http://localhost:5173/stranger.json".to_owned(),
         ..c
     })
     .await;

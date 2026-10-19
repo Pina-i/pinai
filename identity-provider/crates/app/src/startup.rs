@@ -453,8 +453,12 @@ impl Application {
             &key_packages,
         )));
 
+        // Every client is its own document; the official desktop app's is described here.
         let clients: Arc<dyn domain::auth::Clients> =
-            Arc::new(infrastructure::postgres::PgClients::new(pool.clone()));
+            Arc::new(infrastructure::auth::MetadataClients::new(
+                url_policy,
+                vec![domain::auth::desktop_client(&origin)],
+            ));
         let sign_in_accounts: Arc<dyn domain::auth::SignInAccounts> = Arc::new(
             infrastructure::postgres::PgSignInAccounts::new(pool.clone()),
         );
@@ -466,6 +470,8 @@ impl Application {
             Arc::new(infrastructure::auth::Argon2Hasher::new());
         let login_tickets: Arc<dyn domain::auth::LoginTickets> =
             Arc::new(infrastructure::postgres::PgLoginTickets::new(pool.clone()));
+        let client_sign_ins: Arc<dyn domain::auth::ClientSignIns> =
+            Arc::new(infrastructure::postgres::PgClientSignIns::new(pool.clone()));
         let signup_codes: Arc<dyn domain::auth::SignupCodes> =
             Arc::new(infrastructure::postgres::PgSignupCodes::new(
                 pool.clone(),
@@ -513,21 +519,38 @@ impl Application {
             Arc::clone(&friend_presence),
         ));
 
+        let intro = domain::identity::InstanceIntro::new(
+            &origin,
+            config.instance_name.as_deref(),
+            config.instance_description.as_deref(),
+        )
+        .map_err(|e| anyhow::anyhow!("INSTANCE_NAME or INSTANCE_DESCRIPTION: {e}"))?;
+        let describe_instance = Arc::new(application::identity::DescribeInstance::new(
+            intro,
+            Arc::clone(&accounts),
+        ));
+
         let api_state = api::AppState {
             auth: Arc::new(infrastructure::auth::JwtTokenVerifier::new(
                 Arc::clone(&keypair),
                 config.issuer(),
             )),
             cookie_key: cookie_key.clone(),
-            sign_in_pages: api::SignInPages {
-                frontend_url: config.frontend_url.clone(),
-                secure_cookies: config.secure_cookies(),
-            },
+            sign_in_pages: api::SignInPages::new(
+                Arc::clone(&describe_instance),
+                Arc::new(application::auth::ShowSignIn::new(
+                    Arc::clone(&clients),
+                    Arc::clone(&login_tickets),
+                )),
+                origin.clone(),
+                config.secure_cookies(),
+            ),
             jwks: api::Jwks(Arc::new(jwks)),
             authorize: Arc::new(application::auth::Authorize::new(
                 Arc::clone(&clients),
                 Arc::clone(&sign_in_accounts),
                 Arc::clone(&authorization_codes),
+                Arc::clone(&client_sign_ins),
             )),
             log_in: Arc::new(application::auth::LogIn::new(
                 Arc::clone(&clients),
@@ -537,6 +560,7 @@ impl Application {
                 Arc::clone(&login_tickets),
                 Arc::clone(&signup_codes),
                 Arc::clone(&mailer),
+                Arc::clone(&client_sign_ins),
             )),
             register: Arc::new(application::auth::Register::new(
                 origin.clone(),
@@ -553,6 +577,7 @@ impl Application {
                 Arc::clone(&sign_in_accounts),
                 Arc::clone(&signup_codes),
                 Arc::clone(&authorization_codes),
+                Arc::clone(&client_sign_ins),
             )),
             resend_code: Arc::new(application::auth::ResendCode::new(
                 Arc::clone(&sign_in_accounts),
@@ -566,6 +591,7 @@ impl Application {
                 Arc::clone(&second_factors),
                 Arc::clone(&authenticator),
                 Arc::clone(&authorization_codes),
+                client_sign_ins,
             )),
             start_totp_enrollment: Arc::new(application::auth::StartTotpEnrollment::new(
                 origin.clone(),
@@ -599,6 +625,7 @@ impl Application {
             log_out: Arc::new(application::auth::LogOut::new(clients)),
             login_attempts: api::LoginAttempts::new(),
             origin: origin.clone(),
+            describe_instance,
             public_key_pem: api::PublicKeyPem(Arc::from(keypair.public_key_pem.as_str())),
             find_account: Arc::new(application::identity::FindAccount::new(
                 origin.clone(),

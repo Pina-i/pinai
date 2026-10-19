@@ -8,10 +8,10 @@ In this architecture, users can be on **different IdPs** (e.g. Alice on `idp.ali
 -- Local users registered on this IdP instance
 CREATE TABLE users (
   id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    username      TEXT NOT NULL UNIQUE,       -- the handle: chosen name + "_" + 5 of a–z0–9,
-                                            -- e.g. "alice_xk9mp"; used for federation:
-                                            -- alice_xk9mp@idp.alice.com (identity-provider/specs/auth.md § 2)
-  display_name  TEXT NOT NULL,              -- set to user input at creation, e.g. "alice"
+    username      TEXT NOT NULL UNIQUE,       -- the handle: the display name in ASCII + "_" +
+                                            -- 5 of a–z0–9, e.g. "hoku_xk9mp"; used for federation:
+                                            -- hoku_xk9mp@idp.alice.com (identity-provider/specs/auth.md § 2)
+  display_name  TEXT NOT NULL,              -- typed at sign-up, e.g. "Hōkū"
                                             -- freeform, no uniqueness constraint, shown in UI
   avatar_url    TEXT,                       -- public RustFS URL with `?v=<unix_secs>` cache-bust
                                             -- (avatars bucket is public-read; see identity-provider/specs/profile-and-settings.md § 1)
@@ -108,9 +108,61 @@ refused.
 
 ## 5. `username` vs `display_name`
 
-- `username` is the unique internal identifier used for federation and ActivityPub addressing. It is composed of the user-chosen name + `_` + a 5-character suffix of `a–z0–9` appended by the backend at account creation (e.g. `alice_xk9mp`; `identity-provider/specs/auth.md § 2`). This guarantees uniqueness per instance with no coordination needed. It is never shown in the UI.
-- `display_name` is the only name shown client-side. It is automatically set by the backend at account creation to the user-chosen part, before the suffix (e.g. user types `alice` → `display_name = "alice"`). It has no uniqueness constraint and can be changed at any time, within the rules of `identity-provider/specs/profile-and-settings.md § 1`.
+- `display_name` is the only name shown client-side. The user types it at sign-up — `Hōkū`,
+  `Ana Tane` — within the rules of `identity-provider/specs/profile-and-settings.md § 1`
+  (trimmed, 1–50 characters). It has no uniqueness constraint and can be changed at any time.
+- `username` is the unique internal identifier used for federation and ActivityPub addressing,
+  derived from the display name at account creation and never changed. It is never shown in the
+  UI.
+
+The username is the display name made a chosen name (`UsernameChoice::derived_from`), then `_` and
+a 5-character suffix of `a–z0–9` (`identity-provider/specs/auth.md § 2`):
+1. transliterated to ASCII (`Hōkū` → `Hoku`, `Ærø` → `AEro`, `李雷` → `Li Lei`);
+2. lowercased;
+3. every run of anything but `a–z0–9` made one `_`, none at either end;
+4. cut at 32 characters.
+
+A name with fewer than 2 characters left gives `user`. The suffix keeps every username unique
+without asking anyone, so two people named Hōkū are `hoku_xk9mp` and `hoku_3t8qa`.
 
 Example flow at account creation:
-- User inputs: `alice`
-- Backend sets: `username = "alice_xk9mp"`, `display_name = "alice"`, `actor_uri = "https://idp.alice.com/users/alice_xk9mp"`
+- User inputs: `Hōkū Tane`
+- Backend sets: `username = "hoku_tane_xk9mp"`, `display_name = "Hōkū Tane"`,
+  `actor_uri = "https://idp.alice.com/users/hoku_tane_xk9mp"`
+
+## 6. The instance's description
+
+An instance says what it is to whoever is about to sign in to it: on its sign-in pages
+(`identity-provider/specs/auth.md § 1` "The sign-in pages"), and in its NodeInfo, the document
+every fediverse server publishes about itself.
+
+| What | From |
+|---|---|
+| Name | `INSTANCE_NAME`, trimmed, 60 characters at most; unset or blank, the instance's domain |
+| Description | `INSTANCE_DESCRIPTION`, trimmed, 280 characters at most; unset or blank, none |
+| People | Every local account, counted at most a minute ago (`Accounts::count`) |
+| Open registration | Always: there is no way to close it yet |
+
+A name or a description past its limit stops the instance at startup (`InstanceIntro`).
+
+**NodeInfo 2.1**, answered to any origin:
+- `GET /.well-known/nodeinfo` links to the document:
+  `{"links":[{"rel":"http://nodeinfo.diaspora.software/ns/schema/2.1","href":"<issuer>/nodeinfo/2.1"}]}`.
+- `GET /nodeinfo/2.1` is the document, `Content-Type: application/json;
+  profile="http://nodeinfo.diaspora.software/ns/schema/2.1#"`, kept a minute by caches:
+
+```json
+{
+  "version": "2.1",
+  "software": { "name": "pinai", "version": "0.1.0", "repository": "https://github.com/Pina-i/pinai" },
+  "protocols": ["activitypub"],
+  "services": { "inbound": [], "outbound": [] },
+  "openRegistrations": true,
+  "usage": { "users": { "total": 1204 } },
+  "metadata": { "nodeName": "Aotearoa", "nodeDescription": "Design and type people." }
+}
+```
+
+`nodeDescription` is left out when there is none. The web client's landing reads it while the user
+types an instance's address, to show `✓ resolved · Aotearoa · 1,204 people` before sending them
+there; a client tells a Pīna'i instance by `software.name`.

@@ -1,0 +1,7 @@
+{% extends "sign-in/base.html" %}
+{% block title %}{{ title }}{% endblock %}
+{% block back %}{% if let Some(back) = back %}<a class="back" href="{{ back }}">← Another home</a>{% endif %}{% endblock %}
+{% block content %}
+<h2 class="auth-title">{{ title }}</h2>
+<p class="lead">{{ text }}</p>
+{% endblock %}

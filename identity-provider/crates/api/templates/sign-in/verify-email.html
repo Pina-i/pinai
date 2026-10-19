@@ -1,0 +1,21 @@
+{% extends "sign-in/base.html" %}
+{% import "sign-in/icons.html" as icon %}
+{% block title %}Check your inbox{% endblock %}
+{% block back %}<a class="back" href="{{ back }}">← Another home</a>{% endblock %}
+{% block content %}
+<h2 class="auth-title">Check your inbox.</h2>
+<p class="lead">We just sent a one-time code to</p>
+{% if let Some(email) = email %}<div class="address">{% call icon::mail(14) %}{% endcall %}<span>{{ email }}</span></div>{% endif %}
+<form class="stack" method="post" action="/verify-email-and-login">
+{% include "sign-in/carried.html" %}
+<div class="lfield"><label class="eye" for="code">Six-digit code</label><span class="field field--code{% if failed %} field--err{% endif %}"><input id="code" name="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" required autofocus></span></div>
+<p class="status{% if failed %} status--err{% else if resent %} status--ok{% endif %}" role="status">{{ status }}</p>
+<button class="btn btn1" type="submit">Verify and continue{% call icon::arrow_right(15) %}{% endcall %}{% call icon::spinner() %}{% endcall %}</button>
+</form>
+<div class="divider"><span class="eye">Didn't get it?</span></div>
+<form method="post" action="/verify-email/resend">
+{% include "sign-in/carried.html" %}
+<button class="btn btn2" type="submit">{% call icon::rotate_ccw(14) %}{% endcall %}Send a new code{% call icon::spinner() %}{% endcall %}</button>
+</form>
+<p class="footnote">Still nothing? Check your spam folder.</p>
+{% endblock %}

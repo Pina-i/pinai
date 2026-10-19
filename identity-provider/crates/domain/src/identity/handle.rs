@@ -26,6 +26,24 @@ impl UsernameChoice {
         Ok(Self(raw.to_owned()))
     }
 
+    /// The chosen part an account signing up by display name gets: the name in ASCII
+    /// ("Hōkū" → `hoku`), lowercase, every run of anything else one `_`, at most 32 characters.
+    /// A name with less than 2 characters left is `user`; the suffix keeps it unique anyway.
+    pub fn derived_from(display_name: &str) -> Self {
+        let ascii = deunicode::deunicode(display_name).to_ascii_lowercase();
+        let mut derived = String::with_capacity(ascii.len());
+        for c in ascii.chars() {
+            if c.is_ascii_lowercase() || c.is_ascii_digit() {
+                derived.push(c);
+            } else if !derived.is_empty() && !derived.ends_with('_') {
+                derived.push('_');
+            }
+        }
+        derived.truncate(32);
+        let derived = derived.trim_end_matches('_');
+        Self::parse(derived).unwrap_or_else(|_| Self("user".to_owned()))
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }

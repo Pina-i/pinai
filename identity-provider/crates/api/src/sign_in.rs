@@ -1,5 +1,5 @@
-//! OpenID Connect sign-in: `/authorize`, the login form, `/token`, `/logout`, and the documents
-//! a client discovers them by — see identity-provider/specs/auth.md § 1.
+//! OpenID Connect sign-in: `/authorize`, the login page and its form, `/token`, `/logout`, and
+//! the documents a client discovers them by — see identity-provider/specs/auth.md § 1.
 
 use std::sync::Arc;
 
@@ -14,23 +14,18 @@ use axum::{Form, Json};
 use axum_extra::extract::SignedCookieJar;
 use axum_extra::extract::cookie::{Cookie, SameSite};
 use domain::UserId;
-use domain::auth::{AuthError, AuthorizationRequest, ClientId, CodeChallenge};
+use domain::auth::{AuthError, AuthorizationRequest, desktop_client};
 use domain::identity::InstanceOrigin;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
+use crate::pages::{
+    Appearance, Carried, LoginPage, SIGNED_OUT, SameOrigin, SignInPages, cancel, carried, expired,
+    login_alert, login_note, render, to,
+};
 use crate::{ApiError, RateLimiter};
 
 pub const SESSION_COOKIE: &str = "idp_session";
-
-/// Where the sign-in pages live, and how the session cookie is set.
-#[derive(Debug, Clone)]
-pub struct SignInPages {
-    /// The web client serving `/login`, `/verify-email` and `/login/totp`.
-    pub frontend_url: String,
-    /// `Secure` cookies: production is served over HTTPS only.
-    pub secure_cookies: bool,
-}
 
 /// Password guesses, per email: a burst, then one a minute.
 #[derive(Clone)]
@@ -90,8 +85,7 @@ pub(crate) fn url_with(base: &str, pairs: &[(&str, &str)]) -> String {
     format!("{base}?{}", query.join("&"))
 }
 
-/// The request's parameters, in the order the sign-in pages expect them; `extra` goes before
-/// the nonce.
+/// The request's parameters; `extra` goes before the nonce.
 pub(crate) fn carrying<'a>(
     request: &'a AuthorizationRequest,
     extra: &[(&'a str, &'a str)],
@@ -128,6 +122,9 @@ pub struct AuthorizeParams {
     code_challenge: String,
     code_challenge_method: String,
     nonce: Option<String>,
+    /// How the client is painted, for the sign-in pages to match.
+    theme: Option<String>,
+    motif: Option<String>,
 }
 
 fn authorize_error(error: AuthError) -> ApiError {
@@ -145,13 +142,14 @@ fn authorize_error(error: AuthError) -> ApiError {
 }
 
 /// `GET /authorize` — a browser signed in already goes straight back with a code; any other
-/// goes to the web client's login page, carrying the request.
+/// goes to the login page, carrying the request.
 pub async fn authorize(
     State(authorize): State<Arc<Authorize>>,
     State(pages): State<SignInPages>,
     jar: SignedCookieJar,
     Query(params): Query<AuthorizeParams>,
 ) -> Result<Response, ApiError> {
+    let appearance = Appearance::parse(params.theme.as_deref(), params.motif.as_deref());
     let (redirect_uri, state) = (params.redirect_uri.clone(), params.state.clone());
     let command = AuthorizeCommand {
         response_type: params.response_type,
@@ -168,6 +166,9 @@ pub async fn authorize(
         .await
     {
         Ok(authorized) => authorized,
+        Err(error @ (AuthError::UnknownClient | AuthError::UnregisteredRedirect)) => {
+            return pages.misdirected(error, appearance).await;
+        }
         // Raised only once the client and its redirect_uri are known good.
         Err(error @ (AuthError::UnsupportedResponseType | AuthError::BadChallengeMethod)) => {
             let code = match error {
@@ -191,75 +192,100 @@ pub async fn authorize(
         Authorized::Code { request, code } => {
             back_with_code(&request, code.as_str()).into_response()
         }
-        Authorized::SignIn(request) => Redirect::to(&url_with(
-            &format!("{}/login", pages.frontend_url),
-            &carrying(&request, &[]),
-        ))
-        .into_response(),
+        Authorized::SignIn(request) => to("/login", &carried(&request, appearance, &[])),
     })
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LoginQuery {
+    /// `register` for the sign-up tab.
+    tab: Option<String>,
+    error: Option<String>,
+    notice: Option<String>,
+    #[serde(flatten)]
+    carried: Carried,
+}
+
+/// `GET /login` — Sign in or Register, for the request carried. A link that carries none, or a
+/// broken one, is told it has expired.
+pub async fn login_page(
+    State(pages): State<SignInPages>,
+    Query(query): Query<LoginQuery>,
+) -> Result<Response, ApiError> {
+    let appearance = query.carried.appearance();
+    let Some(request) = query.carried.request() else {
+        let notice = expired(query.error.as_deref());
+        return pages
+            .notice(StatusCode::BAD_REQUEST, notice, appearance)
+            .await;
+    };
+    let client = match pages.show.request(&request).await {
+        Ok(client) => client,
+        Err(error) => return pages.misdirected(error, appearance).await,
+    };
+    let register = query.tab.as_deref() == Some("register");
+    let (alert, bad) = match query.error.as_deref().and_then(login_alert) {
+        Some((alert, field)) => (Some(alert), field),
+        None => (None, ""),
+    };
+    let pairs = carried(&request, appearance, &[]);
+    let mut on_register = pairs.clone();
+    on_register.push(("tab", "register"));
+    let host = pages.host();
+    let app_host = client.id.authority();
+    let page = LoginPage {
+        frame: pages.frame(appearance).await?,
+        back: cancel(&request),
+        app_name: client.name,
+        app_host: (app_host != host).then_some(app_host),
+        register,
+        sign_in_href: url_with("/login", &pairs),
+        register_href: url_with("/login", &on_register),
+        alert,
+        note: query.notice.as_deref().and_then(login_note),
+        bad,
+        email_host: host
+            .rsplit_once(':')
+            .map_or(host.as_str(), |(name, _)| name)
+            .to_owned(),
+        carried: pairs,
+    };
+    Ok(render(StatusCode::OK, &page, Some(&request.redirect_uri)))
 }
 
 #[derive(Debug, Deserialize)]
 pub struct LoginForm {
     email: String,
     password: String,
-    client_id: String,
-    redirect_uri: String,
-    scope: String,
-    state: String,
-    code_challenge: String,
-    code_challenge_method: String,
-    nonce: Option<String>,
-}
-
-impl LoginForm {
-    fn request(&self) -> Option<AuthorizationRequest> {
-        Some(AuthorizationRequest {
-            client: ClientId::parse(&self.client_id).ok()?,
-            redirect_uri: self.redirect_uri.clone(),
-            scope: self.scope.clone(),
-            state: self.state.clone(),
-            challenge: CodeChallenge::parse(&self.code_challenge, &self.code_challenge_method)
-                .ok()?,
-            nonce: self.nonce.clone(),
-        })
-    }
-
-    /// Back to the login form, with what it was sent and why it failed.
-    fn refused(&self, pages: &SignInPages, error: &str) -> Response {
-        let mut pairs = vec![
-            ("client_id", self.client_id.as_str()),
-            ("redirect_uri", self.redirect_uri.as_str()),
-            ("scope", self.scope.as_str()),
-            ("state", self.state.as_str()),
-            ("code_challenge", self.code_challenge.as_str()),
-            ("code_challenge_method", self.code_challenge_method.as_str()),
-            ("error", error),
-        ];
-        if let Some(nonce) = &self.nonce {
-            pairs.push(("nonce", nonce));
-        }
-        Redirect::to(&url_with(&format!("{}/login", pages.frontend_url), &pairs)).into_response()
-    }
+    #[serde(flatten)]
+    carried: Carried,
 }
 
 /// `POST /login` — the login form: back to the client with a code, or on to confirming the
 /// address or to the authenticator's code.
 pub async fn log_in(
+    _: SameOrigin,
     State(log_in): State<Arc<LogIn>>,
     State(pages): State<SignInPages>,
     State(LoginAttempts(attempts)): State<LoginAttempts>,
     jar: SignedCookieJar,
     Form(form): Form<LoginForm>,
 ) -> Result<Response, ApiError> {
-    let Some(request) = form.request() else {
-        return Ok(form.refused(&pages, "Invalid request"));
+    let appearance = form.carried.appearance();
+    let Some(request) = form.carried.request() else {
+        return Ok(to("/login", &appearance.pairs()));
+    };
+    let again = |error: &str| {
+        to(
+            "/login",
+            &carried(&request, appearance, &[("error", error)]),
+        )
     };
     // Counted per address in any case, known or not: which is limited never tells who exists.
     if !attempts.allow(&form.email.to_lowercase()) {
-        return Ok(form.refused(&pages, "Too many attempts — try again in a minute"));
+        return Ok(again("rate_limited"));
     }
-    let outcome = log_in
+    let outcome = match log_in
         .execute(
             &form.email,
             &form.password,
@@ -267,31 +293,30 @@ pub async fn log_in(
             OffsetDateTime::now_utc(),
         )
         .await
-        .map_err(authorize_error)?;
+    {
+        Ok(outcome) => outcome,
+        Err(error @ (AuthError::UnknownClient | AuthError::UnregisteredRedirect)) => {
+            return pages.misdirected(error, appearance).await;
+        }
+        Err(other) => return Err(authorize_error(other)),
+    };
     Ok(match outcome {
-        LoginOutcome::Refused => form.refused(&pages, "Invalid email or password"),
+        LoginOutcome::Refused => again("invalid_credentials"),
         LoginOutcome::Unverified { user, email } => {
             let user = user.to_string();
             let pending = [
                 ("pending_user_id", user.as_str()),
                 ("pending_email", email.as_str()),
+                ("notice", "confirm_email"),
             ];
-            let mut pairs = pending.to_vec();
-            pairs.extend(carrying(
-                &request,
-                &[("error", "Confirm your email to finish signing in")],
-            ));
-            Redirect::to(&url_with(
-                &format!("{}/verify-email", pages.frontend_url),
-                &pairs,
-            ))
-            .into_response()
+            to("/verify-email", &carried(&request, appearance, &pending))
         }
-        LoginOutcome::SecondFactor(ticket) => Redirect::to(&url_with(
-            &format!("{}/login/totp", pages.frontend_url),
-            &[("ticket", &ticket.to_string())],
-        ))
-        .into_response(),
+        LoginOutcome::SecondFactor(ticket) => {
+            let ticket = ticket.to_string();
+            let mut pairs = vec![("ticket", ticket.as_str())];
+            pairs.extend(appearance.pairs());
+            to("/login/totp", &pairs)
+        }
         LoginOutcome::SignedIn { user, code } => (
             jar.add(session_cookie(user, pages.secure_cookies)),
             back_with_code(&request, code.as_str()),
@@ -381,6 +406,7 @@ pub async fn token(
 
 #[derive(Debug, Deserialize)]
 pub struct LogoutParams {
+    client_id: Option<String>,
     post_logout_redirect_uri: Option<String>,
 }
 
@@ -391,14 +417,24 @@ pub async fn log_out(
     Query(params): Query<LogoutParams>,
 ) -> Result<impl IntoResponse, ApiError> {
     let to = log_out
-        .execute(params.post_logout_redirect_uri.as_deref())
+        .execute(
+            params.client_id.as_deref(),
+            params.post_logout_redirect_uri.as_deref(),
+        )
         .await
         .map_err(|e| ApiError::internal(anyhow::Error::from(e)))?
-        .unwrap_or_else(|| "/".to_owned());
+        .unwrap_or_else(|| "/signed-out".to_owned());
     Ok((
         jar.remove(Cookie::build((SESSION_COOKIE, "")).path("/").build()),
         Redirect::to(&to),
     ))
+}
+
+/// `GET /signed-out` — where `/logout` lands when it may not go back to the client.
+pub async fn signed_out(State(pages): State<SignInPages>) -> Result<Response, ApiError> {
+    pages
+        .notice(StatusCode::OK, SIGNED_OUT, Appearance::default())
+        .await
 }
 
 /// `GET /.well-known/openid-configuration` — OpenID Connect Discovery 1.0 § 4.
@@ -410,18 +446,27 @@ pub async fn discovery(State(origin): State<InstanceOrigin>) -> Json<serde_json:
         "token_endpoint": format!("{base}/token"),
         "userinfo_endpoint": format!("{base}/userinfo"),
         "jwks_uri": format!("{base}/.well-known/jwks.json"),
-        "registration_endpoint": format!("{base}/register"),
         "scopes_supported": ["openid", "profile", "email"],
         "response_types_supported": ["code"],
         "grant_types_supported": ["authorization_code"],
         "subject_types_supported": ["public"],
         "id_token_signing_alg_values_supported": ["EdDSA"],
         "claims_supported": [
-            "sub", "iss", "aud", "exp", "iat", "email", "preferred_username", "nonce"
+            "sub", "iss", "aud", "client_id", "exp", "iat", "email", "preferred_username", "nonce"
         ],
         "code_challenge_methods_supported": ["S256"],
         "token_endpoint_auth_methods_supported": ["none"],
+        "client_id_metadata_document_supported": true,
     }))
+}
+
+/// `GET /clients/desktop.json` — the official desktop app's client document, as this instance
+/// describes it.
+pub async fn desktop_document(State(origin): State<InstanceOrigin>) -> impl IntoResponse {
+    (
+        [(header::CACHE_CONTROL, "public, max-age=86400")],
+        Json(desktop_client(&origin).document()),
+    )
 }
 
 /// `GET /.well-known/jwks.json` — the keys a token this instance signed verifies against.

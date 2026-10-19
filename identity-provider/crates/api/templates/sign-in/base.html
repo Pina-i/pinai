@@ -1,0 +1,38 @@
+{#- Every sign-in page: the instance on the left, the page's own column on the right. No inline
+    script and no `style` attribute, which the CSP refuses; one script of the instance's own. -#}
+<!doctype html>
+<html lang="en" data-theme="{{ frame.theme }}" data-motif="{{ frame.motif }}" class="{{ frame.mode }}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}{% endblock %} · {{ frame.name }}</title>
+<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="{{ frame.stylesheet }}">
+<script src="{{ frame.script }}" defer></script>
+</head>
+<body>
+<div class="app">
+<div class="amb"></div>
+<div class="auth">
+<aside class="auth-l">
+<div class="auth-l-motif"></div>
+<span class="brand"><span class="mark mark--brand">{% include "sign-in/mark.svg.html" %}</span><span class="brand-name">{{ frame.name }}</span></span>
+<div class="intro">
+<p class="fact fact--plain">{{ frame.host }}</p>
+<h1 class="auth-h">{{ frame.description }}</h1>
+<div class="facts"><span class="fact fact--plain">{{ frame.people }}</span>{% if frame.open %}<span class="fact fact--plain open">open registration</span>{% endif %}</div>
+<div class="band"></div>
+</div>
+<p class="fact fact--plain runs"><span class="mark mark--small">{% include "sign-in/mark.svg.html" %}</span> Runs the Pīna'i identity provider v{{ frame.version }}</p>
+</aside>
+<main class="auth-r">
+<div class="auth-form auth-rise">
+<div class="head"><p class="eye">— {{ frame.host }}</p>{% block back %}{% endblock %}</div>
+{% block content %}{% endblock %}
+</div>
+</main>
+</div>
+<div class="grain"></div>
+</div>
+</body>
+</html>

@@ -4,15 +4,16 @@ use crate::identity::HandleSuffix;
 use crate::{TicketId, UserId};
 
 use super::{
-    AuthError, AuthorizationCode, AuthorizationRequest, Client, ClientId, CodeAttempt, Email,
-    Grant, NewAccount, OtpCode, PasswordHash, Registration, SignInAccount, Ticket, TicketAttempt,
-    Tokens, TotpSecret,
+    AuthError, AuthorizationCode, AuthorizationRequest, Client, ClientId, ClientSignIn,
+    CodeAttempt, Email, Grant, NewAccount, OtpCode, PasswordHash, Registration, SignInAccount,
+    Ticket, TicketAttempt, Tokens, TotpSecret,
 };
 
 #[async_trait::async_trait]
 pub trait Clients: Send + Sync {
+    /// The client its document describes; `None` when the document can't be had or breaks a
+    /// rule, so its redirect URIs are never trusted.
     async fn find(&self, id: &ClientId) -> Result<Option<Client>, AuthError>;
-    async fn all(&self) -> Result<Vec<Client>, AuthError>;
 }
 
 /// Each code is handed out once, and good only until it expires.
@@ -57,6 +58,18 @@ pub trait TokenIssuer: Send + Sync {
 }
 
 /// The second step of a sign-in with an authenticator: the request waits here for the code.
+/// The apps each account signed in to with its password.
+#[async_trait::async_trait]
+pub trait ClientSignIns: Send + Sync {
+    /// Remembers it, or remembers it again; an `offline_access` once given is kept.
+    async fn remember(&self, sign_in: &ClientSignIn, at: OffsetDateTime) -> Result<(), AuthError>;
+    async fn find(
+        &self,
+        user: UserId,
+        client: &ClientId,
+    ) -> Result<Option<ClientSignIn>, AuthError>;
+}
+
 #[async_trait::async_trait]
 pub trait LoginTickets: Send + Sync {
     /// Replaces any ticket the account still had open.

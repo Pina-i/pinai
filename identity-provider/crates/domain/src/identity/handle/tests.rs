@@ -31,6 +31,58 @@ fn a_chosen_name_outside_the_rules_is_refused() {
 }
 
 #[test]
+fn a_display_name_gives_its_ascii_lowercase_as_the_chosen_name() {
+    for (name, derived) in [
+        ("Hōkū", "hoku"),
+        ("Ana Tane", "ana_tane"),
+        ("  J. R. R. Tolkien!  ", "j_r_r_tolkien"),
+        ("Ærøskøbing", "aeroskobing"),
+        ("alice_b", "alice_b"),
+        ("Mika2", "mika2"),
+    ] {
+        assert_eq!(
+            UsernameChoice::derived_from(name).as_str(),
+            derived,
+            "{name:?}"
+        );
+    }
+}
+
+#[test]
+fn a_display_name_derives_a_chosen_name_of_32_characters_at_most() {
+    let derived = UsernameChoice::derived_from(&format!("{} b", "a".repeat(31)));
+
+    assert_eq!(
+        derived.as_str(),
+        "a".repeat(31),
+        "cut, without a trailing underscore"
+    );
+}
+
+#[test]
+fn a_display_name_with_too_little_ascii_in_it_derives_user() {
+    for name in ["A", "!!", "", "  ."] {
+        assert_eq!(
+            UsernameChoice::derived_from(name).as_str(),
+            "user",
+            "{name:?}"
+        );
+    }
+}
+
+#[test]
+fn any_display_name_derives_a_valid_chosen_name() {
+    for name in ["李雷", "Ωmega", "🦄 unicorn", "a.b", "x__y", "-Ana-"] {
+        let derived = UsernameChoice::derived_from(name);
+
+        assert!(
+            UsernameChoice::parse(derived.as_str()).is_ok(),
+            "{name:?} gave {derived:?}"
+        );
+    }
+}
+
+#[test]
 fn a_handle_is_the_chosen_name_an_underscore_and_the_suffix() {
     let choice = UsernameChoice::parse("alice").unwrap();
     let suffix = HandleSuffix::parse("x1y2z").unwrap();

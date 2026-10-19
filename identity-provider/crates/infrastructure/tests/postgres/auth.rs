@@ -3,11 +3,11 @@ use std::sync::Arc;
 use domain::UserId;
 use domain::auth::SignUps;
 use domain::auth::testing::{SignInSeeds, a_request, contract};
-use domain::auth::{Client, LoginTickets, SignInAccount, SignupCodes};
+use domain::auth::{LoginTickets, SignInAccount, SignupCodes};
 use hmac::{Hmac, Mac};
 use infrastructure::postgres::{
-    PgAuthorizationCodes, PgClients, PgLoginTickets, PgSecondFactors, PgSignInAccounts, PgSignUps,
-    PgSignupCodes,
+    PgAuthorizationCodes, PgClientSignIns, PgLoginTickets, PgSecondFactors, PgSignInAccounts,
+    PgSignUps, PgSignupCodes,
 };
 use sha2::Sha256;
 use sqlx::PgPool;
@@ -36,29 +36,6 @@ impl SignInSeeds for PgSignInSeeds {
         .await
         .expect("seed an account");
     }
-
-    async fn register(&self, client: &Client) {
-        sqlx::query(
-            "INSERT INTO oauth_clients (client_id, redirect_uris, grant_types, response_types) \
-             VALUES ($1, $2, ARRAY['authorization_code'], ARRAY['code'])",
-        )
-        .bind(client.id.as_str())
-        .bind(&client.redirect_uris)
-        .execute(&self.0)
-        .await
-        .expect("seed a client");
-    }
-}
-
-#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
-async fn a_client_is_found_by_its_id(pool: PgPool) {
-    contract::a_client_is_found_by_its_id(&PgClients::new(pool.clone()), &PgSignInSeeds(pool))
-        .await;
-}
-
-#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
-async fn every_client_is_listed(pool: PgPool) {
-    contract::every_client_is_listed(&PgClients::new(pool.clone()), &PgSignInSeeds(pool)).await;
 }
 
 #[sqlx::test(migrator = "infrastructure::MIGRATOR")]
@@ -288,6 +265,17 @@ async fn a_recovery_code_is_used_once_and_a_new_set_replaces_the_old(pool: PgPoo
     let user = a_user(&pool).await;
     contract::a_recovery_code_is_used_once_and_a_new_set_replaces_the_old(&factors(&pool), user)
         .await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn an_app_signed_in_to_is_remembered_and_staying_signed_in_kept(pool: PgPool) {
+    let (user, other) = (a_user(&pool).await, a_user(&pool).await);
+    contract::an_app_signed_in_to_is_remembered_and_staying_signed_in_kept(
+        &PgClientSignIns::new(pool),
+        user,
+        other,
+    )
+    .await;
 }
 
 #[sqlx::test(migrator = "infrastructure::MIGRATOR")]

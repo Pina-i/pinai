@@ -1,0 +1,996 @@
+/* The sign-in pages: the identity-lab prototype's instance sign-in (pinai-client
+   tmp/design/identity-lab.html, `Auth`), served by the instance with no JavaScript. The palettes
+   are pinai-client's apps/web/src/index.css, verbatim, so the two stay comparable. */
+
+@font-face {
+    font-family: "Azeret Mono";
+    font-style: normal;
+    font-weight: 400 500;
+    font-display: swap;
+    src: url("/assets/fonts/azeret-mono-ext.woff2") format("woff2");
+    unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+    font-family: "Azeret Mono";
+    font-style: normal;
+    font-weight: 400 500;
+    font-display: swap;
+    src: url("/assets/fonts/azeret-mono.woff2") format("woff2");
+    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+    font-family: "DM Sans";
+    font-style: normal;
+    font-weight: 300 700;
+    font-display: swap;
+    src: url("/assets/fonts/dm-sans-ext.woff2") format("woff2");
+    unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+    font-family: "DM Sans";
+    font-style: normal;
+    font-weight: 300 700;
+    font-display: swap;
+    src: url("/assets/fonts/dm-sans.woff2") format("woff2");
+    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+    font-family: "Instrument Serif";
+    font-style: italic;
+    font-weight: 400;
+    font-display: swap;
+    src: url("/assets/fonts/instrument-serif-italic-ext.woff2") format("woff2");
+    unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+    font-family: "Instrument Serif";
+    font-style: italic;
+    font-weight: 400;
+    font-display: swap;
+    src: url("/assets/fonts/instrument-serif-italic.woff2") format("woff2");
+    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+    font-family: "Instrument Serif";
+    font-style: normal;
+    font-weight: 400;
+    font-display: swap;
+    src: url("/assets/fonts/instrument-serif-ext.woff2") format("woff2");
+    unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+    font-family: "Instrument Serif";
+    font-style: normal;
+    font-weight: 400;
+    font-display: swap;
+    src: url("/assets/fonts/instrument-serif.woff2") format("woff2");
+    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+
+:root,
+[data-theme="pearl-dark"] {
+    --background:                 oklch(0.145 0.014 196);
+    --foreground:                 oklch(0.950 0.008 190);
+    --muted-foreground:           oklch(0.650 0.014 195);
+
+    --surf:                       oklch(1 0 0 / .050);
+    --surf2:                      oklch(1 0 0 / .080);
+    --surf3:                      oklch(1 0 0 / .110);
+    --line:                       oklch(1 0 0 / .080);
+    --line2:                      oklch(1 0 0 / .130);
+
+    --acc:                        oklch(0.760 0.098 176);
+    --accink:                     oklch(0.165 0.020 196);
+    --accsoft:                    oklch(0.760 0.098 176 / .16);
+    --accline:                    oklch(0.760 0.098 176 / .32);
+
+    --action:                     oklch(0.548 0.112 348);
+    --action-foreground:          oklch(0.992 0.006 348);
+
+    --sec:                        oklch(0.705 0.075 348);
+    --secink:                     oklch(0.170 0.020 348);
+    --secsoft:                    oklch(0.705 0.075 348 / .16);
+    --secline:                    oklch(0.705 0.075 348 / .32);
+
+    --on:                         oklch(0.755 0.110 155);
+    --idle:                       oklch(0.805 0.125 78);
+    --dnd:                        oklch(0.660 0.160 22);
+
+    --amb:
+        radial-gradient(900px 540px at 80% 2%, oklch(0.760 0.098 176 / .13), transparent 62%),
+        radial-gradient(760px 540px at 4% 112%, oklch(0.705 0.075 348 / .09), transparent 58%);
+    --grain:                      0.065;
+    --grain-blend:                overlay;
+    /* Above ~8% a motif stroke behind an 11px subline drops under 4.5:1. */
+    --motif-opacity:              0.02;
+
+    color-scheme: dark;
+}
+
+[data-theme="pearl-light"] {
+    --background:                 oklch(0.971 0.006 192);
+    --foreground:                 oklch(0.225 0.016 196);
+    --muted-foreground:           oklch(0.495 0.014 195);
+
+    --surf:                       oklch(1 0 0 / .70);
+    --surf2:                      oklch(1 0 0 / .92);
+    --surf3:                      oklch(0.225 0.016 196 / .06);
+    --line:                       oklch(0.225 0.016 196 / .12);
+    --line2:                      oklch(0.225 0.016 196 / .20);
+
+    --acc:                        oklch(0.545 0.088 176);
+    --accink:                     oklch(0.992 0.004 190);
+    --accsoft:                    oklch(0.545 0.088 176 / .12);
+    --accline:                    oklch(0.545 0.088 176 / .30);
+
+    --action:                     oklch(0.492 0.108 348);
+    --action-foreground:          oklch(0.992 0.004 348);
+
+    --sec:                        oklch(0.560 0.095 348);
+    --secink:                     oklch(0.992 0.004 348);
+    --secsoft:                    oklch(0.560 0.095 348 / .12);
+    --secline:                    oklch(0.560 0.095 348 / .30);
+
+    --on:                         oklch(0.545 0.120 155);
+    --idle:                       oklch(0.640 0.130 78);
+    --dnd:                        oklch(0.545 0.180 25);
+
+    --amb:
+        radial-gradient(900px 540px at 80% 2%, oklch(0.545 0.088 176 / .11), transparent 62%),
+        radial-gradient(760px 540px at 4% 112%, oklch(0.560 0.095 348 / .08), transparent 58%);
+    --grain:                      0.04;
+    --grain-blend:                multiply;
+}
+
+[data-theme="lagoon-dark"] {
+    --background:                 oklch(0.162 0.042 248);
+    --foreground:                 oklch(0.962 0.010 230);
+    --muted-foreground:           oklch(0.672 0.030 238);
+
+    --surf:                       oklch(1 0 0 / .055);
+    --surf2:                      oklch(1 0 0 / .085);
+    --surf3:                      oklch(1 0 0 / .120);
+    --line:                       oklch(1 0 0 / .080);
+    --line2:                      oklch(1 0 0 / .140);
+
+    --acc:                        oklch(0.805 0.105 196);
+    --accink:                     oklch(0.195 0.050 248);
+    --accsoft:                    oklch(0.805 0.105 196 / .16);
+    --accline:                    oklch(0.805 0.105 196 / .32);
+
+    --action:                     oklch(0.545 0.168 28);
+    --action-foreground:          oklch(0.992 0.008 28);
+
+    --sec:                        oklch(0.715 0.178 28);
+    --secink:                     oklch(0.200 0.048 28);
+    --secsoft:                    oklch(0.715 0.178 28 / .16);
+    --secline:                    oklch(0.715 0.178 28 / .32);
+
+    --on:                         oklch(0.790 0.120 155);
+    --idle:                       oklch(0.830 0.120 82);
+    --dnd:                        oklch(0.690 0.165 22);
+
+    --amb:
+        radial-gradient(900px 540px at 80% 2%, oklch(0.805 0.105 196 / .15), transparent 60%),
+        radial-gradient(780px 540px at 4% 114%, oklch(0.715 0.178 28 / .11), transparent 58%);
+    --grain:                      0.065;
+    --grain-blend:                overlay;
+}
+
+[data-theme="lagoon-light"] {
+    --background:                 oklch(0.973 0.014 228);
+    --foreground:                 oklch(0.235 0.042 248);
+    --muted-foreground:           oklch(0.490 0.032 240);
+
+    --surf:                       oklch(1 0 0 / .70);
+    --surf2:                      oklch(1 0 0 / .92);
+    --surf3:                      oklch(0.235 0.042 248 / .06);
+    --line:                       oklch(0.235 0.042 248 / .13);
+    --line2:                      oklch(0.235 0.042 248 / .21);
+
+    --acc:                        oklch(0.555 0.100 204);
+    --accink:                     oklch(0.992 0.006 230);
+    --accsoft:                    oklch(0.555 0.100 204 / .13);
+    --accline:                    oklch(0.555 0.100 204 / .32);
+
+    --action:                     oklch(0.518 0.162 28);
+    --action-foreground:          oklch(0.992 0.006 28);
+
+    --sec:                        oklch(0.572 0.162 28);
+    --secink:                     oklch(0.992 0.006 28);
+    --secsoft:                    oklch(0.572 0.162 28 / .13);
+    --secline:                    oklch(0.572 0.162 28 / .30);
+
+    --on:                         oklch(0.545 0.125 155);
+    --idle:                       oklch(0.640 0.130 82);
+    --dnd:                        oklch(0.545 0.180 25);
+
+    --amb:
+        radial-gradient(900px 540px at 80% 2%, oklch(0.555 0.100 204 / .13), transparent 60%),
+        radial-gradient(780px 540px at 4% 114%, oklch(0.715 0.178 28 / .10), transparent 58%);
+    --grain:                      0.04;
+    --grain-blend:                multiply;
+}
+
+[data-theme="jungle-dark"] {
+    --background:                 oklch(0.158 0.026 152);
+    --foreground:                 oklch(0.952 0.012 140);
+    --muted-foreground:           oklch(0.648 0.026 148);
+
+    --surf:                       oklch(1 0 0 / .050);
+    --surf2:                      oklch(1 0 0 / .080);
+    --surf3:                      oklch(1 0 0 / .112);
+    --line:                       oklch(1 0 0 / .085);
+    --line2:                      oklch(1 0 0 / .145);
+
+    --acc:                        oklch(0.775 0.115 146);
+    --accink:                     oklch(0.178 0.032 152);
+    --accsoft:                    oklch(0.775 0.115 146 / .16);
+    --accline:                    oklch(0.775 0.115 146 / .32);
+
+    --action:                     oklch(0.558 0.104 48);
+    --action-foreground:          oklch(0.992 0.010 60);
+
+    --sec:                        oklch(0.700 0.085 52);
+    --secink:                     oklch(0.178 0.026 52);
+    --secsoft:                    oklch(0.700 0.085 52 / .16);
+    --secline:                    oklch(0.700 0.085 52 / .32);
+
+    --on:                         oklch(0.815 0.135 174);
+    --idle:                       oklch(0.815 0.120 84);
+    --dnd:                        oklch(0.660 0.165 26);
+
+    --amb:
+        radial-gradient(900px 540px at 80% 2%, oklch(0.775 0.115 146 / .14), transparent 62%),
+        radial-gradient(780px 540px at 4% 112%, oklch(0.700 0.085 52 / .11), transparent 58%);
+    --grain:                      0.070;
+    --grain-blend:                overlay;
+}
+
+[data-theme="jungle-light"] {
+    --background:                 oklch(0.960 0.018 140);
+    --foreground:                 oklch(0.232 0.030 152);
+    --muted-foreground:           oklch(0.478 0.030 150);
+
+    --surf:                       oklch(1 0 0 / .66);
+    --surf2:                      oklch(0.995 0.008 140);
+    --surf3:                      oklch(0.232 0.030 152 / .07);
+    --line:                       oklch(0.232 0.030 152 / .13);
+    --line2:                      oklch(0.232 0.030 152 / .21);
+
+    --acc:                        oklch(0.475 0.105 148);
+    --accink:                     oklch(0.992 0.008 140);
+    --accsoft:                    oklch(0.475 0.105 148 / .13);
+    --accline:                    oklch(0.475 0.105 148 / .32);
+
+    --action:                     oklch(0.442 0.092 48);
+    --action-foreground:          oklch(0.994 0.008 60);
+
+    --sec:                        oklch(0.475 0.090 52);
+    --secink:                     oklch(0.992 0.008 52);
+    --secsoft:                    oklch(0.475 0.090 52 / .13);
+    --secline:                    oklch(0.475 0.090 52 / .30);
+
+    --on:                         oklch(0.520 0.110 176);
+    --idle:                       oklch(0.628 0.130 82);
+    --dnd:                        oklch(0.535 0.180 27);
+
+    --amb:
+        radial-gradient(900px 540px at 80% 2%, oklch(0.475 0.105 148 / .12), transparent 62%),
+        radial-gradient(780px 540px at 4% 112%, oklch(0.475 0.090 52 / .10), transparent 58%);
+    --grain:                      0.045;
+    --grain-blend:                multiply;
+}
+
+[data-theme="sand-dark"] {
+    --background:                 oklch(0.176 0.014 74);
+    --foreground:                 oklch(0.952 0.016 84);
+    --muted-foreground:           oklch(0.650 0.022 76);
+
+    --surf:                       oklch(1 0 0 / .055);
+    --surf2:                      oklch(1 0 0 / .085);
+    --surf3:                      oklch(1 0 0 / .120);
+    --line:                       oklch(1 0 0 / .085);
+    --line2:                      oklch(1 0 0 / .145);
+
+    --acc:                        oklch(0.800 0.098 68);
+    --accink:                     oklch(0.196 0.020 68);
+    --accsoft:                    oklch(0.800 0.098 68 / .16);
+    --accline:                    oklch(0.800 0.098 68 / .32);
+
+    --action:                     oklch(0.512 0.082 186);
+    --action-foreground:          oklch(0.988 0.006 186);
+
+    --sec:                        oklch(0.765 0.068 186);
+    --secink:                     oklch(0.190 0.018 186);
+    --secsoft:                    oklch(0.765 0.068 186 / .16);
+    --secline:                    oklch(0.765 0.068 186 / .32);
+
+    --on:                         oklch(0.760 0.110 152);
+    --idle:                       oklch(0.820 0.120 80);
+    --dnd:                        oklch(0.670 0.160 24);
+
+    --amb:
+        radial-gradient(900px 540px at 80% 2%, oklch(0.800 0.098 68 / .14), transparent 62%),
+        radial-gradient(780px 540px at 4% 112%, oklch(0.765 0.068 186 / .10), transparent 58%);
+    --grain:                      0.075;
+    --grain-blend:                overlay;
+}
+
+[data-theme="sand-light"] {
+    --background:                 oklch(0.947 0.026 84);
+    --foreground:                 oklch(0.248 0.020 66);
+    --muted-foreground:           oklch(0.508 0.024 72);
+
+    --surf:                       oklch(1 0 0 / .62);
+    --surf2:                      oklch(0.996 0.010 88);
+    --surf3:                      oklch(0.248 0.020 66 / .06);
+    --line:                       oklch(0.248 0.020 66 / .14);
+    --line2:                      oklch(0.248 0.020 66 / .22);
+
+    --acc:                        oklch(0.565 0.120 44);
+    --accink:                     oklch(0.992 0.008 88);
+    --accsoft:                    oklch(0.565 0.120 44 / .13);
+    --accline:                    oklch(0.565 0.120 44 / .30);
+
+    --action:                     oklch(0.486 0.082 186);
+    --action-foreground:          oklch(0.992 0.008 186);
+
+    --sec:                        oklch(0.545 0.070 186);
+    --secink:                     oklch(0.992 0.008 186);
+    --secsoft:                    oklch(0.545 0.070 186 / .13);
+    --secline:                    oklch(0.545 0.070 186 / .30);
+
+    --on:                         oklch(0.540 0.115 152);
+    --idle:                       oklch(0.640 0.130 80);
+    --dnd:                        oklch(0.540 0.180 27);
+
+    --amb:
+        radial-gradient(900px 540px at 80% 2%, oklch(0.565 0.120 44 / .12), transparent 62%),
+        radial-gradient(780px 540px at 4% 112%, oklch(0.545 0.070 186 / .10), transparent 58%);
+    --grain:                      0.045;
+    --grain-blend:                multiply;
+}
+
+/* Mode-level values, after every palette so they win over `:root`. */
+.light {
+    /* A pattern needs more presence on paper than on a dark ground. */
+    --motif-opacity:              0.10;
+
+    color-scheme: light;
+}
+
+:root {
+    --serif: "Instrument Serif", Georgia, serif;
+    --sans: "DM Sans", system-ui, sans-serif;
+    --mono: "Azeret Mono", ui-monospace, monospace;
+}
+
+*,
+*::before,
+*::after {
+    box-sizing: border-box;
+}
+html,
+body {
+    margin: 0;
+    height: 100%;
+}
+html {
+    background: var(--background);
+}
+body {
+    background: var(--background);
+    color: var(--foreground);
+    font-family: var(--sans);
+    font-size: 14px;
+    -webkit-font-smoothing: antialiased;
+    overflow: hidden;
+}
+button,
+input {
+    font-family: inherit;
+}
+
+/* ── backdrop ── */
+.app {
+    position: relative;
+    display: flex;
+    height: 100%;
+    overflow: hidden;
+}
+.amb {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+    background-image: var(--amb);
+}
+/* Animated film grain — a 3-frame GIF tiled at 1:1, so the noise drifts the way real film does. */
+.grain {
+    position: absolute;
+    inset: 0;
+    z-index: 9990;
+    pointer-events: none;
+    opacity: var(--grain);
+    mix-blend-mode: var(--grain-blend);
+    background-image: url("/assets/grain.gif");
+    background-size: 480px 360px;
+    background-repeat: repeat;
+}
+@media (prefers-reduced-motion: reduce) {
+    .grain {
+        background-image: url("data:image/svg+xml,%3Csvg%20xmlns=%27http://www.w3.org/2000/svg%27%20width=%27160%27%20height=%27160%27%3E%3Cfilter%20id=%27n%27%3E%3CfeTurbulence%20type=%27fractalNoise%27%20baseFrequency=%270.8%27%20numOctaves=%273%27%20stitchTiles=%27stitch%27/%3E%3CfeColorMatrix%20type=%27saturate%27%20values=%270%27/%3E%3C/filter%3E%3Crect%20width=%27100%25%27%20height=%27100%25%27%20filter=%27url%28%23n%29%27/%3E%3C/svg%3E");
+        background-size: 160px 160px;
+    }
+}
+
+/* ── type roles ── */
+.ser {
+    font-family: var(--serif);
+}
+.eye {
+    margin: 0;
+    font-family: var(--sans);
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.01em;
+    color: var(--muted-foreground);
+}
+.fact {
+    margin: 0;
+    font-family: var(--mono);
+    font-size: 9.5px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--muted-foreground);
+}
+.fact--plain {
+    font-size: 10px;
+    letter-spacing: 0.03em;
+    text-transform: none;
+}
+
+/* ── the mark and the icons ── */
+.mark {
+    display: block;
+    flex: 0 0 auto;
+    line-height: 0;
+}
+.mark svg {
+    display: block;
+    width: 100%;
+    height: 100%;
+}
+.mark--brand {
+    width: 46.24px;
+    height: 34px;
+    color: var(--foreground);
+}
+.mark--brand .ripple {
+    fill: var(--acc);
+}
+.mark--small {
+    width: 19.04px;
+    height: 14px;
+    color: var(--muted-foreground);
+}
+.mark--small .ripple {
+    fill: var(--muted-foreground);
+}
+.glyph {
+    display: inline-flex;
+    flex: 0 0 auto;
+    align-items: center;
+    justify-content: center;
+    line-height: 0;
+}
+
+/* ── the two columns ── */
+.auth {
+    position: relative;
+    z-index: 2;
+    flex: 1;
+    display: grid;
+    grid-template-columns: 1.1fr 1fr;
+    grid-template-rows: minmax(0, 1fr);
+    min-width: 0;
+    min-height: 0;
+}
+
+/* The instance. */
+.auth-l {
+    position: relative;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    gap: 28px;
+    min-height: 0;
+    padding: 84px 56px 40px;
+    border-right: 1px solid var(--line);
+}
+.auth-l-motif,
+.band {
+    pointer-events: none;
+    background-color: var(--acc);
+    mask-image: var(--tile);
+    -webkit-mask-image: var(--tile);
+    mask-size: var(--tile-size);
+    -webkit-mask-size: var(--tile-size);
+    mask-repeat: repeat;
+    -webkit-mask-repeat: repeat;
+}
+.auth-l-motif {
+    position: absolute;
+    inset: 0;
+    opacity: calc(var(--motif-opacity) * 1.8);
+}
+[data-motif="kowhaiwhai"] .auth-l-motif {
+    --tile: url("/assets/motifs/kowhaiwhai.svg");
+    --tile-size: 565.48px 38px;
+}
+[data-motif="kowhaiwhai"] .band {
+    --tile: url("/assets/motifs/kowhaiwhai.svg");
+    --tile-size: 223.21px 15px;
+}
+[data-motif="raranga"] .auth-l-motif {
+    --tile: url("/assets/motifs/raranga.svg");
+    --tile-size: 68px 34px;
+}
+[data-motif="raranga"] .band {
+    --tile: url("/assets/motifs/raranga.svg");
+    --tile-size: 44px 22px;
+}
+[data-motif="puhoro"] .auth-l-motif {
+    --tile: url("/assets/motifs/puhoro.svg");
+    --tile-size: 412.86px 108px;
+}
+[data-motif="puhoro"] .band {
+    --tile: url("/assets/motifs/puhoro-band.svg");
+    --tile-size: 40px 16px;
+}
+[data-motif="tapa1"] .auth-l-motif {
+    --tile: url("/assets/motifs/tapa1.svg");
+    --tile-size: 833.33px 30px;
+}
+[data-motif="tapa1"] .band {
+    --tile: url("/assets/motifs/tapa1.svg");
+    --tile-size: 361.11px 13px;
+}
+[data-motif="tapa2"] .auth-l-motif {
+    --tile: url("/assets/motifs/tapa2.svg");
+    --tile-size: 778.21px 40px;
+}
+[data-motif="tapa2"] .band {
+    --tile: url("/assets/motifs/tapa2.svg");
+    --tile-size: 311.28px 16px;
+}
+[data-motif="tapa3"] .auth-l-motif {
+    --tile: url("/assets/motifs/tapa3.svg");
+    --tile-size: 809.52px 34px;
+}
+[data-motif="tapa3"] .band {
+    --tile: url("/assets/motifs/tapa3.svg");
+    --tile-size: 333.33px 14px;
+}
+[data-motif="tapa4"] .auth-l-motif {
+    --tile: url("/assets/motifs/tapa4.svg");
+    --tile-size: 797.1px 44px;
+}
+[data-motif="tapa4"] .band {
+    --tile: url("/assets/motifs/tapa4.svg");
+    --tile-size: 326.09px 18px;
+}
+.brand {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: 12px;
+}
+.brand-name {
+    font-family: var(--serif);
+    font-size: 24px;
+    font-weight: 600;
+}
+.intro {
+    position: relative;
+}
+.auth-h {
+    margin: 14px 0 0;
+    font-family: var(--serif);
+    font-size: 56px;
+    font-weight: 400;
+    line-height: 0.96;
+    letter-spacing: -0.025em;
+}
+.facts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 14px;
+    margin-top: 22px;
+}
+.facts .open {
+    color: var(--on);
+}
+.band {
+    height: 10px;
+    max-width: 300px;
+    margin-top: 30px;
+    opacity: 0.55;
+}
+.runs {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+/* The form. */
+.auth-r {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    justify-content: flex-start;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 84px 40px 40px;
+}
+.auth-r > * {
+    margin: auto;
+}
+.auth-form {
+    width: 100%;
+    max-width: 380px;
+}
+.auth-rise {
+    animation: auth-rise 320ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+@keyframes auth-rise {
+    from {
+        opacity: 0;
+        transform: translateY(10px);
+    }
+}
+@media (prefers-reduced-motion: reduce) {
+    .auth-rise {
+        animation: none;
+    }
+}
+.head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+}
+.back {
+    display: flex;
+    align-items: center;
+    height: 28px;
+    padding: 0 6px;
+    border-radius: 999px;
+    color: var(--muted-foreground);
+    font-size: 11px;
+    font-weight: 500;
+    text-decoration: none;
+    transition: background 150ms ease, color 150ms ease;
+}
+.back:hover {
+    background: var(--surf3);
+    color: var(--foreground);
+}
+.auth-title {
+    margin: 8px 0 22px;
+    font-family: var(--serif);
+    font-size: 32px;
+    font-weight: 400;
+    letter-spacing: -0.015em;
+}
+/* The app the sign-in is for: the page's whole consent, since a password typed here signs in to it. */
+.for {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 4px 8px;
+    margin: -14px 0 18px;
+    font-size: 13.5px;
+    line-height: 1.55;
+    color: var(--muted-foreground);
+}
+.for-name {
+    color: var(--foreground);
+    font-weight: 500;
+}
+.lead {
+    max-width: 380px;
+    margin: -10px 0 18px;
+    font-size: 13.5px;
+    line-height: 1.55;
+    color: var(--muted-foreground);
+}
+.tabs {
+    display: flex;
+    gap: 4px;
+    margin-bottom: 18px;
+    padding: 4px;
+    border-radius: 999px;
+    background: var(--surf2);
+}
+.tab {
+    flex: 1;
+    padding: 9px;
+    border-radius: 999px;
+    color: var(--muted-foreground);
+    font-size: 12.5px;
+    text-align: center;
+    text-decoration: none;
+}
+.tab--on {
+    background: var(--acc);
+    color: var(--accink);
+    font-weight: 700;
+}
+.stack {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+}
+.lfield label {
+    display: block;
+    margin-bottom: 6px;
+}
+.field {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    width: 100%;
+    height: 38px;
+    padding: 0 14px;
+    border-radius: 999px;
+    background: var(--surf2);
+    border: 1px solid var(--line);
+    color: var(--muted-foreground);
+    font-size: 12px;
+}
+.lfield .field {
+    height: 42px;
+    border-radius: 12px;
+}
+.field input {
+    flex: 1;
+    min-width: 0;
+    background: none;
+    border: none;
+    outline: none;
+    color: var(--foreground);
+    font: inherit;
+}
+.field input::placeholder {
+    color: var(--muted-foreground);
+}
+.field:focus-within {
+    border-color: var(--acc);
+    box-shadow: 0 0 0 3px var(--accsoft);
+}
+.field--err,
+.field--err:focus-within {
+    border-color: var(--dnd);
+}
+.field--code {
+    font-family: var(--mono);
+}
+.lfield .field--code {
+    height: 52px;
+}
+.field--code input {
+    font-size: 20px;
+    letter-spacing: 0.4em;
+    text-align: center;
+    font-variant-numeric: tabular-nums;
+    font-variant-ligatures: none;
+}
+/* Phones zoom into a field typed in under 16px, and stay zoomed. */
+@media (hover: none) and (pointer: coarse) {
+    .field input {
+        font-size: 16px;
+    }
+}
+.alert {
+    margin: 0 0 12px;
+    font-size: 12px;
+    color: var(--dnd);
+}
+.note {
+    margin: 0 0 12px;
+    font-size: 12px;
+    color: var(--on);
+}
+.btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    width: 100%;
+    padding: 12px;
+    border-radius: 999px;
+    border: 1px solid transparent;
+    font-size: 13.5px;
+    white-space: nowrap;
+    text-decoration: none;
+    cursor: pointer;
+    transition: opacity 150ms ease, background 150ms ease;
+}
+.btn:hover {
+    opacity: 0.9;
+}
+.btn:disabled {
+    opacity: 0.45;
+    cursor: default;
+}
+.btn1 {
+    background: var(--action);
+    color: var(--action-foreground);
+    font-weight: 700;
+    box-shadow: 0 10px 26px -10px color-mix(in oklab, var(--action) 70%, transparent);
+}
+.btn2 {
+    background: var(--surf2);
+    color: var(--foreground);
+    border-color: var(--line2);
+}
+/* While its form is on its way, a button keeps its size and shows only the spinner. */
+.btn {
+    position: relative;
+}
+.btn .spin {
+    position: absolute;
+    inset: 0;
+    display: none;
+    align-items: center;
+    justify-content: center;
+}
+.btn1 .spin {
+    color: var(--action-foreground);
+}
+.btn2 .spin {
+    color: var(--foreground);
+}
+.btn.is-busy {
+    color: transparent;
+}
+.btn.is-busy .spin {
+    display: flex;
+}
+.spin .glyph {
+    animation: spin 1s linear infinite;
+}
+@keyframes spin {
+    to {
+        transform: rotate(360deg);
+    }
+}
+.auth-foot {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 18px;
+}
+
+/* The code page. */
+.address {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 22px;
+    padding: 8px 12px 8px 10px;
+    border-radius: 999px;
+    border: 1px solid var(--line);
+    background: var(--surf2);
+    color: var(--muted-foreground);
+}
+.address span {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    letter-spacing: 0.02em;
+    color: var(--foreground);
+}
+.status {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 22px;
+    margin: -4px 0 4px;
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.04em;
+    color: var(--muted-foreground);
+}
+.status::before {
+    content: "";
+    width: 6px;
+    height: 6px;
+    flex: 0 0 auto;
+    border-radius: 999px;
+    background: currentColor;
+    opacity: 0.5;
+}
+.status--err {
+    color: var(--dnd);
+}
+.status--ok {
+    color: var(--on);
+}
+.status--err::before,
+.status--ok::before {
+    opacity: 1;
+}
+.divider {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin: 20px 0;
+}
+.divider::before,
+.divider::after {
+    content: "";
+    flex: 1;
+    height: 1px;
+    background: var(--line2);
+}
+.footnote {
+    max-width: 380px;
+    margin: 18px 0 0;
+    font-size: 11.5px;
+    line-height: 1.55;
+    color: var(--muted-foreground);
+}
+.switch {
+    margin-top: 24px;
+    text-align: center;
+}
+.switch a {
+    font-size: 12px;
+    color: var(--muted-foreground);
+    text-decoration: underline;
+    text-underline-offset: 4px;
+    transition: color 150ms ease;
+}
+.switch a:hover {
+    color: var(--foreground);
+}
+
+/* Below the split, the columns stack: the instance first, as AuthShell does. */
+@media (max-width: 1023px) {
+    body {
+        overflow: auto;
+    }
+    .app {
+        height: auto;
+        min-height: 100%;
+        overflow: visible;
+    }
+    .auth {
+        grid-template-columns: 1fr;
+        grid-template-rows: auto;
+    }
+    .auth-l {
+        border-right: none;
+    }
+    .auth-r {
+        overflow: visible;
+        padding-top: 0;
+    }
+    .grain {
+        position: fixed;
+    }
+}
+@media (max-width: 639px) {
+    .auth-l {
+        padding: 56px 24px 32px;
+    }
+    .auth-r {
+        padding: 0 24px 40px;
+    }
+    .auth-h {
+        font-size: 44px;
+    }
+}

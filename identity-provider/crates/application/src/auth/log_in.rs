@@ -1,14 +1,14 @@
 use std::sync::Arc;
 
 use domain::auth::{
-    AuthError, AuthorizationCode, AuthorizationCodes, AuthorizationRequest, CODE_TTL, Clients,
-    Email, Grant, LOGIN_TICKET_TTL, LoginTickets, PasswordHasher, SignInAccounts, SignupCodes,
+    AuthError, AuthorizationCode, AuthorizationCodes, AuthorizationRequest, ClientSignIns, Clients,
+    Email, LOGIN_TICKET_TTL, LoginTickets, PasswordHasher, SignInAccounts, SignupCodes,
     SignupMailer,
 };
 use domain::{TicketId, UserId};
 use time::OffsetDateTime;
 
-use super::mail_signup_code;
+use super::{mail_signup_code, signed_in};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoginOutcome {
@@ -33,9 +33,11 @@ pub struct LogIn {
     tickets: Arc<dyn LoginTickets>,
     signup_codes: Arc<dyn SignupCodes>,
     mailer: Arc<dyn SignupMailer>,
+    sign_ins: Arc<dyn ClientSignIns>,
 }
 
 impl LogIn {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         clients: Arc<dyn Clients>,
         accounts: Arc<dyn SignInAccounts>,
@@ -44,6 +46,7 @@ impl LogIn {
         tickets: Arc<dyn LoginTickets>,
         signup_codes: Arc<dyn SignupCodes>,
         mailer: Arc<dyn SignupMailer>,
+        sign_ins: Arc<dyn ClientSignIns>,
     ) -> Self {
         Self {
             clients,
@@ -53,6 +56,7 @@ impl LogIn {
             tickets,
             signup_codes,
             mailer,
+            sign_ins,
         }
     }
 
@@ -106,10 +110,7 @@ impl LogIn {
                 .await?;
             return Ok(LoginOutcome::SecondFactor(ticket));
         }
-        let code = self
-            .codes
-            .issue(&Grant::answering(account.id, request), now + CODE_TTL)
-            .await?;
+        let code = signed_in(&*self.sign_ins, &*self.codes, account.id, request, now).await?;
         Ok(LoginOutcome::SignedIn {
             user: account.id,
             code,

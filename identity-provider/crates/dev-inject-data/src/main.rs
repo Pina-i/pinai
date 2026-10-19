@@ -58,7 +58,7 @@ const ALICE: Fixture = Fixture {
     username: "alice_dev01",
     email: "akasatana83@hotmail.fr",
     password: "yonolulu",
-    home_domain: "localhost:8080",
+    home_domain: "localhost:8088",
 };
 
 const BOB: Fixture = Fixture {
@@ -76,7 +76,7 @@ const PIERRE: Fixture = Fixture {
     username: "pierre_dev01",
     email: "pierre@test.fr",
     password: "yonolulu",
-    home_domain: "localhost:8080",
+    home_domain: "localhost:8088",
 };
 
 const FIXTURES: &[Fixture] = &[ALICE, BOB, PIERRE];

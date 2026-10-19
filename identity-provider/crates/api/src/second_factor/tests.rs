@@ -1,7 +1,9 @@
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
 use axum::response::Response;
-use domain::auth::testing::{CHALLENGE, REDIRECT_URI, SignInSeeds, StepAuthenticator, signed_up};
+use domain::auth::testing::{
+    CHALLENGE, CLIENT_ID, REDIRECT_URI, SignInSeeds, StepAuthenticator, signed_up,
+};
 use domain::auth::{SecondFactors, SignInAccount, TotpSecret};
 use serde_json::json;
 use time::OffsetDateTime;
@@ -54,7 +56,7 @@ async fn bob_at_the_code_page(app: &TestApp) -> (SignInAccount, String, Vec<Stri
         .unwrap();
     let mut pairs = vec![("email", "bob@idp.test"), ("password", "bob-password")];
     pairs.extend([
-        ("client_id", "web-client"),
+        ("client_id", CLIENT_ID),
         ("redirect_uri", REDIRECT_URI),
         ("scope", "openid profile email"),
         ("state", "the-clients-state"),
@@ -106,11 +108,10 @@ async fn a_refused_code_stays_on_the_code_page_with_the_reason() {
     let unknown = send(&[("recovery_code", "NOPE0-NOPE0")]).await;
     let nothing = send(&[("code", "")]).await;
 
-    let page =
-        |error: &str| format!("http://localhost:5173/login/totp?ticket={ticket}&error={error}");
-    assert_eq!(wrong, page("Incorrect%20code"));
-    assert_eq!(unknown, page("Recovery%20code%20not%20recognised"));
-    assert_eq!(nothing, page("Enter%20a%20code%20or%20a%20recovery%20code"));
+    let page = |said: &str| format!("/login/totp?ticket={ticket}&{said}");
+    assert_eq!(wrong, page("error=totp_incorrect"));
+    assert_eq!(unknown, page("mode=recovery&error=recovery_unknown"));
+    assert_eq!(nothing, page("error=totp_missing"));
 }
 
 #[tokio::test]
@@ -142,14 +143,61 @@ async fn a_ticket_gone_or_out_of_guesses_goes_back_to_the_login_page() {
         ))
         .await;
 
-    assert_eq!(
-        location(&spent),
-        "http://localhost:5173/login?error=Too%20many%20attempts%20%E2%80%94%20sign%20in%20again"
-    );
-    assert_eq!(
-        location(&unknown),
-        "http://localhost:5173/login?error=Sign-in%20expired%20%E2%80%94%20try%20again"
-    );
+    assert_eq!(location(&spent), "/login?error=ticket_exhausted");
+    assert_eq!(location(&unknown), "/login?error=ticket_expired");
+}
+
+fn code_page(ticket: &str, extra: &str) -> Request<Body> {
+    Request::builder()
+        .uri(format!("/login/totp?ticket={ticket}{extra}"))
+        .body(Body::empty())
+        .unwrap()
+}
+
+#[tokio::test]
+async fn the_code_page_asks_the_apps_code_or_a_recovery_code_and_can_cancel() {
+    let app = TestApp::with([], []);
+    let (_, ticket, _) = bob_at_the_code_page(&app).await;
+
+    let (status, apps) = TestApp::html_of(
+        app.respond(code_page(
+            &ticket,
+            "&theme=jungle-dark&error=totp_incorrect",
+        ))
+        .await,
+    )
+    .await;
+    let (_, recovery) =
+        TestApp::html_of(app.respond(code_page(&ticket, "&mode=recovery")).await).await;
+
+    assert_eq!(status, StatusCode::OK);
+    for shown in [
+        "Enter the 6-digit code",
+        "Incorrect code",
+        "action=\"/login/totp\"",
+        &format!("name=\"ticket\" value=\"{ticket}\""),
+        "name=\"theme\" value=\"jungle-dark\"",
+        &format!("href=\"/login/totp?ticket={ticket}&#38;theme=jungle-dark&#38;mode=recovery\""),
+        "href=\"http://localhost:5173/callback?error=access_denied&#38;state=the-clients-state\"",
+    ] {
+        assert!(apps.contains(shown), "{shown} not in {apps}");
+    }
+    assert!(recovery.contains("name=\"recovery_code\""), "{recovery}");
+    assert!(recovery.contains("Use my authenticator app"), "{recovery}");
+}
+
+#[tokio::test]
+async fn the_code_page_of_a_ticket_gone_says_the_sign_in_expired() {
+    let app = TestApp::with([], []);
+
+    let (status, page) = TestApp::html_of(
+        app.respond(code_page(&uuid::Uuid::new_v4().to_string(), ""))
+            .await,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(page.contains("This sign-in has expired"), "{page}");
 }
 
 #[tokio::test]

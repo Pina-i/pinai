@@ -1,0 +1,19 @@
+{% extends "sign-in/base.html" %}
+{% import "sign-in/icons.html" as icon %}
+{% block title %}Second factor{% endblock %}
+{% block back %}<a class="back" href="{{ back }}">← Another home</a>{% endblock %}
+{% block content %}
+<h2 class="auth-title">{% if recovery %}Use a recovery code{% else %}Enter the 6-digit code{% endif %}</h2>
+<p class="lead">{% if recovery %}Type one of the 10 single-use recovery codes you saved when you set up 2FA.{% else %}Open your authenticator app and type the code currently shown for Pīna'i.{% endif %}</p>
+{% if let Some(alert) = alert %}<p class="alert" role="alert">{{ alert }}</p>{% endif %}
+<form class="stack" method="post" action="/login/totp">
+{% include "sign-in/carried.html" %}
+{% if recovery -%}
+<div class="lfield"><label class="eye" for="recovery_code">Recovery code</label><span class="field{% if alert.is_some() %} field--err{% endif %}">{% call icon::key_round(15) %}{% endcall %}<input id="recovery_code" name="recovery_code" placeholder="XXXXX-XXXXX" autocomplete="off" required autofocus></span></div>
+{%- else -%}
+<div class="lfield"><label class="eye" for="code">Authenticator code</label><span class="field field--code{% if alert.is_some() %} field--err{% endif %}"><input id="code" name="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" required autofocus></span></div>
+{%- endif %}
+<button class="btn btn1" type="submit">{% call icon::shield_check(15) %}{% endcall %}Continue{% call icon::spinner() %}{% endcall %}</button>
+</form>
+<p class="switch"><a href="{{ switch_href }}">{% if recovery %}Use my authenticator app{% else %}Use a recovery code instead{% endif %}</a></p>
+{% endblock %}

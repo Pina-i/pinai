@@ -4,6 +4,7 @@
 
 mod account;
 mod client;
+mod client_sign_in;
 mod error;
 mod ports;
 mod request;
@@ -13,11 +14,15 @@ mod signup;
 pub mod testing;
 
 pub use account::{PasswordHash, SignInAccount};
-pub use client::{Client, ClientId, may_return_after_logout};
+pub use client::{
+    Client, ClientDocument, ClientId, ClientKind, ClientPolicy, DESKTOP_DOCUMENT_PATH,
+    DESKTOP_REDIRECT_URI, desktop_client,
+};
+pub use client_sign_in::ClientSignIn;
 pub use error::AuthError;
 pub use ports::{
-    Authenticator, AuthorizationCodes, Clients, HandleSuffixes, LoginTickets, PasswordHasher,
-    SecondFactors, SignInAccounts, SignUps, SignupCodes, SignupMailer, TokenIssuer,
+    Authenticator, AuthorizationCodes, ClientSignIns, Clients, HandleSuffixes, LoginTickets,
+    PasswordHasher, SecondFactors, SignInAccounts, SignUps, SignupCodes, SignupMailer, TokenIssuer,
 };
 pub use request::{
     ACCESS_TOKEN_TTL, AuthorizationCode, AuthorizationRequest, CODE_TTL, CodeChallenge, GRANT_TYPE,

@@ -59,6 +59,15 @@ pub struct AuthorizationRequest {
     pub nonce: Option<String>,
 }
 
+impl AuthorizationRequest {
+    /// It asks to stay signed in on the device: `offline_access` in its scope.
+    pub fn asks_offline_access(&self) -> bool {
+        self.scope
+            .split_whitespace()
+            .any(|scope| scope == "offline_access")
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AuthorizationCode(String);
 

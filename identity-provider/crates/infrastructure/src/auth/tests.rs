@@ -3,7 +3,7 @@ use std::sync::Arc;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use domain::UserId;
-use domain::auth::testing::signed_up;
+use domain::auth::testing::{CLIENT_ID, signed_up};
 use domain::identity::{TokenError, TokenVerifier};
 use jwt_utils::{EdKeyPair, issue_access_token, load_ed_keypair_from_pem};
 
@@ -26,11 +26,22 @@ fn keypair() -> Arc<EdKeyPair> {
 }
 
 fn token(keypair: &EdKeyPair, issuer: &str, subject: &str, ttl: i64) -> String {
+    for_audience(keypair, issuer, issuer, subject, ttl)
+}
+
+fn for_audience(
+    keypair: &EdKeyPair,
+    issuer: &str,
+    audience: &str,
+    subject: &str,
+    ttl: i64,
+) -> String {
     issue_access_token(
         keypair,
         issuer,
         subject,
-        "web-client",
+        audience,
+        CLIENT_ID,
         "a@idp.test",
         "a",
         ttl,
@@ -58,6 +69,7 @@ fn an_expired_or_foreign_token_is_refused() {
     for token in [
         token(&keypair, ISSUER, &user, -120),
         token(&keypair, "https://idp.other.test", &user, 60),
+        for_audience(&keypair, ISSUER, CLIENT_ID, &user, 60),
         "not-a-jwt".to_owned(),
     ] {
         assert!(matches!(verifier.verify(&token), Err(TokenError::Invalid)));
@@ -72,16 +84,19 @@ fn an_expired_or_foreign_token_is_refused() {
 fn the_tokens_a_code_is_exchanged_for_name_the_account_and_carry_the_nonce() {
     let keypair = keypair();
     let alice = signed_up("alice");
-    let client = ClientId::parse("web-client").unwrap();
+    let client = ClientId::parse(CLIENT_ID).unwrap();
 
     let tokens = JwtTokenIssuer::new(keypair.clone(), ISSUER.to_owned())
         .issue(&alice, &client, Some("the-nonce"), Duration::hours(1))
         .unwrap();
 
     let verified = JwtTokenVerifier::new(keypair, ISSUER.to_owned()).verify(&tokens.access_token);
-    let payload = tokens.id_token.split('.').nth(1).unwrap();
-    let claims: serde_json::Value =
-        serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload).unwrap()).unwrap();
+    let claims_of = |token: &str| -> serde_json::Value {
+        let payload = token.split('.').nth(1).unwrap();
+        serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload).unwrap()).unwrap()
+    };
+    let claims = claims_of(&tokens.id_token);
+    let access = claims_of(&tokens.access_token);
     assert_eq!(verified.unwrap(), alice.id);
     assert_eq!(tokens.expires_in, Duration::hours(1));
     assert_eq!(
@@ -93,10 +108,14 @@ fn the_tokens_a_code_is_exchanged_for_name_the_account_and_carry_the_nonce() {
         ),
         (
             &serde_json::json!(alice.id.to_string()),
-            &serde_json::json!("web-client"),
+            &serde_json::json!(CLIENT_ID),
             &serde_json::json!(alice.email),
             &serde_json::json!("the-nonce"),
         )
+    );
+    assert_eq!(
+        (&access["aud"], &access["client_id"]),
+        (&serde_json::json!(ISSUER), &serde_json::json!(CLIENT_ID))
     );
 }
 

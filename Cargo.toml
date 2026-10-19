@@ -34,6 +34,7 @@ http-body-util = "0.1"
 tower      = { version = "0.5", features = ["util"] }
 url        = "2"
 proptest   = "1"
+wiremock   = "0.6"
 lettre     = { version = "0.11", default-features = false, features = ["smtp-transport", "tokio1-rustls-tls", "builder"] }
 totp-rs    = { version = "5", features = ["otpauth"] }
 hmac       = "0.12"
@@ -43,6 +44,8 @@ subtle     = "2"
 base32     = "0.5"
 argon2     = "0.5"
 rand       = "0.8"
+deunicode  = "1"
+askama     = "0.16"
 
 # Shared crates (were the core-libs repo, pulled in as unpinned git deps)
 jwt-utils       = { path = "crates/jwt-utils" }

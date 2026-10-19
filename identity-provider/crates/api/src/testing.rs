@@ -4,14 +4,15 @@ use std::sync::Arc;
 
 use application::auth::{
     Authorize, ConfirmTotpEnrollment, DisableTotp, ExchangeCode, LogIn, LogOut, PassSecondFactor,
-    RegenerateRecoveryCodes, Register, ResendCode, SendTestMail, StartTotpEnrollment, VerifyEmail,
+    RegenerateRecoveryCodes, Register, ResendCode, SendTestMail, ShowSignIn, StartTotpEnrollment,
+    VerifyEmail,
 };
 use application::e2ee::{
     AppendCommit, ArchiveMessages, CatchUpCommits, ClaimKeyPackage, ClaimWelcomes, ClearArchive,
     KeyPackageStatus, ListDevices, LoadArchiveSalt, ReadArchive, ReceiveCommit, ReceiveWelcome,
     RegisterDevice, RevokeDevice, SendWelcome, SetArchiveSalt, UploadKeyPackages,
 };
-use application::identity::{FindAccount, SearchAccounts, WebFinger};
+use application::identity::{DescribeInstance, FindAccount, SearchAccounts, WebFinger};
 use application::messaging::{
     AddGroupMember, CreateGroup, DeliverDirectMessage, DismissGroup, EditMessage,
     ListConversations, ListGroupMembers, LoadHistory, MarkRead, OpenAttachment, ReadBlob,
@@ -38,7 +39,7 @@ use axum::response::IntoResponse;
 use axum_extra::extract::cookie::Key;
 use domain::UserId;
 use domain::auth::testing::{
-    CountingSuffixes, InMemoryClients, InMemoryCodes, InMemorySecondFactors,
+    CountingSuffixes, InMemoryClientSignIns, InMemoryClients, InMemoryCodes, InMemorySecondFactors,
     InMemorySignInAccounts, InMemorySignupCodes, PlainHasher, RecordingMailer, RecordingTickets,
     SpelledTokens, StepAuthenticator, web_client,
 };
@@ -50,7 +51,9 @@ use domain::e2ee::testing::{
 use domain::identity::testing::{
     InMemoryAccounts, InMemoryRemoteActors, InMemoryTokens, TrustedSignatures,
 };
-use domain::identity::{Account, Accounts, ActorUri, InstanceOrigin, RemoteActor, RemoteActors};
+use domain::identity::{
+    Account, Accounts, ActorUri, InstanceIntro, InstanceOrigin, RemoteActor, RemoteActors,
+};
 use domain::messaging::AttachmentLimits;
 use domain::messaging::testing::{
     InMemoryMessaging, InMemoryObjects, InMemoryRemoteFiles, PlainBlobTokens,
@@ -84,6 +87,7 @@ pub struct SignInFakes {
     pub signup_codes: Arc<InMemorySignupCodes>,
     pub mailer: Arc<RecordingMailer>,
     pub factors: Arc<InMemorySecondFactors>,
+    pub sign_ins: Arc<InMemoryClientSignIns>,
 }
 
 /// Behind the profile routes: accounts' profiles, their friends and avatars.
@@ -177,8 +181,12 @@ impl TestApp {
             codes: Arc::new(InMemoryCodes::default()),
             tickets: Arc::new(RecordingTickets::default()),
             mailer: Arc::new(RecordingMailer::default()),
+            sign_ins: Arc::new(InMemoryClientSignIns::default()),
         };
-        let clients = Arc::new(InMemoryClients::with([web_client()]));
+        let clients = Arc::new(InMemoryClients::with([
+            web_client(),
+            domain::auth::desktop_client(&origin),
+        ]));
         let shutdown = tokio_util::sync::CancellationToken::new();
         let reach = Arc::new(StubReachability::default());
         let contact_policies = Arc::new(InMemoryContactPolicies::default());
@@ -194,13 +202,19 @@ impl TestApp {
             federation: Arc::new(RecordingProfileFederation::default()),
             refresh: Arc::new(RecordingProfileRefresh::default()),
         };
+        let describe_instance = Arc::new(DescribeInstance::new(
+            InstanceIntro::new(&origin, Some("Aotearoa"), Some("Design and type people.")).unwrap(),
+            accounts.clone(),
+        ));
         let state = AppState {
             auth: tokens.clone(),
             cookie_key: Key::from(&[7u8; 64]),
-            sign_in_pages: SignInPages {
-                frontend_url: "http://localhost:5173".to_owned(),
-                secure_cookies: false,
-            },
+            sign_in_pages: SignInPages::new(
+                describe_instance.clone(),
+                Arc::new(ShowSignIn::new(clients.clone(), sign_in.tickets.clone())),
+                origin.clone(),
+                false,
+            ),
             jwks: Jwks(Arc::new(
                 serde_json::json!({ "keys": [{ "kid": "test-key" }] }),
             )),
@@ -208,6 +222,7 @@ impl TestApp {
                 clients.clone(),
                 sign_in.accounts.clone(),
                 sign_in.codes.clone(),
+                sign_in.sign_ins.clone(),
             )),
             log_in: Arc::new(LogIn::new(
                 clients.clone(),
@@ -217,6 +232,7 @@ impl TestApp {
                 sign_in.tickets.clone(),
                 sign_in.signup_codes.clone(),
                 sign_in.mailer.clone(),
+                sign_in.sign_ins.clone(),
             )),
             exchange_code: Arc::new(ExchangeCode::new(
                 clients.clone(),
@@ -241,6 +257,7 @@ impl TestApp {
                 sign_in.accounts.clone(),
                 sign_in.signup_codes.clone(),
                 sign_in.codes.clone(),
+                sign_in.sign_ins.clone(),
             )),
             resend_code: Arc::new(ResendCode::new(
                 sign_in.accounts.clone(),
@@ -254,6 +271,7 @@ impl TestApp {
                 sign_in.factors.clone(),
                 authenticator.clone(),
                 sign_in.codes.clone(),
+                sign_in.sign_ins.clone(),
             )),
             start_totp_enrollment: Arc::new(StartTotpEnrollment::new(
                 origin.clone(),
@@ -277,6 +295,7 @@ impl TestApp {
             )),
             signatures: Arc::new(TrustedSignatures),
             origin: origin.clone(),
+            describe_instance,
             public_key_pem: PublicKeyPem(Arc::from(PUBLIC_KEY_PEM)),
             find_account: Arc::new(FindAccount::new(origin.clone(), accounts.clone())),
             show_person: Arc::new(application::profile::ShowPerson::new(
@@ -733,6 +752,14 @@ impl TestApp {
     /// The response as it is, headers and all.
     pub async fn respond(&self, request: Request<Body>) -> axum::response::Response {
         self.router.clone().oneshot(request).await.unwrap()
+    }
+
+    /// A page's status and its HTML.
+    pub async fn html_of(response: impl IntoResponse) -> (StatusCode, String) {
+        let response = response.into_response();
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        (status, String::from_utf8(bytes.to_vec()).unwrap())
     }
 
     pub async fn body_of(response: impl IntoResponse) -> (StatusCode, Value) {

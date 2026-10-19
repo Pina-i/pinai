@@ -5,7 +5,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::oneshot;
 
-use crate::helpers::{PASSWORD, REDIRECT_URI, spawn_app};
+use crate::helpers::{PASSWORD, spawn_app};
 
 #[tokio::test]
 async fn a_request_under_way_is_answered_before_the_instance_stops() {
@@ -15,8 +15,8 @@ async fn a_request_under_way_is_answered_before_the_instance_stops() {
         .extend_pairs([
             ("email", alice.email.as_str()),
             ("password", PASSWORD),
-            ("client_id", "web-client"),
-            ("redirect_uri", REDIRECT_URI),
+            ("client_id", app.client_id.as_str()),
+            ("redirect_uri", app.redirect_uri.as_str()),
             ("scope", "openid"),
             ("state", "s"),
             (

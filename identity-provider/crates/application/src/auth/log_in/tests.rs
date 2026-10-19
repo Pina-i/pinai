@@ -1,5 +1,5 @@
 use domain::auth::testing::{Mail, a_request, signed_up};
-use domain::auth::{ClientId, SignInAccount};
+use domain::auth::{ClientId, ClientSignIn, Grant, SignInAccount};
 use time::Duration;
 
 use crate::auth::world::{now, world};
@@ -25,6 +25,11 @@ async fn the_right_password_ends_in_a_code_answering_the_request() {
         }
     );
     assert_eq!(issued[0].1, Grant::answering(w.alice.id, &a_request()));
+    assert_eq!(
+        w.sign_ins.remembered(),
+        vec![ClientSignIn::of(w.alice.id, &a_request())],
+        "the app is remembered for the account"
+    );
 }
 
 #[tokio::test]
@@ -138,7 +143,7 @@ async fn an_account_with_an_authenticator_is_given_a_ticket_instead_of_a_code() 
 async fn a_request_from_an_unknown_client_or_to_an_unregistered_redirect_is_refused_first() {
     let w = world().await;
     let stranger = AuthorizationRequest {
-        client: ClientId::parse("stranger").unwrap(),
+        client: ClientId::parse("http://localhost:5173/stranger.json").unwrap(),
         ..a_request()
     };
     let elsewhere = AuthorizationRequest {

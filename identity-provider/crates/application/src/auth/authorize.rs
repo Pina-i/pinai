@@ -3,7 +3,7 @@ use std::sync::Arc;
 use domain::UserId;
 use domain::auth::{
     AuthError, AuthorizationCode, AuthorizationCodes, AuthorizationRequest, CODE_TTL, ClientId,
-    Clients, CodeChallenge, Grant, RESPONSE_TYPE, SignInAccounts,
+    ClientSignIns, Clients, CodeChallenge, Grant, RESPONSE_TYPE, SignInAccounts,
 };
 use time::OffsetDateTime;
 
@@ -22,7 +22,7 @@ pub struct AuthorizeCommand {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Authorized {
-    /// Signed in already: back to the client with a code.
+    /// Signed in already, to this app: back to it with a code.
     Code {
         request: AuthorizationRequest,
         code: AuthorizationCode,
@@ -31,11 +31,14 @@ pub enum Authorized {
     SignIn(AuthorizationRequest),
 }
 
-/// A client sends a browser to sign in; one with a session here is handed a code at once.
+/// A client sends a browser to sign in. One with a session here is handed a code at once, for
+/// an app its account signed in to with the password; any other app asks the password first,
+/// or any site could take a code by sending the browser here.
 pub struct Authorize {
     clients: Arc<dyn Clients>,
     accounts: Arc<dyn SignInAccounts>,
     codes: Arc<dyn AuthorizationCodes>,
+    sign_ins: Arc<dyn ClientSignIns>,
 }
 
 impl Authorize {
@@ -43,11 +46,13 @@ impl Authorize {
         clients: Arc<dyn Clients>,
         accounts: Arc<dyn SignInAccounts>,
         codes: Arc<dyn AuthorizationCodes>,
+        sign_ins: Arc<dyn ClientSignIns>,
     ) -> Self {
         Self {
             clients,
             accounts,
             codes,
+            sign_ins,
         }
     }
 
@@ -89,6 +94,10 @@ impl Authorize {
         let Some(account) = signed_in else {
             return Ok(Authorized::SignIn(request));
         };
+        let known = self.sign_ins.find(account.id, &request.client).await?;
+        if !known.is_some_and(|known| known.covers(&request)) {
+            return Ok(Authorized::SignIn(request));
+        }
         let code = self
             .codes
             .issue(&Grant::answering(account.id, &request), now + CODE_TTL)

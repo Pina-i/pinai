@@ -18,8 +18,9 @@ use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
-pub const REDIRECT_URI: &str = "http://localhost:5173/callback";
 // RFC 7636 appendix B.
 const VERIFIER: &str = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
 const CHALLENGE: &str = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
@@ -42,6 +43,10 @@ pub struct TestApp {
     pub domain: String,
     pub mail: MailSink,
     pub http: reqwest::Client,
+    /// The web client the journeys sign in through: its document, served on a port of its own.
+    pub client_id: String,
+    pub redirect_uri: String,
+    _client: MockServer,
     database: String,
     stop: CancellationToken,
     running: JoinHandle<anyhow::Result<()>>,
@@ -70,6 +75,20 @@ pub async fn spawn_app() -> TestApp {
     let domain = format!("127.0.0.1:{port}");
     let (database_url, database) = fresh_database().await;
     let mail = MailSink::start().await;
+    let client = MockServer::start().await;
+    let (client_id, redirect_uri) = (
+        format!("{}/oauth-client.json", client.uri()),
+        format!("{}/callback", client.uri()),
+    );
+    Mock::given(method("GET"))
+        .and(path("/oauth-client.json"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "client_id": client_id,
+            "client_name": "Pīna'i",
+            "redirect_uris": [redirect_uri],
+        })))
+        .mount(&client)
+        .await;
     let key = std::env::temp_dir().join(format!("pinai-journey-{}.pem", Uuid::new_v4()));
     let pem = SigningKey::from_bytes(&rand::random())
         .to_pkcs8_pem(LineEnding::LF)
@@ -83,7 +102,8 @@ pub async fn spawn_app() -> TestApp {
         jwt_key_id: format!("journey-{port}"),
         port,
         session_secret: hex::encode(rand::random::<[u8; 32]>()),
-        frontend_url: "http://localhost:5173".into(),
+        instance_name: None,
+        instance_description: None,
         redis_url: std::env::var("TEST_REDIS_URL")
             .unwrap_or_else(|_| "redis://localhost:56479".into()),
         storage_endpoint: None,
@@ -123,6 +143,9 @@ pub async fn spawn_app() -> TestApp {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .unwrap(),
+        client_id,
+        redirect_uri,
+        _client: client,
         database,
         stop,
         running,
@@ -145,21 +168,13 @@ async fn fresh_database() -> (String, String) {
     (format!("{base}/{name}"), name)
 }
 
-/// The OIDC request the web client makes, as form pairs.
-fn the_request() -> Vec<(&'static str, &'static str)> {
-    vec![
-        ("client_id", "web-client"),
-        ("redirect_uri", REDIRECT_URI),
-        ("scope", "openid profile email"),
-        ("state", "journey-state"),
-        ("code_challenge", CHALLENGE),
-        ("code_challenge_method", "S256"),
-        ("nonce", "journey-nonce"),
-    ]
-}
-
+/// The query of a `Location`: absolute when it goes to the client, relative within this
+/// instance's own pages.
 pub fn query_of(location: &str) -> HashMap<String, String> {
-    let url = reqwest::Url::parse(location).unwrap();
+    let url = reqwest::Url::parse("http://instance.test")
+        .unwrap()
+        .join(location)
+        .unwrap();
     url.query_pairs().into_owned().collect()
 }
 
@@ -168,9 +183,28 @@ pub fn location(response: &reqwest::Response) -> String {
 }
 
 impl TestApp {
+    /// The OIDC request the web client makes, as form pairs.
+    pub fn the_request(&self) -> Vec<(&'static str, String)> {
+        [
+            ("client_id", self.client_id.as_str()),
+            ("redirect_uri", self.redirect_uri.as_str()),
+            ("scope", "openid profile email"),
+            ("state", "journey-state"),
+            ("code_challenge", CHALLENGE),
+            ("code_challenge_method", "S256"),
+            ("nonce", "journey-nonce"),
+        ]
+        .into_iter()
+        .map(|(name, value)| (name, value.to_owned()))
+        .collect()
+    }
+
     pub async fn form(&self, path: &str, pairs: &[(&str, &str)]) -> reqwest::Response {
-        let mut pairs = pairs.to_vec();
-        pairs.extend(the_request());
+        let mut pairs: Vec<(&str, String)> = pairs
+            .iter()
+            .map(|(name, value)| (*name, (*value).to_owned()))
+            .collect();
+        pairs.extend(self.the_request());
         self.http
             .post(format!("{}{path}", self.address))
             .form(&pairs)
@@ -214,15 +248,15 @@ impl TestApp {
         )
     }
 
-    /// Signs up through the web client's pages — the form, the mailed code — then exchanges
-    /// the code the flow ends in for tokens.
+    /// Signs up through the instance's pages — the form, the mailed code — then exchanges the
+    /// code the flow ends in for tokens.
     pub async fn sign_up(&self, name: &str) -> Account {
         let email = format!("{name}@journey.test");
         let signed_up = self
             .form(
                 "/register-and-login",
                 &[
-                    ("username", name),
+                    ("display_name", name),
                     ("email", &email),
                     ("password", PASSWORD),
                 ],
@@ -243,7 +277,7 @@ impl TestApp {
             .await;
         assert_eq!(verified.status(), 303);
         let landed = location(&verified);
-        assert!(landed.starts_with(REDIRECT_URI), "{landed}");
+        assert!(landed.starts_with(&self.redirect_uri), "{landed}");
         let token = self.exchange(&query_of(&landed)["code"]).await;
         let mut account = Account {
             email,
@@ -264,8 +298,8 @@ impl TestApp {
             .form(&[
                 ("grant_type", "authorization_code"),
                 ("code", code),
-                ("redirect_uri", REDIRECT_URI),
-                ("client_id", "web-client"),
+                ("redirect_uri", self.redirect_uri.as_str()),
+                ("client_id", self.client_id.as_str()),
                 ("code_verifier", VERIFIER),
             ])
             .send()

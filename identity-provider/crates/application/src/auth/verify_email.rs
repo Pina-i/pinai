@@ -2,10 +2,12 @@ use std::sync::Arc;
 
 use domain::UserId;
 use domain::auth::{
-    AuthError, AuthorizationCode, AuthorizationCodes, AuthorizationRequest, CODE_TTL, Clients,
-    CodeAttempt, Grant, OtpCode, SignInAccounts, SignupCodes,
+    AuthError, AuthorizationCode, AuthorizationCodes, AuthorizationRequest, ClientSignIns, Clients,
+    CodeAttempt, OtpCode, SignInAccounts, SignupCodes,
 };
 use time::OffsetDateTime;
+
+use super::signed_in;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verification {
@@ -29,6 +31,7 @@ pub struct VerifyEmail {
     accounts: Arc<dyn SignInAccounts>,
     codes: Arc<dyn SignupCodes>,
     authorization_codes: Arc<dyn AuthorizationCodes>,
+    sign_ins: Arc<dyn ClientSignIns>,
 }
 
 impl VerifyEmail {
@@ -37,12 +40,14 @@ impl VerifyEmail {
         accounts: Arc<dyn SignInAccounts>,
         codes: Arc<dyn SignupCodes>,
         authorization_codes: Arc<dyn AuthorizationCodes>,
+        sign_ins: Arc<dyn ClientSignIns>,
     ) -> Self {
         Self {
             clients,
             accounts,
             codes,
             authorization_codes,
+            sign_ins,
         }
     }
 
@@ -76,10 +81,14 @@ impl VerifyEmail {
         }
         match self.codes.attempt(user, &code, now).await? {
             CodeAttempt::Confirmed => {
-                let code = self
-                    .authorization_codes
-                    .issue(&Grant::answering(user, request), now + CODE_TTL)
-                    .await?;
+                let code = signed_in(
+                    &*self.sign_ins,
+                    &*self.authorization_codes,
+                    user,
+                    request,
+                    now,
+                )
+                .await?;
                 Ok(Verification::SignedIn { user, code })
             }
             refused => Ok(Verification::Refused(refused)),

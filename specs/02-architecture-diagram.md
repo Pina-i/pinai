@@ -13,7 +13,7 @@ flowchart TD
     end
 
     subgraph IdP_Alice["idp.alice.com — Identity & Messaging Backbone"]
-        OIDC_A["🔐 OIDC\nAuth + JWT"]
+        OIDC_A["🔐 OIDC\nAuth + JWT\nsign-in pages · NodeInfo"]
         MSG_A["💬 Msg Backbone\nFriends · DMs · ActivityPub"]
         WS_A["⚡ WebSocket Layer\nthin delivery only"]
 
@@ -32,7 +32,7 @@ flowchart TD
     end
 
     subgraph IdP_Bob["idp.bob.com — Identity & Messaging Backbone"]
-        OIDC_B["🔐 OIDC\nAuth + JWT"]
+        OIDC_B["🔐 OIDC\nAuth + JWT\nsign-in pages · NodeInfo"]
         MSG_B["💬 Msg Backbone\nFriends · DMs · ActivityPub"]
         WS_B["⚡ WebSocket Layer\nthin delivery only"]
 
@@ -119,6 +119,12 @@ flowchart TD
     class USERS_A,REMOTE_A,FRIENDS_A,USERS_B,REMOTE_B,FRIENDS_B db
     class RUSTFS_A,RUSTFS_B storage
 ```
+
+> **Note on signing in.** Any client signs its users in to any instance: a
+> client is the URL of the document it publishes, and each instance serves its
+> own sign-in pages, so the password is only typed on the server that checks it.
+> Before sending a browser there, the web client reads the instance's NodeInfo
+> to show its name. See `identity-provider/specs/auth.md § 1`.
 
 > **Note on attachment delivery.** The browser and remote peer IdPs never
 > talk to RustFS directly. `GET /api/attachments/{id}/blob` (browser, HMAC

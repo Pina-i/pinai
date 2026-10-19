@@ -49,7 +49,7 @@ Then edit each one. At a minimum:
 | Variable | Alice | Bob |
 |---|---|---|
 | `IDP_ENV` | `development` | `development` |
-| `DOMAIN` / `PORT` | `localhost:8080` / `8080` | `localhost:8081` / `8081` |
+| `DOMAIN` / `PORT` | `localhost:8088` / `8088` | `localhost:8081` / `8081` |
 | `POSTGRES_DB` / `POSTGRES_PORT` | `idp_alice` / `5432` | `idp_bob` / `5433` |
 | `REDIS_PORT` | `6379` | `6380` |
 | `RUSTFS_PORT` / `RUSTFS_CONSOLE_PORT` | `9004` / `9005` | `9002` / `9003` |
@@ -203,10 +203,10 @@ IdP afterwards so the remote-presence registry reloads the new URIs.
 
 | Service | Alice | Bob |
 |---|---|---|
-| Identity provider | http://localhost:8080 | http://localhost:8081 |
+| Identity provider | http://localhost:8088 | http://localhost:8081 |
 | Mailpit (captured emails) | http://localhost:8025 | http://localhost:8026 |
 | RustFS console | http://localhost:9001 | http://localhost:9003 |
-| Web client (`FRONTEND_URL`) | http://localhost:5173 | http://localhost:5173 |
+| Web client (signs in to either) | http://localhost:5173 | http://localhost:5173 |
 
 ---
 
@@ -276,7 +276,8 @@ All `make` targets are run from the repo root.
 - **PostgreSQL** — `POSTGRES_*`; `DATABASE_URL` is built from them
 - **Server** — `IDP_ENV`, `DOMAIN`, `PORT`
 - **Keys** — `IDP_KEYS_DIR`, `JWT_PRIVATE_KEY_PATH`, `JWT_KEY_ID`
-- **Session / frontend** — `SESSION_SECRET`, `FRONTEND_URL`
+- **Session** — `SESSION_SECRET`
+- **Instance** — `INSTANCE_NAME`, `INSTANCE_DESCRIPTION`: how the sign-in pages and NodeInfo present it
 - **Redis** — `REDIS_PORT`, from which `REDIS_URL` is built (event streams and presence pub-sub)
 - **Object storage** — `RUSTFS_PORT`, from which `STORAGE_ENDPOINT` is built, `STORAGE_ACCESS_KEY`, `STORAGE_SECRET_KEY`, optional `STORAGE_PUBLIC_URL` and bucket names
 - **Email** — `SMTP_*`, `EMAIL_OTP_PEPPER`, `MAILPIT_*` ports

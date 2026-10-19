@@ -88,7 +88,8 @@ identity-provider/          # the Cargo workspace is the monorepo's, at the repo
 │   │                       #   sign-in, sign-up and second-factor stores, Argon2, TOTP, token
 │   │                       #   signing, SMTP mail; `MIGRATOR`
 │   ├── api/                # idp-api — Axum routes (the inbox, the actor documents and
-│   │                       #   WebFinger included), the `/ws` upgrade and read loop, DTOs,
+│   │                       #   WebFinger included), the sign-in pages (`templates/`,
+│   │                       #   `assets/`), the `/ws` upgrade and read loop, DTOs,
 │   │                       #   `ApiError`, the CORS and trace layers, background sweeps, the
 │   │                       #   presence bus relay and polls
 │   ├── app/                # idp-app — `Config`, `Application` (the composition root), the
@@ -133,22 +134,26 @@ connections ──► (no internal deps)
 | `GET /users/:handle` · `GET /actor` | The account's `Person` (name, inbox, `icon`, the instance key) · the instance's `Application` actor, whose key signs inter-instance requests |
 | `POST /users/:handle/inbox` | Peers' activities: signature, `Digest` and actor binding checked first; `Follow`/`Accept`/`Reject`/`Undo{Follow}`, MLS `Create`/`Update{Note}`, `Update{Person}`, and a group's changes — `Add`, `Remove`, `Leave`, `Update{Group}`, `Update{Membership}` — taken only from an entitled maker, through a member's inbox, when newer than this copy's stamps; otherwise 202 and ignored, 400 when malformed. A 1:1 `Create`/`Update{Note}` from an actor the owner doesn't admit is 403 `Message could not be delivered`; a `Follow` from an actor the owner blocked is 202 and dropped. A Welcome from someone the owner doesn't admit is 403 (a 1:1's, or a group's when the owner isn't a member yet); a group Note that would bring the owner into a group from such a sender, or with someone they blocked in it, is 202 and dropped, as is one for an owner no longer in the group. A group Note's `mlsGroup` changes this instance's copy only where its stamps are newer; one listing more than 50 members is 400 |
 | `GET /users/:handle/outbox` · `/followers` · `/following` | Always empty collections: nothing is published, and friend lists are not public |
-| `GET /authorize` | Authorization endpoint (code + PKCE `S256`). An unknown client or unregistered `redirect_uri` is answered here (401 / 400); a bad flow goes back to the client with `error` and `state`. A live session cookie gets a code at once, else the web client's `/login` page |
-| `POST /login` | The login form: the request checked again (401 / 400), 10 guesses per email then 1/min, an unknown email costs a decoy hash check. A code + session cookie, or on to `/verify-email` (a code is mailed) or `/login/totp?ticket=` |
-| `POST /token` | Code exchange (single use, spent even when refused): access + ID token, 1 h, `Cache-Control: no-store`. `unsupported_grant_type`, `invalid_client`, `invalid_grant` |
-| `GET /logout` | Drops the session cookie; `post_logout_redirect_uri` only to the origin of a registered redirect URI, else `/` |
+| `GET /authorize` | Authorization endpoint (code + PKCE `S256`). The client is the URL of its document, fetched and kept (`identity-provider/specs/auth.md § 1` "Clients"). A client whose document can't be had or breaks a rule, or a `redirect_uri` it doesn't list, is answered here, on the "This app couldn't be verified" page (401 / 400); a bad flow goes back to the client with `error` and `state`. A live session cookie gets a code at once — for an app its account signed in to with the password (`client_sign_ins`) — else the instance's own `/login` page, naming the app, carrying the request and the optional `theme` / `motif` the client is painted in |
+| `GET /login` · `GET /verify-email` · `GET /login/totp` · `GET /signed-out` | The sign-in pages, rendered here (askama, no inline script, a strict CSP, `no-store`): the instance's name, description and facts beside the form; errors arrive as codes and only known codes have words; "← Another home" goes back to the client with `error=access_denied`. A link with no request left, or a gone ticket, says the sign-in expired (`identity-provider/specs/auth.md § 1` "The sign-in pages") |
+| `GET /assets/{path}` | The pages' stylesheet, script, fonts, motifs and grain, built into the binary, kept a day |
+| `GET /.well-known/nodeinfo` · `GET /nodeinfo/2.1` | NodeInfo 2.1: `software.name` `pinai`, `openRegistrations`, `usage.users.total` (counted at most a minute ago), `metadata.nodeName` / `nodeDescription` from `INSTANCE_NAME` / `INSTANCE_DESCRIPTION` (`identity-provider/specs/identity.md § 6`) |
+| `POST /login` | The login form, refused 403 when posted from another site: the request checked again (401 / 400), 10 guesses per email then 1/min, an unknown email costs a decoy hash check. A code + session cookie, or on to `/verify-email` (a code is mailed) or `/login/totp?ticket=`, or back to `/login` with `error=<code>` |
+| `POST /token` | Code exchange (single use, spent even when refused): access + ID token, 1 h, `Cache-Control: no-store`. The access token's `aud` is this instance, its `client_id` the client (RFC 9068). `unsupported_grant_type`, `invalid_client`, `invalid_grant` |
+| `GET /logout` | Drops the session cookie; back to `post_logout_redirect_uri` only when the named `client_id`'s document lists it exactly, else `/signed-out` |
+| `GET /clients/desktop.json` | The official desktop app's client document, as every instance describes it (`io.github.pina-i:/callback`, native, `offline_access`) |
 | `GET /userinfo` | The account (handle, `address`, `actor_uri`, name, avatar, pronouns, bio, `email_verified`, `totp_enabled`), its `settings` document, and `privacy: { contact_policy }`. A token outliving its account is `401 invalid_token` |
 | `PATCH /api/profile` | Bearer-auth. Every field on every save: `display_name` trimmed 1–50, `pronouns` ∈ {he, she, non-binary} or empty, `bio` ≤ 190 or empty; `400` names the rule broken. Answers the new userinfo; the friends are told (`friend_profile_updated` here, `Update{Person}` elsewhere) |
 | `PATCH /api/settings` | Bearer-auth. Replace the account-settings sections the body names (`{ appearance: {…} }`), keep the others; returns the merged document and pushes it to the user's sessions as `settings_updated`. Read back on `GET /userinfo` (`settings`). Device-scoped settings never reach the IdP — see `identity-provider/specs/profile-and-settings.md § 2` |
 | `PUT /api/avatar` | Replace the avatar (raw image bytes; 1 byte–2 MiB; jpeg/png/webp/gif): stored, shown, then the other types removed; URL cache-busted with `?v=<unix_secs>`; the friends are told |
 | `DELETE /api/avatar` | Clear the avatar, then remove its images; the friends are told |
 | `GET /api/profiles?actor=<actor URI>` | Bearer-auth. The profile card: `actor_uri`, `display_name`, `avatar_url`, `pronouns`, `bio`, `friends_since` (RFC 3339 or null). An account here for anyone here; one elsewhere, from `remote_actors`, only for an accepted friend or an active co-member — any other is `404 User not found`, cached or not. A cache over 24 h old is answered and rediscovered in the background |
-| `POST /register` | JSON self-registration: `201` with the account, a code mailed, no session. `400` names the rule broken (the handle rules, an address, 8-byte passwords) or `Email already registered` — whatever its case, races included |
-| `POST /register-and-login` | The web client's sign-up form: the same, carrying the OIDC request on to `/verify-email`; a broken rule goes back to `/login?tab=register&error=` |
+| `POST /register` | JSON self-registration `{ display_name, email, password }`: `201` with the account, its handle derived from the display name, a code mailed, no session. `400` names the rule broken (a 1–50 character name, an address, 8-byte passwords) or `Email already registered` — whatever its case, races included |
+| `POST /register-and-login` | The register tab's form (403 from another site): the same, carrying the OIDC request on to `/verify-email`; a broken rule goes back to `/login?tab=register&error=<code>` |
 | `POST /verify-email-and-login` | The mailed code: 5 guesses a code, counted under a row lock; the right one confirms the address, issues an auth code + session, redirects to `redirect_uri` |
-| `POST /verify-email/resend` | Another code: `204`, `410` once confirmed, `429` past 5 codes in 10 min — a sign-in on the unconfirmed address counts too |
+| `POST /verify-email/resend` | The code page's "Send a new code" form: another code, then the page again with `notice=code_resent`, or `error=too_many_codes` past 5 codes in 10 min — a sign-in on the unconfirmed address counts too; on to `/login` once confirmed |
 | `POST /dev/send-test-email` | Development instances only: a signup mail with a fixed code, to check SMTP |
-| `POST /login/totp` | The code page: the authenticator's code — good once, for a step later than the last used — or a recovery code, against the ticket the password step opened (5 attempts, reserved atomically). An auth code + session, or back with `?error=...` |
+| `POST /login/totp` | The code page's form: the authenticator's code — good once, for a step later than the last used — or a recovery code, against the ticket the password step opened (5 attempts, reserved atomically). An auth code + session, or back with `error=<code>`, or `/login?error=ticket_expired` / `ticket_exhausted` |
 | `POST /api/totp/enroll` | Bearer auth. Start TOTP enrollment — returns `{ secret_base32, provisioning_url }` |
 | `POST /api/totp/enroll/verify` | Bearer auth. The first code: in one transaction the secret committed, its step recorded, the enrollment forgotten and 10 one-time recovery codes minted and returned |
 | `POST /api/totp/disable` | Bearer auth + a current, unused TOTP code. Clears the secret, its last step, the recovery codes and any enrollment in one transaction |
@@ -238,16 +243,16 @@ Don't mention any "phase" development or what is currently being worked on. The 
 ## Cross-cutting rules (always apply)
 
 ### Identity & addressing
-- **`username`** = the handle: the chosen name + `_` + 5 of `a–z0–9` (e.g. `alice_xk9mp`). Used for federation and `actor_uri`. **Never shown in the UI.**
-- **`display_name`** = user input only (e.g. `alice`): trimmed, 1–50 characters (`DisplayName`), not unique. **Only name shown client-side.** A peer's is taken within the same rules, or not at all.
+- **`username`** = the handle: the display name in ASCII, lowercase, `_` between words (`UsernameChoice::derived_from`) + `_` + 5 of `a–z0–9` (e.g. "Hōkū" → `hoku_xk9mp`). Used for federation and `actor_uri`. **Never shown in the UI.**
+- **`display_name`** = user input only, typed at sign-up (e.g. `Hōkū`): trimmed, 1–50 characters (`DisplayName`), not unique. **Only name shown client-side.** A peer's is taken within the same rules, or not at all.
 - **Federated address format**: `username@domain` — **no** leading `@`; `/userinfo` answers it as `address`. Clients receive raw actor URIs in some WS events and normalise to this format via `actorUriToAddress()`.
 - **`actor_uri`** is the universal federation key (e.g. `https://idp.alice.com/users/alice_xk9mp`).
 - **Parsing** an address or an actor URI, or deciding whether one is local, goes through
   `domain::identity` — never `split('@')`, `starts_with("{issuer}/users/")` or path slicing. A bare
   name means a local account; our own domain matches in any case. An `ActorUri` is 2 KiB at most
-  once normalised: every writer stores what it is handed. The handle rules
-  (`Handle`, `UsernameChoice`: 2–32 of `a–z0–9_.` + `_` + 5 of `a–z0–9`) are enforced at
-  registration.
+  once normalised: every writer stores what it is handed. A handle (`Handle`: 2–32 of
+  `a–z0–9_.` + `_` + 5 of `a–z0–9`) is derived from the display name at registration, never
+  typed.
 
 ### Profile
 - An inbound `Update{Person}` changes only its signer's own account, never one of this instance
@@ -317,6 +322,8 @@ email_verification_codes — signup codes (peppered HMAC, 10-min expiry, 5 attem
 pending_totp_enrollments — in-flight 2FA secret awaiting first-code verify
 pending_totp_logins      — short-lived "passed password, need TOTP" tickets carrying OIDC params
                             (5 attempts)
+client_sign_ins          — the apps each account signed in to with its password (offline_access
+                            once asked, kept): a session signs in silently to these only
 recovery_codes           — 10 per user, single-use, peppered HMAC
 remote_actors            — cache of federated users (inbox_url, display_name, avatar_url, pronouns,
                             bio — as the actor's own `Update{Person}` or document last said, within
@@ -389,7 +396,10 @@ archive under HAK).
 
 - Never log raw passwords, tokens, or private keys
 - JWT `iss` claim must always match `DOMAIN`
-- Always validate `redirect_uri` against pre-registered clients
+- Always validate `redirect_uri` against the client's own document (its `client_id` URL), exactly
+- The password is typed on this instance's own pages only: never a form on a client. The pages run
+  no script but their own file (`/assets/sign-in.js`), their forms take same-origin POSTs only, and an error reaches them as a code —
+  never as words a link chooses
 - Reject PKCE `plain` challenge method
 - HTTP Signature verification is mandatory on all incoming ActivityPub activities
 - Private keys must never be stored in the database — use filesystem or secrets manager

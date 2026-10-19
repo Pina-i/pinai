@@ -10,6 +10,8 @@ pub trait Accounts: Send + Sync {
     async fn find_by_uri(&self, uri: &ActorUri) -> Result<Option<Account>, AccountsError>;
     /// The accounts whose handle holds `fragment`, in any case, by handle; at most `limit`.
     async fn search(&self, fragment: &str, limit: i64) -> Result<Vec<Account>, AccountsError>;
+    /// How many local accounts there are.
+    async fn count(&self) -> Result<u64, AccountsError>;
 }
 
 #[derive(Debug, thiserror::Error)]

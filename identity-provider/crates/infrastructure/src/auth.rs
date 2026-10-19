@@ -1,4 +1,8 @@
-//! Tokens this instance issues and checks, and the password check.
+//! Tokens this instance issues and checks, the password check, and the clients it signs in to.
+
+mod clients;
+
+pub use clients::MetadataClients;
 
 use std::sync::Arc;
 
@@ -30,7 +34,8 @@ impl JwtTokenVerifier {
 
 impl TokenVerifier for JwtTokenVerifier {
     fn verify(&self, token: &str) -> Result<UserId, TokenError> {
-        let claims = validate_access_token(token, &self.keypair, &self.issuer, "web-client")
+        // RFC 9068: an access token is addressed to this instance's API, whichever client holds it.
+        let claims = validate_access_token(token, &self.keypair, &self.issuer, &self.issuer)
             .map_err(|_| TokenError::Invalid)?;
         claims
             .sub
@@ -65,6 +70,7 @@ impl TokenIssuer for JwtTokenIssuer {
             &self.keypair,
             &self.issuer,
             &subject,
+            &self.issuer,
             client.as_str(),
             &account.email,
             &account.username,

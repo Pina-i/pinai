@@ -1,5 +1,7 @@
 use domain::auth::testing::a_request;
-use domain::auth::{AuthorizationRequest, ClientId, SIGNUP_CODE_TTL, SignInAccount};
+use domain::auth::{
+    AuthorizationRequest, ClientId, ClientSignIn, Grant, SIGNUP_CODE_TTL, SignInAccount,
+};
 
 use crate::auth::world::{World, now, world};
 
@@ -11,7 +13,7 @@ async fn bob(w: &World) -> (UserId, String) {
         .register
         .execute(
             crate::auth::RegisterCommand {
-                username: "bob".to_owned(),
+                display_name: "Bob".to_owned(),
                 email: "bob@idp.test".to_owned(),
                 password: "bob-password".to_owned(),
             },
@@ -46,6 +48,10 @@ async fn the_mailed_code_confirms_the_address_and_signs_in() {
     assert_eq!(issued[0].1, Grant::answering(bob, &a_request()));
     let account: SignInAccount = w.accounts.by_id(bob).await.unwrap().unwrap();
     assert!(account.email_verified);
+    assert_eq!(
+        w.sign_ins.remembered(),
+        vec![ClientSignIn::of(bob, &a_request())]
+    );
 }
 
 #[tokio::test]
@@ -104,7 +110,7 @@ async fn a_request_not_from_a_client_is_refused_before_the_code_is_tried() {
     let w = world().await;
     let (bob, code) = bob(&w).await;
     let stranger = AuthorizationRequest {
-        client: ClientId::parse("stranger").unwrap(),
+        client: ClientId::parse("http://localhost:5173/stranger.json").unwrap(),
         ..a_request()
     };
     let elsewhere = AuthorizationRequest {

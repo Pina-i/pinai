@@ -2,10 +2,12 @@ use std::sync::Arc;
 
 use domain::auth::{
     AuthError, Authenticator, AuthorizationCode, AuthorizationCodes, AuthorizationRequest,
-    CODE_TTL, Grant, LoginTickets, SecondFactors, TICKET_ATTEMPTS, TicketAttempt,
+    ClientSignIns, LoginTickets, SecondFactors, TICKET_ATTEMPTS, TicketAttempt,
 };
 use domain::{TicketId, UserId};
 use time::OffsetDateTime;
+
+use super::signed_in;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SecondFactorOutcome {
@@ -33,6 +35,7 @@ pub struct PassSecondFactor {
     factors: Arc<dyn SecondFactors>,
     authenticator: Arc<dyn Authenticator>,
     codes: Arc<dyn AuthorizationCodes>,
+    sign_ins: Arc<dyn ClientSignIns>,
 }
 
 impl PassSecondFactor {
@@ -41,12 +44,14 @@ impl PassSecondFactor {
         factors: Arc<dyn SecondFactors>,
         authenticator: Arc<dyn Authenticator>,
         codes: Arc<dyn AuthorizationCodes>,
+        sign_ins: Arc<dyn ClientSignIns>,
     ) -> Self {
         Self {
             tickets,
             factors,
             authenticator,
             codes,
+            sign_ins,
         }
     }
 
@@ -98,10 +103,7 @@ impl PassSecondFactor {
         if !self.tickets.consume(ticket).await? {
             return Ok(SecondFactorOutcome::AlreadyUsed);
         }
-        let code = self
-            .codes
-            .issue(&Grant::answering(open.user, &open.request), now + CODE_TTL)
-            .await?;
+        let code = signed_in(&*self.sign_ins, &*self.codes, open.user, &open.request, now).await?;
         Ok(SecondFactorOutcome::SignedIn {
             user: open.user,
             request: open.request,

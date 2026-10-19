@@ -58,6 +58,15 @@ async fn a_search_takes_its_query_literally(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn every_account_counts(pool: PgPool) {
+    an_account(&pool, "alice").await;
+    an_account(&pool, "bob").await;
+    super::a_user(&pool).await;
+
+    domain::identity::testing::contract::every_account_counts(&PgAccounts::new(pool)).await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
 async fn an_account_without_an_actor_uri_is_not_addressable(pool: PgPool) {
     let id = super::a_user(&pool).await;
 

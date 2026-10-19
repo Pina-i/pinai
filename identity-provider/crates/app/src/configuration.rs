@@ -32,9 +32,10 @@ pub struct Config {
     /// What the session-cookie and attachment-link keys are derived from. Falls back
     /// to [`DEV_SESSION_SECRET`] in development; production requires a real one.
     pub session_secret: String,
-    /// Base URL of the web-client, e.g. "http://localhost:5173".
-    /// Used to redirect to the hosted login/register page instead of serving HTML.
-    pub frontend_url: String,
+    /// The name the sign-in pages and NodeInfo give the instance; its domain when unset.
+    pub instance_name: Option<String>,
+    /// A line about the instance, shown under its name on the sign-in pages.
+    pub instance_description: Option<String>,
 
     // ── Redis (Message Broker) ───────────────────────────────────────────
     /// Redis connection URL for the event broker (Streams + pub-sub).
@@ -149,8 +150,8 @@ impl Config {
                 .parse::<u16>()
                 .map_err(|e| ConfigError::InvalidPort(e.to_string()))?,
             session_secret: session_secret(environment, env_var("SESSION_SECRET").ok())?,
-            frontend_url: env_var("FRONTEND_URL")
-                .unwrap_or_else(|_| "http://localhost:5173".into()),
+            instance_name: env_var("INSTANCE_NAME").ok(),
+            instance_description: env_var("INSTANCE_DESCRIPTION").ok(),
             redis_url: env_var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into()),
             storage_endpoint: env_var("STORAGE_ENDPOINT").ok(),
             storage_access_key: env_var("STORAGE_ACCESS_KEY").ok(),

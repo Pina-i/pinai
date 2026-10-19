@@ -5,7 +5,8 @@ use ed25519_dalek::SigningKey;
 use std::path::PathBuf;
 
 const ISSUER: &str = "https://idp.alice.com";
-const AUDIENCE: &str = "web-client";
+const AUDIENCE: &str = ISSUER;
+const CLIENT_ID: &str = "https://app.example/oauth-client.json";
 const SUBJECT: &str = "3f1b8a2c-0000-4000-8000-000000000001";
 const EMAIL: &str = "alice@example.com";
 const USERNAME: &str = "alice-7G4K";
@@ -43,8 +44,10 @@ fn keypair(name: &str, seed: u8) -> (EdKeyPair, TempPem) {
 }
 
 fn access_token(kp: &EdKeyPair, ttl: i64) -> String {
-    issue_access_token(kp, ISSUER, SUBJECT, AUDIENCE, EMAIL, USERNAME, ttl)
-        .expect("issuing should succeed")
+    issue_access_token(
+        kp, ISSUER, SUBJECT, AUDIENCE, CLIENT_ID, EMAIL, USERNAME, ttl,
+    )
+    .expect("issuing should succeed")
 }
 
 // ─── Loading a key ───────────────────────────────────────────────────────────
@@ -134,6 +137,7 @@ fn an_issued_access_token_validates_and_carries_its_claims() {
     assert_eq!(claims.sub, SUBJECT);
     assert_eq!(claims.iss, ISSUER);
     assert_eq!(claims.aud, AUDIENCE);
+    assert_eq!(claims.client_id, CLIENT_ID);
     assert_eq!(claims.email, EMAIL);
     assert_eq!(claims.preferred_username, USERNAME);
     assert_eq!(claims.exp - claims.iat, 300);
@@ -190,7 +194,7 @@ fn a_token_whose_payload_was_edited_is_refused() {
     let token = access_token(&kp, 300);
 
     let mut parts: Vec<&str> = token.split('.').collect();
-    let forged = base64_url("{\"iss\":\"https://idp.alice.com\",\"sub\":\"attacker\",\"aud\":\"web-client\",\"exp\":9999999999,\"iat\":1,\"email\":\"e\",\"preferred_username\":\"u\"}");
+    let forged = base64_url("{\"iss\":\"https://idp.alice.com\",\"sub\":\"attacker\",\"aud\":\"https://idp.alice.com\",\"client_id\":\"c\",\"exp\":9999999999,\"iat\":1,\"email\":\"e\",\"preferred_username\":\"u\"}");
     parts[1] = &forged;
 
     assert!(validate_access_token(&parts.join("."), &kp, ISSUER, AUDIENCE).is_err());

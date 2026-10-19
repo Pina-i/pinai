@@ -10,6 +10,7 @@ name = "api"
 [dependencies]
 activitypub = { workspace = true }
 anyhow      = { workspace = true }
+askama      = { workspace = true }
 application = { package = "idp-application", path = "../application" }
 axum        = { workspace = true, features = ["multipart"] }
 axum-extra  = { workspace = true }

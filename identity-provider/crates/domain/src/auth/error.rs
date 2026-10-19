@@ -18,10 +18,10 @@ pub enum AuthError {
     ClientMismatch,
     #[error("the code_verifier does not match the code_challenge")]
     VerifierMismatch,
-    #[error("username, email, and password are required")]
+    #[error("display_name, email, and password are required")]
     MissingField,
     #[error(transparent)]
-    BadUsername(crate::ValidationError),
+    BadDisplayName(crate::ValidationError),
     #[error(transparent)]
     BadEmail(crate::ValidationError),
     #[error("password must be at least 8 characters")]

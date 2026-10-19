@@ -4,9 +4,10 @@ use anyhow::Context;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use domain::auth::{
-    AuthError, AuthorizationCode, AuthorizationCodes, AuthorizationRequest, CODE_ATTEMPTS, Client,
-    ClientId, Clients, CodeAttempt, CodeChallenge, Email, Grant, LoginTickets, NewAccount, OtpCode,
-    PasswordHash, Registration, SignInAccount, SignInAccounts, SignUps, SignupCodes,
+    AuthError, AuthorizationCode, AuthorizationCodes, AuthorizationRequest, CODE_ATTEMPTS,
+    ClientId, ClientSignIn, ClientSignIns, CodeAttempt, CodeChallenge, Email, Grant, LoginTickets,
+    NewAccount, OtpCode, PasswordHash, Registration, SignInAccount, SignInAccounts, SignUps,
+    SignupCodes,
 };
 use domain::auth::{
     RECOVERY_CODES, SecondFactors, TICKET_ATTEMPTS, Ticket, TicketAttempt, TotpSecret,
@@ -18,49 +19,6 @@ use rand::rngs::OsRng;
 use sha2::Sha256;
 use sqlx::PgPool;
 use time::OffsetDateTime;
-
-/// `oauth_clients`.
-pub struct PgClients {
-    pool: PgPool,
-}
-
-impl PgClients {
-    pub fn new(pool: PgPool) -> Self {
-        Self { pool }
-    }
-}
-
-#[async_trait::async_trait]
-impl Clients for PgClients {
-    async fn find(&self, id: &ClientId) -> Result<Option<Client>, AuthError> {
-        let uris: Option<Vec<String>> =
-            sqlx::query_scalar("SELECT redirect_uris FROM oauth_clients WHERE client_id = $1")
-                .bind(id.as_str())
-                .fetch_optional(&self.pool)
-                .await
-                .context("find a client")?;
-        Ok(uris.map(|redirect_uris| Client {
-            id: id.clone(),
-            redirect_uris,
-        }))
-    }
-
-    async fn all(&self) -> Result<Vec<Client>, AuthError> {
-        let rows: Vec<(String, Vec<String>)> =
-            sqlx::query_as("SELECT client_id, redirect_uris FROM oauth_clients")
-                .fetch_all(&self.pool)
-                .await
-                .context("list the clients")?;
-        rows.into_iter()
-            .map(|(id, redirect_uris)| {
-                Ok(Client {
-                    id: ClientId::parse(&id).context("oauth_clients.client_id")?,
-                    redirect_uris,
-                })
-            })
-            .collect()
-    }
-}
 
 /// `authorization_codes`: `used` flips once, in the `UPDATE` that reads the grant back.
 pub struct PgAuthorizationCodes {
@@ -244,6 +202,58 @@ impl TryFrom<TicketRow> for Ticket {
             },
             attempts: row.attempts,
         })
+    }
+}
+
+/// `client_sign_ins`: one row per account and app.
+pub struct PgClientSignIns {
+    pool: PgPool,
+}
+
+impl PgClientSignIns {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+}
+
+#[async_trait::async_trait]
+impl ClientSignIns for PgClientSignIns {
+    async fn remember(&self, sign_in: &ClientSignIn, at: OffsetDateTime) -> Result<(), AuthError> {
+        sqlx::query(
+            "INSERT INTO client_sign_ins (user_id, client_id, offline_access, signed_in_at) \
+             VALUES ($1, $2, $3, $4) \
+             ON CONFLICT (user_id, client_id) DO UPDATE SET \
+                 offline_access = client_sign_ins.offline_access OR EXCLUDED.offline_access, \
+                 signed_in_at = EXCLUDED.signed_in_at",
+        )
+        .bind(sign_in.user.as_uuid())
+        .bind(sign_in.client.as_str())
+        .bind(sign_in.offline_access)
+        .bind(at)
+        .execute(&self.pool)
+        .await
+        .context("remember an app signed in to")?;
+        Ok(())
+    }
+
+    async fn find(
+        &self,
+        user: UserId,
+        client: &ClientId,
+    ) -> Result<Option<ClientSignIn>, AuthError> {
+        let offline_access: Option<bool> = sqlx::query_scalar(
+            "SELECT offline_access FROM client_sign_ins WHERE user_id = $1 AND client_id = $2",
+        )
+        .bind(user.as_uuid())
+        .bind(client.as_str())
+        .fetch_optional(&self.pool)
+        .await
+        .context("find an app signed in to")?;
+        Ok(offline_access.map(|offline_access| ClientSignIn {
+            user,
+            client: client.clone(),
+            offline_access,
+        }))
     }
 }
 
