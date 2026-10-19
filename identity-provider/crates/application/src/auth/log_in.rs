@@ -1,14 +1,13 @@
 use std::sync::Arc;
 
 use domain::auth::{
-    AuthError, AuthorizationCode, AuthorizationCodes, AuthorizationRequest, ClientSignIns, Clients,
-    Email, LOGIN_TICKET_TTL, LoginTickets, PasswordHasher, SignInAccounts, SignupCodes,
-    SignupMailer,
+    AuthError, AuthorizationCode, AuthorizationRequest, Clients, Email, LOGIN_TICKET_TTL,
+    LoginTickets, PasswordHasher, SignInAccounts, SignupCodes, SignupMailer,
 };
-use domain::{TicketId, UserId};
+use domain::{SessionId, TicketId, UserId};
 use time::OffsetDateTime;
 
-use super::{mail_signup_code, signed_in};
+use super::{CompleteSignIn, mail_signup_code};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoginOutcome {
@@ -20,6 +19,8 @@ pub enum LoginOutcome {
     SecondFactor(TicketId),
     SignedIn {
         user: UserId,
+        /// The browser session to set the cookie for.
+        session: SessionId,
         code: AuthorizationCode,
     },
 }
@@ -29,34 +30,30 @@ pub struct LogIn {
     clients: Arc<dyn Clients>,
     accounts: Arc<dyn SignInAccounts>,
     hasher: Arc<dyn PasswordHasher>,
-    codes: Arc<dyn AuthorizationCodes>,
     tickets: Arc<dyn LoginTickets>,
     signup_codes: Arc<dyn SignupCodes>,
     mailer: Arc<dyn SignupMailer>,
-    sign_ins: Arc<dyn ClientSignIns>,
+    complete: Arc<CompleteSignIn>,
 }
 
 impl LogIn {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         clients: Arc<dyn Clients>,
         accounts: Arc<dyn SignInAccounts>,
         hasher: Arc<dyn PasswordHasher>,
-        codes: Arc<dyn AuthorizationCodes>,
         tickets: Arc<dyn LoginTickets>,
         signup_codes: Arc<dyn SignupCodes>,
         mailer: Arc<dyn SignupMailer>,
-        sign_ins: Arc<dyn ClientSignIns>,
+        complete: Arc<CompleteSignIn>,
     ) -> Self {
         Self {
             clients,
             accounts,
             hasher,
-            codes,
             tickets,
             signup_codes,
             mailer,
-            sign_ins,
+            complete,
         }
     }
 
@@ -65,6 +62,7 @@ impl LogIn {
         email: &str,
         password: &str,
         request: &AuthorizationRequest,
+        current: Option<SessionId>,
         now: OffsetDateTime,
     ) -> Result<LoginOutcome, AuthError> {
         // The form is posted by a browser, not by `/authorize`: its request is checked again, or
@@ -110,9 +108,13 @@ impl LogIn {
                 .await?;
             return Ok(LoginOutcome::SecondFactor(ticket));
         }
-        let code = signed_in(&*self.sign_ins, &*self.codes, account.id, request, now).await?;
+        let (session, code) = self
+            .complete
+            .execute(account.id, request, current, now)
+            .await?;
         Ok(LoginOutcome::SignedIn {
             user: account.id,
+            session,
             code,
         })
     }

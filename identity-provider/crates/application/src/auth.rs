@@ -1,11 +1,13 @@
 //! Signing in over OpenID Connect: a client's request, the credentials, the code it ends in and
 //! the tokens that code is exchanged for.
 
+mod authenticate;
 mod authorize;
 mod exchange_code;
 mod log_in;
 mod log_out;
 mod pass_second_factor;
+mod refresh;
 mod register;
 mod resend_code;
 mod send_test_mail;
@@ -17,11 +19,13 @@ mod verify_email;
 #[cfg(test)]
 mod world;
 
+pub use authenticate::Authenticate;
 pub use authorize::{Authorize, AuthorizeCommand, Authorized};
 pub use exchange_code::{ExchangeCode, TokenCommand};
 pub use log_in::{LogIn, LoginOutcome};
 pub use log_out::LogOut;
 pub use pass_second_factor::{PassSecondFactor, SecondFactorOutcome};
+pub use refresh::{Refresh, RefreshCommand};
 pub use register::{Register, RegisterCommand, Registered};
 pub use resend_code::ResendCode;
 pub use send_test_mail::SendTestMail;
@@ -31,29 +35,98 @@ pub use totp_enrollment::{ConfirmTotpEnrollment, StartTotpEnrollment};
 pub use totp_settings::{DisableTotp, RegenerateRecoveryCodes};
 pub use verify_email::{Verification, VerifyEmail};
 
-use domain::UserId;
+use std::sync::Arc;
+
 use domain::auth::{
     AuthError, AuthorizationCode, AuthorizationCodes, AuthorizationRequest, CODE_TTL, ClientSignIn,
-    ClientSignIns, Grant, RESEND_LIMIT, RESEND_WINDOW, SIGNUP_CODE_TTL, SignInAccount, SignupCodes,
-    SignupMailer,
+    ClientSignIns, Grant, RESEND_LIMIT, RESEND_WINDOW, RevokedReason, SIGNUP_CODE_TTL, SessionKind,
+    SessionNotifier, Sessions, SignInAccount, SignupCodes, SignupMailer,
 };
+use domain::{SessionId, UserId};
 use time::OffsetDateTime;
 
-/// The end of a sign-in the password went through: the app is remembered for the account, so
-/// a live session signs in to it again, and the code is issued.
-pub(crate) async fn signed_in(
-    sign_ins: &dyn ClientSignIns,
-    codes: &dyn AuthorizationCodes,
-    user: UserId,
-    request: &AuthorizationRequest,
+/// The end every password sign-in shares — the login form, the sign-up code, the second factor:
+/// the app remembered for the account, the browser's session, and the code.
+pub struct CompleteSignIn {
+    sign_ins: Arc<dyn ClientSignIns>,
+    codes: Arc<dyn AuthorizationCodes>,
+    sessions: Arc<dyn Sessions>,
+    notifier: Arc<dyn SessionNotifier>,
+}
+
+impl CompleteSignIn {
+    pub fn new(
+        sign_ins: Arc<dyn ClientSignIns>,
+        codes: Arc<dyn AuthorizationCodes>,
+        sessions: Arc<dyn Sessions>,
+        notifier: Arc<dyn SessionNotifier>,
+    ) -> Self {
+        Self {
+            sign_ins,
+            codes,
+            sessions,
+            notifier,
+        }
+    }
+
+    /// `current` is the session the browser holds already: kept when it is this account's and
+    /// live, ended when it is another's — a browser is signed in as one account at a time.
+    pub(crate) async fn execute(
+        &self,
+        user: UserId,
+        request: &AuthorizationRequest,
+        current: Option<SessionId>,
+        now: OffsetDateTime,
+    ) -> Result<(SessionId, AuthorizationCode), AuthError> {
+        let held = match current {
+            Some(id) => self.sessions.find(id).await?,
+            None => None,
+        };
+        let session = match held.filter(|held| held.is_live(now)) {
+            Some(held) if held.user == user => {
+                self.sessions.touch(held.id, now).await?;
+                held.id
+            }
+            other => {
+                if let Some(other) = other {
+                    end_session(
+                        &*self.sessions,
+                        &*self.notifier,
+                        other.id,
+                        RevokedReason::Replaced,
+                        now,
+                    )
+                    .await?;
+                }
+                self.sessions.open(user, &SessionKind::Browser, now).await?
+            }
+        };
+        self.sign_ins
+            .remember(&ClientSignIn::of(user, request), now)
+            .await?;
+        let code = self
+            .codes
+            .issue(&Grant::answering(user, session, request), now + CODE_TTL)
+            .await?;
+        Ok((session, code))
+    }
+}
+
+/// Ends a session, and closes what hangs on it.
+pub(crate) async fn end_session(
+    sessions: &dyn Sessions,
+    notifier: &dyn SessionNotifier,
+    id: SessionId,
+    reason: RevokedReason,
     now: OffsetDateTime,
-) -> Result<AuthorizationCode, AuthError> {
-    sign_ins
-        .remember(&ClientSignIn::of(user, request), now)
-        .await?;
-    codes
-        .issue(&Grant::answering(user, request), now + CODE_TTL)
-        .await
+) -> Result<(), AuthError> {
+    let Some(session) = sessions.find(id).await? else {
+        return Ok(());
+    };
+    if sessions.revoke(id, reason, now).await? {
+        notifier.ended(&session);
+    }
+    Ok(())
 }
 
 /// A fresh code to confirm the account's address, by mail; its earlier codes stop working.

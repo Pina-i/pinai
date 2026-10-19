@@ -428,6 +428,14 @@ disconnect is announced as usual, so the account goes `offline` unless it is con
 elsewhere, and the client reconnects, to this instance once it is back or to another behind the
 same address. A peer's stream ends the same way. What is still open ten seconds later is dropped.
 
+### When its session ends
+
+A WebSocket is opened under the session its token belongs to (`identity-provider/specs/auth.md`
+§ 1 "Sessions"). When that session ends — a sign-out, another account signing in on the browser —
+the account's sockets opened under it close with `1008` ("the session has ended"), the disconnect
+is announced as usual, and a reconnect with that token is refused `401`. Its other sockets, under
+other sessions, stay.
+
 ### Initial presence state on connect
 
 When a user opens the friends list or a DM conversation, their IdP serves current presence states immediately from the in-memory store:

@@ -1,15 +1,18 @@
 use std::sync::Arc;
 
-use domain::UserId;
 use domain::auth::SignUps;
 use domain::auth::testing::{SignInSeeds, a_request, contract};
-use domain::auth::{LoginTickets, SignInAccount, SignupCodes};
+use domain::auth::{
+    AuthorizationCodes, LoginTickets, RefreshTokens, Rotation, SessionKind, Sessions,
+    SignInAccount, SignupCodes,
+};
+use domain::{SessionId, UserId};
 use hmac::{Hmac, Mac};
 use infrastructure::postgres::{
-    PgAuthorizationCodes, PgClientSignIns, PgLoginTickets, PgSecondFactors, PgSignInAccounts,
-    PgSignUps, PgSignupCodes,
+    PgAuthorizationCodes, PgClientSignIns, PgLoginTickets, PgRefreshTokens, PgSecondFactors,
+    PgSessions, PgSignInAccounts, PgSignUps, PgSignupCodes,
 };
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use time::{Duration, OffsetDateTime};
 
@@ -50,12 +53,175 @@ async fn an_account_is_found_by_email_and_id_with_its_sign_in_state(pool: PgPool
 #[sqlx::test(migrator = "infrastructure::MIGRATOR")]
 async fn a_code_is_good_once_and_only_until_it_expires(pool: PgPool) {
     let user = a_user(&pool).await;
-    contract::a_code_is_good_once_and_only_until_it_expires(&PgAuthorizationCodes::new(pool), user)
-        .await;
+    let session = PgSessions::new(pool.clone())
+        .open(user, &SessionKind::Browser, OffsetDateTime::now_utc())
+        .await
+        .unwrap();
+    contract::a_code_is_good_once_and_only_until_it_expires(
+        &PgAuthorizationCodes::new(pool),
+        user,
+        session,
+    )
+    .await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn a_session_opens_is_used_and_ends_once(pool: PgPool) {
+    let user = a_user(&pool).await;
+    contract::a_session_opens_is_used_and_ends_once(&PgSessions::new(pool), user).await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn sessions_ended_are_swept_after_their_retention(pool: PgPool) {
+    let user = a_user(&pool).await;
+    contract::sessions_ended_are_swept_after_their_retention(&PgSessions::new(pool), user).await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn a_session_goes_with_its_account_and_its_codes_with_it(pool: PgPool) {
+    let user = a_user(&pool).await;
+    let sessions = PgSessions::new(pool.clone());
+    let session = sessions
+        .open(user, &SessionKind::Browser, OffsetDateTime::now_utc())
+        .await
+        .unwrap();
+    let code = PgAuthorizationCodes::new(pool.clone())
+        .issue(
+            &domain::auth::Grant::answering(user, session, &a_request()),
+            later(),
+        )
+        .await
+        .unwrap();
+
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(user.as_uuid())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    assert_eq!(sessions.find(session).await.unwrap(), None);
+    assert_eq!(
+        PgAuthorizationCodes::new(pool)
+            .consume(&code, OffsetDateTime::now_utc())
+            .await
+            .unwrap(),
+        None
+    );
 }
 
 fn later() -> OffsetDateTime {
     OffsetDateTime::now_utc() + Duration::minutes(5)
+}
+
+async fn a_session(pool: &PgPool) -> SessionId {
+    let user = a_user(pool).await;
+    PgSessions::new(pool.clone())
+        .open(user, &SessionKind::Browser, OffsetDateTime::now_utc())
+        .await
+        .unwrap()
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn a_refresh_token_rotates_at_each_use_and_a_used_one_is_reused(pool: PgPool) {
+    let session = a_session(&pool).await;
+    contract::a_refresh_token_rotates_at_each_use_and_a_used_one_is_reused(
+        &PgRefreshTokens::new(pool),
+        session,
+    )
+    .await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn a_lost_answer_is_answered_again_within_the_grace(pool: PgPool) {
+    let session = a_session(&pool).await;
+    contract::a_lost_answer_is_answered_again_within_the_grace(
+        &PgRefreshTokens::new(pool),
+        session,
+    )
+    .await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn refresh_tokens_unused_since_the_cutoff_are_swept(pool: PgPool) {
+    let session = a_session(&pool).await;
+    contract::refresh_tokens_unused_since_the_cutoff_are_swept(
+        &PgRefreshTokens::new(pool),
+        session,
+    )
+    .await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn parallel_presentations_of_one_token_leave_its_chain_one_head(pool: PgPool) {
+    let session = a_session(&pool).await;
+    let tokens = Arc::new(PgRefreshTokens::new(pool));
+    let client = a_request().client;
+    let now = OffsetDateTime::now_utc();
+    let first = tokens.start(session, &client, now).await.unwrap();
+
+    let presentations: Vec<_> = (0..8)
+        .map(|_| {
+            let (tokens, first, client) = (tokens.clone(), first.clone(), client.clone());
+            tokio::spawn(async move { tokens.rotate(&first, &client, now).await.unwrap() })
+        })
+        .collect();
+    let mut successors = Vec::new();
+    for presentation in presentations {
+        match presentation.await.unwrap() {
+            Rotation::Rotated { successor, .. } => successors.push(successor),
+            other => panic!("within the grace, each is answered: {other:?}"),
+        }
+    }
+    let mut heads = 0;
+    for successor in &successors {
+        let rotation = tokens
+            .rotate(successor, &client, now + Duration::seconds(1))
+            .await
+            .unwrap();
+        if matches!(rotation, Rotation::Rotated { .. }) {
+            heads += 1;
+        }
+    }
+
+    successors.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+    successors.dedup();
+    assert_eq!(successors.len(), 8);
+    assert_eq!(heads, 1, "each answer replaced the one before");
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn a_refresh_token_is_kept_as_its_hash_and_goes_with_its_session(pool: PgPool) {
+    let user = a_user(&pool).await;
+    let now = OffsetDateTime::now_utc();
+    let session = PgSessions::new(pool.clone())
+        .open(user, &SessionKind::App(a_request().client), now)
+        .await
+        .unwrap();
+    let token = PgRefreshTokens::new(pool.clone())
+        .start(session, &a_request().client, now)
+        .await
+        .unwrap();
+
+    let kept: Vec<Vec<u8>> = sqlx::query_scalar("SELECT token_hash FROM refresh_tokens")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(user.as_uuid())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let left: i64 = sqlx::query_scalar("SELECT count(*) FROM refresh_tokens")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+    assert_eq!(token.as_str().len(), 43, "256 bits, base64url");
+    assert_eq!(
+        kept,
+        vec![Sha256::digest(token.as_str().as_bytes()).to_vec()]
+    );
+    assert_eq!(left, 0);
 }
 
 #[sqlx::test(migrator = "infrastructure::MIGRATOR")]

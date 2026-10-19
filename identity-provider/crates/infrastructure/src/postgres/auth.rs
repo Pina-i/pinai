@@ -6,17 +6,18 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use domain::auth::{
     AuthError, AuthorizationCode, AuthorizationCodes, AuthorizationRequest, CODE_ATTEMPTS,
     ClientId, ClientSignIn, ClientSignIns, CodeAttempt, CodeChallenge, Email, Grant, LoginTickets,
-    NewAccount, OtpCode, PasswordHash, Registration, SignInAccount, SignInAccounts, SignUps,
-    SignupCodes,
+    NewAccount, OtpCode, PasswordHash, Presentation, RefreshLink, RefreshToken, RefreshTokens,
+    Registration, RevokedReason, Rotation, SESSION_IDLE, Session, SessionKind, Sessions,
+    SignInAccount, SignInAccounts, SignUps, SignupCodes,
 };
 use domain::auth::{
     RECOVERY_CODES, SecondFactors, TICKET_ATTEMPTS, Ticket, TicketAttempt, TotpSecret,
 };
-use domain::{TicketId, UserId};
+use domain::{SessionId, TicketId, UserId};
 use hmac::{Hmac, Mac};
 use rand::RngCore;
 use rand::rngs::OsRng;
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use time::OffsetDateTime;
 
@@ -34,6 +35,7 @@ impl PgAuthorizationCodes {
 #[derive(sqlx::FromRow)]
 struct GrantRow {
     user_id: uuid::Uuid,
+    session_id: uuid::Uuid,
     client_id: String,
     redirect_uri: String,
     scope: String,
@@ -48,6 +50,7 @@ impl TryFrom<GrantRow> for Grant {
     fn try_from(row: GrantRow) -> Result<Self, Self::Error> {
         Ok(Grant {
             user: row.user_id.into(),
+            session: row.session_id.into(),
             client: ClientId::parse(&row.client_id).context("authorization_codes.client_id")?,
             redirect_uri: row.redirect_uri,
             scope: row.scope,
@@ -70,13 +73,14 @@ impl AuthorizationCodes for PgAuthorizationCodes {
         let code = URL_SAFE_NO_PAD.encode(bytes);
         sqlx::query(
             "INSERT INTO authorization_codes \
-                 (code, client_id, user_id, redirect_uri, code_challenge, code_challenge_method, \
-                  scope, nonce, expires_at) \
-             VALUES ($1, $2, $3, $4, $5, 'S256', $6, $7, $8)",
+                 (code, client_id, user_id, session_id, redirect_uri, code_challenge, \
+                  code_challenge_method, scope, nonce, expires_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, 'S256', $7, $8, $9)",
         )
         .bind(&code)
         .bind(grant.client.as_str())
         .bind(grant.user.as_uuid())
+        .bind(grant.session.as_uuid())
         .bind(&grant.redirect_uri)
         .bind(grant.challenge.as_str())
         .bind(&grant.scope)
@@ -96,7 +100,7 @@ impl AuthorizationCodes for PgAuthorizationCodes {
         let row: Option<GrantRow> = sqlx::query_as(
             "UPDATE authorization_codes SET used = true \
              WHERE code = $1 AND used = false AND expires_at > $2 \
-             RETURNING user_id, client_id, redirect_uri, scope, code_challenge, \
+             RETURNING user_id, session_id, client_id, redirect_uri, scope, code_challenge, \
                        code_challenge_method, nonce",
         )
         .bind(code.as_str())
@@ -202,6 +206,274 @@ impl TryFrom<TicketRow> for Ticket {
             },
             attempts: row.attempts,
         })
+    }
+}
+
+/// `sessions`.
+pub struct PgSessions {
+    pool: PgPool,
+}
+
+impl PgSessions {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct SessionRow {
+    id: uuid::Uuid,
+    user_id: uuid::Uuid,
+    kind: String,
+    client_id: Option<String>,
+    created_at: OffsetDateTime,
+    last_used_at: OffsetDateTime,
+    revoked_at: Option<OffsetDateTime>,
+}
+
+impl TryFrom<SessionRow> for Session {
+    type Error = anyhow::Error;
+
+    fn try_from(row: SessionRow) -> Result<Self, Self::Error> {
+        let kind = match (row.kind.as_str(), row.client_id) {
+            ("browser", None) => SessionKind::Browser,
+            ("app", Some(client)) => {
+                SessionKind::App(ClientId::parse(&client).context("sessions.client_id")?)
+            }
+            (kind, _) => anyhow::bail!("sessions.kind {kind}, against its client_id"),
+        };
+        Ok(Session {
+            id: row.id.into(),
+            user: row.user_id.into(),
+            kind,
+            created_at: row.created_at,
+            last_used_at: row.last_used_at,
+            revoked_at: row.revoked_at,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl Sessions for PgSessions {
+    async fn open(
+        &self,
+        user: UserId,
+        kind: &SessionKind,
+        now: OffsetDateTime,
+    ) -> Result<SessionId, AuthError> {
+        let id = SessionId::generate();
+        let (kind, client) = match kind {
+            SessionKind::Browser => ("browser", None),
+            SessionKind::App(client) => ("app", Some(client.as_str())),
+        };
+        sqlx::query(
+            "INSERT INTO sessions (id, user_id, kind, client_id, created_at, last_used_at) \
+             VALUES ($1, $2, $3, $4, $5, $5)",
+        )
+        .bind(id.as_uuid())
+        .bind(user.as_uuid())
+        .bind(kind)
+        .bind(client)
+        .bind(now)
+        .execute(&self.pool)
+        .await
+        .context("open a session")?;
+        Ok(id)
+    }
+
+    async fn find(&self, id: SessionId) -> Result<Option<Session>, AuthError> {
+        let row: Option<SessionRow> = sqlx::query_as(
+            "SELECT id, user_id, kind, client_id, created_at, last_used_at, revoked_at \
+             FROM sessions WHERE id = $1",
+        )
+        .bind(id.as_uuid())
+        .fetch_optional(&self.pool)
+        .await
+        .context("find a session")?;
+        Ok(row.map(Session::try_from).transpose()?)
+    }
+
+    async fn touch(&self, id: SessionId, now: OffsetDateTime) -> Result<(), AuthError> {
+        sqlx::query("UPDATE sessions SET last_used_at = $2 WHERE id = $1")
+            .bind(id.as_uuid())
+            .bind(now)
+            .execute(&self.pool)
+            .await
+            .context("stamp a session's use")?;
+        Ok(())
+    }
+
+    async fn revoke(
+        &self,
+        id: SessionId,
+        reason: RevokedReason,
+        now: OffsetDateTime,
+    ) -> Result<bool, AuthError> {
+        let revoked = sqlx::query(
+            "UPDATE sessions SET revoked_at = $2, revoked_reason = $3 \
+             WHERE id = $1 AND revoked_at IS NULL",
+        )
+        .bind(id.as_uuid())
+        .bind(now)
+        .bind(reason.as_str())
+        .execute(&self.pool)
+        .await
+        .context("revoke a session")?;
+        Ok(revoked.rows_affected() == 1)
+    }
+
+    async fn delete_ended(&self, before: OffsetDateTime) -> Result<usize, AuthError> {
+        let deleted =
+            sqlx::query("DELETE FROM sessions WHERE revoked_at < $1 OR last_used_at < $2")
+                .bind(before)
+                .bind(before - SESSION_IDLE)
+                .execute(&self.pool)
+                .await
+                .context("delete the ended sessions")?;
+        Ok(usize::try_from(deleted.rows_affected()).unwrap_or(usize::MAX))
+    }
+}
+
+/// `refresh_tokens`: a presentation locks its token, then its successor, so presentations of one
+/// chain are judged one after the other.
+pub struct PgRefreshTokens {
+    pool: PgPool,
+}
+
+impl PgRefreshTokens {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+}
+
+fn fresh_refresh_token() -> RefreshToken {
+    let mut bytes = [0u8; 32];
+    OsRng.fill_bytes(&mut bytes);
+    RefreshToken::new(URL_SAFE_NO_PAD.encode(bytes))
+}
+
+fn refresh_hash(token: &RefreshToken) -> Vec<u8> {
+    Sha256::digest(token.as_str().as_bytes()).to_vec()
+}
+
+#[derive(sqlx::FromRow)]
+struct RefreshRow {
+    session_id: uuid::Uuid,
+    client_id: String,
+    rotated_at: Option<OffsetDateTime>,
+    successor_hash: Option<Vec<u8>>,
+}
+
+const INSERT_REFRESH_TOKEN: &str = "INSERT INTO refresh_tokens \
+         (token_hash, session_id, client_id, created_at) VALUES ($1, $2, $3, $4)";
+
+#[async_trait::async_trait]
+impl RefreshTokens for PgRefreshTokens {
+    async fn start(
+        &self,
+        session: SessionId,
+        client: &ClientId,
+        now: OffsetDateTime,
+    ) -> Result<RefreshToken, AuthError> {
+        let token = fresh_refresh_token();
+        sqlx::query(INSERT_REFRESH_TOKEN)
+            .bind(refresh_hash(&token))
+            .bind(session.as_uuid())
+            .bind(client.as_str())
+            .bind(now)
+            .execute(&self.pool)
+            .await
+            .context("start a refresh token chain")?;
+        Ok(token)
+    }
+
+    async fn rotate(
+        &self,
+        token: &RefreshToken,
+        client: &ClientId,
+        now: OffsetDateTime,
+    ) -> Result<Rotation, AuthError> {
+        let hash = refresh_hash(token);
+        let mut tx = self.pool.begin().await.context("begin a rotation")?;
+        let row: Option<RefreshRow> = sqlx::query_as(
+            "SELECT session_id, client_id, rotated_at, successor_hash FROM refresh_tokens \
+             WHERE token_hash = $1 FOR UPDATE",
+        )
+        .bind(&hash)
+        .fetch_optional(&mut *tx)
+        .await
+        .context("find a refresh token")?;
+        let Some(row) = row else {
+            return Ok(Rotation::Refused);
+        };
+        let successor_unused = match &row.successor_hash {
+            Some(successor) => sqlx::query_scalar::<_, bool>(
+                "SELECT rotated_at IS NULL FROM refresh_tokens WHERE token_hash = $1 FOR UPDATE",
+            )
+            .bind(successor)
+            .fetch_optional(&mut *tx)
+            .await
+            .context("find a refresh token's successor")?
+            .unwrap_or(false),
+            None => false,
+        };
+        let session = SessionId::from(row.session_id);
+        let link = RefreshLink {
+            session,
+            client: ClientId::parse(&row.client_id).context("refresh_tokens.client_id")?,
+            rotated_at: row.rotated_at,
+            successor_unused,
+        };
+        match link.presented(client, now) {
+            Presentation::Refused => return Ok(Rotation::Refused),
+            Presentation::Reuse => return Ok(Rotation::Reused { session }),
+            Presentation::Rotate => {}
+            Presentation::Retry => {
+                sqlx::query(
+                    "UPDATE refresh_tokens SET rotated_at = $2, successor_hash = NULL \
+                     WHERE token_hash = $1",
+                )
+                .bind(&row.successor_hash)
+                .bind(now)
+                .execute(&mut *tx)
+                .await
+                .context("replace a refresh token's successor")?;
+            }
+        }
+        let successor = fresh_refresh_token();
+        let successor_hash = refresh_hash(&successor);
+        sqlx::query(INSERT_REFRESH_TOKEN)
+            .bind(&successor_hash)
+            .bind(session.as_uuid())
+            .bind(client.as_str())
+            .bind(now)
+            .execute(&mut *tx)
+            .await
+            .context("insert a refresh token's successor")?;
+        // A retry keeps the first rotation's time, so the grace never stretches.
+        sqlx::query(
+            "UPDATE refresh_tokens \
+             SET rotated_at = COALESCE(rotated_at, $2), successor_hash = $3 \
+             WHERE token_hash = $1",
+        )
+        .bind(&hash)
+        .bind(now)
+        .bind(&successor_hash)
+        .execute(&mut *tx)
+        .await
+        .context("rotate a refresh token")?;
+        tx.commit().await.context("commit a rotation")?;
+        Ok(Rotation::Rotated { session, successor })
+    }
+
+    async fn delete_unused(&self, before: OffsetDateTime) -> Result<usize, AuthError> {
+        let deleted =
+            sqlx::query("DELETE FROM refresh_tokens WHERE COALESCE(rotated_at, created_at) < $1")
+                .bind(before)
+                .execute(&self.pool)
+                .await
+                .context("delete the unused refresh tokens")?;
+        Ok(usize::try_from(deleted.rows_affected()).unwrap_or(usize::MAX))
     }
 }
 

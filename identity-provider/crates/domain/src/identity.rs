@@ -19,7 +19,7 @@ pub use handle::{Handle, HandleSuffix, UsernameChoice};
 pub use intro::InstanceIntro;
 pub use origin::{InstanceOrigin, Recipient};
 pub use ports::{
-    Accounts, AccountsError, RemoteActors, RemoteActorsError, Requester, SignatureError,
+    Accounts, AccountsError, Bearer, RemoteActors, RemoteActorsError, Requester, SignatureError,
     SignatureVerifier, SignedRequest, TokenError, TokenVerifier,
 };
 pub use search::SearchQuery;

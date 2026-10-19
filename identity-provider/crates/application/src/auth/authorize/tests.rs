@@ -1,5 +1,8 @@
+use domain::SessionId;
+use domain::auth::SessionKind;
 use domain::auth::testing::{CHALLENGE, REDIRECT_URI, a_request};
-use domain::auth::{ClientSignIn, Grant};
+use domain::auth::{ClientSignIn, Grant, RevokedReason, SESSION_IDLE, Sessions};
+use time::Duration;
 
 use crate::auth::world::{now, world};
 
@@ -22,6 +25,11 @@ fn command() -> AuthorizeCommand {
 #[tokio::test]
 async fn a_browser_signed_in_already_to_this_app_is_handed_a_code_at_once() {
     let w = world().await;
+    let session = w
+        .sessions
+        .open(w.alice.id, &SessionKind::Browser, now() - Duration::days(3))
+        .await
+        .unwrap();
     w.sign_ins
         .remember(&ClientSignIn::of(w.alice.id, &a_request()), now())
         .await
@@ -29,7 +37,7 @@ async fn a_browser_signed_in_already_to_this_app_is_handed_a_code_at_once() {
 
     let authorized = w
         .authorize
-        .execute(command(), Some(w.alice.id), now())
+        .execute(command(), Some(session), now())
         .await
         .unwrap();
 
@@ -39,9 +47,23 @@ async fn a_browser_signed_in_already_to_this_app_is_handed_a_code_at_once() {
         Authorized::Code {
             request: a_request(),
             code: issued[0].0.clone(),
+            session,
         }
     );
-    assert_eq!(issued[0].1, Grant::answering(w.alice.id, &a_request()));
+    assert_eq!(
+        issued[0].1,
+        Grant::answering(w.alice.id, session, &a_request())
+    );
+    assert_eq!(
+        w.sessions
+            .find(session)
+            .await
+            .unwrap()
+            .unwrap()
+            .last_used_at,
+        now(),
+        "used again: its 90 days start over"
+    );
 }
 
 #[tokio::test]
@@ -53,6 +75,16 @@ async fn a_session_never_signs_in_silently_to_an_app_its_account_did_not_sign_in
         .remember(&ClientSignIn::of(bob.id, &a_request()), now())
         .await
         .unwrap();
+    let (alices, bobs) = (
+        w.sessions
+            .open(w.alice.id, &SessionKind::Browser, now())
+            .await
+            .unwrap(),
+        w.sessions
+            .open(bob.id, &SessionKind::Browser, now())
+            .await
+            .unwrap(),
+    );
     let staying = AuthorizeCommand {
         scope: "openid profile email offline_access".to_owned(),
         ..command()
@@ -60,12 +92,12 @@ async fn a_session_never_signs_in_silently_to_an_app_its_account_did_not_sign_in
 
     let never = w
         .authorize
-        .execute(command(), Some(w.alice.id), now())
+        .execute(command(), Some(alices), now())
         .await
         .unwrap();
     let longer = w
         .authorize
-        .execute(staying, Some(bob.id), now())
+        .execute(staying, Some(bobs), now())
         .await
         .unwrap();
 
@@ -82,27 +114,50 @@ async fn a_session_never_signs_in_silently_to_an_app_its_account_did_not_sign_in
 }
 
 #[tokio::test]
-async fn a_browser_without_a_session_is_sent_to_sign_in() {
+async fn a_browser_without_a_live_session_is_sent_to_sign_in() {
     let w = world().await;
-
-    let anonymous = w.authorize.execute(command(), None, now()).await.unwrap();
-    let vanished = w
-        .authorize
-        .execute(command(), Some(UserId::generate()), now())
+    w.sign_ins
+        .remember(&ClientSignIn::of(w.alice.id, &a_request()), now())
+        .await
+        .unwrap();
+    let revoked = w
+        .sessions
+        .open(w.alice.id, &SessionKind::Browser, now())
+        .await
+        .unwrap();
+    w.sessions
+        .revoke(revoked, RevokedReason::SignOut, now())
+        .await
+        .unwrap();
+    let idle = w
+        .sessions
+        .open(w.alice.id, &SessionKind::Browser, now() - SESSION_IDLE)
         .await
         .unwrap();
 
-    assert_eq!(anonymous, Authorized::SignIn(a_request()));
-    assert_eq!(vanished, Authorized::SignIn(a_request()));
+    for session in [None, Some(SessionId::generate()), Some(revoked), Some(idle)] {
+        let authorized = w
+            .authorize
+            .execute(command(), session, now())
+            .await
+            .unwrap();
+
+        assert_eq!(authorized, Authorized::SignIn(a_request()), "{session:?}");
+    }
     assert!(w.codes.issued().is_empty());
 }
 
 #[tokio::test]
 async fn a_request_is_refused_for_another_flow_an_unknown_client_or_an_unregistered_redirect() {
     let w = world().await;
+    let session = w
+        .sessions
+        .open(w.alice.id, &SessionKind::Browser, now())
+        .await
+        .unwrap();
     let refused = async |command: AuthorizeCommand| {
         w.authorize
-            .execute(command, Some(w.alice.id), now())
+            .execute(command, Some(session), now())
             .await
             .unwrap_err()
     };

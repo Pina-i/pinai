@@ -4,8 +4,8 @@
 use std::sync::Arc;
 
 use application::auth::{
-    Authorize, AuthorizeCommand, Authorized, ExchangeCode, LogIn, LogOut, LoginOutcome,
-    TokenCommand,
+    Authorize, AuthorizeCommand, Authorized, ExchangeCode, LogIn, LogOut, LoginOutcome, Refresh,
+    RefreshCommand, TokenCommand,
 };
 use axum::extract::{Query, State};
 use axum::http::{HeaderName, HeaderValue, StatusCode, header};
@@ -13,8 +13,10 @@ use axum::response::{IntoResponse, Redirect, Response};
 use axum::{Form, Json};
 use axum_extra::extract::SignedCookieJar;
 use axum_extra::extract::cookie::{Cookie, SameSite};
-use domain::UserId;
-use domain::auth::{AuthError, AuthorizationRequest, desktop_client};
+use domain::SessionId;
+use domain::auth::{
+    AuthError, AuthorizationRequest, GRANT_TYPE, REFRESH_GRANT_TYPE, SESSION_IDLE, desktop_client,
+};
 use domain::identity::InstanceOrigin;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -47,21 +49,24 @@ impl Default for LoginAttempts {
 #[derive(Debug, Clone)]
 pub struct Jwks(pub Arc<serde_json::Value>);
 
-/// The account a browser signed in as, for 30 days: its id in a cookie signed with the
-/// instance's session key.
-pub(crate) fn session_cookie(user: UserId, secure: bool) -> Cookie<'static> {
-    Cookie::build((SESSION_COOKIE, user.to_string()))
+/// The browser's session, by its id in a cookie signed with the instance's session key. It lasts
+/// as long as the session may — 90 days from its last use — and is set again at every use, so it
+/// slides with it.
+pub(crate) fn session_cookie(session: SessionId, secure: bool) -> Cookie<'static> {
+    Cookie::build((SESSION_COOKIE, session.to_string()))
         .http_only(true)
         .same_site(SameSite::Lax)
         .path("/")
-        .max_age(time::Duration::days(30))
+        .max_age(SESSION_IDLE)
         .secure(secure)
         .build()
 }
 
-fn session_of(jar: &SignedCookieJar) -> Option<UserId> {
+pub(crate) fn session_of(jar: &SignedCookieJar) -> Option<SessionId> {
     let cookie = jar.get(SESSION_COOKIE)?;
-    uuid::Uuid::parse_str(cookie.value()).ok().map(UserId::from)
+    uuid::Uuid::parse_str(cookie.value())
+        .ok()
+        .map(SessionId::from)
 }
 
 /// Percent-encodes every byte but RFC 3986's unreserved characters.
@@ -189,9 +194,16 @@ pub async fn authorize(
         Err(error) => return Err(authorize_error(error)),
     };
     Ok(match authorized {
-        Authorized::Code { request, code } => {
-            back_with_code(&request, code.as_str()).into_response()
-        }
+        // Used again: its cookie starts its 90 days over.
+        Authorized::Code {
+            request,
+            code,
+            session,
+        } => (
+            jar.add(session_cookie(session, pages.secure_cookies)),
+            back_with_code(&request, code.as_str()),
+        )
+            .into_response(),
         Authorized::SignIn(request) => to("/login", &carried(&request, appearance, &[])),
     })
 }
@@ -290,6 +302,7 @@ pub async fn log_in(
             &form.email,
             &form.password,
             &request,
+            session_of(&jar),
             OffsetDateTime::now_utc(),
         )
         .await
@@ -317,21 +330,27 @@ pub async fn log_in(
             pairs.extend(appearance.pairs());
             to("/login/totp", &pairs)
         }
-        LoginOutcome::SignedIn { user, code } => (
-            jar.add(session_cookie(user, pages.secure_cookies)),
+        LoginOutcome::SignedIn { session, code, .. } => (
+            jar.add(session_cookie(session, pages.secure_cookies)),
             back_with_code(&request, code.as_str()),
         )
             .into_response(),
     })
 }
 
+/// Each grant reads its own fields; one left out is empty, and refused as such.
 #[derive(Debug, Deserialize)]
 pub struct TokenForm {
     grant_type: String,
-    code: String,
-    redirect_uri: String,
     client_id: String,
+    #[serde(default)]
+    code: String,
+    #[serde(default)]
+    redirect_uri: String,
+    #[serde(default)]
     code_verifier: String,
+    #[serde(default)]
+    refresh_token: String,
 }
 
 #[derive(Serialize)]
@@ -339,7 +358,9 @@ pub struct TokenBody {
     access_token: String,
     token_type: &'static str,
     expires_in: i64,
-    id_token: String,
+    refresh_token: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id_token: Option<String>,
 }
 
 /// RFC 6749 § 5.1: a token answer — and its refusal — is never stored on the way.
@@ -364,12 +385,15 @@ fn token_refusal(error: AuthError) -> ApiError {
         AuthError::UnsupportedGrantType => ApiError::new(
             StatusCode::BAD_REQUEST,
             "unsupported_grant_type",
-            "grant_type must be 'authorization_code'",
+            "grant_type must be 'authorization_code' or 'refresh_token'",
         ),
         AuthError::UnknownClient => ApiError::invalid_client("Unknown client_id"),
         AuthError::RedirectMismatch => refused("redirect_uri mismatch"),
         AuthError::CodeUnusable => {
             refused("Authorization code is invalid, expired, or already used")
+        }
+        AuthError::RefreshUnusable => {
+            refused("Refresh token is invalid, rotated, or its session ended")
         }
         AuthError::ClientMismatch => refused("client_id mismatch"),
         AuthError::VerifierMismatch => refused("code_verifier does not match code_challenge"),
@@ -377,28 +401,40 @@ fn token_refusal(error: AuthError) -> ApiError {
     }
 }
 
-/// `POST /token` — the code a sign-in ended in, for the account's tokens.
+/// `POST /token` — the code a sign-in ended in, or a refresh token, for the account's tokens.
 pub async fn token(
     State(exchange): State<Arc<ExchangeCode>>,
+    State(refresh): State<Arc<Refresh>>,
     Form(form): Form<TokenForm>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let command = TokenCommand {
-        grant_type: form.grant_type,
-        code: form.code,
-        redirect_uri: form.redirect_uri,
-        client_id: form.client_id,
-        code_verifier: form.code_verifier,
-    };
-    let tokens = exchange
-        .execute(command, OffsetDateTime::now_utc())
-        .await
-        .map_err(token_error)?;
+    let now = OffsetDateTime::now_utc();
+    let tokens = match form.grant_type.as_str() {
+        GRANT_TYPE => {
+            let command = TokenCommand {
+                code: form.code,
+                redirect_uri: form.redirect_uri,
+                client_id: form.client_id,
+                code_verifier: form.code_verifier,
+            };
+            exchange.execute(command, now).await
+        }
+        REFRESH_GRANT_TYPE => {
+            let command = RefreshCommand {
+                client_id: form.client_id,
+                refresh_token: form.refresh_token,
+            };
+            refresh.execute(command, now).await
+        }
+        _ => Err(AuthError::UnsupportedGrantType),
+    }
+    .map_err(token_error)?;
     Ok((
         uncached(),
         Json(TokenBody {
             access_token: tokens.access_token,
             token_type: "Bearer",
             expires_in: tokens.expires_in.whole_seconds(),
+            refresh_token: tokens.refresh_token.as_str().to_owned(),
             id_token: tokens.id_token,
         }),
     ))
@@ -418,8 +454,10 @@ pub async fn log_out(
 ) -> Result<impl IntoResponse, ApiError> {
     let to = log_out
         .execute(
+            session_of(&jar),
             params.client_id.as_deref(),
             params.post_logout_redirect_uri.as_deref(),
+            OffsetDateTime::now_utc(),
         )
         .await
         .map_err(|e| ApiError::internal(anyhow::Error::from(e)))?
@@ -446,9 +484,9 @@ pub async fn discovery(State(origin): State<InstanceOrigin>) -> Json<serde_json:
         "token_endpoint": format!("{base}/token"),
         "userinfo_endpoint": format!("{base}/userinfo"),
         "jwks_uri": format!("{base}/.well-known/jwks.json"),
-        "scopes_supported": ["openid", "profile", "email"],
+        "scopes_supported": ["openid", "profile", "email", "offline_access"],
         "response_types_supported": ["code"],
-        "grant_types_supported": ["authorization_code"],
+        "grant_types_supported": ["authorization_code", "refresh_token"],
         "subject_types_supported": ["public"],
         "id_token_signing_alg_values_supported": ["EdDSA"],
         "claims_supported": [

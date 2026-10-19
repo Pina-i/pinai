@@ -1,3 +1,7 @@
+use crate::auth::testing::{a_request, web_client};
+use crate::auth::{DESKTOP_REDIRECT_URI, desktop_client};
+use crate::identity::InstanceOrigin;
+
 use super::*;
 
 // RFC 7636 appendix B.
@@ -34,4 +38,35 @@ fn a_signup_code_is_six_digits() {
     for refused in ["12345", "1234567", "12345a", "", "١٢٣٤٥٦"] {
         assert!(OtpCode::parse(refused).is_err(), "{refused}");
     }
+}
+
+#[test]
+fn only_a_client_allowed_to_stay_signed_in_that_asked_to_opens_an_app_session() {
+    let desktop = desktop_client(&InstanceOrigin::parse("http://localhost:8080").unwrap());
+    let request = |scope: &str| AuthorizationRequest {
+        client: desktop.id.clone(),
+        redirect_uri: DESKTOP_REDIRECT_URI.to_owned(),
+        scope: scope.to_owned(),
+        ..a_request()
+    };
+    let grant =
+        |scope: &str| Grant::answering(UserId::generate(), SessionId::generate(), &request(scope));
+    let staying = "openid profile email offline_access";
+
+    assert!(grant(staying).opens_app_session(&desktop));
+    assert!(
+        !grant("openid profile email").opens_app_session(&desktop),
+        "it did not ask"
+    );
+    assert!(
+        !grant(staying).opens_app_session(&Client {
+            offline_access: false,
+            ..desktop.clone()
+        }),
+        "its document does not allow it"
+    );
+    assert!(
+        !grant(staying).opens_app_session(&web_client()),
+        "a web client never may"
+    );
 }

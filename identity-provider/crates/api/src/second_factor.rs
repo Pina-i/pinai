@@ -22,7 +22,7 @@ use crate::auth::Authenticated;
 use crate::pages::{
     Appearance, SameOrigin, SecondFactorPage, SignInPages, cancel, expired, render, to, totp_alert,
 };
-use crate::sign_in::{back_with_code, session_cookie, url_with};
+use crate::sign_in::{back_with_code, session_cookie, session_of, url_with};
 
 #[derive(Debug, Deserialize)]
 pub struct ChallengeQuery {
@@ -103,6 +103,7 @@ pub async fn pass(
             ticket,
             form.code.as_deref(),
             form.recovery_code.as_deref(),
+            session_of(&jar),
             OffsetDateTime::now_utc(),
         )
         .await
@@ -124,11 +125,12 @@ pub async fn pass(
     };
     Ok(match outcome {
         SecondFactorOutcome::SignedIn {
-            user,
+            session,
             request,
             code,
+            ..
         } => (
-            jar.add(session_cookie(user, pages.secure_cookies)),
+            jar.add(session_cookie(session, pages.secure_cookies)),
             back_with_code(&request, code.as_str()),
         )
             .into_response(),

@@ -3,9 +3,9 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use sha2::{Digest, Sha256};
 use time::Duration;
 
-use crate::{UserId, ValidationError};
+use crate::{SessionId, UserId, ValidationError};
 
-use super::{AuthError, ClientId};
+use super::{AuthError, Client, ClientId, RefreshToken};
 
 /// The only flow: authorization code with PKCE.
 pub const RESPONSE_TYPE: &str = "code";
@@ -62,9 +62,7 @@ pub struct AuthorizationRequest {
 impl AuthorizationRequest {
     /// It asks to stay signed in on the device: `offline_access` in its scope.
     pub fn asks_offline_access(&self) -> bool {
-        self.scope
-            .split_whitespace()
-            .any(|scope| scope == "offline_access")
+        asks_offline_access(&self.scope)
     }
 }
 
@@ -86,6 +84,8 @@ impl AuthorizationCode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Grant {
     pub user: UserId,
+    /// The browser session the code was issued under: the tokens belong to it.
+    pub session: SessionId,
     pub client: ClientId,
     pub redirect_uri: String,
     pub scope: String,
@@ -94,9 +94,10 @@ pub struct Grant {
 }
 
 impl Grant {
-    pub fn answering(user: UserId, request: &AuthorizationRequest) -> Self {
+    pub fn answering(user: UserId, session: SessionId, request: &AuthorizationRequest) -> Self {
         Self {
             user,
+            session,
             client: request.client.clone(),
             redirect_uri: request.redirect_uri.clone(),
             scope: request.scope.clone(),
@@ -104,12 +105,26 @@ impl Grant {
             nonce: request.nonce.clone(),
         }
     }
+
+    /// Its tokens open a session of their own on the device, apart from the browser's: a client
+    /// allowed to stay signed in asked to, and the sign-in this code ended agreed.
+    pub fn opens_app_session(&self, client: &Client) -> bool {
+        client.offline_access && asks_offline_access(&self.scope)
+    }
 }
 
+fn asks_offline_access(scope: &str) -> bool {
+    scope
+        .split_whitespace()
+        .any(|scope| scope == "offline_access")
+}
+
+/// What `/token` answers: an ID token after a sign-in, none after a refresh.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tokens {
     pub access_token: String,
-    pub id_token: String,
+    pub refresh_token: RefreshToken,
+    pub id_token: Option<String>,
     pub expires_in: Duration,
 }
 

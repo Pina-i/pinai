@@ -1,12 +1,13 @@
 use time::{Duration, OffsetDateTime};
 
 use crate::identity::HandleSuffix;
-use crate::{TicketId, UserId};
+use crate::{SessionId, TicketId, UserId};
 
 use super::{
     AuthError, AuthorizationCode, AuthorizationRequest, Client, ClientId, ClientSignIn,
-    CodeAttempt, Email, Grant, NewAccount, OtpCode, PasswordHash, Registration, SignInAccount,
-    Ticket, TicketAttempt, Tokens, TotpSecret,
+    CodeAttempt, Email, Grant, NewAccount, OtpCode, PasswordHash, RefreshToken, Registration,
+    RevokedReason, Rotation, Session, SessionKind, SignInAccount, Ticket, TicketAttempt,
+    TotpSecret,
 };
 
 #[async_trait::async_trait]
@@ -46,18 +47,79 @@ pub trait PasswordHasher: Send + Sync {
     fn decoy(&self) -> &PasswordHash;
 }
 
-/// Signs the tokens a code is exchanged for, as this instance.
+/// Signs the tokens a sign-in leads to, as this instance.
 pub trait TokenIssuer: Send + Sync {
-    fn issue(
+    /// Names `session`, so it stops working when the session ends.
+    fn access_token(
+        &self,
+        account: &SignInAccount,
+        session: SessionId,
+        client: &ClientId,
+        ttl: Duration,
+    ) -> Result<String, AuthError>;
+    fn id_token(
         &self,
         account: &SignInAccount,
         client: &ClientId,
         nonce: Option<&str>,
         ttl: Duration,
-    ) -> Result<Tokens, AuthError>;
+    ) -> Result<String, AuthError>;
 }
 
-/// The second step of a sign-in with an authenticator: the request waits here for the code.
+/// The sessions: each a row, so each can end on its own.
+#[async_trait::async_trait]
+pub trait Sessions: Send + Sync {
+    /// A new session for the account, used `now`.
+    async fn open(
+        &self,
+        user: UserId,
+        kind: &SessionKind,
+        now: OffsetDateTime,
+    ) -> Result<SessionId, AuthError>;
+    async fn find(&self, id: SessionId) -> Result<Option<Session>, AuthError>;
+    /// Stamps a use of it.
+    async fn touch(&self, id: SessionId, now: OffsetDateTime) -> Result<(), AuthError>;
+    /// Ends it; `false` when it had ended already.
+    async fn revoke(
+        &self,
+        id: SessionId,
+        reason: RevokedReason,
+        now: OffsetDateTime,
+    ) -> Result<bool, AuthError>;
+    /// The sessions over before `before`: revoked then, or idle since `before - SESSION_IDLE`.
+    /// How many went.
+    async fn delete_ended(&self, before: OffsetDateTime) -> Result<usize, AuthError>;
+}
+
+/// Tells what hangs on a session that it ended: its account's sockets opened under it close.
+pub trait SessionNotifier: Send + Sync {
+    fn ended(&self, session: &Session);
+}
+
+/// The refresh tokens, in chains: each use rotates a token to its successor. Only a hash of each
+/// is kept.
+#[async_trait::async_trait]
+pub trait RefreshTokens: Send + Sync {
+    /// The first token of a new chain, for `client` under `session`.
+    async fn start(
+        &self,
+        session: SessionId,
+        client: &ClientId,
+        now: OffsetDateTime,
+    ) -> Result<RefreshToken, AuthError>;
+    /// Presents `token` for `client`, and does what [`crate::auth::RefreshLink::presented`] decides — in one
+    /// step, so two presentations of one token are judged one after the other.
+    async fn rotate(
+        &self,
+        token: &RefreshToken,
+        client: &ClientId,
+        now: OffsetDateTime,
+    ) -> Result<Rotation, AuthError>;
+    /// The tokens last used before `before`: a head since its creation, any other since its
+    /// rotation. How many went.
+    async fn delete_unused(&self, before: OffsetDateTime) -> Result<usize, AuthError>;
+}
+
 /// The apps each account signed in to with its password.
 #[async_trait::async_trait]
 pub trait ClientSignIns: Send + Sync {
@@ -70,6 +132,7 @@ pub trait ClientSignIns: Send + Sync {
     ) -> Result<Option<ClientSignIn>, AuthError>;
 }
 
+/// The second step of a sign-in with an authenticator: the request waits here for the code.
 #[async_trait::async_trait]
 pub trait LoginTickets: Send + Sync {
     /// Replaces any ticket the account still had open.

@@ -23,7 +23,7 @@ use crate::pages::{
     Appearance, Carried, SameOrigin, SignInPages, VerifyEmailPage, cancel, carried, expired,
     render, to, verify_status,
 };
-use crate::sign_in::{back_with_code, session_cookie};
+use crate::sign_in::{back_with_code, session_cookie, session_of};
 
 fn internal(error: AuthError) -> ApiError {
     ApiError::internal(anyhow::Error::from(error))
@@ -250,6 +250,7 @@ pub async fn verify_email(
             UserId::from(form.pending_user_id),
             &form.code,
             &request,
+            session_of(&jar),
             OffsetDateTime::now_utc(),
         )
         .await
@@ -265,8 +266,8 @@ pub async fn verify_email(
         Err(other) => return Err(internal(other)),
     };
     Ok(match verification {
-        Verification::SignedIn { user, code } => (
-            jar.add(session_cookie(user, pages.secure_cookies)),
+        Verification::SignedIn { session, code, .. } => (
+            jar.add(session_cookie(session, pages.secure_cookies)),
             back_with_code(&request, code.as_str()),
         )
             .into_response(),

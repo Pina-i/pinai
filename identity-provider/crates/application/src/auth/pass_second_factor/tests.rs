@@ -34,7 +34,7 @@ async fn the_apps_code_ends_the_sign_in_with_a_code_for_the_request() {
 
     let outcome = w
         .pass
-        .execute(ticket, Some(&app_code()), None, now())
+        .execute(ticket, Some(&app_code()), None, None, now())
         .await
         .unwrap();
 
@@ -43,11 +43,15 @@ async fn the_apps_code_ends_the_sign_in_with_a_code_for_the_request() {
         outcome,
         SecondFactorOutcome::SignedIn {
             user: bob.id,
+            session: w.sessions.all()[0].id,
             request: a_request(),
             code: issued[0].0.clone(),
         }
     );
-    assert_eq!(issued[0].1, Grant::answering(bob.id, &a_request()));
+    assert_eq!(
+        issued[0].1,
+        Grant::answering(bob.id, w.sessions.all()[0].id, &a_request())
+    );
     assert_eq!(w.tickets.find(ticket, now()).await.unwrap(), None);
     assert_eq!(
         w.sign_ins.remembered(),
@@ -62,7 +66,7 @@ async fn a_recovery_code_does_too_once() {
 
     let first = w
         .pass
-        .execute(ticket, None, Some(&recovery[0]), now())
+        .execute(ticket, None, Some(&recovery[0]), None, now())
         .await
         .unwrap();
     let again_ticket = w
@@ -72,7 +76,7 @@ async fn a_recovery_code_does_too_once() {
         .unwrap();
     let again = w
         .pass
-        .execute(again_ticket, Some(""), Some(&recovery[0]), now())
+        .execute(again_ticket, Some(""), Some(&recovery[0]), None, now())
         .await
         .unwrap();
 
@@ -98,14 +102,14 @@ async fn wrong_codes_are_counted_and_the_fifth_closes_the_ticket() {
     for _ in 0..TICKET_ATTEMPTS {
         answers.push(
             w.pass
-                .execute(ticket, Some(wrong), None, now())
+                .execute(ticket, Some(wrong), None, None, now())
                 .await
                 .unwrap(),
         );
     }
     let too_late = w
         .pass
-        .execute(ticket, Some(&right), None, now())
+        .execute(ticket, Some(&right), None, None, now())
         .await
         .unwrap();
 
@@ -120,17 +124,23 @@ async fn an_expired_or_unknown_ticket_starts_over_and_nothing_sent_is_not_counte
 
     let nothing = w
         .pass
-        .execute(ticket, Some(""), Some(""), now())
+        .execute(ticket, Some(""), Some(""), None, now())
         .await
         .unwrap();
     let expired = w
         .pass
-        .execute(ticket, Some(&app_code()), None, now() + LOGIN_TICKET_TTL)
+        .execute(
+            ticket,
+            Some(&app_code()),
+            None,
+            None,
+            now() + LOGIN_TICKET_TTL,
+        )
         .await
         .unwrap();
     let unknown = w
         .pass
-        .execute(TicketId::generate(), Some(&app_code()), None, now())
+        .execute(TicketId::generate(), Some(&app_code()), None, None, now())
         .await
         .unwrap();
 
@@ -158,7 +168,7 @@ async fn a_code_used_once_is_refused_the_second_time_within_its_window() {
 
     let first = w
         .pass
-        .execute(ticket, Some(&code), None, now())
+        .execute(ticket, Some(&code), None, None, now())
         .await
         .unwrap();
     let again_ticket = w
@@ -168,7 +178,7 @@ async fn a_code_used_once_is_refused_the_second_time_within_its_window() {
         .unwrap();
     let replayed = w
         .pass
-        .execute(again_ticket, Some(&code), None, now())
+        .execute(again_ticket, Some(&code), None, None, now())
         .await
         .unwrap();
     let to_disable = w.disable.execute(bob.id, &code, now()).await;
@@ -197,13 +207,13 @@ async fn the_right_code_on_the_fifth_attempt_still_signs_in() {
 
     for _ in 1..TICKET_ATTEMPTS {
         w.pass
-            .execute(ticket, Some(wrong), None, now())
+            .execute(ticket, Some(wrong), None, None, now())
             .await
             .unwrap();
     }
     let fifth = w
         .pass
-        .execute(ticket, Some(&right), None, now())
+        .execute(ticket, Some(&right), None, None, now())
         .await
         .unwrap();
 

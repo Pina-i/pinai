@@ -3,10 +3,10 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use crate::UserId;
+use crate::{SessionId, UserId};
 
 use super::{
-    Account, Accounts, AccountsError, ActorUri, FederatedAddress, Handle, RemoteActor,
+    Account, Accounts, AccountsError, ActorUri, Bearer, FederatedAddress, Handle, RemoteActor,
     RemoteActors, RemoteActorsError, SignatureError, SignatureVerifier, SignedRequest, TokenError,
     TokenVerifier,
 };
@@ -209,19 +209,23 @@ impl RemoteActors for InMemoryRemoteActors {
 /// Hands out opaque tokens and accepts only those.
 #[derive(Default)]
 pub struct InMemoryTokens {
-    issued: Mutex<HashMap<String, UserId>>,
+    issued: Mutex<HashMap<String, Bearer>>,
 }
 
 impl InMemoryTokens {
-    pub fn issue(&self, user: UserId) -> String {
+    /// A token for `user`, belonging to `session`.
+    pub fn issue(&self, user: UserId, session: SessionId) -> String {
         let token = format!("token-{}", UserId::generate());
-        self.issued.lock().unwrap().insert(token.clone(), user);
+        self.issued
+            .lock()
+            .unwrap()
+            .insert(token.clone(), Bearer { user, session });
         token
     }
 }
 
 impl TokenVerifier for InMemoryTokens {
-    fn verify(&self, token: &str) -> Result<UserId, TokenError> {
+    fn verify(&self, token: &str) -> Result<Bearer, TokenError> {
         self.issued
             .lock()
             .unwrap()

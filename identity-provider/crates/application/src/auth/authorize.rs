@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
-use domain::UserId;
+use domain::SessionId;
 use domain::auth::{
     AuthError, AuthorizationCode, AuthorizationCodes, AuthorizationRequest, CODE_TTL, ClientId,
-    ClientSignIns, Clients, CodeChallenge, Grant, RESPONSE_TYPE, SignInAccounts,
+    ClientSignIns, Clients, CodeChallenge, Grant, RESPONSE_TYPE, Sessions, SignInAccounts,
 };
 use time::OffsetDateTime;
 
@@ -22,10 +22,11 @@ pub struct AuthorizeCommand {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Authorized {
-    /// Signed in already, to this app: back to it with a code.
+    /// Signed in already, to this app: back to it with a code, the session used once more.
     Code {
         request: AuthorizationRequest,
         code: AuthorizationCode,
+        session: SessionId,
     },
     /// To the sign-in pages, carrying the request.
     SignIn(AuthorizationRequest),
@@ -39,6 +40,7 @@ pub struct Authorize {
     accounts: Arc<dyn SignInAccounts>,
     codes: Arc<dyn AuthorizationCodes>,
     sign_ins: Arc<dyn ClientSignIns>,
+    sessions: Arc<dyn Sessions>,
 }
 
 impl Authorize {
@@ -47,19 +49,21 @@ impl Authorize {
         accounts: Arc<dyn SignInAccounts>,
         codes: Arc<dyn AuthorizationCodes>,
         sign_ins: Arc<dyn ClientSignIns>,
+        sessions: Arc<dyn Sessions>,
     ) -> Self {
         Self {
             clients,
             accounts,
             codes,
             sign_ins,
+            sessions,
         }
     }
 
     pub async fn execute(
         &self,
         command: AuthorizeCommand,
-        session: Option<UserId>,
+        session: Option<SessionId>,
         now: OffsetDateTime,
     ) -> Result<Authorized, AuthError> {
         // The client and its redirect first: once they are known good, the errors that follow
@@ -87,22 +91,34 @@ impl Authorize {
             challenge,
             nonce: command.nonce,
         };
-        let signed_in = match session {
-            Some(user) => self.accounts.by_id(user).await?,
+        // A cookie naming a session that isn't live any more is no cookie at all.
+        let session = match session {
+            Some(id) => self.sessions.find(id).await?,
             None => None,
         };
-        let Some(account) = signed_in else {
+        let Some(session) = session.filter(|session| session.is_live(now)) else {
             return Ok(Authorized::SignIn(request));
         };
-        let known = self.sign_ins.find(account.id, &request.client).await?;
+        if self.accounts.by_id(session.user).await?.is_none() {
+            return Ok(Authorized::SignIn(request));
+        }
+        let known = self.sign_ins.find(session.user, &request.client).await?;
         if !known.is_some_and(|known| known.covers(&request)) {
             return Ok(Authorized::SignIn(request));
         }
+        self.sessions.touch(session.id, now).await?;
         let code = self
             .codes
-            .issue(&Grant::answering(account.id, &request), now + CODE_TTL)
+            .issue(
+                &Grant::answering(session.user, session.id, &request),
+                now + CODE_TTL,
+            )
             .await?;
-        Ok(Authorized::Code { request, code })
+        Ok(Authorized::Code {
+            request,
+            code,
+            session: session.id,
+        })
     }
 }
 

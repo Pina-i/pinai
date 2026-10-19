@@ -8,12 +8,14 @@ pub enum AuthError {
     UnsupportedResponseType,
     #[error("code_challenge_method must be S256")]
     BadChallengeMethod,
-    #[error("only the authorization_code grant is supported")]
+    #[error("only the authorization_code and refresh_token grants are supported")]
     UnsupportedGrantType,
     #[error("the code was issued for another redirect_uri")]
     RedirectMismatch,
     #[error("the code is invalid, expired, or already used")]
     CodeUnusable,
+    #[error("the refresh token is invalid, rotated, or its session ended")]
+    RefreshUnusable,
     #[error("the code was issued to another client")]
     ClientMismatch,
     #[error("the code_verifier does not match the code_challenge")]

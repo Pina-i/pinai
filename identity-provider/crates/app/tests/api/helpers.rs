@@ -22,8 +22,8 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 // RFC 7636 appendix B.
-const VERIFIER: &str = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
-const CHALLENGE: &str = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
+pub const VERIFIER: &str = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+pub const CHALLENGE: &str = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
 pub const PASSWORD: &str = "journey-password-1";
 
 /// `TEST_LOG=1` shows the applications' logs.
@@ -59,6 +59,10 @@ pub struct Account {
     pub handle: String,
     pub actor_uri: String,
     pub token: String,
+    /// The web client's, from the same exchange.
+    pub refresh_token: String,
+    /// `idp_session=…`: the browser session the sign-up opened.
+    pub cookie: String,
 }
 
 impl Account {
@@ -276,14 +280,23 @@ impl TestApp {
             )
             .await;
         assert_eq!(verified.status(), 303);
+        let cookie = verified.headers()["set-cookie"]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
         let landed = location(&verified);
         assert!(landed.starts_with(&self.redirect_uri), "{landed}");
-        let token = self.exchange(&query_of(&landed)["code"]).await;
+        let tokens = self.tokens_for(&query_of(&landed)["code"]).await;
         let mut account = Account {
             email,
             handle: String::new(),
             actor_uri: String::new(),
-            token,
+            token: tokens["access_token"].as_str().unwrap().to_owned(),
+            refresh_token: tokens["refresh_token"].as_str().unwrap().to_owned(),
+            cookie,
         };
         let (_, userinfo) = self.get(&account, "/userinfo").await;
         account.handle = userinfo["preferred_username"].as_str().unwrap().to_owned();
@@ -292,8 +305,15 @@ impl TestApp {
     }
 
     pub async fn exchange(&self, code: &str) -> String {
-        let tokens: Value = self
-            .http
+        self.tokens_for(code).await["access_token"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    }
+
+    /// `/token`'s answer for the web client's code.
+    pub async fn tokens_for(&self, code: &str) -> Value {
+        self.http
             .post(format!("{}/token", self.address))
             .form(&[
                 ("grant_type", "authorization_code"),
@@ -307,8 +327,26 @@ impl TestApp {
             .unwrap()
             .json()
             .await
+            .unwrap()
+    }
+
+    /// The web client's refresh: `/token`'s status and answer.
+    pub async fn refresh(&self, token: &str) -> (reqwest::StatusCode, Value) {
+        let response = self
+            .http
+            .post(format!("{}/token", self.address))
+            .form(&[
+                ("grant_type", "refresh_token"),
+                ("client_id", self.client_id.as_str()),
+                ("refresh_token", token),
+            ])
+            .send()
+            .await
             .unwrap();
-        tokens["access_token"].as_str().unwrap().to_owned()
+        (
+            response.status(),
+            response.json().await.unwrap_or(Value::Null),
+        )
     }
 
     /// A count straight from the instance's database, for what no route shows.

@@ -50,6 +50,7 @@ id!(DeviceId);
 id!(FriendshipId);
 id!(GroupEventId);
 id!(MessageId);
+id!(SessionId);
 id!(TicketId);
 id!(UserId);
 id!(WelcomeId);

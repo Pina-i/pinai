@@ -1,19 +1,20 @@
 use std::sync::Arc;
 
-use domain::UserId;
 use domain::auth::{
-    AuthError, AuthorizationCode, AuthorizationCodes, AuthorizationRequest, ClientSignIns, Clients,
-    CodeAttempt, OtpCode, SignInAccounts, SignupCodes,
+    AuthError, AuthorizationCode, AuthorizationRequest, Clients, CodeAttempt, OtpCode,
+    SignInAccounts, SignupCodes,
 };
+use domain::{SessionId, UserId};
 use time::OffsetDateTime;
 
-use super::signed_in;
+use super::CompleteSignIn;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verification {
     /// The address is confirmed: back to the client with a code.
     SignedIn {
         user: UserId,
+        session: SessionId,
         code: AuthorizationCode,
     },
     /// Confirmed before: nothing to spend, signing in will do.
@@ -30,8 +31,7 @@ pub struct VerifyEmail {
     clients: Arc<dyn Clients>,
     accounts: Arc<dyn SignInAccounts>,
     codes: Arc<dyn SignupCodes>,
-    authorization_codes: Arc<dyn AuthorizationCodes>,
-    sign_ins: Arc<dyn ClientSignIns>,
+    complete: Arc<CompleteSignIn>,
 }
 
 impl VerifyEmail {
@@ -39,15 +39,13 @@ impl VerifyEmail {
         clients: Arc<dyn Clients>,
         accounts: Arc<dyn SignInAccounts>,
         codes: Arc<dyn SignupCodes>,
-        authorization_codes: Arc<dyn AuthorizationCodes>,
-        sign_ins: Arc<dyn ClientSignIns>,
+        complete: Arc<CompleteSignIn>,
     ) -> Self {
         Self {
             clients,
             accounts,
             codes,
-            authorization_codes,
-            sign_ins,
+            complete,
         }
     }
 
@@ -56,6 +54,7 @@ impl VerifyEmail {
         user: UserId,
         code: &str,
         request: &AuthorizationRequest,
+        current: Option<SessionId>,
         now: OffsetDateTime,
     ) -> Result<Verification, AuthError> {
         let Ok(code) = OtpCode::parse(code) else {
@@ -81,15 +80,12 @@ impl VerifyEmail {
         }
         match self.codes.attempt(user, &code, now).await? {
             CodeAttempt::Confirmed => {
-                let code = signed_in(
-                    &*self.sign_ins,
-                    &*self.authorization_codes,
+                let (session, code) = self.complete.execute(user, request, current, now).await?;
+                Ok(Verification::SignedIn {
                     user,
-                    request,
-                    now,
-                )
-                .await?;
-                Ok(Verification::SignedIn { user, code })
+                    session,
+                    code,
+                })
             }
             refused => Ok(Verification::Refused(refused)),
         }

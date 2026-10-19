@@ -20,6 +20,7 @@ async fn a_code_is_good_once_and_only_until_it_expires() {
     contract::a_code_is_good_once_and_only_until_it_expires(
         &InMemoryCodes::default(),
         UserId::generate(),
+        SessionId::generate(),
     )
     .await;
 }
@@ -146,6 +147,51 @@ async fn an_app_signed_in_to_is_remembered_and_staying_signed_in_kept() {
         &InMemoryClientSignIns::default(),
         UserId::generate(),
         UserId::generate(),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_session_opens_is_used_and_ends_once() {
+    contract::a_session_opens_is_used_and_ends_once(
+        &InMemorySessions::default(),
+        UserId::generate(),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn sessions_ended_are_swept_after_their_retention() {
+    contract::sessions_ended_are_swept_after_their_retention(
+        &InMemorySessions::default(),
+        UserId::generate(),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_refresh_token_rotates_at_each_use_and_a_used_one_is_reused() {
+    contract::a_refresh_token_rotates_at_each_use_and_a_used_one_is_reused(
+        &InMemoryRefreshTokens::default(),
+        SessionId::generate(),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_lost_answer_is_answered_again_within_the_grace() {
+    contract::a_lost_answer_is_answered_again_within_the_grace(
+        &InMemoryRefreshTokens::default(),
+        SessionId::generate(),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn refresh_tokens_unused_since_the_cutoff_are_swept() {
+    contract::refresh_tokens_unused_since_the_cutoff_are_swept(
+        &InMemoryRefreshTokens::default(),
+        SessionId::generate(),
     )
     .await;
 }

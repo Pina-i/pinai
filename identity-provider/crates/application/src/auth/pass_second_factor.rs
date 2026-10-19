@@ -1,18 +1,19 @@
 use std::sync::Arc;
 
 use domain::auth::{
-    AuthError, Authenticator, AuthorizationCode, AuthorizationCodes, AuthorizationRequest,
-    ClientSignIns, LoginTickets, SecondFactors, TICKET_ATTEMPTS, TicketAttempt,
+    AuthError, Authenticator, AuthorizationCode, AuthorizationRequest, LoginTickets, SecondFactors,
+    TICKET_ATTEMPTS, TicketAttempt,
 };
-use domain::{TicketId, UserId};
+use domain::{SessionId, TicketId, UserId};
 use time::OffsetDateTime;
 
-use super::signed_in;
+use super::CompleteSignIn;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SecondFactorOutcome {
     SignedIn {
         user: UserId,
+        session: SessionId,
         request: AuthorizationRequest,
         code: AuthorizationCode,
     },
@@ -34,8 +35,7 @@ pub struct PassSecondFactor {
     tickets: Arc<dyn LoginTickets>,
     factors: Arc<dyn SecondFactors>,
     authenticator: Arc<dyn Authenticator>,
-    codes: Arc<dyn AuthorizationCodes>,
-    sign_ins: Arc<dyn ClientSignIns>,
+    complete: Arc<CompleteSignIn>,
 }
 
 impl PassSecondFactor {
@@ -43,15 +43,13 @@ impl PassSecondFactor {
         tickets: Arc<dyn LoginTickets>,
         factors: Arc<dyn SecondFactors>,
         authenticator: Arc<dyn Authenticator>,
-        codes: Arc<dyn AuthorizationCodes>,
-        sign_ins: Arc<dyn ClientSignIns>,
+        complete: Arc<CompleteSignIn>,
     ) -> Self {
         Self {
             tickets,
             factors,
             authenticator,
-            codes,
-            sign_ins,
+            complete,
         }
     }
 
@@ -60,6 +58,7 @@ impl PassSecondFactor {
         ticket: TicketId,
         code: Option<&str>,
         recovery_code: Option<&str>,
+        current: Option<SessionId>,
         now: OffsetDateTime,
     ) -> Result<SecondFactorOutcome, AuthError> {
         let given =
@@ -103,9 +102,13 @@ impl PassSecondFactor {
         if !self.tickets.consume(ticket).await? {
             return Ok(SecondFactorOutcome::AlreadyUsed);
         }
-        let code = signed_in(&*self.sign_ins, &*self.codes, open.user, &open.request, now).await?;
+        let (session, code) = self
+            .complete
+            .execute(open.user, &open.request, current, now)
+            .await?;
         Ok(SecondFactorOutcome::SignedIn {
             user: open.user,
+            session,
             request: open.request,
             code,
         })

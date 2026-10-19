@@ -8,6 +8,7 @@ mod messaging;
 mod mls;
 mod presence;
 mod profile;
+mod sessions;
 mod settings;
 mod social;
 
@@ -20,6 +21,7 @@ pub use messaging::HubMessageNotifier;
 pub use mls::HubMlsNotifier;
 pub use presence::HubPresenceNotifier;
 pub use profile::HubProfileNotifier;
+pub use sessions::HubSessionNotifier;
 pub use settings::HubSettingsNotifier;
 pub use social::HubSocialNotifier;
 

@@ -134,7 +134,8 @@ async fn the_login_form_goes_back_with_a_code_and_a_session_that_signs_the_brows
         format!("{REDIRECT_URI}?code=code-1&state=the-clients-state")
     );
     assert!(cookie.starts_with("idp_session="), "{cookie}");
-    for attribute in ["HttpOnly", "SameSite=Lax", "Path=/", "Max-Age=2592000"] {
+    // 90 days: as long as its session may go unused.
+    for attribute in ["HttpOnly", "SameSite=Lax", "Path=/", "Max-Age=7776000"] {
         assert!(cookie.contains(attribute), "{cookie}");
     }
     assert!(!cookie.contains("Secure"), "{cookie}");
@@ -142,6 +143,12 @@ async fn the_login_form_goes_back_with_a_code_and_a_session_that_signs_the_brows
         location(&again),
         format!("{REDIRECT_URI}?code=code-2&state=the-clients-state")
     );
+    assert_eq!(
+        set_cookie(&again),
+        cookie,
+        "used again, the same session's cookie starts its 90 days over"
+    );
+    assert_eq!(app.sign_in.sessions.all().len(), 1);
 }
 
 #[tokio::test]
@@ -207,11 +214,23 @@ fn exchange(code: &str, verifier: &str) -> Request<Body> {
     )
 }
 
+fn refresh(client: &str, token: &str) -> Request<Body> {
+    post_form(
+        "/token",
+        &[
+            ("grant_type", "refresh_token"),
+            ("client_id", client),
+            ("refresh_token", token),
+        ],
+    )
+}
+
 #[tokio::test]
 async fn a_code_is_exchanged_once_for_the_accounts_tokens() {
     let alice = signed_up("alice");
     let app = app_with(std::slice::from_ref(&alice)).await;
     app.respond(login(&alice.email, "alice-password")).await;
+    let session = app.sign_in.sessions.all()[0].id;
 
     let (status, tokens) = app.send(exchange("code-1", VERIFIER)).await;
     let (again, refused) = app.send(exchange("code-1", VERIFIER)).await;
@@ -220,9 +239,10 @@ async fn a_code_is_exchanged_once_for_the_accounts_tokens() {
     assert_eq!(
         tokens,
         json!({
-            "access_token": format!("access:{}:{CLIENT_ID}", alice.id),
+            "access_token": format!("access:{}:{session}:{CLIENT_ID}", alice.id),
             "token_type": "Bearer",
             "expires_in": 3600,
+            "refresh_token": "refresh-1",
             "id_token": format!("id:{}:{CLIENT_ID}:{}:the-nonce", alice.id, alice.email),
         })
     );
@@ -379,6 +399,14 @@ async fn a_client_discovers_the_endpoints_and_the_keys() {
         json!(["S256"])
     );
     assert_eq!(discovery["client_id_metadata_document_supported"], true);
+    assert_eq!(
+        discovery["grant_types_supported"],
+        json!(["authorization_code", "refresh_token"])
+    );
+    assert_eq!(
+        discovery["scopes_supported"],
+        json!(["openid", "profile", "email", "offline_access"])
+    );
     assert!(discovery.get("registration_endpoint").is_none());
     assert_eq!(keys, json!({ "keys": [{ "kid": "test-key" }] }));
 }
@@ -448,6 +476,7 @@ async fn a_token_answer_is_never_cached_and_another_grant_type_is_unsupported() 
     app.respond(login(&alice.email, "alice-password")).await;
 
     let issued = app.respond(exchange("code-1", VERIFIER)).await;
+    let refreshed = app.respond(refresh(CLIENT_ID, "refresh-1")).await;
     let refused = app
         .respond(post_form(
             "/token",
@@ -461,14 +490,18 @@ async fn a_token_answer_is_never_cached_and_another_grant_type_is_unsupported() 
         ))
         .await;
 
-    for response in [&issued, &refused] {
+    for response in [&issued, &refreshed, &refused] {
         assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
         assert_eq!(response.headers()[header::PRAGMA], "no-cache");
     }
     let (status, body) = TestApp::body_of(refused).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(
-        (status, body["error"].as_str()),
-        (StatusCode::BAD_REQUEST, Some("unsupported_grant_type"))
+        body,
+        json!({
+            "error": "unsupported_grant_type",
+            "error_description": "grant_type must be 'authorization_code' or 'refresh_token'",
+        })
     );
 }
 
@@ -772,4 +805,179 @@ async fn the_login_page_names_the_app_and_where_it_lives() {
         desktop.contains("to continue to <span class=\"for-name\">Pīna&#39;i desktop</span></p>"),
         "the instance's own document names no other place: {desktop}"
     );
+}
+
+fn bearer_get(uri: &str, token: &str) -> Request<Body> {
+    Request::builder()
+        .uri(uri)
+        .header(header::AUTHORIZATION, format!("Bearer {token}"))
+        .body(Body::empty())
+        .unwrap()
+}
+
+#[tokio::test]
+async fn signing_out_ends_the_session_so_its_tokens_stop_working_at_once() {
+    let alice = signed_up("alice");
+    let app = app_with(std::slice::from_ref(&alice)).await;
+    let signed_in = app.respond(login(&alice.email, "alice-password")).await;
+    let cookie = set_cookie(&signed_in).split(';').next().unwrap().to_owned();
+    let session = app.sign_in.sessions.all()[0].id;
+    let token = app.token_in(alice.id, session);
+
+    let before = app
+        .respond(bearer_get("/api/friends", &token))
+        .await
+        .status();
+    app.respond(get(&logout(CLIENT_ID, POST_LOGOUT_URI), Some(&cookie)))
+        .await;
+    let (after, refused) = app.send(bearer_get("/api/friends", &token)).await;
+    let again = app.respond(get(&authorize_uri(&[]), Some(&cookie))).await;
+
+    assert_eq!(before, StatusCode::OK);
+    assert_eq!(
+        (after, refused["error_description"].as_str()),
+        (StatusCode::UNAUTHORIZED, Some("The session has ended"))
+    );
+    assert_eq!(
+        app.sign_in.ended.ended(),
+        vec![session],
+        "its sockets closed"
+    );
+    assert!(
+        location(&again).starts_with("/login?"),
+        "the cookie of an ended session is no cookie: {}",
+        location(&again)
+    );
+}
+
+#[tokio::test]
+async fn a_refresh_token_is_traded_for_an_access_token_and_its_successor() {
+    let alice = signed_up("alice");
+    let app = app_with(std::slice::from_ref(&alice)).await;
+    app.respond(login(&alice.email, "alice-password")).await;
+    let session = app.sign_in.sessions.all()[0].id;
+    app.respond(exchange("code-1", VERIFIER)).await;
+
+    let (status, tokens) = app.send(refresh(CLIENT_ID, "refresh-1")).await;
+    let (unknown, refused) = app.send(refresh(CLIENT_ID, "a-guess")).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        tokens,
+        json!({
+            "access_token": format!("access:{}:{session}:{CLIENT_ID}", alice.id),
+            "token_type": "Bearer",
+            "expires_in": 3600,
+            "refresh_token": "refresh-2",
+        }),
+        "no ID token: nobody signed in"
+    );
+    assert_eq!(unknown, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        refused,
+        json!({
+            "error": "invalid_grant",
+            "error_description": "Refresh token is invalid, rotated, or its session ended",
+        })
+    );
+}
+
+#[tokio::test]
+async fn a_refresh_token_presented_again_ends_its_session_and_every_token_with_it() {
+    let alice = signed_up("alice");
+    let app = app_with(std::slice::from_ref(&alice)).await;
+    app.respond(login(&alice.email, "alice-password")).await;
+    let session = app.sign_in.sessions.all()[0].id;
+    let token = app.token_in(alice.id, session);
+    app.respond(exchange("code-1", VERIFIER)).await;
+    app.respond(refresh(CLIENT_ID, "refresh-1")).await;
+    app.respond(refresh(CLIENT_ID, "refresh-2")).await;
+
+    let (copied, refused) = app.send(refresh(CLIENT_ID, "refresh-1")).await;
+    let (head, _) = app.send(refresh(CLIENT_ID, "refresh-3")).await;
+    let (bearer, _) = app.send(bearer_get("/api/friends", &token)).await;
+
+    assert_eq!(
+        (copied, refused["error"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("invalid_grant"))
+    );
+    assert_eq!(head, StatusCode::BAD_REQUEST, "the latest goes with it");
+    assert_eq!(bearer, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        app.sign_in.sessions.reason(session),
+        Some(domain::auth::RevokedReason::Reuse)
+    );
+    assert_eq!(
+        app.sign_in.ended.ended(),
+        vec![session],
+        "its sockets closed"
+    );
+}
+
+#[tokio::test]
+async fn the_desktop_staying_signed_in_keeps_its_session_when_the_browser_signs_out() {
+    let alice = signed_up("alice");
+    let app = app_with(std::slice::from_ref(&alice)).await;
+    let mut pairs = vec![
+        ("email", alice.email.as_str()),
+        ("password", "alice-password"),
+    ];
+    pairs.extend(desktop_request().into_iter().map(|(k, v)| match k {
+        "scope" => (k, "openid profile email offline_access"),
+        _ => (k, v),
+    }));
+    let signed_in = app.respond(post_form("/login", &pairs)).await;
+    let cookie = set_cookie(&signed_in).split(';').next().unwrap().to_owned();
+    let browser = app.sign_in.sessions.all()[0].id;
+
+    let (status, tokens) = app
+        .send(post_form(
+            "/token",
+            &[
+                ("grant_type", "authorization_code"),
+                ("code", "code-1"),
+                ("redirect_uri", "io.github.pina-i:/callback"),
+                ("client_id", "http://localhost:8080/clients/desktop.json"),
+                ("code_verifier", VERIFIER),
+            ],
+        ))
+        .await;
+    let desktop = app.sign_in.sessions.all()[1].clone();
+    app.respond(get(&logout(CLIENT_ID, POST_LOGOUT_URI), Some(&cookie)))
+        .await;
+    let (still, _) = app
+        .send(bearer_get(
+            "/api/friends",
+            &app.token_in(alice.id, desktop.id),
+        ))
+        .await;
+    let (renewed, _) = app
+        .send(refresh(
+            "http://localhost:8080/clients/desktop.json",
+            "refresh-1",
+        ))
+        .await;
+
+    assert!(
+        location(&signed_in).starts_with("io.github.pina-i:/callback?code=code-1"),
+        "{}",
+        location(&signed_in)
+    );
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        desktop.kind,
+        domain::auth::SessionKind::App(
+            domain::auth::ClientId::parse("http://localhost:8080/clients/desktop.json").unwrap()
+        )
+    );
+    assert_eq!(
+        tokens["access_token"],
+        format!(
+            "access:{}:{}:http://localhost:8080/clients/desktop.json",
+            alice.id, desktop.id
+        )
+    );
+    assert_eq!(app.sign_in.ended.ended(), vec![browser]);
+    assert_eq!(still, StatusCode::OK, "the app's session lives on");
+    assert_eq!(renewed, StatusCode::OK);
 }

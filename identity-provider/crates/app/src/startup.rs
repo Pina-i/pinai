@@ -472,6 +472,22 @@ impl Application {
             Arc::new(infrastructure::postgres::PgLoginTickets::new(pool.clone()));
         let client_sign_ins: Arc<dyn domain::auth::ClientSignIns> =
             Arc::new(infrastructure::postgres::PgClientSignIns::new(pool.clone()));
+        let sessions: Arc<dyn domain::auth::Sessions> =
+            Arc::new(infrastructure::postgres::PgSessions::new(pool.clone()));
+        let session_notifier: Arc<dyn domain::auth::SessionNotifier> = Arc::new(
+            infrastructure::realtime::HubSessionNotifier::new(Arc::clone(&hub)),
+        );
+        let refresh_tokens: Arc<dyn domain::auth::RefreshTokens> =
+            Arc::new(infrastructure::postgres::PgRefreshTokens::new(pool.clone()));
+        let token_issuer: Arc<dyn domain::auth::TokenIssuer> = Arc::new(
+            infrastructure::auth::JwtTokenIssuer::new(Arc::clone(&keypair), config.issuer()),
+        );
+        let complete_sign_in = Arc::new(application::auth::CompleteSignIn::new(
+            client_sign_ins.clone(),
+            Arc::clone(&authorization_codes),
+            Arc::clone(&sessions),
+            Arc::clone(&session_notifier),
+        ));
         let signup_codes: Arc<dyn domain::auth::SignupCodes> =
             Arc::new(infrastructure::postgres::PgSignupCodes::new(
                 pool.clone(),
@@ -490,6 +506,8 @@ impl Application {
             Arc::clone(&signup_codes),
             login_tickets.clone(),
             sign_ups.clone(),
+            Arc::clone(&sessions),
+            Arc::clone(&refresh_tokens),
         ));
 
         let receive_follow = Arc::new(ReceiveFollow::new(
@@ -531,9 +549,12 @@ impl Application {
         ));
 
         let api_state = api::AppState {
-            auth: Arc::new(infrastructure::auth::JwtTokenVerifier::new(
-                Arc::clone(&keypair),
-                config.issuer(),
+            authenticate: Arc::new(application::auth::Authenticate::new(
+                Arc::new(infrastructure::auth::JwtTokenVerifier::new(
+                    Arc::clone(&keypair),
+                    config.issuer(),
+                )),
+                Arc::clone(&sessions),
             )),
             cookie_key: cookie_key.clone(),
             sign_in_pages: api::SignInPages::new(
@@ -550,17 +571,17 @@ impl Application {
                 Arc::clone(&clients),
                 Arc::clone(&sign_in_accounts),
                 Arc::clone(&authorization_codes),
-                Arc::clone(&client_sign_ins),
+                client_sign_ins,
+                Arc::clone(&sessions),
             )),
             log_in: Arc::new(application::auth::LogIn::new(
                 Arc::clone(&clients),
                 Arc::clone(&sign_in_accounts),
                 Arc::clone(&hasher),
-                Arc::clone(&authorization_codes),
                 Arc::clone(&login_tickets),
                 Arc::clone(&signup_codes),
                 Arc::clone(&mailer),
-                Arc::clone(&client_sign_ins),
+                Arc::clone(&complete_sign_in),
             )),
             register: Arc::new(application::auth::Register::new(
                 origin.clone(),
@@ -576,8 +597,7 @@ impl Application {
                 Arc::clone(&clients),
                 Arc::clone(&sign_in_accounts),
                 Arc::clone(&signup_codes),
-                Arc::clone(&authorization_codes),
-                Arc::clone(&client_sign_ins),
+                Arc::clone(&complete_sign_in),
             )),
             resend_code: Arc::new(application::auth::ResendCode::new(
                 Arc::clone(&sign_in_accounts),
@@ -590,8 +610,7 @@ impl Application {
                 Arc::clone(&login_tickets),
                 Arc::clone(&second_factors),
                 Arc::clone(&authenticator),
-                Arc::clone(&authorization_codes),
-                client_sign_ins,
+                complete_sign_in,
             )),
             start_totp_enrollment: Arc::new(application::auth::StartTotpEnrollment::new(
                 origin.clone(),
@@ -616,13 +635,23 @@ impl Application {
             exchange_code: Arc::new(application::auth::ExchangeCode::new(
                 Arc::clone(&clients),
                 authorization_codes,
-                sign_in_accounts,
-                Arc::new(infrastructure::auth::JwtTokenIssuer::new(
-                    Arc::clone(&keypair),
-                    config.issuer(),
-                )),
+                Arc::clone(&sign_in_accounts),
+                Arc::clone(&token_issuer),
+                Arc::clone(&sessions),
+                Arc::clone(&refresh_tokens),
             )),
-            log_out: Arc::new(application::auth::LogOut::new(clients)),
+            refresh: Arc::new(application::auth::Refresh::new(
+                refresh_tokens,
+                Arc::clone(&sessions),
+                Arc::clone(&session_notifier),
+                sign_in_accounts,
+                token_issuer,
+            )),
+            log_out: Arc::new(application::auth::LogOut::new(
+                clients,
+                sessions,
+                session_notifier,
+            )),
             login_attempts: api::LoginAttempts::new(),
             origin: origin.clone(),
             describe_instance,

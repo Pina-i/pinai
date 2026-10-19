@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use application::auth::Authenticate;
 use axum::Json;
 use axum::body::Bytes;
 use axum::extract::{FromRef, FromRequest, FromRequestParts, Request};
@@ -11,19 +12,19 @@ use axum::http::{HeaderMap, Method, Uri};
 use domain::UserId;
 use domain::identity::{
     ActorUri, Requester, SignatureError, SignatureVerifier, SignedRequest, TokenError,
-    TokenVerifier,
 };
+use time::OffsetDateTime;
 
 use serde::de::DeserializeOwned;
 
 use crate::ApiError;
 
-/// The user a request's bearer token belongs to.
+/// The user a request's bearer token belongs to, while its session lives.
 pub struct Authenticated(pub UserId);
 
 impl<S> FromRequestParts<S> for Authenticated
 where
-    Arc<dyn TokenVerifier>: FromRef<S>,
+    Arc<Authenticate>: FromRef<S>,
     S: Send + Sync,
 {
     type Rejection = ApiError;
@@ -37,8 +38,10 @@ where
             .ok_or_else(|| {
                 ApiError::invalid_token("Missing or invalid Authorization header", false)
             })?;
-        let user = Arc::<dyn TokenVerifier>::from_ref(state).verify(token)?;
-        Ok(Self(user))
+        let bearer = Arc::<Authenticate>::from_ref(state)
+            .execute(token, OffsetDateTime::now_utc())
+            .await?;
+        Ok(Self(bearer.user))
     }
 }
 
@@ -47,6 +50,8 @@ impl From<TokenError> for ApiError {
         match error {
             TokenError::Invalid => ApiError::invalid_token("Invalid or expired access token", true),
             TokenError::BadSubject => ApiError::invalid_token("Invalid subject claim", true),
+            TokenError::SessionEnded => ApiError::invalid_token("The session has ended", true),
+            TokenError::Unexpected(e) => ApiError::internal(e),
         }
     }
 }
@@ -117,7 +122,7 @@ pub struct CallerJson<T>(pub Requester, pub T);
 
 impl<S, T> FromRequest<S> for CallerJson<T>
 where
-    Arc<dyn TokenVerifier>: FromRef<S>,
+    Arc<Authenticate>: FromRef<S>,
     Arc<dyn SignatureVerifier>: FromRef<S>,
     S: Send + Sync,
     T: DeserializeOwned,

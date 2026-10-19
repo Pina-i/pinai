@@ -4,22 +4,25 @@ use std::sync::Arc;
 
 use domain::auth::SignInAccount;
 use domain::auth::testing::{
-    CountingSuffixes, InMemoryClientSignIns, InMemoryClients, InMemoryCodes, InMemorySecondFactors,
-    InMemorySignInAccounts, InMemorySignupCodes, PlainHasher, RecordingMailer, RecordingTickets,
-    SignInSeeds, SpelledTokens, StepAuthenticator, signed_up, web_client,
+    CountingSuffixes, InMemoryClientSignIns, InMemoryClients, InMemoryCodes, InMemoryRefreshTokens,
+    InMemorySecondFactors, InMemorySessions, InMemorySignInAccounts, InMemorySignupCodes,
+    PlainHasher, RecordingMailer, RecordingSessionNotifier, RecordingTickets, SignInSeeds,
+    SpelledTokens, StepAuthenticator, signed_up, web_client,
 };
-use domain::auth::{SecondFactors, TotpSecret};
+use domain::auth::{Client, SecondFactors, TotpSecret, desktop_client};
 use domain::identity::InstanceOrigin;
 use time::OffsetDateTime;
 
 use super::{
-    Authorize, ConfirmTotpEnrollment, DisableTotp, ExchangeCode, LogIn, LogOut, PassSecondFactor,
-    RegenerateRecoveryCodes, Register, ResendCode, ShowSignIn, StartTotpEnrollment, SweepSignups,
-    VerifyEmail,
+    Authorize, CompleteSignIn, ConfirmTotpEnrollment, DisableTotp, ExchangeCode, LogIn, LogOut,
+    PassSecondFactor, Refresh, RegenerateRecoveryCodes, Register, ResendCode, ShowSignIn,
+    StartTotpEnrollment, SweepSignups, VerifyEmail,
 };
 
 pub struct World {
     pub alice: SignInAccount,
+    /// The official desktop app: native, and allowed to stay signed in.
+    pub desktop: Client,
     pub accounts: Arc<InMemorySignInAccounts>,
     pub codes: Arc<InMemoryCodes>,
     pub hasher: Arc<PlainHasher>,
@@ -27,9 +30,13 @@ pub struct World {
     pub signup_codes: Arc<InMemorySignupCodes>,
     pub mailer: Arc<RecordingMailer>,
     pub sign_ins: Arc<InMemoryClientSignIns>,
+    pub sessions: Arc<InMemorySessions>,
+    pub ended: Arc<RecordingSessionNotifier>,
+    pub refresh_tokens: Arc<InMemoryRefreshTokens>,
     pub authorize: Authorize,
     pub log_in: LogIn,
     pub exchange: ExchangeCode,
+    pub refresh: Refresh,
     pub log_out: LogOut,
     pub register: Register,
     pub verify: VerifyEmail,
@@ -51,23 +58,32 @@ pub fn now() -> OffsetDateTime {
 pub async fn world() -> World {
     let alice = signed_up("alice");
     let accounts = Arc::new(InMemorySignInAccounts::with([alice.clone()]));
-    let clients = Arc::new(InMemoryClients::with([web_client()]));
+    let origin = InstanceOrigin::parse("http://localhost:8080").unwrap();
+    let desktop = desktop_client(&origin);
+    let clients = Arc::new(InMemoryClients::with([web_client(), desktop.clone()]));
     let codes = Arc::new(InMemoryCodes::default());
     let hasher = Arc::new(PlainHasher::default());
     let tickets = Arc::new(RecordingTickets::default());
     let signup_codes = Arc::new(InMemorySignupCodes::confirming(accounts.clone()));
     let mailer = Arc::new(RecordingMailer::default());
     let sign_ins = Arc::new(InMemoryClientSignIns::default());
+    let sessions = Arc::new(InMemorySessions::default());
+    let ended = Arc::new(RecordingSessionNotifier::default());
+    let refresh_tokens = Arc::new(InMemoryRefreshTokens::default());
+    let complete = Arc::new(CompleteSignIn::new(
+        sign_ins.clone(),
+        codes.clone(),
+        sessions.clone(),
+        ended.clone(),
+    ));
     let factors = Arc::new(InMemorySecondFactors::for_accounts(accounts.clone()));
     let authenticator = Arc::new(StepAuthenticator::default());
-    let origin = InstanceOrigin::parse("http://localhost:8080").unwrap();
     World {
         pass: PassSecondFactor::new(
             tickets.clone(),
             factors.clone(),
             authenticator.clone(),
-            codes.clone(),
-            sign_ins.clone(),
+            complete.clone(),
         ),
         enroll: StartTotpEnrollment::new(
             origin.clone(),
@@ -88,24 +104,33 @@ pub async fn world() -> World {
             accounts.clone(),
             codes.clone(),
             sign_ins.clone(),
+            sessions.clone(),
         ),
         log_in: LogIn::new(
             clients.clone(),
             accounts.clone(),
             hasher.clone(),
-            codes.clone(),
             tickets.clone(),
             signup_codes.clone(),
             mailer.clone(),
-            sign_ins.clone(),
+            complete.clone(),
         ),
         exchange: ExchangeCode::new(
             clients.clone(),
             codes.clone(),
             accounts.clone(),
             Arc::new(SpelledTokens),
+            sessions.clone(),
+            refresh_tokens.clone(),
         ),
-        log_out: LogOut::new(clients.clone()),
+        refresh: Refresh::new(
+            refresh_tokens.clone(),
+            sessions.clone(),
+            ended.clone(),
+            accounts.clone(),
+            Arc::new(SpelledTokens),
+        ),
+        log_out: LogOut::new(clients.clone(), sessions.clone(), ended.clone()),
         register: Register::new(
             origin.clone(),
             clients.clone(),
@@ -120,13 +145,19 @@ pub async fn world() -> World {
             clients.clone(),
             accounts.clone(),
             signup_codes.clone(),
-            codes.clone(),
-            sign_ins.clone(),
+            complete,
         ),
         resend: ResendCode::new(accounts.clone(), signup_codes.clone(), mailer.clone()),
-        sweep: SweepSignups::new(signup_codes.clone(), tickets.clone(), accounts.clone()),
+        sweep: SweepSignups::new(
+            signup_codes.clone(),
+            tickets.clone(),
+            accounts.clone(),
+            sessions.clone(),
+            refresh_tokens.clone(),
+        ),
         show: ShowSignIn::new(clients.clone(), tickets.clone()),
         alice,
+        desktop,
         accounts,
         codes,
         hasher,
@@ -134,6 +165,9 @@ pub async fn world() -> World {
         signup_codes,
         mailer,
         sign_ins,
+        sessions,
+        ended,
+        refresh_tokens,
     }
 }
 

@@ -1,24 +1,50 @@
 use std::sync::Arc;
 
-use domain::auth::{AuthError, ClientId, Clients};
+use domain::SessionId;
+use domain::auth::{AuthError, ClientId, Clients, RevokedReason, SessionNotifier, Sessions};
+use time::OffsetDateTime;
 
-/// `GET /logout`: the session ends, and the browser goes back where its client asked if the
-/// client listed that place.
+use super::end_session;
+
+/// `GET /logout`: the browser's session ends — every token it led to with it — and the browser
+/// goes back where its client asked if the client listed that place.
 pub struct LogOut {
     clients: Arc<dyn Clients>,
+    sessions: Arc<dyn Sessions>,
+    notifier: Arc<dyn SessionNotifier>,
 }
 
 impl LogOut {
-    pub fn new(clients: Arc<dyn Clients>) -> Self {
-        Self { clients }
+    pub fn new(
+        clients: Arc<dyn Clients>,
+        sessions: Arc<dyn Sessions>,
+        notifier: Arc<dyn SessionNotifier>,
+    ) -> Self {
+        Self {
+            clients,
+            sessions,
+            notifier,
+        }
     }
 
-    /// Where to send the browser; `None` for this instance's root.
+    /// Where to send the browser; `None` for this instance's signed-out page.
     pub async fn execute(
         &self,
+        session: Option<SessionId>,
         client: Option<&str>,
         return_to: Option<&str>,
+        now: OffsetDateTime,
     ) -> Result<Option<String>, AuthError> {
+        if let Some(session) = session {
+            end_session(
+                &*self.sessions,
+                &*self.notifier,
+                session,
+                RevokedReason::SignOut,
+                now,
+            )
+            .await?;
+        }
         let (Some(client), Some(uri)) = (client, return_to) else {
             return Ok(None);
         };

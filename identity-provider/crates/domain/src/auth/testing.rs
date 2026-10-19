@@ -7,16 +7,17 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use time::{Duration, OffsetDateTime};
 
 use crate::identity::{ActorUri, Handle, HandleSuffix};
-use crate::{TicketId, UserId};
+use crate::{SessionId, TicketId, UserId};
 
 use super::{
     AuthError, Authenticator, AuthorizationCode, AuthorizationCodes, AuthorizationRequest,
     CODE_ATTEMPTS, Client, ClientDocument, ClientId, ClientKind, ClientPolicy, ClientSignIn,
     ClientSignIns, Clients, CodeAttempt, CodeChallenge, Email, Grant, HandleSuffixes,
     LOGIN_TICKET_TTL, LoginTickets, NewAccount, OtpCode, PasswordHash, PasswordHasher,
-    RECOVERY_CODES, Registration, SIGNUP_CODE_TTL, SecondFactors, SignInAccount, SignInAccounts,
-    SignUps, SignupCodes, SignupMailer, TICKET_ATTEMPTS, Ticket, TicketAttempt, TokenIssuer,
-    Tokens, TotpSecret,
+    Presentation, RECOVERY_CODES, RefreshLink, RefreshToken, RefreshTokens, Registration,
+    RevokedReason, Rotation, SESSION_IDLE, SESSION_RETENTION, SIGNUP_CODE_TTL, SecondFactors,
+    Session, SessionKind, SessionNotifier, Sessions, SignInAccount, SignInAccounts, SignUps,
+    SignupCodes, SignupMailer, TICKET_ATTEMPTS, Ticket, TicketAttempt, TokenIssuer, TotpSecret,
 };
 
 pub const CLIENT_ID: &str = "http://localhost:5173/oauth-client.json";
@@ -86,6 +87,139 @@ impl Clients for InMemoryClients {
             .iter()
             .find(|client| client.id == *id)
             .cloned())
+    }
+}
+
+#[derive(Default)]
+pub struct InMemorySessions {
+    sessions: Mutex<Vec<(Session, Option<RevokedReason>)>>,
+}
+
+impl InMemorySessions {
+    /// Every session, ended or not, oldest first.
+    pub fn all(&self) -> Vec<Session> {
+        self.sessions
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(session, _)| session.clone())
+            .collect()
+    }
+
+    /// A live session of `user`'s, opened now: what a test's bearer token belongs to.
+    pub fn live(&self, user: UserId) -> SessionId {
+        let id = SessionId::generate();
+        let now = OffsetDateTime::now_utc();
+        self.sessions.lock().unwrap().push((
+            Session {
+                id,
+                user,
+                kind: SessionKind::Browser,
+                created_at: now,
+                last_used_at: now,
+                revoked_at: None,
+            },
+            None,
+        ));
+        id
+    }
+
+    pub fn reason(&self, id: SessionId) -> Option<RevokedReason> {
+        self.sessions
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(session, _)| session.id == id)
+            .and_then(|(_, reason)| *reason)
+    }
+}
+
+#[async_trait::async_trait]
+impl Sessions for InMemorySessions {
+    async fn open(
+        &self,
+        user: UserId,
+        kind: &SessionKind,
+        now: OffsetDateTime,
+    ) -> Result<SessionId, AuthError> {
+        let id = SessionId::generate();
+        self.sessions.lock().unwrap().push((
+            Session {
+                id,
+                user,
+                kind: kind.clone(),
+                created_at: now,
+                last_used_at: now,
+                revoked_at: None,
+            },
+            None,
+        ));
+        Ok(id)
+    }
+
+    async fn find(&self, id: SessionId) -> Result<Option<Session>, AuthError> {
+        Ok(self
+            .sessions
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(session, _)| session.id == id)
+            .map(|(session, _)| session.clone()))
+    }
+
+    async fn touch(&self, id: SessionId, now: OffsetDateTime) -> Result<(), AuthError> {
+        for (session, _) in self.sessions.lock().unwrap().iter_mut() {
+            if session.id == id {
+                session.last_used_at = now;
+            }
+        }
+        Ok(())
+    }
+
+    async fn revoke(
+        &self,
+        id: SessionId,
+        reason: RevokedReason,
+        now: OffsetDateTime,
+    ) -> Result<bool, AuthError> {
+        let mut sessions = self.sessions.lock().unwrap();
+        let Some((session, why)) = sessions
+            .iter_mut()
+            .find(|(session, _)| session.id == id && session.revoked_at.is_none())
+        else {
+            return Ok(false);
+        };
+        session.revoked_at = Some(now);
+        *why = Some(reason);
+        Ok(true)
+    }
+
+    async fn delete_ended(&self, before: OffsetDateTime) -> Result<usize, AuthError> {
+        let mut sessions = self.sessions.lock().unwrap();
+        let held = sessions.len();
+        sessions.retain(|(session, _)| {
+            !(session.revoked_at.is_some_and(|at| at < before)
+                || session.last_used_at < before - SESSION_IDLE)
+        });
+        Ok(held - sessions.len())
+    }
+}
+
+/// The sessions told ended, in order.
+#[derive(Default)]
+pub struct RecordingSessionNotifier {
+    ended: Mutex<Vec<SessionId>>,
+}
+
+impl RecordingSessionNotifier {
+    pub fn ended(&self) -> Vec<SessionId> {
+        self.ended.lock().unwrap().clone()
+    }
+}
+
+impl SessionNotifier for RecordingSessionNotifier {
+    fn ended(&self, session: &Session) {
+        self.ended.lock().unwrap().push(session.id);
     }
 }
 
@@ -335,24 +469,143 @@ impl PasswordHasher for PlainHasher {
 pub struct SpelledTokens;
 
 impl TokenIssuer for SpelledTokens {
-    fn issue(
+    fn access_token(
+        &self,
+        account: &SignInAccount,
+        session: SessionId,
+        client: &ClientId,
+        _ttl: Duration,
+    ) -> Result<String, AuthError> {
+        Ok(format!(
+            "access:{}:{session}:{}",
+            account.id,
+            client.as_str()
+        ))
+    }
+
+    fn id_token(
         &self,
         account: &SignInAccount,
         client: &ClientId,
         nonce: Option<&str>,
-        ttl: Duration,
-    ) -> Result<Tokens, AuthError> {
-        Ok(Tokens {
-            access_token: format!("access:{}:{}", account.id, client.as_str()),
-            id_token: format!(
-                "id:{}:{}:{}:{}",
-                account.id,
-                client.as_str(),
-                account.email,
-                nonce.unwrap_or("-")
-            ),
-            expires_in: ttl,
+        _ttl: Duration,
+    ) -> Result<String, AuthError> {
+        Ok(format!(
+            "id:{}:{}:{}:{}",
+            account.id,
+            client.as_str(),
+            account.email,
+            nonce.unwrap_or("-")
+        ))
+    }
+}
+
+struct RefreshRow {
+    token: RefreshToken,
+    session: SessionId,
+    client: ClientId,
+    created_at: OffsetDateTime,
+    rotated_at: Option<OffsetDateTime>,
+    successor: Option<RefreshToken>,
+}
+
+/// Refresh tokens spelled `refresh-{n}`, kept as they are: a fake's tokens are no secret.
+#[derive(Default)]
+pub struct InMemoryRefreshTokens {
+    issued: AtomicUsize,
+    rows: Mutex<Vec<RefreshRow>>,
+}
+
+impl InMemoryRefreshTokens {
+    fn fresh(&self) -> RefreshToken {
+        let n = self.issued.fetch_add(1, Ordering::SeqCst) + 1;
+        RefreshToken::new(format!("refresh-{n}"))
+    }
+
+    /// The tokens kept for `session`, rotated or not, oldest first.
+    pub fn of(&self, session: SessionId) -> Vec<RefreshToken> {
+        self.rows
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|row| row.session == session)
+            .map(|row| row.token.clone())
+            .collect()
+    }
+}
+
+#[async_trait::async_trait]
+impl RefreshTokens for InMemoryRefreshTokens {
+    async fn start(
+        &self,
+        session: SessionId,
+        client: &ClientId,
+        now: OffsetDateTime,
+    ) -> Result<RefreshToken, AuthError> {
+        let token = self.fresh();
+        self.rows.lock().unwrap().push(RefreshRow {
+            token: token.clone(),
+            session,
+            client: client.clone(),
+            created_at: now,
+            rotated_at: None,
+            successor: None,
+        });
+        Ok(token)
+    }
+
+    async fn rotate(
+        &self,
+        token: &RefreshToken,
+        client: &ClientId,
+        now: OffsetDateTime,
+    ) -> Result<Rotation, AuthError> {
+        let mut rows = self.rows.lock().unwrap();
+        let Some(at) = rows.iter().position(|row| row.token == *token) else {
+            return Ok(Rotation::Refused);
+        };
+        let successor = rows[at]
+            .successor
+            .as_ref()
+            .and_then(|successor| rows.iter().position(|row| row.token == *successor));
+        let link = RefreshLink {
+            session: rows[at].session,
+            client: rows[at].client.clone(),
+            rotated_at: rows[at].rotated_at,
+            successor_unused: successor.is_some_and(|i| rows[i].rotated_at.is_none()),
+        };
+        let session = link.session;
+        match link.presented(client, now) {
+            Presentation::Refused => return Ok(Rotation::Refused),
+            Presentation::Reuse => return Ok(Rotation::Reused { session }),
+            Presentation::Rotate => rows[at].rotated_at = Some(now),
+            Presentation::Retry => {
+                let replaced = successor.expect("a retry replaces a successor");
+                rows[replaced].rotated_at = Some(now);
+                rows[replaced].successor = None;
+            }
+        }
+        let next = self.fresh();
+        rows[at].successor = Some(next.clone());
+        rows.push(RefreshRow {
+            token: next.clone(),
+            session,
+            client: client.clone(),
+            created_at: now,
+            rotated_at: None,
+            successor: None,
+        });
+        Ok(Rotation::Rotated {
+            session,
+            successor: next,
         })
+    }
+
+    async fn delete_unused(&self, before: OffsetDateTime) -> Result<usize, AuthError> {
+        let mut rows = self.rows.lock().unwrap();
+        let held = rows.len();
+        rows.retain(|row| row.rotated_at.unwrap_or(row.created_at) >= before);
+        Ok(held - rows.len())
     }
 }
 
@@ -955,12 +1208,14 @@ pub mod contract {
         assert_eq!(accounts.by_id(UserId::generate()).await.unwrap(), None);
     }
 
+    /// `session` is one of `user`'s.
     pub async fn a_code_is_good_once_and_only_until_it_expires(
         codes: &dyn AuthorizationCodes,
         user: UserId,
+        session: SessionId,
     ) {
         let now = OffsetDateTime::from_unix_timestamp(1_790_000_000).unwrap();
-        let grant = Grant::answering(user, &a_request());
+        let grant = Grant::answering(user, session, &a_request());
         let fresh = codes
             .issue(&grant, now + Duration::minutes(10))
             .await
@@ -1352,6 +1607,293 @@ pub mod contract {
             ]
         );
         assert_eq!((expired, spent), (TicketAttempt::Gone, TicketAttempt::Gone));
+    }
+
+    pub async fn a_session_opens_is_used_and_ends_once(sessions: &dyn Sessions, user: UserId) {
+        let at = OffsetDateTime::from_unix_timestamp(1_790_000_000).unwrap();
+        let id = sessions
+            .open(user, &SessionKind::Browser, at)
+            .await
+            .unwrap();
+        let app = SessionKind::App(web_client().id);
+        let apps = sessions.open(user, &app, at).await.unwrap();
+
+        let opened = sessions.find(id).await.unwrap();
+        sessions.touch(id, at + Duration::hours(1)).await.unwrap();
+        let used = sessions.find(id).await.unwrap().unwrap();
+        let revoked = sessions
+            .revoke(id, RevokedReason::SignOut, at + Duration::hours(2))
+            .await
+            .unwrap();
+        let again = sessions
+            .revoke(id, RevokedReason::Replaced, at + Duration::hours(3))
+            .await
+            .unwrap();
+        let reused = sessions
+            .revoke(apps, RevokedReason::Reuse, at + Duration::hours(2))
+            .await
+            .unwrap();
+        let ended = sessions.find(id).await.unwrap().unwrap();
+
+        assert_eq!(
+            opened,
+            Some(Session {
+                id,
+                user,
+                kind: SessionKind::Browser,
+                created_at: at,
+                last_used_at: at,
+                revoked_at: None,
+            })
+        );
+        assert_eq!(sessions.find(apps).await.unwrap().unwrap().kind, app);
+        assert_eq!(used.last_used_at, at + Duration::hours(1));
+        assert_eq!((revoked, again, reused), (true, false, true), "ended once");
+        assert_eq!(ended.revoked_at, Some(at + Duration::hours(2)));
+        assert_eq!(sessions.find(SessionId::generate()).await.unwrap(), None);
+    }
+
+    pub async fn sessions_ended_are_swept_after_their_retention(
+        sessions: &dyn Sessions,
+        user: UserId,
+    ) {
+        let now = OffsetDateTime::from_unix_timestamp(1_790_000_000).unwrap();
+        let before = now - SESSION_RETENTION;
+        let live = sessions
+            .open(user, &SessionKind::Browser, now)
+            .await
+            .unwrap();
+        let revoked_long_ago = sessions
+            .open(user, &SessionKind::Browser, now - Duration::days(40))
+            .await
+            .unwrap();
+        sessions
+            .revoke(
+                revoked_long_ago,
+                RevokedReason::SignOut,
+                before - Duration::days(1),
+            )
+            .await
+            .unwrap();
+        let revoked_lately = sessions
+            .open(user, &SessionKind::Browser, now - Duration::days(2))
+            .await
+            .unwrap();
+        sessions
+            .revoke(
+                revoked_lately,
+                RevokedReason::SignOut,
+                before + Duration::days(1),
+            )
+            .await
+            .unwrap();
+        let idle_long_ago = sessions
+            .open(
+                user,
+                &SessionKind::Browser,
+                before - SESSION_IDLE - Duration::days(1),
+            )
+            .await
+            .unwrap();
+        let idle_lately = sessions
+            .open(
+                user,
+                &SessionKind::Browser,
+                before - SESSION_IDLE + Duration::days(1),
+            )
+            .await
+            .unwrap();
+
+        let swept = sessions.delete_ended(before).await.unwrap();
+
+        assert_eq!(swept, 2);
+        for kept in [live, revoked_lately, idle_lately] {
+            assert!(sessions.find(kept).await.unwrap().is_some());
+        }
+        for gone in [revoked_long_ago, idle_long_ago] {
+            assert_eq!(sessions.find(gone).await.unwrap(), None);
+        }
+    }
+
+    fn rotated(rotation: Rotation) -> RefreshToken {
+        match rotation {
+            Rotation::Rotated { successor, .. } => successor,
+            other => panic!("not rotated: {other:?}"),
+        }
+    }
+
+    /// `session` is a live one.
+    pub async fn a_refresh_token_rotates_at_each_use_and_a_used_one_is_reused(
+        tokens: &dyn RefreshTokens,
+        session: SessionId,
+    ) {
+        let at = OffsetDateTime::from_unix_timestamp(1_790_000_000).unwrap();
+        let client = web_client().id;
+        let other = ClientId::parse("http://localhost:5173/other.json").unwrap();
+        let first = tokens.start(session, &client, at).await.unwrap();
+        let elsewhere = tokens.start(session, &client, at).await.unwrap();
+
+        let second = rotated(
+            tokens
+                .rotate(&first, &client, at + Duration::hours(1))
+                .await
+                .unwrap(),
+        );
+        let third = rotated(
+            tokens
+                .rotate(&second, &client, at + Duration::hours(2))
+                .await
+                .unwrap(),
+        );
+        let first_again = tokens
+            .rotate(&first, &client, at + Duration::hours(2))
+            .await
+            .unwrap();
+        let second_later = tokens
+            .rotate(
+                &second,
+                &client,
+                at + Duration::hours(2) + Duration::minutes(2),
+            )
+            .await
+            .unwrap();
+        let unknown = tokens
+            .rotate(
+                &RefreshToken::new("no-such-token".to_owned()),
+                &client,
+                at + Duration::hours(2),
+            )
+            .await
+            .unwrap();
+        let by_another = tokens
+            .rotate(&third, &other, at + Duration::hours(2))
+            .await
+            .unwrap();
+        let fourth = tokens
+            .rotate(&third, &client, at + Duration::hours(3))
+            .await
+            .unwrap();
+        let other_chain = tokens
+            .rotate(&elsewhere, &client, at + Duration::hours(3))
+            .await
+            .unwrap();
+
+        assert_ne!(first, elsewhere);
+        assert_ne!(second, third);
+        assert_eq!(
+            first_again,
+            Rotation::Reused { session },
+            "its successor was used"
+        );
+        assert_eq!(second_later, Rotation::Reused { session }, "past the grace");
+        assert_eq!(
+            (unknown, by_another),
+            (Rotation::Refused, Rotation::Refused)
+        );
+        assert!(
+            matches!(fourth, Rotation::Rotated { session: s, .. } if s == session),
+            "another client's try changed nothing: {fourth:?}"
+        );
+        assert!(
+            matches!(other_chain, Rotation::Rotated { .. }),
+            "each chain on its own: {other_chain:?}"
+        );
+    }
+
+    /// `session` is a live one.
+    pub async fn a_lost_answer_is_answered_again_within_the_grace(
+        tokens: &dyn RefreshTokens,
+        session: SessionId,
+    ) {
+        let at = OffsetDateTime::from_unix_timestamp(1_790_000_000).unwrap();
+        let client = web_client().id;
+        let first = tokens.start(session, &client, at).await.unwrap();
+        let lost = rotated(tokens.rotate(&first, &client, at).await.unwrap());
+
+        let retried = rotated(
+            tokens
+                .rotate(&first, &client, at + Duration::seconds(30))
+                .await
+                .unwrap(),
+        );
+        let lost_after_all = tokens
+            .rotate(&lost, &client, at + Duration::seconds(40))
+            .await
+            .unwrap();
+        let next = tokens
+            .rotate(&retried, &client, at + Duration::seconds(45))
+            .await
+            .unwrap();
+        let first_once_more = tokens
+            .rotate(&first, &client, at + Duration::seconds(50))
+            .await
+            .unwrap();
+
+        assert_ne!(retried, lost);
+        assert_eq!(
+            lost_after_all,
+            Rotation::Reused { session },
+            "replaced: whoever holds it holds a copy"
+        );
+        assert!(matches!(next, Rotation::Rotated { .. }), "{next:?}");
+        assert_eq!(
+            first_once_more,
+            Rotation::Reused { session },
+            "its successor came this time"
+        );
+    }
+
+    /// `session` is a live one.
+    pub async fn refresh_tokens_unused_since_the_cutoff_are_swept(
+        tokens: &dyn RefreshTokens,
+        session: SessionId,
+    ) {
+        let before = OffsetDateTime::from_unix_timestamp(1_790_000_000).unwrap();
+        let now = before + Duration::days(2);
+        let client = web_client().id;
+        let old_head = tokens
+            .start(session, &client, before - Duration::days(1))
+            .await
+            .unwrap();
+        let new_head = tokens
+            .start(session, &client, before + Duration::days(1))
+            .await
+            .unwrap();
+        let old_link = tokens
+            .start(session, &client, before - Duration::days(2))
+            .await
+            .unwrap();
+        let new_link = rotated(
+            tokens
+                .rotate(&old_link, &client, before - Duration::days(1))
+                .await
+                .unwrap(),
+        );
+        let chain_head = rotated(
+            tokens
+                .rotate(&new_link, &client, before + Duration::days(1))
+                .await
+                .unwrap(),
+        );
+
+        let swept = tokens.delete_unused(before).await.unwrap();
+
+        assert_eq!(swept, 2);
+        for kept in [new_head, chain_head] {
+            let rotation = tokens.rotate(&kept, &client, now).await.unwrap();
+            assert!(matches!(rotation, Rotation::Rotated { .. }), "{rotation:?}");
+        }
+        assert_eq!(
+            tokens.rotate(&new_link, &client, now).await.unwrap(),
+            Rotation::Reused { session },
+            "kept, to catch a copy"
+        );
+        for gone in [old_head, old_link] {
+            assert_eq!(
+                tokens.rotate(&gone, &client, now).await.unwrap(),
+                Rotation::Refused
+            );
+        }
     }
 
     /// `user` and `other` are two accounts.

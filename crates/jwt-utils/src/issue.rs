@@ -11,6 +11,8 @@ pub struct AccessTokenClaims {
     pub sub: String, // user UUID as string
     pub aud: String,
     pub client_id: String,
+    /// The session the token belongs to: it stops working when the session ends.
+    pub sid: String,
     pub exp: i64, // unix timestamp
     pub iat: i64,
     pub email: String,
@@ -37,6 +39,7 @@ pub fn issue_access_token(
     subject: &str, // user UUID
     audience: &str,
     client_id: &str,
+    session_id: &str,
     email: &str,
     username: &str,
     ttl_seconds: i64,
@@ -47,6 +50,7 @@ pub fn issue_access_token(
         sub: subject.to_owned(),
         aud: audience.to_owned(),
         client_id: client_id.to_owned(),
+        sid: session_id.to_owned(),
         exp: now + ttl_seconds,
         iat: now,
         email: email.to_owned(),

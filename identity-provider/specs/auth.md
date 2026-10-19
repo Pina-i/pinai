@@ -34,7 +34,10 @@ sequenceDiagram
         end
     end
     C->>I: POST /token (code, redirect_uri, client_id, code_verifier)
-    I-->>C: access_token + id_token
+    I-->>C: access_token + refresh_token + id_token
+    Note over C: before the hour is up
+    C->>I: POST /token (refresh_token)
+    I-->>C: access_token + the next refresh_token
 ```
 
 ### Clients
@@ -56,7 +59,7 @@ It trusts nothing the document doesn't list:
 | `application_type` | `web` (the default) or `native` |
 | `redirect_uris` | 1 to 10, matched **exactly**, case and path included (RFC 6749 § 3.1.2): they are where codes are sent. A web client's are `https` URLs on the `client_id`'s own origin. A native client's are on the loopback interface (`http://127.0.0.1:<port>/…` or `http://[::1]:<port>/…`, RFC 8252 § 7.3), or under a scheme named after its own domain, reversed: `https://example.org/…` may use `org.example:/…` (RFC 8252 § 7.1). So no document can claim another app's scheme |
 | `post_logout_redirect_uris` | 10 at most, under the same rules |
-| `scope` | `offline_access` here asks to stay signed in on the device; only a native client may |
+| `scope` | `offline_access` here asks to stay signed in on the device, with a session of its own (§ "Sessions"); only a native client may |
 | `token_endpoint_auth_method` | `none`, or absent: confidential clients aren't supported |
 
 Other fields are ignored. A document that breaks a rule leaves its client unknown.
@@ -205,12 +208,64 @@ A code is good for 10 minutes, once. It remembers the account, the client, the
 `redirect_uri`, the scope, the challenge and the nonce; the `state` goes back with it and is not
 kept.
 
-### The session cookie
+### Sessions
 
-`idp_session` holds the account id, signed (HMAC-SHA256) with a key derived from
-`SESSION_SECRET`: `HttpOnly`, `SameSite=Lax`, `Path=/`, 30 days, and `Secure` in production. It is
-what lets `/authorize` skip the login page — **for the apps the account signed in to with its
-password only**.
+A session is a row, so each one can end on its own, and every code, access token and refresh token
+it leads to belongs to it. There are two kinds:
+
+- A **browser session** is what a password sign-in opens — the login form, the code mailed at
+  sign-up, the second factor — and what the `idp_session` cookie names. The web client's tokens
+  belong to it.
+- An **app session** is opened by a native client's code exchange when it stays signed in on its
+  device: its document allows `offline_access`, its request asked for it, and the password sign-in
+  agreed (`Grant::opens_app_session`). The desktop app's tokens belong to it, not to the system
+  browser it signed in through, so signing out of that browser leaves the app signed in.
+
+```sql
+CREATE TABLE sessions (
+    id             UUID PRIMARY KEY,
+    user_id        UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    kind           TEXT NOT NULL,           -- browser | app
+    client_id      TEXT,                    -- an app session's client, and only theirs
+    created_at     TIMESTAMPTZ NOT NULL,
+    last_used_at   TIMESTAMPTZ NOT NULL,    -- the last sign-in or refresh that used it
+    revoked_at     TIMESTAMPTZ,
+    revoked_reason TEXT                     -- sign_out | replaced | reuse
+);
+-- and authorization_codes.session_id: the browser session a code was issued under
+```
+
+```mermaid
+stateDiagram-v2
+    [*] --> Live: a password sign-in (browser), a code exchange staying signed in (app)
+    Live --> Live: a silent /authorize, a refresh (used again)
+    Live --> Ended: /logout (sign_out), another account signs in here (replaced)
+    Live --> Ended: a rotated refresh token presented again (reuse)
+    Live --> Ended: 90 days without use
+    Ended --> [*]: swept a month later
+```
+
+- **Live** while it isn't revoked and was used in the last 90 days (`Session::is_live`). A password
+  sign-in, a silent `/authorize` and a refresh count as use. There is no absolute limit: an active
+  user never signs in again.
+- **The cookie** holds the browser session's id, signed (HMAC-SHA256) with a key derived from
+  `SESSION_SECRET`: `HttpOnly`, `SameSite=Lax`, `Path=/`, `Secure` in production. It lasts as long as
+  the session may, 90 days, and is **set again at every use**, so it slides with it. A cookie naming
+  a session that isn't live is no cookie: the login page shows.
+- **One account per browser.** A password sign-in keeps the browser's live session when it is the
+  same account's, stamping it; another account's is ended (`replaced`) and a new one opened.
+- **Codes and tokens belong to it.** A code is issued under the browser session and refused at
+  `/token` once that session has ended. The access token names its session (`sid`), and every
+  authenticated request and the `/ws` upgrade check that it still lives — one read by primary key
+  — so an ended session's tokens stop at once, not an hour later: `401 invalid_token`, "The
+  session has ended". A refresh token works while its session lives (§ "Tokens").
+- **Ending one** (`/logout`, a replacement, a reuse) also closes the account's WebSockets opened
+  under it, with `1008` ("the session has ended"); a reconnect with its token is refused `401`.
+- **Swept** by the hourly sign-up sweep (§ 2) a month after it ended: revoked then, or idle past its
+  90 days. Its refresh tokens go with it.
+
+The cookie is what lets `/authorize` skip the login page — **for the apps the account signed in to
+with its password only**.
 
 Any site can be a client, and any site can send a browser to `/authorize`. If a session alone
 answered with a code, a page you merely visited could take one for your account, and the tokens
@@ -240,18 +295,31 @@ shares another's key, and a new secret signs everyone out.
 
 ### `POST /token`
 
-`application/x-www-form-urlencoded`: `grant_type`, `code`, `redirect_uri`, `client_id`,
-`code_verifier`.
+`application/x-www-form-urlencoded`, with `grant_type` and `client_id`; each grant takes its own
+fields, and one left out is refused as unusable.
 
-1. `grant_type` must be `authorization_code`, the client known, the `redirect_uri` registered.
+**`authorization_code`**: `code`, `redirect_uri`, `code_verifier`.
+
+1. The client known, the `redirect_uri` registered.
 2. The code is **spent** as it is read — even if the rest of the exchange is refused, it is never
    tried twice.
 3. The code must have been issued to this client for this `redirect_uri`, and the verifier must
    meet its challenge: `BASE64URL(SHA256(code_verifier)) = code_challenge`.
-4. The account must still exist.
+4. The account must still exist, and the browser session the code was issued under still live.
+5. A client staying signed in gets an app session of its own (§ "Sessions"); any other's tokens
+   belong to the browser session.
 
 ```json
-{ "access_token": "…", "token_type": "Bearer", "expires_in": 3600, "id_token": "…" }
+{ "access_token": "…", "token_type": "Bearer", "expires_in": 3600, "refresh_token": "…", "id_token": "…" }
+```
+
+**`refresh_token`** (RFC 6749 § 6): `refresh_token`.
+
+The token is rotated (§ "Tokens"), its session must live and its account exist, and the session is
+used once more. The answer has no ID token — nobody signed in:
+
+```json
+{ "access_token": "…", "token_type": "Bearer", "expires_in": 3600, "refresh_token": "…" }
 ```
 
 Every answer, success or refusal, carries `Cache-Control: no-store` and `Pragma: no-cache`
@@ -260,20 +328,50 @@ Every answer, success or refusal, carries `Cache-Control: no-store` and `Pragma:
 | Refusal | Status | `error` |
 |---|---|---|
 | Another grant type | 400 | `unsupported_grant_type` |
-| Unknown client | 401 | `invalid_client` |
-| Unregistered or mismatched `redirect_uri`, unusable code (unknown, expired, spent, or its account gone), another client's code, a verifier that does not meet the challenge | 400 | `invalid_grant` |
+| Unknown client (a `client_id` that isn't a client URL, for a refresh) | 401 | `invalid_client` |
+| Unregistered or mismatched `redirect_uri`, unusable code (unknown, expired, spent, its account gone, or its session ended), another client's code, a verifier that does not meet the challenge | 400 | `invalid_grant` |
+| An unusable refresh token: unknown, another client's, rotated (ending its session past the grace), its session ended or idle, its account gone | 400 | `invalid_grant` |
 
 ### Tokens
 
-Both are JWTs signed with the instance's Ed25519 key (`EdDSA`, the key the JWKS publishes):
-`iss` the issuer, `sub` the account id, `email`, `preferred_username` (the handle), valid for one
-hour.
+The access and ID tokens are JWTs signed with the instance's Ed25519 key (`EdDSA`, the key the
+JWKS publishes): `iss` the issuer, `sub` the account id, `email`, `preferred_username` (the handle),
+valid for one hour.
 
 - **The access token** is addressed to this instance's API (RFC 9068): `aud` is the issuer, and
-  `client_id` names the client it was issued to. So the API takes it from any client.
+  `client_id` names the client it was issued to, so the API takes it from any client. `sid` names
+  the session it belongs to (§ "Sessions"): it works while that session lives.
 - **The ID token** is addressed to the client: `aud` is the `client_id`. It adds the request's
-  `nonce`. There is no refresh token:
-a client signs in again, which a live session cookie makes silent.
+  `nonce`. Only a code exchange issues one.
+- **The refresh token** is 256 random bits (base64url, 43 characters). Only its SHA-256 is kept.
+
+```sql
+CREATE TABLE refresh_tokens (
+    token_hash     BYTEA PRIMARY KEY,       -- SHA-256 of the token
+    session_id     UUID NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    client_id      TEXT NOT NULL,
+    created_at     TIMESTAMPTZ NOT NULL,
+    rotated_at     TIMESTAMPTZ,             -- used; NULL for the head of its chain
+    successor_hash BYTEA                    -- what it was rotated to
+);
+```
+
+Each code exchange starts a **chain** under its session: one per tab of the web client, one per
+desktop sign-in. Every use **rotates** the token — it is answered with its successor, and stops
+working itself. What a presentation comes to is `RefreshLink::presented`:
+
+| The token presented | Answer |
+|---|---|
+| The head of its chain | Its successor, the new head |
+| Rotated within the last **60 s**, its successor never used | A new successor, replacing that one: the answer was lost on its way back |
+| Rotated, past the 60 s or after its successor was used — or a successor so replaced | `invalid_grant`, and its **session ends** (`reuse`): two copies exist, and the server can't tell the owner's from the thief's |
+| Unknown, or another client's | `invalid_grant`; nothing changes |
+
+So a stolen refresh token works until the owner's next refresh, or the thief's: whichever comes
+second signs both out. The rotated tokens are kept while their session lives, so a copy presented
+late is still caught. A presentation locks its token's row, then its successor's: two presentations
+of one token are judged one after the other, and leave one head. A client refreshes one at a time —
+of two answers to two concurrent refreshes, only the later works.
 
 A bearer token that is missing or unusable is answered `401 invalid_token`, with the challenge
 RFC 6750 § 3 asks for: `WWW-Authenticate: Bearer` when none was sent, `Bearer
@@ -295,14 +393,16 @@ reads as not covering `Authorization`.
 
 ### `GET /logout`
 
-Drops the session cookie and redirects to `post_logout_redirect_uri`, but only when the request
-names its client (`client_id`) and that client's document lists the URI exactly. Anything else goes
-to the instance's own `/signed-out` page: the endpoint is never an open redirect.
+Ends the browser's session (`sign_out`) — every token it led to stops working at once, and its
+WebSockets close — drops the cookie, and redirects to `post_logout_redirect_uri`, but only when the
+request names its client (`client_id`) and that client's document lists the URI exactly. Anything
+else goes to the instance's own `/signed-out` page: the endpoint is never an open redirect.
 
 ### Discovery
 
 `GET /.well-known/openid-configuration` (OpenID Connect Discovery 1.0 § 4) names the endpoints,
-`response_types_supported: ["code"]`, `grant_types_supported: ["authorization_code"]`,
+`scopes_supported: ["openid", "profile", "email", "offline_access"]`,
+`response_types_supported: ["code"]`, `grant_types_supported: ["authorization_code", "refresh_token"]`,
 `code_challenge_methods_supported: ["S256"]`, `id_token_signing_alg_values_supported: ["EdDSA"]`,
 `token_endpoint_auth_methods_supported: ["none"]` and
 `client_id_metadata_document_supported: true`. It names no `registration_endpoint`: clients aren't
@@ -314,7 +414,11 @@ registered, and the JSON `POST /register` creates accounts, not clients.
 - **First visit.** The web client sends the browser to `/authorize`; without a session it lands
   on the login page, signs in, and comes back with a code the client exchanges at `/token`.
 - **Coming back.** The session cookie is still there, and this account signed in to this app:
-  `/authorize` answers with a code at once.
+  `/authorize` answers with a code at once, and the session's 90 days start over.
+- **Back after four months.** The session went 90 days unused: it is over, and the password is
+  asked again. Used every week, it never ends.
+- **Signing out** in one tab ends the session for every tab of that browser: their tokens are
+  refused at their next request, and their WebSockets close with `1008` at once.
 - **A second app.** Signed in through the web client, the user opens the desktop app: the login
   page asks the password once, naming "Pīna'i desktop"; from then on both sign in silently.
 - **A site that only sends the browser to `/authorize`** — its own document, its own callback —
@@ -336,6 +440,18 @@ registered, and the JSON `POST /register` creates accounts, not clients.
   is sent anywhere.
 - **Signing out** returns the browser where its client listed. A link naming another site, or no
   client, goes to `/signed-out` instead.
+- **A copy of a cookie or a token** stops working when its session ends: signing out ends it on the
+  server, not only in the browser that signed out.
+- **An hour in.** The client trades its refresh token for a new access token and the next refresh
+  token; the session's 90 days start over.
+- **A refresh answer lost** on a flaky network: the client sends the same token again within the
+  minute and gets a new successor. The one that never arrived stops working.
+- **A stolen refresh token.** The thief refreshes with it; at the owner's next refresh the token
+  comes back already rotated, and the session ends for both — every token, every socket. The owner
+  signs in again; the thief can't.
+- **The desktop app staying signed in.** Its first sign-in goes through the system browser; the
+  exchange opens an app session that refreshes on its own. Signing out of that browser leaves the
+  app signed in; three months without opening the app sign it out.
 
 ## 2. Sign-up email verification
 
@@ -432,7 +548,11 @@ sequenceDiagram
 Every hour — and once at startup — the IdP deletes:
 1. the codes and the login tickets (§ 3) spent or expired, once a day old;
 2. the accounts never confirmed, once a week old: an abandoned sign-up frees its address and
-   handle.
+   handle;
+3. the sessions (§ 1) ended a month ago: revoked then, or idle past their 90 days, and their
+   refresh tokens with them;
+4. the refresh tokens (§ 1) unused for 90 days — a head since its creation, a rotated one since its
+   rotation — so the chains of a session in use, a tab per reload, don't pile up.
 
 ### Scenarios
 

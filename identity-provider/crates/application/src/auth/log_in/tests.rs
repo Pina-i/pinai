@@ -12,19 +12,28 @@ async fn the_right_password_ends_in_a_code_answering_the_request() {
 
     let outcome = w
         .log_in
-        .execute(&w.alice.email, "alice-password", &a_request(), now())
+        .execute(&w.alice.email, "alice-password", &a_request(), None, now())
         .await
         .unwrap();
 
     let issued = w.codes.issued();
+    let session = w.sessions.all()[0].id;
     assert_eq!(
         outcome,
         LoginOutcome::SignedIn {
             user: w.alice.id,
+            session,
             code: issued[0].0.clone(),
         }
     );
-    assert_eq!(issued[0].1, Grant::answering(w.alice.id, &a_request()));
+    assert_eq!(
+        issued[0].1,
+        Grant::answering(w.alice.id, session, &a_request())
+    );
+    assert!(
+        w.sessions.all()[0].is_live(now()),
+        "a browser session, opened"
+    );
     assert_eq!(
         w.sign_ins.remembered(),
         vec![ClientSignIn::of(w.alice.id, &a_request())],
@@ -38,12 +47,18 @@ async fn a_wrong_password_and_an_unknown_email_are_refused_alike() {
 
     let wrong = w
         .log_in
-        .execute(&w.alice.email, "bob-password", &a_request(), now())
+        .execute(&w.alice.email, "bob-password", &a_request(), None, now())
         .await
         .unwrap();
     let unknown = w
         .log_in
-        .execute("nobody@idp.test", "alice-password", &a_request(), now())
+        .execute(
+            "nobody@idp.test",
+            "alice-password",
+            &a_request(),
+            None,
+            now(),
+        )
         .await
         .unwrap();
 
@@ -65,7 +80,7 @@ async fn an_unconfirmed_address_is_mailed_a_code_instead_of_signing_in() {
 
     let outcome = w
         .log_in
-        .execute(&bob.email, "bob-password", &a_request(), now())
+        .execute(&bob.email, "bob-password", &a_request(), None, now())
         .await
         .unwrap();
 
@@ -105,7 +120,7 @@ async fn a_mail_that_cannot_leave_still_sends_the_account_to_confirm_its_address
 
     let outcome = w
         .log_in
-        .execute(&bob.email, "bob-password", &a_request(), now())
+        .execute(&bob.email, "bob-password", &a_request(), None, now())
         .await
         .unwrap();
 
@@ -126,7 +141,7 @@ async fn an_account_with_an_authenticator_is_given_a_ticket_instead_of_a_code() 
 
     let outcome = w
         .log_in
-        .execute(&bob.email, "bob-password", &a_request(), now())
+        .execute(&bob.email, "bob-password", &a_request(), None, now())
         .await
         .unwrap();
 
@@ -153,11 +168,11 @@ async fn a_request_from_an_unknown_client_or_to_an_unregistered_redirect_is_refu
 
     let unknown = w
         .log_in
-        .execute(&w.alice.email, "alice-password", &stranger, now())
+        .execute(&w.alice.email, "alice-password", &stranger, None, now())
         .await;
     let unregistered = w
         .log_in
-        .execute(&w.alice.email, "alice-password", &elsewhere, now())
+        .execute(&w.alice.email, "alice-password", &elsewhere, None, now())
         .await;
 
     assert!(
@@ -177,12 +192,18 @@ async fn an_unknown_email_costs_the_same_password_check_as_a_wrong_password() {
     let w = world().await;
 
     w.log_in
-        .execute("nobody@idp.test", "alice-password", &a_request(), now())
+        .execute(
+            "nobody@idp.test",
+            "alice-password",
+            &a_request(),
+            None,
+            now(),
+        )
         .await
         .unwrap();
     let unknown = w.hasher.verifications();
     w.log_in
-        .execute(&w.alice.email, "not-it", &a_request(), now())
+        .execute(&w.alice.email, "not-it", &a_request(), None, now())
         .await
         .unwrap();
 
@@ -204,7 +225,7 @@ async fn an_address_mailed_to_its_limit_is_not_mailed_again_on_signing_in() {
 
     let outcome = w
         .log_in
-        .execute(&bob.email, "bob-password", &a_request(), now())
+        .execute(&bob.email, "bob-password", &a_request(), None, now())
         .await
         .unwrap();
 
@@ -222,7 +243,13 @@ async fn an_address_signs_in_whatever_its_case() {
 
     let outcome = w
         .log_in
-        .execute(" ALICE@idp.test", "alice-password", &a_request(), now())
+        .execute(
+            " ALICE@idp.test",
+            "alice-password",
+            &a_request(),
+            None,
+            now(),
+        )
         .await
         .unwrap();
 
@@ -230,4 +257,53 @@ async fn an_address_signs_in_whatever_its_case() {
         matches!(outcome, LoginOutcome::SignedIn { .. }),
         "{outcome:?}"
     );
+}
+
+#[tokio::test]
+async fn signing_in_again_keeps_the_browsers_session_and_another_account_replaces_it() {
+    let w = world().await;
+    let bob = signed_up("bob");
+    w.sign_up(&bob).await;
+    let first = w
+        .log_in
+        .execute(&w.alice.email, "alice-password", &a_request(), None, now())
+        .await
+        .unwrap();
+    let LoginOutcome::SignedIn { session, .. } = first else {
+        panic!("{first:?}")
+    };
+
+    let again = w
+        .log_in
+        .execute(
+            &w.alice.email,
+            "alice-password",
+            &a_request(),
+            Some(session),
+            now(),
+        )
+        .await
+        .unwrap();
+    let other = w
+        .log_in
+        .execute(
+            &bob.email,
+            "bob-password",
+            &a_request(),
+            Some(session),
+            now(),
+        )
+        .await
+        .unwrap();
+
+    assert!(matches!(again, LoginOutcome::SignedIn { session: kept, .. } if kept == session));
+    let LoginOutcome::SignedIn { session: bobs, .. } = other else {
+        panic!("{other:?}")
+    };
+    assert_ne!(bobs, session);
+    assert_eq!(
+        w.sessions.reason(session),
+        Some(domain::auth::RevokedReason::Replaced)
+    );
+    assert_eq!(w.ended.ended(), vec![session], "its sockets told to close");
 }

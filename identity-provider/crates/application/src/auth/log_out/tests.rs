@@ -1,6 +1,8 @@
+use domain::auth::SessionKind;
+use domain::auth::Sessions;
 use domain::auth::testing::{CLIENT_ID, POST_LOGOUT_URI};
 
-use crate::auth::world::world;
+use crate::auth::world::{now, world};
 
 #[tokio::test]
 async fn after_signing_out_a_browser_goes_back_only_where_its_client_listed() {
@@ -8,7 +10,7 @@ async fn after_signing_out_a_browser_goes_back_only_where_its_client_listed() {
 
     assert_eq!(
         w.log_out
-            .execute(Some(CLIENT_ID), Some(POST_LOGOUT_URI))
+            .execute(None, Some(CLIENT_ID), Some(POST_LOGOUT_URI), now())
             .await
             .unwrap(),
         Some(POST_LOGOUT_URI.to_owned())
@@ -21,7 +23,7 @@ async fn after_signing_out_a_browser_goes_back_only_where_its_client_listed() {
     ] {
         assert_eq!(
             w.log_out
-                .execute(Some(CLIENT_ID), Some(elsewhere))
+                .execute(None, Some(CLIENT_ID), Some(elsewhere), now())
                 .await
                 .unwrap(),
             None,
@@ -41,7 +43,7 @@ async fn a_logout_naming_no_known_client_stays_here() {
     ] {
         assert_eq!(
             w.log_out
-                .execute(client, Some(POST_LOGOUT_URI))
+                .execute(None, client, Some(POST_LOGOUT_URI), now())
                 .await
                 .unwrap(),
             None,
@@ -49,7 +51,35 @@ async fn a_logout_naming_no_known_client_stays_here() {
         );
     }
     assert_eq!(
-        w.log_out.execute(Some(CLIENT_ID), None).await.unwrap(),
+        w.log_out
+            .execute(None, Some(CLIENT_ID), None, now())
+            .await
+            .unwrap(),
         None
     );
+}
+
+#[tokio::test]
+async fn signing_out_ends_the_browsers_session_and_what_hangs_on_it_once() {
+    let w = world().await;
+    let session = w
+        .sessions
+        .open(w.alice.id, &SessionKind::Browser, now())
+        .await
+        .unwrap();
+
+    w.log_out
+        .execute(Some(session), None, None, now())
+        .await
+        .unwrap();
+    w.log_out
+        .execute(Some(session), None, None, now())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        w.sessions.reason(session),
+        Some(domain::auth::RevokedReason::SignOut)
+    );
+    assert_eq!(w.ended.ended(), vec![session], "its sockets closed once");
 }

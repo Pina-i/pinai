@@ -3,9 +3,9 @@
 use std::sync::Arc;
 
 use application::auth::{
-    Authorize, ConfirmTotpEnrollment, DisableTotp, ExchangeCode, LogIn, LogOut, PassSecondFactor,
-    RegenerateRecoveryCodes, Register, ResendCode, SendTestMail, ShowSignIn, StartTotpEnrollment,
-    VerifyEmail,
+    Authenticate, Authorize, CompleteSignIn, ConfirmTotpEnrollment, DisableTotp, ExchangeCode,
+    LogIn, LogOut, PassSecondFactor, Refresh, RegenerateRecoveryCodes, Register, ResendCode,
+    SendTestMail, ShowSignIn, StartTotpEnrollment, VerifyEmail,
 };
 use application::e2ee::{
     AppendCommit, ArchiveMessages, CatchUpCommits, ClaimKeyPackage, ClaimWelcomes, ClearArchive,
@@ -39,9 +39,10 @@ use axum::response::IntoResponse;
 use axum_extra::extract::cookie::Key;
 use domain::UserId;
 use domain::auth::testing::{
-    CountingSuffixes, InMemoryClientSignIns, InMemoryClients, InMemoryCodes, InMemorySecondFactors,
-    InMemorySignInAccounts, InMemorySignupCodes, PlainHasher, RecordingMailer, RecordingTickets,
-    SpelledTokens, StepAuthenticator, web_client,
+    CountingSuffixes, InMemoryClientSignIns, InMemoryClients, InMemoryCodes, InMemoryRefreshTokens,
+    InMemorySecondFactors, InMemorySessions, InMemorySignInAccounts, InMemorySignupCodes,
+    PlainHasher, RecordingMailer, RecordingSessionNotifier, RecordingTickets, SpelledTokens,
+    StepAuthenticator, web_client,
 };
 use domain::e2ee::KeyPackagePolicy;
 use domain::e2ee::testing::{
@@ -88,6 +89,9 @@ pub struct SignInFakes {
     pub mailer: Arc<RecordingMailer>,
     pub factors: Arc<InMemorySecondFactors>,
     pub sign_ins: Arc<InMemoryClientSignIns>,
+    pub sessions: Arc<InMemorySessions>,
+    pub ended: Arc<RecordingSessionNotifier>,
+    pub refresh_tokens: Arc<InMemoryRefreshTokens>,
 }
 
 /// Behind the profile routes: accounts' profiles, their friends and avatars.
@@ -182,7 +186,16 @@ impl TestApp {
             tickets: Arc::new(RecordingTickets::default()),
             mailer: Arc::new(RecordingMailer::default()),
             sign_ins: Arc::new(InMemoryClientSignIns::default()),
+            sessions: Arc::new(InMemorySessions::default()),
+            ended: Arc::new(RecordingSessionNotifier::default()),
+            refresh_tokens: Arc::new(InMemoryRefreshTokens::default()),
         };
+        let complete = Arc::new(CompleteSignIn::new(
+            sign_in.sign_ins.clone(),
+            sign_in.codes.clone(),
+            sign_in.sessions.clone(),
+            sign_in.ended.clone(),
+        ));
         let clients = Arc::new(InMemoryClients::with([
             web_client(),
             domain::auth::desktop_client(&origin),
@@ -207,7 +220,7 @@ impl TestApp {
             accounts.clone(),
         ));
         let state = AppState {
-            auth: tokens.clone(),
+            authenticate: Arc::new(Authenticate::new(tokens.clone(), sign_in.sessions.clone())),
             cookie_key: Key::from(&[7u8; 64]),
             sign_in_pages: SignInPages::new(
                 describe_instance.clone(),
@@ -223,24 +236,37 @@ impl TestApp {
                 sign_in.accounts.clone(),
                 sign_in.codes.clone(),
                 sign_in.sign_ins.clone(),
+                sign_in.sessions.clone(),
             )),
             log_in: Arc::new(LogIn::new(
                 clients.clone(),
                 sign_in.accounts.clone(),
                 Arc::new(PlainHasher::default()),
-                sign_in.codes.clone(),
                 sign_in.tickets.clone(),
                 sign_in.signup_codes.clone(),
                 sign_in.mailer.clone(),
-                sign_in.sign_ins.clone(),
+                complete.clone(),
             )),
             exchange_code: Arc::new(ExchangeCode::new(
                 clients.clone(),
                 sign_in.codes.clone(),
                 sign_in.accounts.clone(),
                 Arc::new(SpelledTokens),
+                sign_in.sessions.clone(),
+                sign_in.refresh_tokens.clone(),
             )),
-            log_out: Arc::new(LogOut::new(clients.clone())),
+            refresh: Arc::new(Refresh::new(
+                sign_in.refresh_tokens.clone(),
+                sign_in.sessions.clone(),
+                sign_in.ended.clone(),
+                sign_in.accounts.clone(),
+                Arc::new(SpelledTokens),
+            )),
+            log_out: Arc::new(LogOut::new(
+                clients.clone(),
+                sign_in.sessions.clone(),
+                sign_in.ended.clone(),
+            )),
             login_attempts: crate::LoginAttempts::new(),
             register: Arc::new(Register::new(
                 origin.clone(),
@@ -256,8 +282,7 @@ impl TestApp {
                 clients.clone(),
                 sign_in.accounts.clone(),
                 sign_in.signup_codes.clone(),
-                sign_in.codes.clone(),
-                sign_in.sign_ins.clone(),
+                complete.clone(),
             )),
             resend_code: Arc::new(ResendCode::new(
                 sign_in.accounts.clone(),
@@ -270,8 +295,7 @@ impl TestApp {
                 sign_in.tickets.clone(),
                 sign_in.factors.clone(),
                 authenticator.clone(),
-                sign_in.codes.clone(),
-                sign_in.sign_ins.clone(),
+                complete,
             )),
             start_totp_enrollment: Arc::new(StartTotpEnrollment::new(
                 origin.clone(),
@@ -690,7 +714,7 @@ impl TestApp {
     ) -> (StatusCode, Value) {
         let mut request = Request::builder().method(method).uri(uri);
         if let Some(user) = caller {
-            let token = self.tokens.issue(user);
+            let token = self.token(user);
             request = request.header(header::AUTHORIZATION, format!("Bearer {token}"));
         }
         let request = match body {
@@ -702,9 +726,15 @@ impl TestApp {
         self.send(request.unwrap()).await
     }
 
-    /// A bearer token for `user`, for requests built by hand.
+    /// A bearer token belonging to `session`.
+    pub fn token_in(&self, user: UserId, session: domain::SessionId) -> String {
+        self.tokens.issue(user, session)
+    }
+
+    /// A bearer token for `user`, for requests built by hand: a live session's.
     pub fn token(&self, user: UserId) -> String {
-        self.tokens.issue(user)
+        let session = self.sign_in.sessions.live(user);
+        self.tokens.issue(user, session)
     }
 
     /// A request another instance signed, as `peer`, with the `Digest` of its body.

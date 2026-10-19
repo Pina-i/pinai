@@ -31,8 +31,9 @@ mod ws;
 use std::sync::Arc;
 
 use application::auth::{
-    Authorize, ConfirmTotpEnrollment, DisableTotp, ExchangeCode, LogIn, LogOut, PassSecondFactor,
-    RegenerateRecoveryCodes, Register, ResendCode, SendTestMail, StartTotpEnrollment, VerifyEmail,
+    Authenticate, Authorize, ConfirmTotpEnrollment, DisableTotp, ExchangeCode, LogIn, LogOut,
+    PassSecondFactor, Refresh, RegenerateRecoveryCodes, Register, ResendCode, SendTestMail,
+    StartTotpEnrollment, VerifyEmail,
 };
 use application::e2ee::{
     AppendCommit, ArchiveMessages, CatchUpCommits, ClaimKeyPackage, ClaimWelcomes, ClearArchive,
@@ -64,7 +65,7 @@ use axum::routing::{delete, get, patch, post, put};
 use axum::{Json, Router};
 use axum_extra::extract::cookie::Key;
 use connections::Hub;
-use domain::identity::{InstanceOrigin, SignatureVerifier, TokenVerifier};
+use domain::identity::{InstanceOrigin, SignatureVerifier};
 use domain::messaging::AttachmentLimits;
 use domain::presence::MissedEvents;
 use serde_json::json;
@@ -79,7 +80,8 @@ pub use sign_in::{Jwks, LoginAttempts};
 /// What handlers reach through `State`, built in the composition root.
 #[derive(Clone, FromRef)]
 pub struct AppState {
-    pub auth: Arc<dyn TokenVerifier>,
+    /// Bearer tokens: their signature, then their session.
+    pub authenticate: Arc<Authenticate>,
     /// Signs the session cookie.
     pub cookie_key: Key,
     pub sign_in_pages: SignInPages,
@@ -87,6 +89,7 @@ pub struct AppState {
     pub authorize: Arc<Authorize>,
     pub log_in: Arc<LogIn>,
     pub exchange_code: Arc<ExchangeCode>,
+    pub refresh: Arc<Refresh>,
     pub log_out: Arc<LogOut>,
     pub login_attempts: LoginAttempts,
     pub register: Arc<Register>,

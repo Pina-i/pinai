@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use domain::UserId;
 use domain::auth::testing::{CLIENT_ID, signed_up};
-use domain::identity::{TokenError, TokenVerifier};
+use domain::identity::{Bearer, TokenError, TokenVerifier};
+use domain::{SessionId, UserId};
 use jwt_utils::{EdKeyPair, issue_access_token, load_ed_keypair_from_pem};
 
 use super::*;
@@ -25,6 +25,9 @@ fn keypair() -> Arc<EdKeyPair> {
     Arc::new(keypair)
 }
 
+/// A session these tests' tokens belong to.
+const SESSION: &str = "8c3a1f2e-0b1d-4c55-9a77-1f0e6d2b3a40";
+
 fn token(keypair: &EdKeyPair, issuer: &str, subject: &str, ttl: i64) -> String {
     for_audience(keypair, issuer, issuer, subject, ttl)
 }
@@ -42,6 +45,7 @@ fn for_audience(
         subject,
         audience,
         CLIENT_ID,
+        SESSION,
         "a@idp.test",
         "a",
         ttl,
@@ -50,14 +54,20 @@ fn for_audience(
 }
 
 #[test]
-fn a_token_this_instance_issued_names_its_user() {
+fn a_token_this_instance_issued_names_its_user_and_session() {
     let keypair = keypair();
     let user = UserId::generate();
     let verifier = JwtTokenVerifier::new(keypair.clone(), ISSUER.to_owned());
 
     let verified = verifier.verify(&token(&keypair, ISSUER, &user.to_string(), 60));
 
-    assert_eq!(verified.unwrap(), user);
+    assert_eq!(
+        verified.unwrap(),
+        Bearer {
+            user,
+            session: SessionId::from(uuid::Uuid::parse_str(SESSION).unwrap()),
+        }
+    );
 }
 
 #[test]
@@ -81,24 +91,41 @@ fn an_expired_or_foreign_token_is_refused() {
 }
 
 #[test]
-fn the_tokens_a_code_is_exchanged_for_name_the_account_and_carry_the_nonce() {
+fn the_tokens_a_sign_in_leads_to_name_the_account_and_its_session_and_carry_the_nonce() {
     let keypair = keypair();
     let alice = signed_up("alice");
     let client = ClientId::parse(CLIENT_ID).unwrap();
 
-    let tokens = JwtTokenIssuer::new(keypair.clone(), ISSUER.to_owned())
-        .issue(&alice, &client, Some("the-nonce"), Duration::hours(1))
+    let session = SessionId::generate();
+    let issuer = JwtTokenIssuer::new(keypair.clone(), ISSUER.to_owned());
+    let access_token = issuer
+        .access_token(&alice, session, &client, Duration::hours(1))
+        .unwrap();
+    let id_token = issuer
+        .id_token(&alice, &client, Some("the-nonce"), Duration::hours(1))
         .unwrap();
 
-    let verified = JwtTokenVerifier::new(keypair, ISSUER.to_owned()).verify(&tokens.access_token);
+    let verified = JwtTokenVerifier::new(keypair, ISSUER.to_owned()).verify(&access_token);
     let claims_of = |token: &str| -> serde_json::Value {
         let payload = token.split('.').nth(1).unwrap();
         serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload).unwrap()).unwrap()
     };
-    let claims = claims_of(&tokens.id_token);
-    let access = claims_of(&tokens.access_token);
-    assert_eq!(verified.unwrap(), alice.id);
-    assert_eq!(tokens.expires_in, Duration::hours(1));
+    let claims = claims_of(&id_token);
+    let access = claims_of(&access_token);
+    assert_eq!(
+        verified.unwrap(),
+        Bearer {
+            user: alice.id,
+            session
+        }
+    );
+    assert_eq!(access["sid"], session.to_string());
+    for token in [&access, &claims] {
+        assert_eq!(
+            token["exp"].as_i64().unwrap() - token["iat"].as_i64().unwrap(),
+            3600
+        );
+    }
     assert_eq!(
         (
             &claims["sub"],

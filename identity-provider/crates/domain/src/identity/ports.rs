@@ -1,4 +1,4 @@
-use crate::UserId;
+use crate::{SessionId, UserId};
 
 use super::{Account, ActorUri, FederatedAddress, Handle, RemoteActor};
 
@@ -44,9 +44,17 @@ pub enum RemoteActorsError {
     Unexpected(#[from] anyhow::Error),
 }
 
-/// Checks the access tokens this instance issued, and names the user each one belongs to.
+/// What an access token says: whose it is, and the session it belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Bearer {
+    pub user: UserId,
+    pub session: SessionId,
+}
+
+/// Checks the access tokens this instance issued, by their signature and expiry alone: whether
+/// their session still lives is asked of the sessions.
 pub trait TokenVerifier: Send + Sync {
-    fn verify(&self, token: &str) -> Result<UserId, TokenError>;
+    fn verify(&self, token: &str) -> Result<Bearer, TokenError>;
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -55,6 +63,10 @@ pub enum TokenError {
     Invalid,
     #[error("the token's subject is not a user id")]
     BadSubject,
+    #[error("the token's session has ended")]
+    SessionEnded,
+    #[error(transparent)]
+    Unexpected(#[from] anyhow::Error),
 }
 
 /// Who made a request: an account of this instance, by its bearer token, or another instance,

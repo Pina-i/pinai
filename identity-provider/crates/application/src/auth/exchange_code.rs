@@ -2,26 +2,29 @@ use std::sync::Arc;
 
 use domain::auth::{
     ACCESS_TOKEN_TTL, AuthError, AuthorizationCode, AuthorizationCodes, ClientId, Clients,
-    GRANT_TYPE, SignInAccounts, TokenIssuer, Tokens,
+    RefreshTokens, SessionKind, Sessions, SignInAccounts, TokenIssuer, Tokens,
 };
 use time::OffsetDateTime;
 
-/// `POST /token`, as it arrived.
+/// `POST /token` with `grant_type=authorization_code`, as it arrived.
 #[derive(Debug, Clone)]
 pub struct TokenCommand {
-    pub grant_type: String,
     pub code: String,
     pub redirect_uri: String,
     pub client_id: String,
     pub code_verifier: String,
 }
 
-/// A client trades the code a sign-in ended in for the account's tokens — once.
+/// A client trades the code a sign-in ended in for the account's tokens — once. The refresh
+/// token starts a chain under the browser's session, or under a session of the app's own when
+/// it stays signed in on its device.
 pub struct ExchangeCode {
     clients: Arc<dyn Clients>,
     codes: Arc<dyn AuthorizationCodes>,
     accounts: Arc<dyn SignInAccounts>,
     tokens: Arc<dyn TokenIssuer>,
+    sessions: Arc<dyn Sessions>,
+    refresh_tokens: Arc<dyn RefreshTokens>,
 }
 
 impl ExchangeCode {
@@ -30,12 +33,16 @@ impl ExchangeCode {
         codes: Arc<dyn AuthorizationCodes>,
         accounts: Arc<dyn SignInAccounts>,
         tokens: Arc<dyn TokenIssuer>,
+        sessions: Arc<dyn Sessions>,
+        refresh_tokens: Arc<dyn RefreshTokens>,
     ) -> Self {
         Self {
             clients,
             codes,
             accounts,
             tokens,
+            sessions,
+            refresh_tokens,
         }
     }
 
@@ -44,9 +51,6 @@ impl ExchangeCode {
         command: TokenCommand,
         now: OffsetDateTime,
     ) -> Result<Tokens, AuthError> {
-        if command.grant_type != GRANT_TYPE {
-            return Err(AuthError::UnsupportedGrantType);
-        }
         let client_id =
             ClientId::parse(&command.client_id).map_err(|_| AuthError::UnknownClient)?;
         let client = self
@@ -77,12 +81,38 @@ impl ExchangeCode {
             .by_id(grant.user)
             .await?
             .ok_or(AuthError::CodeUnusable)?;
-        self.tokens.issue(
-            &account,
-            &client.id,
-            grant.nonce.as_deref(),
-            ACCESS_TOKEN_TTL,
-        )
+        // Signed out between the code and its exchange: the code goes with its session.
+        let live = self
+            .sessions
+            .find(grant.session)
+            .await?
+            .is_some_and(|session| session.is_live(now));
+        if !live {
+            return Err(AuthError::CodeUnusable);
+        }
+        let session = if grant.opens_app_session(&client) {
+            self.sessions
+                .open(account.id, &SessionKind::App(client.id.clone()), now)
+                .await?
+        } else {
+            grant.session
+        };
+        Ok(Tokens {
+            access_token: self.tokens.access_token(
+                &account,
+                session,
+                &client.id,
+                ACCESS_TOKEN_TTL,
+            )?,
+            refresh_token: self.refresh_tokens.start(session, &client.id, now).await?,
+            id_token: Some(self.tokens.id_token(
+                &account,
+                &client.id,
+                grant.nonce.as_deref(),
+                ACCESS_TOKEN_TTL,
+            )?),
+            expires_in: ACCESS_TOKEN_TTL,
+        })
     }
 }
 

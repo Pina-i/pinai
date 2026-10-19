@@ -7,8 +7,10 @@ mod client;
 mod client_sign_in;
 mod error;
 mod ports;
+mod refresh;
 mod request;
 mod second_factor;
+mod session;
 mod signup;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod testing;
@@ -22,7 +24,11 @@ pub use client_sign_in::ClientSignIn;
 pub use error::AuthError;
 pub use ports::{
     Authenticator, AuthorizationCodes, ClientSignIns, Clients, HandleSuffixes, LoginTickets,
-    PasswordHasher, SecondFactors, SignInAccounts, SignUps, SignupCodes, SignupMailer, TokenIssuer,
+    PasswordHasher, RefreshTokens, SecondFactors, SessionNotifier, Sessions, SignInAccounts,
+    SignUps, SignupCodes, SignupMailer, TokenIssuer,
+};
+pub use refresh::{
+    Presentation, REFRESH_GRACE, REFRESH_GRANT_TYPE, RefreshLink, RefreshToken, Rotation,
 };
 pub use request::{
     ACCESS_TOKEN_TTL, AuthorizationCode, AuthorizationRequest, CODE_TTL, CodeChallenge, GRANT_TYPE,
@@ -31,6 +37,7 @@ pub use request::{
 pub use second_factor::{
     Enrollment, RECOVERY_CODES, TICKET_ATTEMPTS, Ticket, TicketAttempt, TotpSecret,
 };
+pub use session::{RevokedReason, SESSION_IDLE, SESSION_RETENTION, Session, SessionKind};
 pub use signup::{
     CODE_ATTEMPTS, CodeAttempt, Email, NewAccount, RESEND_LIMIT, RESEND_WINDOW, Registration,
     SPENT_RETENTION, UNVERIFIED_TTL, check_password,

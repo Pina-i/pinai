@@ -11,4 +11,5 @@ name = "connections"
 [dependencies]
 dashmap = { workspace = true }
 tokio   = { workspace = true }
+tokio-util = { workspace = true }
 uuid    = { workspace = true }

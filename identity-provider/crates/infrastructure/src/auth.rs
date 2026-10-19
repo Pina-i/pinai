@@ -9,12 +9,12 @@ use std::sync::Arc;
 use anyhow::Context;
 use argon2::password_hash::SaltString;
 use argon2::{Argon2, PasswordHasher as _, PasswordVerifier};
-use domain::UserId;
 use domain::auth::{
     AuthError, Authenticator, ClientId, HandleSuffixes, PasswordHash, PasswordHasher,
-    SignInAccount, TokenIssuer, Tokens, TotpSecret,
+    SignInAccount, TokenIssuer, TotpSecret,
 };
-use domain::identity::{HandleSuffix, TokenError, TokenVerifier};
+use domain::identity::{Bearer, HandleSuffix, TokenError, TokenVerifier};
+use domain::{SessionId, UserId};
 use jwt_utils::{EdKeyPair, issue_access_token, issue_id_token, validate_access_token};
 use rand::rngs::OsRng;
 use rand::{Rng, RngCore};
@@ -33,15 +33,21 @@ impl JwtTokenVerifier {
 }
 
 impl TokenVerifier for JwtTokenVerifier {
-    fn verify(&self, token: &str) -> Result<UserId, TokenError> {
+    fn verify(&self, token: &str) -> Result<Bearer, TokenError> {
         // RFC 9068: an access token is addressed to this instance's API, whichever client holds it.
         let claims = validate_access_token(token, &self.keypair, &self.issuer, &self.issuer)
             .map_err(|_| TokenError::Invalid)?;
-        claims
+        let user = claims
             .sub
             .parse::<uuid::Uuid>()
             .map(UserId::from)
-            .map_err(|_| TokenError::BadSubject)
+            .map_err(|_| TokenError::BadSubject)?;
+        let session = claims
+            .sid
+            .parse::<uuid::Uuid>()
+            .map(SessionId::from)
+            .map_err(|_| TokenError::Invalid)?;
+        Ok(Bearer { user, session })
     }
 }
 
@@ -58,41 +64,45 @@ impl JwtTokenIssuer {
 }
 
 impl TokenIssuer for JwtTokenIssuer {
-    fn issue(
+    fn access_token(
+        &self,
+        account: &SignInAccount,
+        session: SessionId,
+        client: &ClientId,
+        ttl: Duration,
+    ) -> Result<String, AuthError> {
+        Ok(issue_access_token(
+            &self.keypair,
+            &self.issuer,
+            &account.id.to_string(),
+            &self.issuer,
+            client.as_str(),
+            &session.to_string(),
+            &account.email,
+            &account.username,
+            ttl.whole_seconds(),
+        )
+        .context("sign an access token")?)
+    }
+
+    fn id_token(
         &self,
         account: &SignInAccount,
         client: &ClientId,
         nonce: Option<&str>,
         ttl: Duration,
-    ) -> Result<Tokens, AuthError> {
-        let subject = account.id.to_string();
-        let access_token = issue_access_token(
+    ) -> Result<String, AuthError> {
+        Ok(issue_id_token(
             &self.keypair,
             &self.issuer,
-            &subject,
-            &self.issuer,
-            client.as_str(),
-            &account.email,
-            &account.username,
-            ttl.whole_seconds(),
-        )
-        .context("sign an access token")?;
-        let id_token = issue_id_token(
-            &self.keypair,
-            &self.issuer,
-            &subject,
+            &account.id.to_string(),
             client.as_str(),
             &account.email,
             &account.username,
             nonce.map(ToOwned::to_owned),
             ttl.whole_seconds(),
         )
-        .context("sign an ID token")?;
-        Ok(Tokens {
-            access_token,
-            id_token,
-            expires_in: ttl,
-        })
+        .context("sign an ID token")?)
     }
 }
 

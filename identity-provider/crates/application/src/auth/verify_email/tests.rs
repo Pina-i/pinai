@@ -33,7 +33,7 @@ async fn the_mailed_code_confirms_the_address_and_signs_in() {
 
     let verified = w
         .verify
-        .execute(bob, &code, &a_request(), now())
+        .execute(bob, &code, &a_request(), None, now())
         .await
         .unwrap();
 
@@ -42,10 +42,14 @@ async fn the_mailed_code_confirms_the_address_and_signs_in() {
         verified,
         Verification::SignedIn {
             user: bob,
+            session: w.sessions.all()[0].id,
             code: issued[0].0.clone(),
         }
     );
-    assert_eq!(issued[0].1, Grant::answering(bob, &a_request()));
+    assert_eq!(
+        issued[0].1,
+        Grant::answering(bob, w.sessions.all()[0].id, &a_request())
+    );
     let account: SignInAccount = w.accounts.by_id(bob).await.unwrap().unwrap();
     assert!(account.email_verified);
     assert_eq!(
@@ -62,17 +66,17 @@ async fn a_wrong_code_counts_down_a_malformed_one_is_not_tried_and_an_old_one_is
 
     let malformed = w
         .verify
-        .execute(bob, "12 34", &a_request(), now())
+        .execute(bob, "12 34", &a_request(), None, now())
         .await
         .unwrap();
     let guessed = w
         .verify
-        .execute(bob, wrong, &a_request(), now())
+        .execute(bob, wrong, &a_request(), None, now())
         .await
         .unwrap();
     let late = w
         .verify
-        .execute(bob, &code, &a_request(), now() + SIGNUP_CODE_TTL)
+        .execute(bob, &code, &a_request(), None, now() + SIGNUP_CODE_TTL)
         .await
         .unwrap();
 
@@ -90,12 +94,12 @@ async fn a_confirmed_account_is_sent_to_sign_in_and_an_unknown_one_refused() {
 
     let confirmed = w
         .verify
-        .execute(w.alice.id, "123456", &a_request(), now())
+        .execute(w.alice.id, "123456", &a_request(), None, now())
         .await
         .unwrap();
     let unknown = w
         .verify
-        .execute(UserId::generate(), "123456", &a_request(), now())
+        .execute(UserId::generate(), "123456", &a_request(), None, now())
         .await;
 
     assert_eq!(confirmed, Verification::AlreadyConfirmed);
@@ -118,11 +122,11 @@ async fn a_request_not_from_a_client_is_refused_before_the_code_is_tried() {
         ..a_request()
     };
 
-    let unknown = w.verify.execute(bob, &code, &stranger, now()).await;
-    let unregistered = w.verify.execute(bob, &code, &elsewhere, now()).await;
+    let unknown = w.verify.execute(bob, &code, &stranger, None, now()).await;
+    let unregistered = w.verify.execute(bob, &code, &elsewhere, None, now()).await;
     let fine = w
         .verify
-        .execute(bob, &code, &a_request(), now())
+        .execute(bob, &code, &a_request(), None, now())
         .await
         .unwrap();
 

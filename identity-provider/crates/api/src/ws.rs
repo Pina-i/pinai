@@ -12,7 +12,7 @@ use axum::response::{IntoResponse, Response};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use connections::Frame;
-use domain::identity::TokenError;
+use domain::identity::{Bearer, TokenError};
 use domain::messaging::{MessagingError, MlsCiphertext};
 use domain::presence::{PresenceError, PresenceState};
 use domain::{ConnectionId, UserId};
@@ -39,20 +39,35 @@ pub async fn upgrade(
     Query(query): Query<WsQuery>,
     ws: WebSocketUpgrade,
 ) -> Response {
-    let user = match state.auth.verify(&query.token) {
-        Ok(user) => user,
+    let bearer = match state
+        .authenticate
+        .execute(&query.token, OffsetDateTime::now_utc())
+        .await
+    {
+        Ok(bearer) => bearer,
         Err(TokenError::Invalid) => {
             return (StatusCode::UNAUTHORIZED, "Invalid or expired token").into_response();
         }
         Err(TokenError::BadSubject) => {
             return (StatusCode::UNAUTHORIZED, "Invalid subject claim").into_response();
         }
+        Err(TokenError::SessionEnded) => {
+            return (StatusCode::UNAUTHORIZED, "The session has ended").into_response();
+        }
+        Err(TokenError::Unexpected(e)) => {
+            tracing::error!(error = ?e, "websocket token not checked");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
     };
-    ws.on_upgrade(move |socket| run(socket, user, query.last_event_id, state))
+    ws.on_upgrade(move |socket| run(socket, bearer, query.last_event_id, state))
 }
 
-async fn run(socket: WebSocket, user: UserId, last_event_id: Option<String>, state: AppState) {
-    let (events, handle, first) = state.hub.subscribe(user.as_uuid());
+async fn run(socket: WebSocket, bearer: Bearer, last_event_id: Option<String>, state: AppState) {
+    let user = bearer.user;
+    let (events, handle, first) = state
+        .hub
+        .subscribe(user.as_uuid(), bearer.session.as_uuid());
+    let ended = handle.ended().clone();
     let connection = ConnectionId::from(handle.conn_id());
     let session = match state
         .connect
@@ -72,10 +87,10 @@ async fn run(socket: WebSocket, user: UserId, last_event_id: Option<String>, sta
         None => true,
     };
     if replayed {
-        let forwarding = tokio::spawn(forward(events, sink, state.shutdown.clone()));
-        receive(stream, &state, &session).await;
-        if state.shutdown.is_cancelled() {
-            // It closes the socket, telling the client to reconnect.
+        let forwarding = tokio::spawn(forward(events, sink, state.shutdown.clone(), ended.clone()));
+        receive(stream, &state, &session, &ended).await;
+        if state.shutdown.is_cancelled() || ended.is_cancelled() {
+            // It closes the socket, saying why.
             let _ = forwarding.await;
         } else {
             forwarding.abort();
@@ -122,12 +137,14 @@ async fn replay(
     true
 }
 
-/// The frames pushed to the account, to the socket, until the instance stops: the socket is
-/// then closed as going away.
+/// The frames pushed to the account, to the socket, until the instance stops or the session
+/// the socket was opened under ends: the socket is then closed as going away (the client
+/// reconnects), or for policy (its token is no good any more).
 async fn forward(
     mut frames: mpsc::UnboundedReceiver<Frame>,
     mut sink: SplitSink<WebSocket, Message>,
     stop: CancellationToken,
+    ended: CancellationToken,
 ) {
     loop {
         let frame = tokio::select! {
@@ -136,6 +153,15 @@ async fn forward(
                     .send(Message::Close(Some(CloseFrame {
                         code: close_code::AWAY,
                         reason: "the instance is stopping".into(),
+                    })))
+                    .await;
+                return;
+            }
+            () = ended.cancelled() => {
+                let _ = sink
+                    .send(Message::Close(Some(CloseFrame {
+                        code: close_code::POLICY,
+                        reason: "the session has ended".into(),
                     })))
                     .await;
                 return;
@@ -149,10 +175,16 @@ async fn forward(
     }
 }
 
-async fn receive(mut stream: SplitStream<WebSocket>, state: &AppState, session: &Session) {
+async fn receive(
+    mut stream: SplitStream<WebSocket>,
+    state: &AppState,
+    session: &Session,
+    ended: &CancellationToken,
+) {
     loop {
         let frame = tokio::select! {
             () = state.shutdown.cancelled() => return,
+            () = ended.cancelled() => return,
             frame = stream.next() => frame,
         };
         let Some(Ok(frame)) = frame else { return };

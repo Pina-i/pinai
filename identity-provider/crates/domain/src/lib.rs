@@ -11,6 +11,6 @@ pub mod validation;
 
 pub use ids::{
     AttachmentId, CommitId, ConnectionId, ConversationId, DeviceId, FriendshipId, GroupEventId,
-    MessageId, TicketId, UserId, WelcomeId,
+    MessageId, SessionId, TicketId, UserId, WelcomeId,
 };
 pub use validation::ValidationError;
