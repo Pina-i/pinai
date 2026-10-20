@@ -5,8 +5,8 @@
 The IdP is the OpenID provider of its own accounts. There is one flow — the authorization code
 flow with PKCE (`S256`) — for public clients, which hold no secret. Any client may sign its users
 in here: it is known by the document it publishes (§ "Clients"). The IdP serves the sign-in pages
-itself (§ "The sign-in pages"), so a password is only ever typed on the server that checks it,
-and no client — a web client elsewhere, the desktop app's system browser — ever sees it.
+itself (§ "The sign-in pages"), so a password is only ever typed on the server that checks it —
+in the browser for a web client, in its own window for the desktop app — and goes nowhere else.
 
 ```mermaid
 sequenceDiagram
@@ -99,9 +99,8 @@ user's own instance, and a new desktop redirect URI or scope ships with the inst
    app with its password (§ "The session cookie"), is handed a code at once; any other goes to
    the login page, carrying the request and the client's theme (§ "The sign-in pages").
 4. `prompt=login` (OpenID Connect Core § 3.1.2.1) always goes to the login page, whatever session
-   the browser holds. The desktop app sends it at each sign-in: it signs in through the system
-   browser, which may hold another account's session, and the user can pick another account
-   there.
+   the browser holds. The desktop app sends it at each sign-in: its window keeps the IdP's
+   cookie like a browser, and the user can pick another account there.
 
 ### The sign-in pages
 
@@ -429,8 +428,8 @@ error="invalid_token"` when one was.
 RFC 7009, how an app holding its own session signs out — the desktop: `client_id`, `token` (its
 refresh token), `token_type_hint` (not read: refresh tokens are the only kind revoked here). The
 token's session ends (`sign_out`) — every token of it, and its WebSockets — whether the token is
-the head of its chain or a rotated one. The browser the app signed in through keeps its own
-session.
+the head of its chain or a rotated one. The browser session its window signed in through is
+left alone.
 
 `200` with no body for a token unknown here, or another client's, as for a revoked one: the
 endpoint tells nothing of tokens. `400 invalid_request` without a token; `401 invalid_client` for
@@ -509,11 +508,11 @@ registered, and the JSON `POST /register` creates accounts, not clients.
 - **A stolen refresh token.** The thief refreshes with it; at the owner's next refresh the token
   comes back already rotated, and the session ends for both — every token, every socket. The owner
   signs in again; the thief can't.
-- **The desktop app staying signed in.** Its sign-in goes through the system browser
-  (`offline_access`, `prompt=login`) and comes back through `io.github.pina-i:/callback`; the
-  exchange opens an app session that refreshes on its own. Signing out of that browser leaves the
-  app signed in; three months without opening the app sign it out. Signing out of the app revokes
-  its refresh token (`/revoke`) and leaves the browser signed in; its next sign-in asks the
+- **The desktop app staying signed in.** It shows these pages in its own window
+  (`offline_access`, `prompt=login`), and catches the answer to `io.github.pina-i:/callback`
+  there; the exchange opens an app session that refreshes on its own, apart from the browser
+  session the window signed in through. Three months without opening the app sign it out.
+  Signing out of the app revokes its refresh token (`/revoke`); its next sign-in asks the
   password, so another account can be picked.
 - **A lost phone.** From the laptop, Settings → Devices shows the phone "Active 2 hours ago";
   revoking it signs it out at once — its socket closes, its next request and renewal are refused —
