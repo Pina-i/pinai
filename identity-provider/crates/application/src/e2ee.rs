@@ -22,7 +22,7 @@ pub use delivery::{
     ReceiveCommit, ReceiveWelcome, SendWelcome, SweepWelcomes,
 };
 pub use key_package_status::{DeviceStash, KeyPackageStatus, StashStatus};
-pub use list_devices::ListDevices;
+pub use list_devices::{ListDevices, ListedDevice};
 pub use register_device::{RegisterDevice, Registered};
 pub use revoke_device::RevokeDevice;
 pub use sweep_key_packages::SweepKeyPackages;

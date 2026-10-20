@@ -4,8 +4,9 @@ use std::sync::Arc;
 
 use application::auth::{
     Authenticate, Authorize, CompleteSignIn, ConfirmTotpEnrollment, DisableTotp, ExchangeCode,
-    LogIn, LogOut, PassSecondFactor, Refresh, RegenerateRecoveryCodes, Register, ResendCode,
-    SendTestMail, ShowSignIn, StartTotpEnrollment, VerifyEmail,
+    LinkDevice, LogIn, LogOut, PassSecondFactor, Refresh, RegenerateRecoveryCodes, Register,
+    ResendCode, RevokeToken, SendTestMail, ShowSignIn, SignOutOthers, StartTotpEnrollment,
+    VerifyEmail,
 };
 use application::e2ee::{
     AppendCommit, ArchiveMessages, CatchUpCommits, ClaimKeyPackage, ClaimWelcomes, ClearArchive,
@@ -255,6 +256,11 @@ impl TestApp {
                 sign_in.sessions.clone(),
                 sign_in.refresh_tokens.clone(),
             )),
+            revoke_token: Arc::new(RevokeToken::new(
+                sign_in.refresh_tokens.clone(),
+                sign_in.sessions.clone(),
+                sign_in.ended.clone(),
+            )),
             refresh: Arc::new(Refresh::new(
                 sign_in.refresh_tokens.clone(),
                 sign_in.sessions.clone(),
@@ -264,6 +270,15 @@ impl TestApp {
             )),
             log_out: Arc::new(LogOut::new(
                 clients.clone(),
+                sign_in.sessions.clone(),
+                sign_in.ended.clone(),
+            )),
+            link_device: Arc::new(LinkDevice::new(
+                keys.clone(),
+                sign_in.sessions.clone(),
+                sign_in.ended.clone(),
+            )),
+            sign_out_others: Arc::new(SignOutOthers::new(
                 sign_in.sessions.clone(),
                 sign_in.ended.clone(),
             )),
@@ -612,8 +627,12 @@ impl TestApp {
                 Arc::new(PlainAttester),
                 device_notifier.clone(),
             )),
-            list_devices: Arc::new(ListDevices::new(keys.clone())),
-            revoke_device: Arc::new(RevokeDevice::new(keys.clone())),
+            list_devices: Arc::new(ListDevices::new(keys.clone(), sign_in.sessions.clone())),
+            revoke_device: Arc::new(RevokeDevice::new(
+                keys.clone(),
+                sign_in.sessions.clone(),
+                sign_in.ended.clone(),
+            )),
             upload_key_packages: Arc::new(UploadKeyPackages::new(
                 key_policy,
                 keys.clone(),

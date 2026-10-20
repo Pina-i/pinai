@@ -19,6 +19,7 @@ mod privacy;
 mod profile;
 pub mod rate_limit;
 mod second_factor;
+mod sessions;
 mod settings;
 mod sign_in;
 mod sign_up;
@@ -31,9 +32,9 @@ mod ws;
 use std::sync::Arc;
 
 use application::auth::{
-    Authenticate, Authorize, ConfirmTotpEnrollment, DisableTotp, ExchangeCode, LogIn, LogOut,
-    PassSecondFactor, Refresh, RegenerateRecoveryCodes, Register, ResendCode, SendTestMail,
-    StartTotpEnrollment, VerifyEmail,
+    Authenticate, Authorize, ConfirmTotpEnrollment, DisableTotp, ExchangeCode, LinkDevice, LogIn,
+    LogOut, PassSecondFactor, Refresh, RegenerateRecoveryCodes, Register, ResendCode, RevokeToken,
+    SendTestMail, SignOutOthers, StartTotpEnrollment, VerifyEmail,
 };
 use application::e2ee::{
     AppendCommit, ArchiveMessages, CatchUpCommits, ClaimKeyPackage, ClaimWelcomes, ClearArchive,
@@ -90,7 +91,10 @@ pub struct AppState {
     pub log_in: Arc<LogIn>,
     pub exchange_code: Arc<ExchangeCode>,
     pub refresh: Arc<Refresh>,
+    pub revoke_token: Arc<RevokeToken>,
     pub log_out: Arc<LogOut>,
+    pub link_device: Arc<LinkDevice>,
+    pub sign_out_others: Arc<SignOutOthers>,
     pub login_attempts: LoginAttempts,
     pub register: Arc<Register>,
     pub verify_email: Arc<VerifyEmail>,
@@ -222,6 +226,7 @@ pub fn router(state: AppState) -> Router {
         .route("/authorize", get(sign_in::authorize))
         .route("/login", get(sign_in::login_page).post(sign_in::log_in))
         .route("/token", post(sign_in::token))
+        .route("/revoke", post(sign_in::revoke))
         .route("/logout", get(sign_in::log_out))
         .route("/signed-out", get(sign_in::signed_out))
         .route("/register", post(sign_up::register))
@@ -256,6 +261,8 @@ pub fn router(state: AppState) -> Router {
             "/api/keys/devices/{device_id}/revoke",
             post(key_directory::revoke),
         )
+        .route("/api/sessions", delete(sessions::sign_out_others))
+        .route("/api/sessions/current/device", put(sessions::link_device))
         .route("/api/keys/packages", post(key_directory::upload))
         .route("/api/keys/packages/claim", post(key_directory::claim))
         .route(

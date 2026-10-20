@@ -400,6 +400,10 @@ async fn a_client_discovers_the_endpoints_and_the_keys() {
     );
     assert_eq!(discovery["client_id_metadata_document_supported"], true);
     assert_eq!(
+        discovery["revocation_endpoint"],
+        "http://localhost:8080/revoke"
+    );
+    assert_eq!(
         discovery["grant_types_supported"],
         json!(["authorization_code", "refresh_token"])
     );
@@ -980,4 +984,81 @@ async fn the_desktop_staying_signed_in_keeps_its_session_when_the_browser_signs_
     assert_eq!(app.sign_in.ended.ended(), vec![browser]);
     assert_eq!(still, StatusCode::OK, "the app's session lives on");
     assert_eq!(renewed, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn prompt_login_shows_the_login_page_to_a_browser_already_signed_in() {
+    let alice = signed_up("alice");
+    let app = app_with(std::slice::from_ref(&alice)).await;
+    let signed_in = app.respond(login(&alice.email, "alice-password")).await;
+    let cookie = set_cookie(&signed_in).split(';').next().unwrap().to_owned();
+
+    let silent = app.respond(get(&authorize_uri(&[]), Some(&cookie))).await;
+    let asked = app
+        .respond(get(&authorize_uri(&[("prompt", "login")]), Some(&cookie)))
+        .await;
+
+    assert!(
+        location(&silent).starts_with(REDIRECT_URI),
+        "{}",
+        location(&silent)
+    );
+    assert!(
+        location(&asked).starts_with("/login?"),
+        "{}",
+        location(&asked)
+    );
+}
+
+fn revoke(client: &str, token: &str) -> Request<Body> {
+    post_form(
+        "/revoke",
+        &[
+            ("client_id", client),
+            ("token", token),
+            ("token_type_hint", "refresh_token"),
+        ],
+    )
+}
+
+#[tokio::test]
+async fn revoking_the_refresh_token_signs_its_session_out() {
+    let alice = signed_up("alice");
+    let app = app_with(std::slice::from_ref(&alice)).await;
+    app.respond(login(&alice.email, "alice-password")).await;
+    let session = app.sign_in.sessions.all()[0].id;
+    app.respond(exchange("code-1", VERIFIER)).await;
+
+    let revoked = app.respond(revoke(CLIENT_ID, "refresh-1")).await;
+    let (after, _) = app.send(refresh(CLIENT_ID, "refresh-1")).await;
+    let (bearer, _) = app
+        .send(bearer_get("/api/friends", &app.token_in(alice.id, session)))
+        .await;
+
+    assert_eq!(revoked.status(), StatusCode::OK);
+    assert_eq!(revoked.headers()[header::CACHE_CONTROL], "no-store");
+    assert_eq!(
+        app.sign_in.sessions.reason(session),
+        Some(domain::auth::RevokedReason::SignOut)
+    );
+    assert_eq!(
+        (after, bearer),
+        (StatusCode::BAD_REQUEST, StatusCode::UNAUTHORIZED)
+    );
+}
+
+#[tokio::test]
+async fn revoking_an_unknown_token_is_answered_alike_and_a_missing_one_is_a_bad_request() {
+    let app = app_with(&[]).await;
+
+    let unknown = app.respond(revoke(CLIENT_ID, "a-guess")).await.status();
+    let (missing, body) = app.send(revoke(CLIENT_ID, "")).await;
+    let (stranger, _) = app.send(revoke("stranger", "a-guess")).await;
+
+    assert_eq!(unknown, StatusCode::OK);
+    assert_eq!(
+        (missing, body["error"].as_str()),
+        (StatusCode::BAD_REQUEST, Some("invalid_request"))
+    );
+    assert_eq!(stranger, StatusCode::UNAUTHORIZED);
 }

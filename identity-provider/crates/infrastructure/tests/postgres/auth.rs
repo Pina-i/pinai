@@ -6,7 +6,7 @@ use domain::auth::{
     AuthorizationCodes, LoginTickets, RefreshTokens, Rotation, SessionKind, Sessions,
     SignInAccount, SignupCodes,
 };
-use domain::{SessionId, UserId};
+use domain::{DeviceId, SessionId, UserId};
 use hmac::{Hmac, Mac};
 use infrastructure::postgres::{
     PgAuthorizationCodes, PgClientSignIns, PgLoginTickets, PgRefreshTokens, PgSecondFactors,
@@ -113,6 +113,64 @@ fn later() -> OffsetDateTime {
     OffsetDateTime::now_utc() + Duration::minutes(5)
 }
 
+async fn a_device_of(pool: &PgPool, user: UserId) -> DeviceId {
+    let device = DeviceId::generate();
+    sqlx::query(
+        "INSERT INTO user_devices (device_id, user_id, display_name, kind) \
+         VALUES ($1, $2, 'Firefox on Linux', 'laptop')",
+    )
+    .bind(device.as_uuid())
+    .bind(user.as_uuid())
+    .execute(pool)
+    .await
+    .expect("seed a device");
+    device
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn a_device_holds_one_session_the_latest_linked(pool: PgPool) {
+    let user = a_user(&pool).await;
+    let device = a_device_of(&pool, user).await;
+    contract::a_device_holds_one_session_the_latest_linked(&PgSessions::new(pool), user, device)
+        .await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn a_revoked_device_and_signing_out_elsewhere_end_the_right_sessions(pool: PgPool) {
+    let (user, other) = (a_user(&pool).await, a_user(&pool).await);
+    let device = a_device_of(&pool, user).await;
+    contract::a_revoked_device_and_signing_out_elsewhere_end_the_right_sessions(
+        &PgSessions::new(pool),
+        user,
+        other,
+        device,
+    )
+    .await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn a_session_forgets_a_device_deleted_with_its_rows(pool: PgPool) {
+    let user = a_user(&pool).await;
+    let device = a_device_of(&pool, user).await;
+    let sessions = PgSessions::new(pool.clone());
+    let session = sessions
+        .open(user, &SessionKind::Browser, OffsetDateTime::now_utc())
+        .await
+        .unwrap();
+    sessions
+        .link(session, device, OffsetDateTime::now_utc())
+        .await
+        .unwrap();
+
+    sqlx::query("DELETE FROM user_devices WHERE device_id = $1")
+        .bind(device.as_uuid())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    assert_eq!(sessions.find(session).await.unwrap().unwrap().device, None);
+}
+
 async fn a_session(pool: &PgPool) -> SessionId {
     let user = a_user(pool).await;
     PgSessions::new(pool.clone())
@@ -135,6 +193,16 @@ async fn a_refresh_token_rotates_at_each_use_and_a_used_one_is_reused(pool: PgPo
 async fn a_lost_answer_is_answered_again_within_the_grace(pool: PgPool) {
     let session = a_session(&pool).await;
     contract::a_lost_answer_is_answered_again_within_the_grace(
+        &PgRefreshTokens::new(pool),
+        session,
+    )
+    .await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn a_refresh_token_names_its_session_to_its_own_client_only(pool: PgPool) {
+    let session = a_session(&pool).await;
+    contract::a_refresh_token_names_its_session_to_its_own_client_only(
         &PgRefreshTokens::new(pool),
         session,
     )

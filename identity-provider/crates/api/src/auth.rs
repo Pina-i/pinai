@@ -11,7 +11,7 @@ use axum::http::request::Parts;
 use axum::http::{HeaderMap, Method, Uri};
 use domain::UserId;
 use domain::identity::{
-    ActorUri, Requester, SignatureError, SignatureVerifier, SignedRequest, TokenError,
+    ActorUri, Bearer, Requester, SignatureError, SignatureVerifier, SignedRequest, TokenError,
 };
 use time::OffsetDateTime;
 
@@ -30,6 +30,22 @@ where
     type Rejection = ApiError;
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let SignedIn(bearer) = SignedIn::from_request_parts(parts, state).await?;
+        Ok(Self(bearer.user))
+    }
+}
+
+/// The same, with the session the token belongs to: for the routes about that session.
+pub struct SignedIn(pub Bearer);
+
+impl<S> FromRequestParts<S> for SignedIn
+where
+    Arc<Authenticate>: FromRef<S>,
+    S: Send + Sync,
+{
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let token = parts
             .headers
             .get(AUTHORIZATION)
@@ -41,7 +57,7 @@ where
         let bearer = Arc::<Authenticate>::from_ref(state)
             .execute(token, OffsetDateTime::now_utc())
             .await?;
-        Ok(Self(bearer.user))
+        Ok(Self(bearer))
     }
 }
 

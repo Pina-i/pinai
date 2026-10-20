@@ -46,6 +46,13 @@ impl CodeChallenge {
     }
 }
 
+/// The request asks the password again, whatever session the browser holds: `login` among its
+/// `prompt` values (OpenID Connect Core § 3.1.2.1). The desktop app asks it at each sign-in, so a
+/// user can pick another account than the system browser's.
+pub fn prompts_login(prompt: Option<&str>) -> bool {
+    prompt.is_some_and(|prompt| prompt.split_whitespace().any(|value| value == "login"))
+}
+
 /// What a client asks for when it sends a user to sign in: carried through the sign-in pages,
 /// and kept with the code the sign-in ends in.
 #[derive(Debug, Clone, PartialEq, Eq)]

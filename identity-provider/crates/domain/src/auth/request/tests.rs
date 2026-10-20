@@ -70,3 +70,12 @@ fn only_a_client_allowed_to_stay_signed_in_that_asked_to_opens_an_app_session() 
         "a web client never may"
     );
 }
+
+#[test]
+fn login_among_the_prompt_values_asks_the_password_again() {
+    assert!(prompts_login(Some("login")));
+    assert!(prompts_login(Some("consent login")));
+    assert!(!prompts_login(Some("none")));
+    assert!(!prompts_login(Some("loginx")));
+    assert!(!prompts_login(None));
+}

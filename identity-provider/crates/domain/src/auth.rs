@@ -32,12 +32,14 @@ pub use refresh::{
 };
 pub use request::{
     ACCESS_TOKEN_TTL, AuthorizationCode, AuthorizationRequest, CODE_TTL, CodeChallenge, GRANT_TYPE,
-    Grant, LOGIN_TICKET_TTL, OtpCode, RESPONSE_TYPE, SIGNUP_CODE_TTL, Tokens,
+    Grant, LOGIN_TICKET_TTL, OtpCode, RESPONSE_TYPE, SIGNUP_CODE_TTL, Tokens, prompts_login,
 };
 pub use second_factor::{
     Enrollment, RECOVERY_CODES, TICKET_ATTEMPTS, Ticket, TicketAttempt, TotpSecret,
 };
-pub use session::{RevokedReason, SESSION_IDLE, SESSION_RETENTION, Session, SessionKind};
+pub use session::{
+    RevokedReason, SESSION_IDLE, SESSION_RETENTION, Session, SessionKind, last_active,
+};
 pub use signup::{
     CODE_ATTEMPTS, CodeAttempt, Email, NewAccount, RESEND_LIMIT, RESEND_WINDOW, Registration,
     SPENT_RETENTION, UNVERIFIED_TTL, check_password,

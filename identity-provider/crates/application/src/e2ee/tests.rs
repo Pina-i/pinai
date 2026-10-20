@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
 use domain::DeviceId;
+use domain::auth::testing::{InMemorySessions, RecordingSessionNotifier};
+use domain::auth::{RevokedReason, SessionKind, Sessions};
 use domain::e2ee::testing::{
     InMemoryKeyDirectory, InMemoryRemoteKeyPackages, PlainAttester, RecordingDeviceNotifier,
 };
@@ -22,6 +24,8 @@ struct World {
     carol: RemoteActor,
     carols_claim: Claim,
     store: Arc<InMemoryKeyDirectory>,
+    sessions: Arc<InMemorySessions>,
+    ended: Arc<RecordingSessionNotifier>,
     notifier: Arc<RecordingDeviceNotifier>,
     remote: Arc<InMemoryRemoteKeyPackages>,
     reach: Arc<StubReachability>,
@@ -82,6 +86,8 @@ fn world() -> World {
     };
     let accounts = Arc::new(InMemoryAccounts::with([alice.clone(), bob.clone()]));
     let store = Arc::new(InMemoryKeyDirectory::default());
+    let sessions = Arc::new(InMemorySessions::default());
+    let ended = Arc::new(RecordingSessionNotifier::default());
     let notifier = Arc::new(RecordingDeviceNotifier::default());
     let reach = Arc::new(StubReachability::default());
     let remote = Arc::new(InMemoryRemoteKeyPackages::with(
@@ -95,8 +101,8 @@ fn world() -> World {
             Arc::new(PlainAttester),
             notifier.clone(),
         ),
-        list: ListDevices::new(store.clone()),
-        revoke: RevokeDevice::new(store.clone()),
+        list: ListDevices::new(store.clone(), sessions.clone()),
+        revoke: RevokeDevice::new(store.clone(), sessions.clone(), ended.clone()),
         upload: UploadKeyPackages::new(policy(), store.clone(), store.clone()),
         claim: ClaimKeyPackage::new(
             InstanceOrigin::parse("http://localhost:8080").unwrap(),
@@ -114,6 +120,8 @@ fn world() -> World {
         carol,
         carols_claim,
         store,
+        sessions,
+        ended,
         notifier,
         remote,
         reach,
@@ -220,17 +228,62 @@ async fn the_owner_lists_its_own_devices() {
         .unwrap();
     w.upload(&w.alice, phone, batch(1)).await;
     w.upload(&w.bob, DeviceId::generate(), batch(1)).await;
+    let session = w
+        .sessions
+        .open(
+            w.alice.id,
+            &SessionKind::Browser,
+            now() - Duration::hours(2),
+        )
+        .await
+        .unwrap();
+    w.sessions.link(session, laptop, now()).await.unwrap();
 
-    let listed: Vec<DeviceId> = w
+    let listed: Vec<(DeviceId, Option<OffsetDateTime>)> = w
         .list
-        .execute(w.alice.id)
+        .execute(w.alice.id, now())
         .await
         .unwrap()
         .iter()
-        .map(|d| d.id)
+        .map(|d| (d.device.id, d.last_active_at))
         .collect();
 
-    assert_eq!(listed, vec![phone, laptop]);
+    assert_eq!(
+        listed,
+        vec![(phone, None), (laptop, Some(now() - Duration::hours(2)))],
+        "the laptop is signed in, the phone isn't"
+    );
+}
+
+#[tokio::test]
+async fn revoking_a_device_signs_it_out() {
+    let w = world();
+    let device = DeviceId::generate();
+    w.upload(&w.alice, device, batch(1)).await;
+    let session = w
+        .sessions
+        .open(w.alice.id, &SessionKind::Browser, now())
+        .await
+        .unwrap();
+    w.sessions.link(session, device, now()).await.unwrap();
+
+    let by_bob = w.revoke.execute(w.bob.id, device, now()).await;
+    let still = w
+        .sessions
+        .find(session)
+        .await
+        .unwrap()
+        .unwrap()
+        .is_live(now());
+    w.revoke.execute(w.alice.id, device, now()).await.unwrap();
+
+    assert!(matches!(by_bob, Err(KeyDirectoryError::DeviceNotFound)));
+    assert!(still, "another account's revoke ends nothing");
+    assert_eq!(
+        w.sessions.reason(session),
+        Some(RevokedReason::DeviceRevoked)
+    );
+    assert_eq!(w.ended.ended(), vec![session], "its sockets close");
 }
 
 #[tokio::test]
@@ -239,10 +292,13 @@ async fn a_device_is_revoked_by_its_owner_and_not_found_by_anyone_else() {
     let device = DeviceId::generate();
     w.upload(&w.alice, device, batch(1)).await;
 
-    let by_bob = w.revoke.execute(w.bob.id, device).await;
-    let unknown = w.revoke.execute(w.alice.id, DeviceId::generate()).await;
-    w.revoke.execute(w.alice.id, device).await.unwrap();
-    let again = w.revoke.execute(w.alice.id, device).await;
+    let by_bob = w.revoke.execute(w.bob.id, device, now()).await;
+    let unknown = w
+        .revoke
+        .execute(w.alice.id, DeviceId::generate(), now())
+        .await;
+    w.revoke.execute(w.alice.id, device, now()).await.unwrap();
+    let again = w.revoke.execute(w.alice.id, device, now()).await;
 
     assert!(
         matches!(by_bob, Err(KeyDirectoryError::DeviceNotFound)),
@@ -511,7 +567,7 @@ async fn a_revoked_device_neither_renews_its_attestation_nor_publishes_key_packa
         .execute(w.alice.id, device, key(1), now())
         .await
         .unwrap();
-    w.revoke.execute(w.alice.id, device).await.unwrap();
+    w.revoke.execute(w.alice.id, device, now()).await.unwrap();
 
     let renewal = w.register.execute(w.alice.id, device, key(1), now()).await;
     let upload = w

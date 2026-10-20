@@ -98,6 +98,10 @@ user's own instance, and a new desktop redirect URI or scope ships with the inst
 3. A browser with a session cookie, for an account that still exists and that signed in to this
    app with its password (§ "The session cookie"), is handed a code at once; any other goes to
    the login page, carrying the request and the client's theme (§ "The sign-in pages").
+4. `prompt=login` (OpenID Connect Core § 3.1.2.1) always goes to the login page, whatever session
+   the browser holds. The desktop app sends it at each sign-in: it signs in through the system
+   browser, which may hold another account's session, and the user can pick another account
+   there.
 
 ### The sign-in pages
 
@@ -227,10 +231,13 @@ CREATE TABLE sessions (
     user_id        UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     kind           TEXT NOT NULL,           -- browser | app
     client_id      TEXT,                    -- an app session's client, and only theirs
+    device_id      UUID REFERENCES user_devices(device_id) ON DELETE SET NULL,
+                                            -- the E2EE device it signed in (§ "Sessions and devices")
     created_at     TIMESTAMPTZ NOT NULL,
     last_used_at   TIMESTAMPTZ NOT NULL,    -- the last sign-in or refresh that used it
     revoked_at     TIMESTAMPTZ,
-    revoked_reason TEXT                     -- sign_out | replaced | reuse
+    revoked_reason TEXT                     -- sign_out | replaced | reuse | device_revoked
+                                            --   | signed_out_elsewhere
 );
 -- and authorization_codes.session_id: the browser session a code was issued under
 ```
@@ -240,7 +247,10 @@ stateDiagram-v2
     [*] --> Live: a password sign-in (browser), a code exchange staying signed in (app)
     Live --> Live: a silent /authorize, a refresh (used again)
     Live --> Ended: /logout (sign_out), another account signs in here (replaced)
+    Live --> Ended: a new session on its device (replaced)
     Live --> Ended: a rotated refresh token presented again (reuse)
+    Live --> Ended: its device revoked (device_revoked)
+    Live --> Ended: the account signs out of every other device (signed_out_elsewhere)
     Live --> Ended: 90 days without use
     Ended --> [*]: swept a month later
 ```
@@ -259,7 +269,7 @@ stateDiagram-v2
   authenticated request and the `/ws` upgrade check that it still lives — one read by primary key
   — so an ended session's tokens stop at once, not an hour later: `401 invalid_token`, "The
   session has ended". A refresh token works while its session lives (§ "Tokens").
-- **Ending one** (`/logout`, a replacement, a reuse) also closes the account's WebSockets opened
+- **Ending one** (`/logout`, a replacement, a reuse, a revoked device, a sign-out elsewhere) also closes the account's WebSockets opened
   under it, with `1008` ("the session has ended"); a reconnect with its token is refused `401`.
 - **Swept** by the hourly sign-up sweep (§ 2) a month after it ended: revoked then, or idle past its
   90 days. Its refresh tokens go with it.
@@ -292,6 +302,43 @@ The secret makes two keys, each derived from all of it with HKDF-SHA256 under a 
 the session cookie's (`pinai idp: session cookies`) and the attachment links'
 (`pinai idp: attachment links`, `identity-provider/specs/attachments.md`). No purpose
 shares another's key, and a new secret signs everyone out.
+
+### Sessions and devices
+
+A session is tied to the E2EE device it signed in (`identity-provider/specs/e2ee.md § 3.1`), so
+revoking a device signs it out, and the Devices screen tells which devices are signed in.
+
+```mermaid
+sequenceDiagram
+    participant D as client (a device)
+    participant I as IdP
+    participant O as client (another device)
+    D->>I: PUT /api/sessions/current/device { device_id }
+    I->>I: the session names the device; the device's earlier session ends (replaced)
+    O->>I: GET /api/keys/devices
+    I-->>O: … signed_in, last_active_at
+    O->>I: POST /api/keys/devices/:id/revoke
+    I->>I: the device's sessions end (device_revoked), then its directory flag
+    I-->>D: its sockets close (1008); its tokens and refresh tokens refused
+```
+
+- **`PUT /api/sessions/current/device`** `{ device_id }`: the bearer's session names its device.
+  The client sends it once the account's device storage is open and the device exists — on a
+  first sign-in, after the onboarding that creates it. `204`; `403 access_denied` "Not one of
+  your devices, or revoked" for a device that isn't the account's, is revoked, or is unknown.
+- **A device is signed in once at a time.** Linking a session ends the device's other live
+  sessions (`replaced`): signing in again on a device — after the browser lost its cookie, or a
+  desktop app its refresh token — leaves no session behind.
+- **`GET /api/keys/devices`** answers each device's `signed_in` (a live session of it) and
+  `last_active_at` (that session's last use: a sign-in, a silent `/authorize` or a refresh), null
+  when signed out (`last_active`).
+- **Revoking a device** (`POST /api/keys/devices/:device_id/revoke`) ends its sessions
+  (`device_revoked`) — their tokens, refresh tokens and sockets — then sets the directory flag.
+  The sessions go first: if the flag fails, the device is out all the same, and revoking again
+  finishes. A revoked device can't link a new session.
+- **`DELETE /api/sessions?keep=current`** ends every session of the account but the caller's
+  (`signed_out_elsewhere`): other browsers, other apps, linked to a device or not. The devices
+  stay, and each may sign in again as the same device. `204`; `400` without `keep=current`.
 
 ### `POST /token`
 
@@ -377,6 +424,18 @@ A bearer token that is missing or unusable is answered `401 invalid_token`, with
 RFC 6750 § 3 asks for: `WWW-Authenticate: Bearer` when none was sent, `Bearer
 error="invalid_token"` when one was.
 
+### `POST /revoke`
+
+RFC 7009, how an app holding its own session signs out — the desktop: `client_id`, `token` (its
+refresh token), `token_type_hint` (not read: refresh tokens are the only kind revoked here). The
+token's session ends (`sign_out`) — every token of it, and its WebSockets — whether the token is
+the head of its chain or a rotated one. The browser the app signed in through keeps its own
+session.
+
+`200` with no body for a token unknown here, or another client's, as for a revoked one: the
+endpoint tells nothing of tokens. `400 invalid_request` without a token; `401 invalid_client` for
+a `client_id` that isn't a client URL. `Cache-Control: no-store`.
+
 ### Calls from a browser
 
 Every route answers CORS for any origin (`Access-Control-Allow-Origin: *`), because pages served
@@ -400,7 +459,8 @@ else goes to the instance's own `/signed-out` page: the endpoint is never an ope
 
 ### Discovery
 
-`GET /.well-known/openid-configuration` (OpenID Connect Discovery 1.0 § 4) names the endpoints,
+`GET /.well-known/openid-configuration` (OpenID Connect Discovery 1.0 § 4) names the endpoints —
+`revocation_endpoint` with `revocation_endpoint_auth_methods_supported: ["none"]` among them —
 `scopes_supported: ["openid", "profile", "email", "offline_access"]`,
 `response_types_supported: ["code"]`, `grant_types_supported: ["authorization_code", "refresh_token"]`,
 `code_challenge_methods_supported: ["S256"]`, `id_token_signing_alg_values_supported: ["EdDSA"]`,
@@ -449,9 +509,17 @@ registered, and the JSON `POST /register` creates accounts, not clients.
 - **A stolen refresh token.** The thief refreshes with it; at the owner's next refresh the token
   comes back already rotated, and the session ends for both — every token, every socket. The owner
   signs in again; the thief can't.
-- **The desktop app staying signed in.** Its first sign-in goes through the system browser; the
+- **The desktop app staying signed in.** Its sign-in goes through the system browser
+  (`offline_access`, `prompt=login`) and comes back through `io.github.pina-i:/callback`; the
   exchange opens an app session that refreshes on its own. Signing out of that browser leaves the
-  app signed in; three months without opening the app sign it out.
+  app signed in; three months without opening the app sign it out. Signing out of the app revokes
+  its refresh token (`/revoke`) and leaves the browser signed in; its next sign-in asks the
+  password, so another account can be picked.
+- **A lost phone.** From the laptop, Settings → Devices shows the phone "Active 2 hours ago";
+  revoking it signs it out at once — its socket closes, its next request and renewal are refused —
+  and takes it out of every group.
+- **"Sign out other devices".** Every other browser and app signs in again with the password;
+  this one stays. The devices aren't revoked: each comes back as itself.
 
 ## 2. Sign-up email verification
 

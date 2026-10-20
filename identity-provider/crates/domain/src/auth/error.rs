@@ -16,6 +16,8 @@ pub enum AuthError {
     CodeUnusable,
     #[error("the refresh token is invalid, rotated, or its session ended")]
     RefreshUnusable,
+    #[error("not one of the account's devices, or revoked")]
+    DeviceRefused,
     #[error("the code was issued to another client")]
     ClientMismatch,
     #[error("the code_verifier does not match the code_challenge")]

@@ -640,6 +640,11 @@ impl Application {
                 Arc::clone(&sessions),
                 Arc::clone(&refresh_tokens),
             )),
+            revoke_token: Arc::new(application::auth::RevokeToken::new(
+                Arc::clone(&refresh_tokens),
+                Arc::clone(&sessions),
+                Arc::clone(&session_notifier),
+            )),
             refresh: Arc::new(application::auth::Refresh::new(
                 refresh_tokens,
                 Arc::clone(&sessions),
@@ -649,8 +654,17 @@ impl Application {
             )),
             log_out: Arc::new(application::auth::LogOut::new(
                 clients,
-                sessions,
-                session_notifier,
+                Arc::clone(&sessions),
+                Arc::clone(&session_notifier),
+            )),
+            link_device: Arc::new(application::auth::LinkDevice::new(
+                Arc::clone(&devices),
+                Arc::clone(&sessions),
+                Arc::clone(&session_notifier),
+            )),
+            sign_out_others: Arc::new(application::auth::SignOutOthers::new(
+                Arc::clone(&sessions),
+                Arc::clone(&session_notifier),
             )),
             login_attempts: api::LoginAttempts::new(),
             origin: origin.clone(),
@@ -853,8 +867,15 @@ impl Application {
                 )),
                 Arc::clone(&device_notifier),
             )),
-            list_devices: Arc::new(application::e2ee::ListDevices::new(Arc::clone(&devices))),
-            revoke_device: Arc::new(application::e2ee::RevokeDevice::new(Arc::clone(&devices))),
+            list_devices: Arc::new(application::e2ee::ListDevices::new(
+                Arc::clone(&devices),
+                Arc::clone(&sessions),
+            )),
+            revoke_device: Arc::new(application::e2ee::RevokeDevice::new(
+                Arc::clone(&devices),
+                Arc::clone(&sessions),
+                Arc::clone(&session_notifier),
+            )),
             upload_key_packages: Arc::new(application::e2ee::UploadKeyPackages::new(
                 key_package_policy,
                 devices,

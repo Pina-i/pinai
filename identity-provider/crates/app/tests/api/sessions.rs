@@ -218,3 +218,212 @@ async fn signing_out_of_the_browser_ends_the_web_clients_refresh_tokens_not_the_
     );
     app.stop().await.unwrap();
 }
+
+/// Another browser signing in to `who`'s account with the password: a session of its own.
+async fn another_browser(app: &TestApp, who: &Account) -> Account {
+    let signed_in = app
+        .form("/login", &[("email", &who.email), ("password", PASSWORD)])
+        .await;
+    let landed = location(&signed_in);
+    assert!(landed.starts_with(&app.redirect_uri), "{landed}");
+    let tokens = app.tokens_for(&query_of(&landed)["code"]).await;
+    Account {
+        token: tokens["access_token"].as_str().unwrap().to_owned(),
+        refresh_token: tokens["refresh_token"].as_str().unwrap().to_owned(),
+        cookie: signed_in.headers()["set-cookie"]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned(),
+        ..who.clone()
+    }
+}
+
+#[tokio::test]
+async fn revoking_a_device_from_another_signs_it_out_and_closes_its_socket() {
+    let app = spawn_app().await;
+    let laptop = app.sign_up("alice").await;
+    let device = uuid::Uuid::new_v4();
+    let (registered, _) = app
+        .send(
+            reqwest::Method::POST,
+            &laptop,
+            "/api/keys/devices",
+            serde_json::json!({
+                "device_id": device,
+                "drk_public_key": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=",
+            }),
+        )
+        .await;
+    let (linked, _) = app
+        .send(
+            reqwest::Method::PUT,
+            &laptop,
+            "/api/sessions/current/device",
+            serde_json::json!({ "device_id": device }),
+        )
+        .await;
+    let mut socket = open_socket(&app, &laptop.token).await.unwrap();
+    let phone = another_browser(&app, &laptop).await;
+    let (_, listed) = app.get(&phone, "/api/keys/devices").await;
+
+    let (revoked, _) = app
+        .send(
+            reqwest::Method::POST,
+            &phone,
+            &format!("/api/keys/devices/{device}/revoke"),
+            serde_json::Value::Null,
+        )
+        .await;
+    let closed = closed_as_ended(&mut socket).await;
+    let (refused, _) = app.get(&laptop, "/userinfo").await;
+    let (renewal, _) = app.refresh(&laptop.refresh_token).await;
+    let (still, _) = app.get(&phone, "/userinfo").await;
+
+    assert_eq!(
+        [registered, linked].map(|status| status.as_u16()),
+        [201, 204]
+    );
+    assert_eq!(listed["devices"][0]["signed_in"], true);
+    assert_eq!(revoked, 204);
+    assert!(closed, "its socket closed with 1008");
+    assert_eq!(
+        [refused, renewal].map(|status| status.as_u16()),
+        [401, 400],
+        "its tokens with it"
+    );
+    assert_eq!(still, 200, "the device that revoked it stays");
+    assert_eq!(
+        app.count("SELECT count(*) FROM sessions WHERE revoked_reason = 'device_revoked'")
+            .await,
+        1
+    );
+    app.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn signing_out_of_every_other_device_keeps_this_one() {
+    let app = spawn_app().await;
+    let here = app.sign_up("alice").await;
+    let there = another_browser(&app, &here).await;
+    let mut socket = open_socket(&app, &there.token).await.unwrap();
+
+    let signed_out = app
+        .http
+        .delete(format!("{}/api/sessions?keep=current", app.address))
+        .bearer_auth(&here.token)
+        .send()
+        .await
+        .unwrap()
+        .status();
+    let closed = closed_as_ended(&mut socket).await;
+    let (gone, _) = app.get(&there, "/userinfo").await;
+    let (kept, _) = app.get(&here, "/userinfo").await;
+
+    assert_eq!(signed_out, 204);
+    assert!(closed, "the other's socket closed with 1008");
+    assert_eq!([gone, kept].map(|status| status.as_u16()), [401, 200]);
+    app.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn the_desktop_signs_out_by_revoking_its_token_and_signs_in_again_with_the_password() {
+    let app = spawn_app().await;
+    let alice = app.sign_up("alice").await;
+    let desktop = format!("{}/clients/desktop.json", app.address);
+    let request = |prompt: Option<&'static str>| {
+        let mut pairs = vec![
+            ("response_type", "code".to_owned()),
+            ("client_id", desktop.clone()),
+            ("redirect_uri", "io.github.pina-i:/callback".to_owned()),
+            ("scope", "openid profile email offline_access".to_owned()),
+            ("state", "desktop-state".to_owned()),
+            ("code_challenge", CHALLENGE.to_owned()),
+            ("code_challenge_method", "S256".to_owned()),
+        ];
+        if let Some(prompt) = prompt {
+            pairs.push(("prompt", prompt.to_owned()));
+        }
+        pairs
+    };
+    let signed_in = app
+        .http
+        .post(format!("{}/login", app.address))
+        .form(
+            &[
+                request(None),
+                vec![
+                    ("email", alice.email.clone()),
+                    ("password", PASSWORD.to_owned()),
+                ],
+            ]
+            .concat(),
+        )
+        .header("cookie", &alice.cookie)
+        .send()
+        .await
+        .unwrap();
+    let tokens: serde_json::Value = app
+        .http
+        .post(format!("{}/token", app.address))
+        .form(&[
+            ("grant_type", "authorization_code"),
+            ("code", query_of(&location(&signed_in))["code"].as_str()),
+            ("redirect_uri", "io.github.pina-i:/callback"),
+            ("client_id", &desktop),
+            ("code_verifier", VERIFIER),
+        ])
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let on_desktop = Account {
+        token: tokens["access_token"].as_str().unwrap().to_owned(),
+        ..alice.clone()
+    };
+
+    let revoked = app
+        .http
+        .post(format!("{}/revoke", app.address))
+        .form(&[
+            ("client_id", desktop.as_str()),
+            ("token", tokens["refresh_token"].as_str().unwrap()),
+        ])
+        .send()
+        .await
+        .unwrap()
+        .status();
+    let (desktop_api, _) = app.get(&on_desktop, "/userinfo").await;
+    let (browser_api, _) = app.get(&alice, "/userinfo").await;
+    let again = |prompt| {
+        app.http
+            .get(format!("{}/authorize", app.address))
+            .query(&request(prompt))
+            .header("cookie", &alice.cookie)
+            .send()
+    };
+    let silent = again(None).await.unwrap();
+    let asked = again(Some("login")).await.unwrap();
+
+    assert_eq!(revoked, 200);
+    assert_eq!(
+        [desktop_api, browser_api].map(|status| status.as_u16()),
+        [401, 200],
+        "the app's session ended, the browser's stays"
+    );
+    assert!(
+        location(&silent).starts_with("io.github.pina-i:/callback?"),
+        "{}",
+        location(&silent)
+    );
+    assert!(
+        location(&asked).starts_with("/login?"),
+        "prompt=login asks the password: {}",
+        location(&asked)
+    );
+    app.stop().await.unwrap();
+}

@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use time::{Duration, OffsetDateTime};
 
 use crate::identity::{ActorUri, Handle, HandleSuffix};
-use crate::{SessionId, TicketId, UserId};
+use crate::{DeviceId, SessionId, TicketId, UserId};
 
 use super::{
     AuthError, Authenticator, AuthorizationCode, AuthorizationCodes, AuthorizationRequest,
@@ -115,6 +115,7 @@ impl InMemorySessions {
                 id,
                 user,
                 kind: SessionKind::Browser,
+                device: None,
                 created_at: now,
                 last_used_at: now,
                 revoked_at: None,
@@ -132,6 +133,24 @@ impl InMemorySessions {
             .find(|(session, _)| session.id == id)
             .and_then(|(_, reason)| *reason)
     }
+
+    /// Ends the sessions not ended yet that `which` picks, as they are once ended.
+    fn end(
+        &self,
+        which: impl Fn(&Session) -> bool,
+        reason: RevokedReason,
+        now: OffsetDateTime,
+    ) -> Vec<Session> {
+        let mut ended = Vec::new();
+        for (session, why) in self.sessions.lock().unwrap().iter_mut() {
+            if session.revoked_at.is_none() && which(session) {
+                session.revoked_at = Some(now);
+                *why = Some(reason);
+                ended.push(session.clone());
+            }
+        }
+        ended
+    }
 }
 
 #[async_trait::async_trait]
@@ -148,6 +167,7 @@ impl Sessions for InMemorySessions {
                 id,
                 user,
                 kind: kind.clone(),
+                device: None,
                 created_at: now,
                 last_used_at: now,
                 revoked_at: None,
@@ -202,6 +222,59 @@ impl Sessions for InMemorySessions {
                 || session.last_used_at < before - SESSION_IDLE)
         });
         Ok(held - sessions.len())
+    }
+
+    async fn of_user(&self, user: UserId) -> Result<Vec<Session>, AuthError> {
+        Ok(self
+            .all()
+            .into_iter()
+            .filter(|session| session.user == user)
+            .collect())
+    }
+
+    async fn link(
+        &self,
+        id: SessionId,
+        device: DeviceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<Session>, AuthError> {
+        let replaced = self.end(
+            |session| session.device == Some(device) && session.id != id,
+            RevokedReason::Replaced,
+            now,
+        );
+        for (session, _) in self.sessions.lock().unwrap().iter_mut() {
+            if session.id == id {
+                session.device = Some(device);
+            }
+        }
+        Ok(replaced)
+    }
+
+    async fn revoke_device(
+        &self,
+        user: UserId,
+        device: DeviceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<Session>, AuthError> {
+        Ok(self.end(
+            |session| session.user == user && session.device == Some(device),
+            RevokedReason::DeviceRevoked,
+            now,
+        ))
+    }
+
+    async fn revoke_others(
+        &self,
+        user: UserId,
+        keep: SessionId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<Session>, AuthError> {
+        Ok(self.end(
+            |session| session.user == user && session.id != keep,
+            RevokedReason::SignedOutElsewhere,
+            now,
+        ))
     }
 }
 
@@ -606,6 +679,20 @@ impl RefreshTokens for InMemoryRefreshTokens {
         let held = rows.len();
         rows.retain(|row| row.rotated_at.unwrap_or(row.created_at) >= before);
         Ok(held - rows.len())
+    }
+
+    async fn session_of(
+        &self,
+        token: &RefreshToken,
+        client: &ClientId,
+    ) -> Result<Option<SessionId>, AuthError> {
+        Ok(self
+            .rows
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|row| row.token == *token && row.client == *client)
+            .map(|row| row.session))
     }
 }
 
@@ -1641,6 +1728,7 @@ pub mod contract {
                 id,
                 user,
                 kind: SessionKind::Browser,
+                device: None,
                 created_at: at,
                 last_used_at: at,
                 revoked_at: None,
@@ -1713,6 +1801,108 @@ pub mod contract {
         for gone in [revoked_long_ago, idle_long_ago] {
             assert_eq!(sessions.find(gone).await.unwrap(), None);
         }
+    }
+
+    fn ids(sessions: Vec<Session>) -> Vec<SessionId> {
+        sessions.into_iter().map(|session| session.id).collect()
+    }
+
+    /// `device` is one of `user`'s.
+    pub async fn a_device_holds_one_session_the_latest_linked(
+        sessions: &dyn Sessions,
+        user: UserId,
+        device: DeviceId,
+    ) {
+        let at = OffsetDateTime::from_unix_timestamp(1_790_000_000).unwrap();
+        let first = sessions
+            .open(user, &SessionKind::Browser, at)
+            .await
+            .unwrap();
+        let second = sessions
+            .open(user, &SessionKind::Browser, at)
+            .await
+            .unwrap();
+        let unlinked = sessions
+            .open(user, &SessionKind::Browser, at)
+            .await
+            .unwrap();
+
+        let linked = sessions.link(first, device, at).await.unwrap();
+        let replaced = sessions
+            .link(second, device, at + Duration::hours(1))
+            .await
+            .unwrap();
+        let again = sessions
+            .link(second, device, at + Duration::hours(2))
+            .await
+            .unwrap();
+        let mine = sessions.of_user(user).await.unwrap();
+        let first = sessions.find(first).await.unwrap().unwrap();
+
+        assert!(linked.is_empty());
+        assert_eq!(
+            ids(replaced),
+            vec![first.id],
+            "a new sign-in takes the device over"
+        );
+        assert!(again.is_empty(), "linking again changes nothing");
+        assert_eq!(first.revoked_at, Some(at + Duration::hours(1)));
+        assert_eq!(
+            sessions.find(second).await.unwrap().unwrap().device,
+            Some(device)
+        );
+        assert_eq!(sessions.find(unlinked).await.unwrap().unwrap().device, None);
+        assert_eq!(mine.len(), 3);
+    }
+
+    /// `device` is one of `user`'s; `other` is another account.
+    pub async fn a_revoked_device_and_signing_out_elsewhere_end_the_right_sessions(
+        sessions: &dyn Sessions,
+        user: UserId,
+        other: UserId,
+        device: DeviceId,
+    ) {
+        let at = OffsetDateTime::from_unix_timestamp(1_790_000_000).unwrap();
+        let on_device = sessions
+            .open(user, &SessionKind::Browser, at)
+            .await
+            .unwrap();
+        sessions.link(on_device, device, at).await.unwrap();
+        let current = sessions
+            .open(user, &SessionKind::Browser, at)
+            .await
+            .unwrap();
+        let elsewhere = sessions
+            .open(user, &SessionKind::App(web_client().id), at)
+            .await
+            .unwrap();
+        let someone_elses = sessions
+            .open(other, &SessionKind::Browser, at)
+            .await
+            .unwrap();
+
+        let not_theirs = sessions.revoke_device(other, device, at).await.unwrap();
+        let revoked = sessions.revoke_device(user, device, at).await.unwrap();
+        let revoked_again = sessions.revoke_device(user, device, at).await.unwrap();
+        let signed_out = sessions.revoke_others(user, current, at).await.unwrap();
+
+        assert!(not_theirs.is_empty());
+        assert_eq!(ids(revoked), vec![on_device]);
+        assert!(revoked_again.is_empty());
+        assert_eq!(
+            ids(signed_out),
+            vec![elsewhere],
+            "the ended one is not ended twice"
+        );
+        assert!(sessions.find(current).await.unwrap().unwrap().is_live(at));
+        assert!(
+            sessions
+                .find(someone_elses)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_live(at)
+        );
     }
 
     fn rotated(rotation: Rotation) -> RefreshToken {
@@ -1840,6 +2030,36 @@ pub mod contract {
             first_once_more,
             Rotation::Reused { session },
             "its successor came this time"
+        );
+    }
+
+    /// `session` is a live one.
+    pub async fn a_refresh_token_names_its_session_to_its_own_client_only(
+        tokens: &dyn RefreshTokens,
+        session: SessionId,
+    ) {
+        let at = OffsetDateTime::from_unix_timestamp(1_790_000_000).unwrap();
+        let client = web_client().id;
+        let other = ClientId::parse("http://localhost:5173/other.json").unwrap();
+        let first = tokens.start(session, &client, at).await.unwrap();
+        let head = rotated(tokens.rotate(&first, &client, at).await.unwrap());
+
+        assert_eq!(
+            tokens.session_of(&head, &client).await.unwrap(),
+            Some(session)
+        );
+        assert_eq!(
+            tokens.session_of(&first, &client).await.unwrap(),
+            Some(session),
+            "a rotated one too"
+        );
+        assert_eq!(tokens.session_of(&head, &other).await.unwrap(), None);
+        assert_eq!(
+            tokens
+                .session_of(&RefreshToken::new("no-such-token".to_owned()), &client)
+                .await
+                .unwrap(),
+            None
         );
     }
 

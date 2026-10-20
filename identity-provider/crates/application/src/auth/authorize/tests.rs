@@ -19,6 +19,7 @@ fn command() -> AuthorizeCommand {
         code_challenge: CHALLENGE.to_owned(),
         code_challenge_method: "S256".to_owned(),
         nonce: request.nonce,
+        prompt: None,
     }
 }
 
@@ -233,4 +234,34 @@ async fn the_client_and_its_redirect_are_checked_before_the_flow_so_an_error_can
         matches!(elsewhere, Err(AuthError::UnregisteredRedirect)),
         "{elsewhere:?}"
     );
+}
+
+#[tokio::test]
+async fn prompt_login_asks_the_password_whatever_session_the_browser_holds() {
+    let w = world().await;
+    let session = w
+        .sessions
+        .open(w.alice.id, &SessionKind::Browser, now())
+        .await
+        .unwrap();
+    w.sign_ins
+        .remember(&ClientSignIn::of(w.alice.id, &a_request()), now())
+        .await
+        .unwrap();
+
+    let authorized = w
+        .authorize
+        .execute(
+            AuthorizeCommand {
+                prompt: Some("login".to_owned()),
+                ..command()
+            },
+            Some(session),
+            now(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(authorized, Authorized::SignIn(a_request()));
+    assert!(w.codes.issued().is_empty());
 }

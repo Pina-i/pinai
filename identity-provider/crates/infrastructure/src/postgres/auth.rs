@@ -13,7 +13,7 @@ use domain::auth::{
 use domain::auth::{
     RECOVERY_CODES, SecondFactors, TICKET_ATTEMPTS, Ticket, TicketAttempt, TotpSecret,
 };
-use domain::{SessionId, TicketId, UserId};
+use domain::{DeviceId, SessionId, TicketId, UserId};
 use hmac::{Hmac, Mac};
 use rand::RngCore;
 use rand::rngs::OsRng;
@@ -220,12 +220,16 @@ impl PgSessions {
     }
 }
 
+const SESSION_COLUMNS: &str =
+    "id, user_id, kind, client_id, device_id, created_at, last_used_at, revoked_at";
+
 #[derive(sqlx::FromRow)]
 struct SessionRow {
     id: uuid::Uuid,
     user_id: uuid::Uuid,
     kind: String,
     client_id: Option<String>,
+    device_id: Option<uuid::Uuid>,
     created_at: OffsetDateTime,
     last_used_at: OffsetDateTime,
     revoked_at: Option<OffsetDateTime>,
@@ -246,6 +250,7 @@ impl TryFrom<SessionRow> for Session {
             id: row.id.into(),
             user: row.user_id.into(),
             kind,
+            device: row.device_id.map(DeviceId::from),
             created_at: row.created_at,
             last_used_at: row.last_used_at,
             revoked_at: row.revoked_at,
@@ -282,10 +287,9 @@ impl Sessions for PgSessions {
     }
 
     async fn find(&self, id: SessionId) -> Result<Option<Session>, AuthError> {
-        let row: Option<SessionRow> = sqlx::query_as(
-            "SELECT id, user_id, kind, client_id, created_at, last_used_at, revoked_at \
-             FROM sessions WHERE id = $1",
-        )
+        let row: Option<SessionRow> = sqlx::query_as(&format!(
+            "SELECT {SESSION_COLUMNS} FROM sessions WHERE id = $1"
+        ))
         .bind(id.as_uuid())
         .fetch_optional(&self.pool)
         .await
@@ -331,6 +335,89 @@ impl Sessions for PgSessions {
                 .await
                 .context("delete the ended sessions")?;
         Ok(usize::try_from(deleted.rows_affected()).unwrap_or(usize::MAX))
+    }
+
+    async fn of_user(&self, user: UserId) -> Result<Vec<Session>, AuthError> {
+        let rows: Vec<SessionRow> = sqlx::query_as(&format!(
+            "SELECT {SESSION_COLUMNS} FROM sessions WHERE user_id = $1 ORDER BY created_at, id"
+        ))
+        .bind(user.as_uuid())
+        .fetch_all(&self.pool)
+        .await
+        .context("list an account's sessions")?;
+        sessions(rows)
+    }
+
+    async fn link(
+        &self,
+        id: SessionId,
+        device: DeviceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<Session>, AuthError> {
+        let mut tx = self.pool.begin().await.context("begin a link")?;
+        // One link of a device at a time: two at once would each miss the other.
+        sqlx::query("SELECT 1 FROM user_devices WHERE device_id = $1 FOR UPDATE")
+            .bind(device.as_uuid())
+            .execute(&mut *tx)
+            .await
+            .context("lock a device to link")?;
+        let replaced: Vec<SessionRow> = sqlx::query_as(&format!(
+            "UPDATE sessions SET revoked_at = $3, revoked_reason = 'replaced' \
+             WHERE device_id = $2 AND id <> $1 AND revoked_at IS NULL RETURNING {SESSION_COLUMNS}"
+        ))
+        .bind(id.as_uuid())
+        .bind(device.as_uuid())
+        .bind(now)
+        .fetch_all(&mut *tx)
+        .await
+        .context("end a device's earlier sessions")?;
+        sqlx::query("UPDATE sessions SET device_id = $2 WHERE id = $1")
+            .bind(id.as_uuid())
+            .bind(device.as_uuid())
+            .execute(&mut *tx)
+            .await
+            .context("link a session to its device")?;
+        tx.commit().await.context("commit a link")?;
+        sessions(replaced)
+    }
+
+    async fn revoke_device(
+        &self,
+        user: UserId,
+        device: DeviceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<Session>, AuthError> {
+        let rows: Vec<SessionRow> = sqlx::query_as(&format!(
+            "UPDATE sessions SET revoked_at = $3, revoked_reason = 'device_revoked' \
+             WHERE user_id = $1 AND device_id = $2 AND revoked_at IS NULL \
+             RETURNING {SESSION_COLUMNS}"
+        ))
+        .bind(user.as_uuid())
+        .bind(device.as_uuid())
+        .bind(now)
+        .fetch_all(&self.pool)
+        .await
+        .context("end a revoked device's sessions")?;
+        sessions(rows)
+    }
+
+    async fn revoke_others(
+        &self,
+        user: UserId,
+        keep: SessionId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<Session>, AuthError> {
+        let rows: Vec<SessionRow> = sqlx::query_as(&format!(
+            "UPDATE sessions SET revoked_at = $3, revoked_reason = 'signed_out_elsewhere' \
+             WHERE user_id = $1 AND id <> $2 AND revoked_at IS NULL RETURNING {SESSION_COLUMNS}"
+        ))
+        .bind(user.as_uuid())
+        .bind(keep.as_uuid())
+        .bind(now)
+        .fetch_all(&self.pool)
+        .await
+        .context("end an account's other sessions")?;
+        sessions(rows)
     }
 }
 
@@ -466,6 +553,22 @@ impl RefreshTokens for PgRefreshTokens {
         Ok(Rotation::Rotated { session, successor })
     }
 
+    async fn session_of(
+        &self,
+        token: &RefreshToken,
+        client: &ClientId,
+    ) -> Result<Option<SessionId>, AuthError> {
+        let session: Option<uuid::Uuid> = sqlx::query_scalar(
+            "SELECT session_id FROM refresh_tokens WHERE token_hash = $1 AND client_id = $2",
+        )
+        .bind(refresh_hash(token))
+        .bind(client.as_str())
+        .fetch_optional(&self.pool)
+        .await
+        .context("find a refresh token's session")?;
+        Ok(session.map(SessionId::from))
+    }
+
     async fn delete_unused(&self, before: OffsetDateTime) -> Result<usize, AuthError> {
         let deleted =
             sqlx::query("DELETE FROM refresh_tokens WHERE COALESCE(rotated_at, created_at) < $1")
@@ -475,6 +578,13 @@ impl RefreshTokens for PgRefreshTokens {
                 .context("delete the unused refresh tokens")?;
         Ok(usize::try_from(deleted.rows_affected()).unwrap_or(usize::MAX))
     }
+}
+
+fn sessions(rows: Vec<SessionRow>) -> Result<Vec<Session>, AuthError> {
+    Ok(rows
+        .into_iter()
+        .map(Session::try_from)
+        .collect::<Result<_, _>>()?)
 }
 
 /// `client_sign_ins`: one row per account and app.

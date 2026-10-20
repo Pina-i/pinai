@@ -195,3 +195,33 @@ async fn refresh_tokens_unused_since_the_cutoff_are_swept() {
     )
     .await;
 }
+
+#[tokio::test]
+async fn a_device_holds_one_session_the_latest_linked() {
+    contract::a_device_holds_one_session_the_latest_linked(
+        &InMemorySessions::default(),
+        UserId::generate(),
+        DeviceId::generate(),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_revoked_device_and_signing_out_elsewhere_end_the_right_sessions() {
+    contract::a_revoked_device_and_signing_out_elsewhere_end_the_right_sessions(
+        &InMemorySessions::default(),
+        UserId::generate(),
+        UserId::generate(),
+        DeviceId::generate(),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_refresh_token_names_its_session_to_its_own_client_only() {
+    contract::a_refresh_token_names_its_session_to_its_own_client_only(
+        &InMemoryRefreshTokens::default(),
+        SessionId::generate(),
+    )
+    .await;
+}

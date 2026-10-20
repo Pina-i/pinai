@@ -1,7 +1,7 @@
 use time::{Duration, OffsetDateTime};
 
 use crate::identity::HandleSuffix;
-use crate::{SessionId, TicketId, UserId};
+use crate::{DeviceId, SessionId, TicketId, UserId};
 
 use super::{
     AuthError, AuthorizationCode, AuthorizationRequest, Client, ClientId, ClientSignIn,
@@ -89,6 +89,31 @@ pub trait Sessions: Send + Sync {
     /// The sessions over before `before`: revoked then, or idle since `before - SESSION_IDLE`.
     /// How many went.
     async fn delete_ended(&self, before: OffsetDateTime) -> Result<usize, AuthError>;
+    /// The account's sessions, ended or not, until swept.
+    async fn of_user(&self, user: UserId) -> Result<Vec<Session>, AuthError>;
+    /// Links the session to the E2EE device it signed in, and ends the device's other sessions
+    /// (`replaced`): a device is signed in once at a time. The sessions it ended.
+    async fn link(
+        &self,
+        id: SessionId,
+        device: DeviceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<Session>, AuthError>;
+    /// Ends the account's sessions linked to `device` (`device_revoked`). The sessions it ended.
+    async fn revoke_device(
+        &self,
+        user: UserId,
+        device: DeviceId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<Session>, AuthError>;
+    /// Ends every session of the account but `keep` (`signed_out_elsewhere`). The sessions it
+    /// ended.
+    async fn revoke_others(
+        &self,
+        user: UserId,
+        keep: SessionId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<Session>, AuthError>;
 }
 
 /// Tells what hangs on a session that it ended: its account's sockets opened under it close.
@@ -118,6 +143,12 @@ pub trait RefreshTokens: Send + Sync {
     /// The tokens last used before `before`: a head since its creation, any other since its
     /// rotation. How many went.
     async fn delete_unused(&self, before: OffsetDateTime) -> Result<usize, AuthError>;
+    /// The session `token` belongs to, rotated or not, when it was issued to `client`.
+    async fn session_of(
+        &self,
+        token: &RefreshToken,
+        client: &ClientId,
+    ) -> Result<Option<SessionId>, AuthError>;
 }
 
 /// The apps each account signed in to with its password.

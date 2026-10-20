@@ -11,6 +11,7 @@ fn a_session_ended_closes_its_sockets() {
         id: SessionId::generate(),
         user: UserId::generate(),
         kind: domain::auth::SessionKind::Browser,
+        device: None,
         created_at: now,
         last_used_at: now,
         revoked_at: Some(now),

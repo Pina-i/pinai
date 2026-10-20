@@ -4,6 +4,7 @@ use domain::SessionId;
 use domain::auth::{
     AuthError, AuthorizationCode, AuthorizationCodes, AuthorizationRequest, CODE_TTL, ClientId,
     ClientSignIns, Clients, CodeChallenge, Grant, RESPONSE_TYPE, Sessions, SignInAccounts,
+    prompts_login,
 };
 use time::OffsetDateTime;
 
@@ -18,6 +19,7 @@ pub struct AuthorizeCommand {
     pub code_challenge: String,
     pub code_challenge_method: String,
     pub nonce: Option<String>,
+    pub prompt: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,6 +85,7 @@ impl Authorize {
         }
         let challenge =
             CodeChallenge::parse(&command.code_challenge, &command.code_challenge_method)?;
+        let asks_login = prompts_login(command.prompt.as_deref());
         let request = AuthorizationRequest {
             client: client.id,
             redirect_uri: command.redirect_uri,
@@ -91,6 +94,9 @@ impl Authorize {
             challenge,
             nonce: command.nonce,
         };
+        if asks_login {
+            return Ok(Authorized::SignIn(request));
+        }
         // A cookie naming a session that isn't live any more is no cookie at all.
         let session = match session {
             Some(id) => self.sessions.find(id).await?,

@@ -1,6 +1,6 @@
 use time::{Duration, OffsetDateTime};
 
-use crate::{SessionId, UserId};
+use crate::{DeviceId, SessionId, UserId};
 
 use super::ClientId;
 
@@ -17,6 +17,8 @@ pub struct Session {
     pub id: SessionId,
     pub user: UserId,
     pub kind: SessionKind,
+    /// The E2EE device it signed in, once its client said: revoking the device ends it.
+    pub device: Option<DeviceId>,
     pub created_at: OffsetDateTime,
     /// The last sign-in or refresh that used it.
     pub last_used_at: OffsetDateTime,
@@ -27,6 +29,20 @@ impl Session {
     pub fn is_live(&self, now: OffsetDateTime) -> bool {
         self.revoked_at.is_none() && now - self.last_used_at < SESSION_IDLE
     }
+}
+
+/// When `device` was last used signed in: its live session's last use, `None` when it is signed
+/// out.
+pub fn last_active(
+    sessions: &[Session],
+    device: DeviceId,
+    now: OffsetDateTime,
+) -> Option<OffsetDateTime> {
+    sessions
+        .iter()
+        .filter(|session| session.device == Some(device) && session.is_live(now))
+        .map(|session| session.last_used_at)
+        .max()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,10 +60,15 @@ pub enum SessionKind {
 pub enum RevokedReason {
     /// `/logout`.
     SignOut,
-    /// Another account signed in on the same browser.
+    /// Another sign-in took its place: another account on the same browser, or a new session
+    /// on the same device.
     Replaced,
     /// A refresh token of it was presented again after its rotation: two copies exist.
     Reuse,
+    /// Its device was revoked.
+    DeviceRevoked,
+    /// Its account signed out of every other device.
+    SignedOutElsewhere,
 }
 
 impl RevokedReason {
@@ -56,6 +77,8 @@ impl RevokedReason {
             Self::SignOut => "sign_out",
             Self::Replaced => "replaced",
             Self::Reuse => "reuse",
+            Self::DeviceRevoked => "device_revoked",
+            Self::SignedOutElsewhere => "signed_out_elsewhere",
         }
     }
 }

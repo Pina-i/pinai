@@ -4,14 +4,17 @@
 mod authenticate;
 mod authorize;
 mod exchange_code;
+mod link_device;
 mod log_in;
 mod log_out;
 mod pass_second_factor;
 mod refresh;
 mod register;
 mod resend_code;
+mod revoke_token;
 mod send_test_mail;
 mod show_sign_in;
+mod sign_out_others;
 mod sweep_signups;
 mod totp_enrollment;
 mod totp_settings;
@@ -22,14 +25,17 @@ mod world;
 pub use authenticate::Authenticate;
 pub use authorize::{Authorize, AuthorizeCommand, Authorized};
 pub use exchange_code::{ExchangeCode, TokenCommand};
+pub use link_device::LinkDevice;
 pub use log_in::{LogIn, LoginOutcome};
 pub use log_out::LogOut;
 pub use pass_second_factor::{PassSecondFactor, SecondFactorOutcome};
 pub use refresh::{Refresh, RefreshCommand};
 pub use register::{Register, RegisterCommand, Registered};
 pub use resend_code::ResendCode;
+pub use revoke_token::RevokeToken;
 pub use send_test_mail::SendTestMail;
 pub use show_sign_in::ShowSignIn;
+pub use sign_out_others::SignOutOthers;
 pub use sweep_signups::{SweepSignups, Swept};
 pub use totp_enrollment::{ConfirmTotpEnrollment, StartTotpEnrollment};
 pub use totp_settings::{DisableTotp, RegenerateRecoveryCodes};
@@ -39,8 +45,8 @@ use std::sync::Arc;
 
 use domain::auth::{
     AuthError, AuthorizationCode, AuthorizationCodes, AuthorizationRequest, CODE_TTL, ClientSignIn,
-    ClientSignIns, Grant, RESEND_LIMIT, RESEND_WINDOW, RevokedReason, SIGNUP_CODE_TTL, SessionKind,
-    SessionNotifier, Sessions, SignInAccount, SignupCodes, SignupMailer,
+    ClientSignIns, Grant, RESEND_LIMIT, RESEND_WINDOW, RevokedReason, SIGNUP_CODE_TTL, Session,
+    SessionKind, SessionNotifier, Sessions, SignInAccount, SignupCodes, SignupMailer,
 };
 use domain::{SessionId, UserId};
 use time::OffsetDateTime;
@@ -127,6 +133,13 @@ pub(crate) async fn end_session(
         notifier.ended(&session);
     }
     Ok(())
+}
+
+/// Closes what hangs on each of the sessions just ended.
+pub(crate) fn tell_ended(notifier: &dyn SessionNotifier, ended: &[Session]) {
+    for session in ended {
+        notifier.ended(session);
+    }
 }
 
 /// A fresh code to confirm the account's address, by mail; its earlier codes stop working.

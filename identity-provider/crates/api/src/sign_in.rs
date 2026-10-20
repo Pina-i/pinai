@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use application::auth::{
     Authorize, AuthorizeCommand, Authorized, ExchangeCode, LogIn, LogOut, LoginOutcome, Refresh,
-    RefreshCommand, TokenCommand,
+    RefreshCommand, RevokeToken, TokenCommand,
 };
 use axum::extract::{Query, State};
 use axum::http::{HeaderName, HeaderValue, StatusCode, header};
@@ -127,6 +127,7 @@ pub struct AuthorizeParams {
     code_challenge: String,
     code_challenge_method: String,
     nonce: Option<String>,
+    prompt: Option<String>,
     /// How the client is painted, for the sign-in pages to match.
     theme: Option<String>,
     motif: Option<String>,
@@ -165,6 +166,7 @@ pub async fn authorize(
         code_challenge: params.code_challenge,
         code_challenge_method: params.code_challenge_method,
         nonce: params.nonce,
+        prompt: params.prompt,
     };
     let authorized = match authorize
         .execute(command, session_of(&jar), OffsetDateTime::now_utc())
@@ -396,6 +398,11 @@ fn token_refusal(error: AuthError) -> ApiError {
             refused("Refresh token is invalid, rotated, or its session ended")
         }
         AuthError::ClientMismatch => refused("client_id mismatch"),
+        AuthError::MissingField => ApiError::new(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "token is required",
+        ),
         AuthError::VerifierMismatch => refused("code_verifier does not match code_challenge"),
         other => ApiError::internal(anyhow::Error::from(other)),
     }
@@ -441,6 +448,30 @@ pub async fn token(
 }
 
 #[derive(Debug, Deserialize)]
+pub struct RevokeForm {
+    client_id: String,
+    #[serde(default)]
+    token: String,
+}
+
+/// `POST /revoke` (RFC 7009) — an app's sign-out: its refresh token, and the session with it.
+/// `200` whatever the token was; `token_type_hint` is not read, refresh tokens being the only
+/// kind revoked here.
+pub async fn revoke(
+    State(revoke): State<Arc<RevokeToken>>,
+    Form(form): Form<RevokeForm>,
+) -> Result<impl IntoResponse, ApiError> {
+    if form.token.is_empty() {
+        return Err(token_error(AuthError::MissingField));
+    }
+    revoke
+        .execute(&form.client_id, &form.token, OffsetDateTime::now_utc())
+        .await
+        .map_err(token_error)?;
+    Ok((uncached(), StatusCode::OK))
+}
+
+#[derive(Debug, Deserialize)]
 pub struct LogoutParams {
     client_id: Option<String>,
     post_logout_redirect_uri: Option<String>,
@@ -482,6 +513,7 @@ pub async fn discovery(State(origin): State<InstanceOrigin>) -> Json<serde_json:
         "issuer": base,
         "authorization_endpoint": format!("{base}/authorize"),
         "token_endpoint": format!("{base}/token"),
+        "revocation_endpoint": format!("{base}/revoke"),
         "userinfo_endpoint": format!("{base}/userinfo"),
         "jwks_uri": format!("{base}/.well-known/jwks.json"),
         "scopes_supported": ["openid", "profile", "email", "offline_access"],
@@ -494,6 +526,7 @@ pub async fn discovery(State(origin): State<InstanceOrigin>) -> Json<serde_json:
         ],
         "code_challenge_methods_supported": ["S256"],
         "token_endpoint_auth_methods_supported": ["none"],
+        "revocation_endpoint_auth_methods_supported": ["none"],
         "client_id_metadata_document_supported": true,
     }))
 }

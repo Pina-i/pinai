@@ -3,7 +3,8 @@
 use std::sync::Arc;
 
 use application::e2ee::{
-    ClaimKeyPackage, KeyPackageStatus, ListDevices, RegisterDevice, RevokeDevice, UploadKeyPackages,
+    ClaimKeyPackage, KeyPackageStatus, ListDevices, ListedDevice, RegisterDevice, RevokeDevice,
+    UploadKeyPackages,
 };
 use axum::Json;
 use axum::extract::{Path, State};
@@ -11,7 +12,7 @@ use axum::http::{HeaderMap, StatusCode, header};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use domain::e2ee::{
-    Claim, Device, DeviceLabel, DeviceRootKey, KeyDirectoryError, KeyPackageBytes, NewKeyPackage,
+    Claim, DeviceLabel, DeviceRootKey, KeyDirectoryError, KeyPackageBytes, NewKeyPackage,
 };
 use domain::identity::{ActorUri, Requester};
 use serde::{Deserialize, Serialize};
@@ -34,6 +35,11 @@ pub struct DeviceEntry {
     last_seen_at: OffsetDateTime,
     #[serde(with = "time::serde::rfc3339::option")]
     revoked_at: Option<OffsetDateTime>,
+    /// Signed in: a live session of it.
+    signed_in: bool,
+    /// That session's last use; `None` when signed out.
+    #[serde(with = "time::serde::rfc3339::option")]
+    last_active_at: Option<OffsetDateTime>,
     /// `None` until the device registers its root key.
     #[serde(with = "time::serde::rfc3339::option")]
     attestation_expires_at: Option<OffsetDateTime>,
@@ -123,8 +129,13 @@ pub struct StatusBody {
     cap: usize,
 }
 
-impl From<Device> for DeviceEntry {
-    fn from(device: Device) -> Self {
+impl From<ListedDevice> for DeviceEntry {
+    fn from(
+        ListedDevice {
+            device,
+            last_active_at,
+        }: ListedDevice,
+    ) -> Self {
         Self {
             device_id: device.id.as_uuid(),
             display_name: device.label.name,
@@ -132,6 +143,8 @@ impl From<Device> for DeviceEntry {
             paired_at: device.paired_at,
             last_seen_at: device.last_seen_at,
             revoked_at: device.revoked_at,
+            signed_in: last_active_at.is_some(),
+            last_active_at,
             attestation_expires_at: device.attestation.map(|a| a.expires_at),
         }
     }
@@ -147,7 +160,7 @@ pub async fn devices(
     State(list): State<Arc<ListDevices>>,
     Authenticated(user): Authenticated,
 ) -> Result<Json<DevicesBody>, ApiError> {
-    let devices = list.execute(user).await?;
+    let devices = list.execute(user, OffsetDateTime::now_utc()).await?;
     Ok(Json(DevicesBody {
         devices: devices.into_iter().map(DeviceEntry::from).collect(),
     }))
@@ -185,7 +198,9 @@ pub async fn revoke(
     Authenticated(user): Authenticated,
     Path(device_id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
-    revoke.execute(user, device_id.into()).await?;
+    revoke
+        .execute(user, device_id.into(), OffsetDateTime::now_utc())
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

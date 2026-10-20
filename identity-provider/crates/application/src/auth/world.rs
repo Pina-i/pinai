@@ -10,13 +10,14 @@ use domain::auth::testing::{
     SpelledTokens, StepAuthenticator, signed_up, web_client,
 };
 use domain::auth::{Client, SecondFactors, TotpSecret, desktop_client};
+use domain::e2ee::testing::InMemoryKeyDirectory;
 use domain::identity::InstanceOrigin;
 use time::OffsetDateTime;
 
 use super::{
-    Authorize, CompleteSignIn, ConfirmTotpEnrollment, DisableTotp, ExchangeCode, LogIn, LogOut,
-    PassSecondFactor, Refresh, RegenerateRecoveryCodes, Register, ResendCode, ShowSignIn,
-    StartTotpEnrollment, SweepSignups, VerifyEmail,
+    Authorize, CompleteSignIn, ConfirmTotpEnrollment, DisableTotp, ExchangeCode, LinkDevice, LogIn,
+    LogOut, PassSecondFactor, Refresh, RegenerateRecoveryCodes, Register, ResendCode, RevokeToken,
+    ShowSignIn, SignOutOthers, StartTotpEnrollment, SweepSignups, VerifyEmail,
 };
 
 pub struct World {
@@ -33,10 +34,14 @@ pub struct World {
     pub sessions: Arc<InMemorySessions>,
     pub ended: Arc<RecordingSessionNotifier>,
     pub refresh_tokens: Arc<InMemoryRefreshTokens>,
+    pub devices: Arc<InMemoryKeyDirectory>,
     pub authorize: Authorize,
     pub log_in: LogIn,
     pub exchange: ExchangeCode,
     pub refresh: Refresh,
+    pub link: LinkDevice,
+    pub sign_out_others: SignOutOthers,
+    pub revoke_token: RevokeToken,
     pub log_out: LogOut,
     pub register: Register,
     pub verify: VerifyEmail,
@@ -70,6 +75,7 @@ pub async fn world() -> World {
     let sessions = Arc::new(InMemorySessions::default());
     let ended = Arc::new(RecordingSessionNotifier::default());
     let refresh_tokens = Arc::new(InMemoryRefreshTokens::default());
+    let devices = Arc::new(InMemoryKeyDirectory::default());
     let complete = Arc::new(CompleteSignIn::new(
         sign_ins.clone(),
         codes.clone(),
@@ -130,6 +136,9 @@ pub async fn world() -> World {
             accounts.clone(),
             Arc::new(SpelledTokens),
         ),
+        link: LinkDevice::new(devices.clone(), sessions.clone(), ended.clone()),
+        sign_out_others: SignOutOthers::new(sessions.clone(), ended.clone()),
+        revoke_token: RevokeToken::new(refresh_tokens.clone(), sessions.clone(), ended.clone()),
         log_out: LogOut::new(clients.clone(), sessions.clone(), ended.clone()),
         register: Register::new(
             origin.clone(),
@@ -168,6 +177,7 @@ pub async fn world() -> World {
         sessions,
         ended,
         refresh_tokens,
+        devices,
     }
 }
 
