@@ -12,13 +12,57 @@ the backend services of the platform in a single Cargo workspace:
 | `compose.yaml` | The development stack for Docker Compose |
 | `deploy/` | Hosting an instance: the published image behind Caddy, set up by `deploy/setup.sh` — see `deploy/README.md` |
 
-The web client lives in a separate repository (`web-client`) and talks to these
+The web and desktop clients live in their own repository,
+[`Pina-i/pinai-client`](https://github.com/Pina-i/pinai-client), and talk to these
 services over HTTP. Each service has its own `README.md` / `CLAUDE.md` with its
 internal architecture.
 
+- [Install your own instance](#install-your-own-instance) — run Pīna'i for your community
+- [Development setup](#development-setup) — two local instances, Alice and Bob, to work on the code
+
 ---
 
-## Prerequisites
+## Install your own instance
+
+An instance is the identity provider with its Postgres, Redis and RustFS (file
+storage), and Caddy in front of them for HTTPS, all from the published image
+`ghcr.io/pina-i/pinai-idp`. Its users sign in with the official web or desktop
+app: there is no client to host.
+
+You need:
+
+- a Linux server, amd64 or arm64, with Docker and its Compose plugin;
+- a domain pointing at the server, with ports 80 and 443 open. It becomes part of
+  every account's address (`alice_xk9mp@your.domain`), so it cannot change later;
+- an SMTP relay accepting STARTTLS on port 587: sign-up codes are mailed.
+
+Then, on the server:
+
+```bash
+curl -L https://github.com/Pina-i/pinai/releases/latest/download/pinai-deploy.tar.gz | tar xz
+cd pinai
+./setup.sh               # asks for the domain and SMTP, generates the secrets
+docker compose up -d
+```
+
+`https://your.domain/.well-known/nodeinfo` answers once the database is migrated
+and Caddy has its certificate. Upgrades, backups and running behind your own
+reverse proxy are in [`deploy/README.md`](deploy/README.md), which the archive
+carries too.
+
+> **Back up `.env` and `data/` together.** The instance key and the secrets in
+> `.env` cannot be regenerated: a new key breaks every device that signed in, a
+> new `EMAIL_OTP_PEPPER` every recovery code.
+
+---
+
+## Development setup
+
+Two instances on one machine, **Alice** and **Bob**, so that federation can be
+exercised locally. All paths in the env files resolve against the working
+directory, so **run every command from the repo root**.
+
+### Prerequisites
 
 - **Rust** (stable) with the `clippy` and `rustfmt` components
   ```bash
@@ -28,17 +72,10 @@ internal architecture.
 - **OpenSSL** — used to generate each instance's Ed25519 signing key
 - **GNU Make** and **bash**
 
----
-
-## Setup
-
 ### 1. Environment files
 
 Every deployment unit is configured by one env file. Only the template,
 `.env.example`, is committed; every other `.env*` file is git-ignored.
-
-The dev targets expect two instances, **Alice** and **Bob**, so federation can be
-exercised locally:
 
 ```bash
 cp .env.example .env.alice
@@ -69,9 +106,6 @@ them in.
 `IDP_ENV` defaults to `production` when unset, which switches issuer URLs and
 peer calls to `https` and sets the `Secure` cookie flag — always set it to
 `development` locally.
-
-All paths in the env files resolve against the working directory, so **run
-every command from the repo root**.
 
 ### 2. Instance secrets
 
@@ -116,11 +150,9 @@ service.
 > **Losing a key cannot be recovered from**: existing devices stop verifying.
 > Back `IDP_KEYS_DIR` up together with the database.
 
----
+### 4. Run the instances
 
-## Running
-
-### Option A — Docker (full stack)
+#### Option A — Docker (full stack)
 
 Brings up Postgres, Redis, RustFS (S3-compatible storage), Mailpit (SMTP
 catcher) and the identity provider, then seeds the dev users:
@@ -142,7 +174,12 @@ make alice-down          # stop containers, keep data
 make alice-down-v        # stop containers and delete volumes
 ```
 
-### Option B — Host (`cargo run`, fastest inner loop)
+> A volume created before the move to Postgres 18 stops the target with
+> `in 18+, these Docker images are configured to store database data in a format…`.
+> `make alice-down-v` deletes it, and the instance's data with it; then run the
+> target again.
+
+#### Option B — Host (`cargo run`, fastest inner loop)
 
 The IdP runs on your machine; its infrastructure still comes from Docker. Start
 the dependencies for the instance first:
@@ -180,7 +217,7 @@ signup OTP flow:
 
 | Instance | User | Handle | Email | Password |
 |---|---|---|---|---|
-| Alice | Alice | `alice_dev01` | `akasatana83@hotmail.fr` | `yonolulu` |
+| Alice | Alice | `alice_dev01` | `alice@test.fr` | `yonolulu` |
 | Alice | Pierre | `pierre_dev01` | `pierre@test.fr` | `yonolulu` |
 | Bob | Bob | `bob_dev01` | `bob@test.fr` | `yonolulu` |
 
@@ -206,8 +243,21 @@ IdP afterwards so the remote-presence registry reloads the new URIs.
 |---|---|---|
 | Identity provider | http://localhost:8088 | http://localhost:8081 |
 | Mailpit (captured emails) | http://localhost:8025 | http://localhost:8026 |
-| RustFS console | http://localhost:9001 | http://localhost:9003 |
+| RustFS console | http://localhost:9005 | http://localhost:9003 |
 | Web client (signs in to either) | http://localhost:5173 | http://localhost:5173 |
+
+### The web client
+
+Clone [`Pina-i/pinai-client`](https://github.com/Pina-i/pinai-client) and follow
+its README (Node, pnpm and `wasm-pack`), then:
+
+```bash
+pnpm install
+pnpm dev                 # http://localhost:5173, pre-filled with Alice's instance
+```
+
+Sign in with one of the dev users above; type `localhost:8081` on the landing
+page to reach Bob's instance instead.
 
 ---
 
@@ -245,10 +295,11 @@ image for amd64 and arm64 on native runners. What it publishes to
 | A tag `vX.Y.Z-rc.1` | `X.Y.Z-rc.1`, then a pre-release with the bundle pinned to it |
 
 A tag must name the version of `idp-api` (what NodeInfo reports), or a release
-candidate of it: the run checks it first.
+candidate of it: the run checks it first. Tag the commit of `main` whose run
+passed, and push the tag:
 
 ```bash
-git tag v0.1.0 && git push origin v0.1.0
+git tag -a v0.1.0 -m "v0.1.0" && git push origin v0.1.0
 ```
 
 The Rust toolchain is pinned in both Dockerfiles (the cargo-chef image) and in
@@ -279,8 +330,10 @@ All `make` targets are run from the repo root.
 |---|---|
 | `make fmt` | `cargo fmt --all` |
 | `make fmt-check` | Check formatting without writing |
-| `make lint` | `cargo clippy --workspace --all-targets -- -D warnings` |
-| `make check` | `fmt-check` + `lint` + `cargo test --workspace` — run before every commit |
+| `make lint` | `cargo clippy --workspace --all-targets --all-features -- -D warnings` |
+| `make check` | `fmt-check` + `lint` + `cargo test --workspace` — no Docker; run before every commit |
+| `make test-integration` | Throwaway Postgres and Redis (`compose.test.yml`), then every test, the Docker-gated ones included |
+| `make check-all` | `check` + `test-integration` — what CI runs, the gate before merging |
 
 ### Cargo
 
@@ -295,7 +348,9 @@ All `make` targets are run from the repo root.
 
 ## Configuration reference
 
-`.env.example` documents every supported variable. The main groups:
+`.env.example` documents every variable of the development env files; a hosted
+instance is configured by `deploy/.env.example`, which `deploy/setup.sh` fills.
+The main groups:
 
 - **PostgreSQL** — `POSTGRES_*`; `DATABASE_URL` is built from them
 - **Server** — `IDP_ENV`, `DOMAIN`, `PORT`
@@ -312,6 +367,7 @@ All `make` targets are run from the repo root.
 
 ## Documentation
 
+- `deploy/README.md` — hosting an instance: install, upgrade, back up, reverse proxy
 - `specs/02-architecture-diagram.md` — the whole platform at a glance
 - `specs/06-federation-authentication.md` — Bearer JWT vs HTTP Signatures, server-to-server trust
 - `identity-provider/README.md` — IdP endpoints, OIDC flow, federation

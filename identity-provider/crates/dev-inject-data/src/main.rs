@@ -56,7 +56,7 @@ const ALICE: Fixture = Fixture {
     key: "alice",
     display_name: "Alice",
     username: "alice_dev01",
-    email: "akasatana83@hotmail.fr",
+    email: "alice@test.fr",
     password: "yonolulu",
     home_domain: "localhost:8088",
 };
