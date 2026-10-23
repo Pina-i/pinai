@@ -233,25 +233,26 @@ docker compose up -d     # the whole platform, configured by .env
 
 ### Releasing
 
-Every pull request and push to `main` runs `.github/workflows/ci.yml`:
-`make check-all` and an amd64 build of the production image, not published.
+`.github/workflows/ci.yml` runs `make check-all`, then builds the production
+image for amd64 and arm64 on native runners. What it publishes to
+`ghcr.io/pina-i/pinai-idp` depends on what triggered it:
 
-Pushing a tag `vX.Y.Z`, the version of `idp-api` (what NodeInfo reports), or a
-release candidate of it (`vX.Y.Z-rc.1`), runs `.github/workflows/release.yml`:
+| Trigger | Published |
+|---|---|
+| A pull request | nothing |
+| A push to `main` | `edge` and `sha-<short>`, for testing only |
+| A tag `vX.Y.Z` | `X.Y.Z`, `X.Y` and `latest`, then a GitHub release carrying `pinai-deploy.tar.gz`: `deploy/` with `PINAI_VERSION` set to `X.Y` |
+| A tag `vX.Y.Z-rc.1` | `X.Y.Z-rc.1`, then a pre-release with the bundle pinned to it |
 
-1. the tag checked against the crate version, then `make check-all`;
-2. the image built for amd64 and arm64 on native runners and published to
-   `ghcr.io/pina-i/pinai-idp` as `X.Y.Z`, `X.Y` and `latest` (a release
-   candidate as its own version only);
-3. a GitHub release carrying `pinai-deploy.tar.gz`: `deploy/` with
-   `PINAI_VERSION` set to `X.Y`.
+A tag must name the version of `idp-api` (what NodeInfo reports), or a release
+candidate of it: the run checks it first.
 
 ```bash
 git tag v0.1.0 && git push origin v0.1.0
 ```
 
 The Rust toolchain is pinned in both Dockerfiles (the cargo-chef image) and in
-both workflows (`RUSTUP_TOOLCHAIN`): change the four together.
+the workflow (`RUSTUP_TOOLCHAIN`): change the three together.
 
 ---
 
