@@ -213,13 +213,27 @@ pub struct InMemoryTokens {
 }
 
 impl InMemoryTokens {
-    /// A token for `user`, belonging to `session`.
+    /// A token for `user`, belonging to `session`, whose password was typed just now.
     pub fn issue(&self, user: UserId, session: SessionId) -> String {
+        self.issue_signed_in_at(user, session, time::OffsetDateTime::now_utc())
+    }
+
+    /// The same, with the password typed at `authenticated_at`.
+    pub fn issue_signed_in_at(
+        &self,
+        user: UserId,
+        session: SessionId,
+        authenticated_at: time::OffsetDateTime,
+    ) -> String {
         let token = format!("token-{}", UserId::generate());
-        self.issued
-            .lock()
-            .unwrap()
-            .insert(token.clone(), Bearer { user, session });
+        self.issued.lock().unwrap().insert(
+            token.clone(),
+            Bearer {
+                user,
+                session,
+                authenticated_at,
+            },
+        );
         token
     }
 }

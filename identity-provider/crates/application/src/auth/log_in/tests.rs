@@ -1,5 +1,5 @@
 use domain::auth::testing::{Mail, a_request, signed_up};
-use domain::auth::{ClientId, ClientSignIn, Grant, SignInAccount};
+use domain::auth::{ClientId, ClientSignIn, Grant, Sessions, SignInAccount};
 use time::Duration;
 
 use crate::auth::world::{now, world};
@@ -306,4 +306,32 @@ async fn signing_in_again_keeps_the_browsers_session_and_another_account_replace
         Some(domain::auth::RevokedReason::Replaced)
     );
     assert_eq!(w.ended.ended(), vec![session], "its sockets told to close");
+}
+
+#[tokio::test]
+async fn the_password_typed_again_on_a_kept_session_dates_it_anew() {
+    let w = world().await;
+    let first = w
+        .log_in
+        .execute(&w.alice.email, "alice-password", &a_request(), None, now())
+        .await
+        .unwrap();
+    let LoginOutcome::SignedIn { session, .. } = first else {
+        panic!("{first:?}")
+    };
+    let later = now() + Duration::hours(1);
+
+    w.log_in
+        .execute(
+            &w.alice.email,
+            "alice-password",
+            &a_request(),
+            Some(session),
+            later,
+        )
+        .await
+        .unwrap();
+
+    let kept = w.sessions.find(session).await.unwrap().unwrap();
+    assert_eq!(kept.authenticated_at, later);
 }

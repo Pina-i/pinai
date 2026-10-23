@@ -10,7 +10,7 @@ use anyhow::Context;
 use argon2::password_hash::SaltString;
 use argon2::{Argon2, PasswordHasher as _, PasswordVerifier};
 use domain::auth::{
-    AuthError, Authenticator, ClientId, HandleSuffixes, PasswordHash, PasswordHasher,
+    AuthError, Authenticator, ClientId, HandleSuffixes, PasswordHash, PasswordHasher, Session,
     SignInAccount, TokenIssuer, TotpSecret,
 };
 use domain::identity::{Bearer, HandleSuffix, TokenError, TokenVerifier};
@@ -47,7 +47,13 @@ impl TokenVerifier for JwtTokenVerifier {
             .parse::<uuid::Uuid>()
             .map(SessionId::from)
             .map_err(|_| TokenError::Invalid)?;
-        Ok(Bearer { user, session })
+        let authenticated_at = OffsetDateTime::from_unix_timestamp(claims.auth_time)
+            .map_err(|_| TokenError::Invalid)?;
+        Ok(Bearer {
+            user,
+            session,
+            authenticated_at,
+        })
     }
 }
 
@@ -67,7 +73,7 @@ impl TokenIssuer for JwtTokenIssuer {
     fn access_token(
         &self,
         account: &SignInAccount,
-        session: SessionId,
+        session: &Session,
         client: &ClientId,
         ttl: Duration,
     ) -> Result<String, AuthError> {
@@ -77,7 +83,8 @@ impl TokenIssuer for JwtTokenIssuer {
             &account.id.to_string(),
             &self.issuer,
             client.as_str(),
-            &session.to_string(),
+            &session.id.to_string(),
+            session.authenticated_at.unix_timestamp(),
             &account.email,
             &account.username,
             ttl.whole_seconds(),

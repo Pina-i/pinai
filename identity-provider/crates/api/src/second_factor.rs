@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 use crate::ApiError;
-use crate::auth::Authenticated;
+use crate::auth::{Authenticated, RecentlySignedIn};
 use crate::pages::{
     Appearance, SameOrigin, SecondFactorPage, SignInPages, cancel, expired, render, to, totp_alert,
 };
@@ -166,10 +166,10 @@ pub struct EnrollmentBody {
 /// `POST /api/totp/enroll` — a secret to scan: the second factor is on once a code confirms it.
 pub async fn enroll(
     State(enroll): State<Arc<StartTotpEnrollment>>,
-    Authenticated(user): Authenticated,
+    RecentlySignedIn(bearer): RecentlySignedIn,
 ) -> Result<Json<EnrollmentBody>, ApiError> {
     let enrollment = enroll
-        .execute(user)
+        .execute(bearer.user)
         .await
         .map_err(|e| refused(e, "Incorrect code"))?;
     Ok(Json(EnrollmentBody {

@@ -21,7 +21,7 @@ use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
 
 use crate::ApiError;
-use crate::auth::{Authenticated, CallerJson};
+use crate::auth::{Authenticated, CallerJson, RecentlySignedIn};
 use crate::rate_limit::RateLimiter;
 
 #[derive(Serialize)]
@@ -195,11 +195,11 @@ pub async fn register(
 /// `POST /api/keys/devices/{device_id}/revoke`
 pub async fn revoke(
     State(revoke): State<Arc<RevokeDevice>>,
-    Authenticated(user): Authenticated,
+    RecentlySignedIn(bearer): RecentlySignedIn,
     Path(device_id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
     revoke
-        .execute(user, device_id.into(), OffsetDateTime::now_utc())
+        .execute(bearer.user, device_id.into(), OffsetDateTime::now_utc())
         .await?;
     Ok(StatusCode::NO_CONTENT)
 }

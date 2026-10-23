@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use domain::auth::SessionKind;
 use domain::auth::testing::{CLIENT_ID, signed_up};
 use domain::identity::{Bearer, TokenError, TokenVerifier};
 use domain::{SessionId, UserId};
@@ -25,8 +26,9 @@ fn keypair() -> Arc<EdKeyPair> {
     Arc::new(keypair)
 }
 
-/// A session these tests' tokens belong to.
+/// A session these tests' tokens belong to, and when its password was typed.
 const SESSION: &str = "8c3a1f2e-0b1d-4c55-9a77-1f0e6d2b3a40";
+const SIGNED_IN_AT: i64 = 1_790_000_000;
 
 fn token(keypair: &EdKeyPair, issuer: &str, subject: &str, ttl: i64) -> String {
     for_audience(keypair, issuer, issuer, subject, ttl)
@@ -46,6 +48,7 @@ fn for_audience(
         audience,
         CLIENT_ID,
         SESSION,
+        SIGNED_IN_AT,
         "a@idp.test",
         "a",
         ttl,
@@ -54,7 +57,7 @@ fn for_audience(
 }
 
 #[test]
-fn a_token_this_instance_issued_names_its_user_and_session() {
+fn a_token_this_instance_issued_names_its_user_session_and_password_time() {
     let keypair = keypair();
     let user = UserId::generate();
     let verifier = JwtTokenVerifier::new(keypair.clone(), ISSUER.to_owned());
@@ -66,6 +69,7 @@ fn a_token_this_instance_issued_names_its_user_and_session() {
         Bearer {
             user,
             session: SessionId::from(uuid::Uuid::parse_str(SESSION).unwrap()),
+            authenticated_at: OffsetDateTime::from_unix_timestamp(SIGNED_IN_AT).unwrap(),
         }
     );
 }
@@ -96,10 +100,20 @@ fn the_tokens_a_sign_in_leads_to_name_the_account_and_its_session_and_carry_the_
     let alice = signed_up("alice");
     let client = ClientId::parse(CLIENT_ID).unwrap();
 
-    let session = SessionId::generate();
+    let opened = OffsetDateTime::from_unix_timestamp(SIGNED_IN_AT).unwrap();
+    let session = Session {
+        id: SessionId::generate(),
+        user: alice.id,
+        kind: SessionKind::Browser,
+        device: None,
+        created_at: opened,
+        last_used_at: opened + Duration::hours(3),
+        authenticated_at: opened + Duration::hours(2),
+        revoked_at: None,
+    };
     let issuer = JwtTokenIssuer::new(keypair.clone(), ISSUER.to_owned());
     let access_token = issuer
-        .access_token(&alice, session, &client, Duration::hours(1))
+        .access_token(&alice, &session, &client, Duration::hours(1))
         .unwrap();
     let id_token = issuer
         .id_token(&alice, &client, Some("the-nonce"), Duration::hours(1))
@@ -116,10 +130,15 @@ fn the_tokens_a_sign_in_leads_to_name_the_account_and_its_session_and_carry_the_
         verified.unwrap(),
         Bearer {
             user: alice.id,
-            session
+            session: session.id,
+            authenticated_at: session.authenticated_at,
         }
     );
-    assert_eq!(access["sid"], session.to_string());
+    assert_eq!(access["sid"], session.id.to_string());
+    assert_eq!(
+        access["auth_time"],
+        session.authenticated_at.unix_timestamp()
+    );
     for token in [&access, &claims] {
         assert_eq!(
             token["exp"].as_i64().unwrap() - token["iat"].as_i64().unwrap(),

@@ -13,6 +13,9 @@ pub struct AccessTokenClaims {
     pub client_id: String,
     /// The session the token belongs to: it stops working when the session ends.
     pub sid: String,
+    /// When the account last typed its password on that session (OpenID Connect `auth_time`): a
+    /// renewal keeps it, so a sensitive action can ask for a recent one.
+    pub auth_time: i64,
     pub exp: i64, // unix timestamp
     pub iat: i64,
     pub email: String,
@@ -40,6 +43,7 @@ pub fn issue_access_token(
     audience: &str,
     client_id: &str,
     session_id: &str,
+    auth_time: i64,
     email: &str,
     username: &str,
     ttl_seconds: i64,
@@ -51,6 +55,7 @@ pub fn issue_access_token(
         aud: audience.to_owned(),
         client_id: client_id.to_owned(),
         sid: session_id.to_owned(),
+        auth_time,
         exp: now + ttl_seconds,
         iat: now,
         email: email.to_owned(),

@@ -1,7 +1,7 @@
 //! The layers every route goes through: CORS for any client, and one span per request.
 
 use axum::body::Body;
-use axum::http::{HeaderName, Method, Request, Uri};
+use axum::http::{HeaderName, Method, Request, Uri, header};
 use tower_http::classify::{ServerErrorsAsFailures, SharedClassifier};
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::{
@@ -30,6 +30,8 @@ pub fn cors() -> CorsLayer {
             HeaderName::from_static("accept"),
             HeaderName::from_static("x-requested-with"),
         ])
+        // The challenge of a 401 tells a token to renew from a password to type again.
+        .expose_headers([header::WWW_AUTHENTICATE])
         .allow_credentials(false)
 }
 

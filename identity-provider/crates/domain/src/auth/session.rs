@@ -22,6 +22,10 @@ pub struct Session {
     pub created_at: OffsetDateTime,
     /// The last sign-in or refresh that used it.
     pub last_used_at: OffsetDateTime,
+    /// The last time the account typed its password on it: what its tokens carry as `auth_time`,
+    /// and what a sensitive action asks to be recent. Neither a refresh nor a silent sign-in
+    /// changes it.
+    pub authenticated_at: OffsetDateTime,
     pub revoked_at: Option<OffsetDateTime>,
 }
 

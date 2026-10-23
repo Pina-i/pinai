@@ -55,6 +55,24 @@ impl ApiError {
         )
     }
 
+    /// A 401 for a password typed longer than `max_age` ago, with the challenge RFC 9470 § 3
+    /// asks for: the client has the password typed again, then asks again.
+    pub fn insufficient_user_authentication(max_age: time::Duration) -> Self {
+        let challenge = format!(
+            r#"Bearer error="insufficient_user_authentication", max_age="{}""#,
+            max_age.whole_seconds()
+        );
+        Self::new(
+            StatusCode::UNAUTHORIZED,
+            "insufficient_user_authentication",
+            "Type your password again to do this",
+        )
+        .with_header(
+            header::WWW_AUTHENTICATE,
+            HeaderValue::from_str(&challenge).expect("an ASCII challenge"),
+        )
+    }
+
     /// A 500 whose cause goes to the logs, never to the client.
     pub fn internal(source: anyhow::Error) -> Self {
         Self {

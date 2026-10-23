@@ -294,7 +294,7 @@ All Bearer-auth except where noted. Cross-IdP paths use HTTP Signatures — see
 |---|---|
 | `POST /api/keys/devices` | Register/renew/rotate the caller's DRK attestation. Idempotent on `(device_id, drk_public_key)`. First-time mint emits a `DeviceJoined` WS event to the user's other live sessions. Returns the signature, kid, issued_at, expires_at, and the canonical bytes the IdP signed so the client can re-verify locally |
 | `GET /api/keys/devices` | List the caller's devices with their attestation expiry (the client uses this to schedule silent renewals), and whether each is signed in: `signed_in`, `last_active_at` |
-| `POST /api/keys/devices/:device_id/revoke` | Signs the device out — its sessions end (`identity-provider/specs/auth.md § 1`, "Sessions and devices") — then sets the directory-level revocation flag; complements MLS Remove commits. Idempotent; `404` for a device that is not the caller's |
+| `POST /api/keys/devices/:device_id/revoke` | Signs the device out — its sessions end (`identity-provider/specs/auth.md § 1`, "Sessions and devices") — then sets the directory-level revocation flag; the MLS Remove commits follow. Takes a password typed in the last 10 minutes (`identity-provider/specs/auth.md § 1`, "Sensitive actions"). Idempotent; `404` for a device that is not the caller's |
 | `POST /api/keys/packages` | Upload a batch of KeyPackages for one of the caller's devices — refused whole (`400`) when a package is empty or not base64, expires in the past or beyond the lifetime, or would take the device past the cap |
 | `POST /api/keys/packages/claim` | Atomically reserve one KeyPackage for `actor_uri` — of `device_id`, or of any device with some left. Bearer or HTTP-Sig (peer IdPs); for remote `actor_uri` the local IdP proxies to the target IdP via HTTP-Sig |
 | `POST /api/keys/packages/claim/devices` | One KeyPackage of each of `actor_uri`'s unrevoked devices that has any, as `{ claims: [...] }` — a contact's first add brings all their devices in (§ 6.5). Asked, proxied, limited and refused as a single claim is; none at all → 409 |
@@ -383,7 +383,7 @@ and they hold for what peers deliver as much as for local clients.
 | `GET /api/history/salt` | Returns `{salt_base64}` or 404 when unset |
 | `POST /api/history/messages` | Batch upload of 1 to 50 entries (`400` otherwise; a nonce is 12 bytes). Every `conversation_id` must be one the caller is or was a member of — leaving a group keeps the history already read — or the batch is refused whole (`403`). Idempotent upsert on `(user_id, id)` — first decryptor of a message wins; subsequent uploads from the user's other devices no-op. Answers `{ inserted }`, how many were new |
 | `GET /api/history/messages?after_id=&after_created_at=&limit=` | Keyset pagination over `(created_at DESC, id DESC)`, limit clamped 1..=500, default 100. `next_cursor` names the page's last entry, and is `null` only on an empty page; `after_id` and `after_created_at` (RFC 3339) go together (`400`) |
-| `DELETE /api/history/messages` | Wipe the user's archive. Settings → Devices → Clear |
+| `DELETE /api/history/messages` | Wipe the user's archive. Settings → Devices → Clear. Takes a password typed in the last 10 minutes (`identity-provider/specs/auth.md § 1`, "Sensitive actions") |
 
 ### WebSocket events (server → client)
 
@@ -648,14 +648,19 @@ sequenceDiagram
     participant IdP
 
     U->>Web: Settings → Devices → Revoke
+    Web->>IdP: POST /api/keys/devices/:device_id/revoke
+    IdP->>IdP: end the device's sessions, then mark user_devices.revoked_at = now()
+    Note over IdP: its tokens and sockets stop at once;<br/>future /api/keys/packages/claim<br/>requests for this device fail
     loop for each conversation the revoked device is in
         Web->>Web: build MLS Remove commit
         Web->>IdP: POST /api/mls/groups/:id/commits
     end
-    Web->>IdP: POST /api/keys/devices/:device_id/revoke
-    IdP->>IdP: end the device's sessions, then mark user_devices.revoked_at = now()
-    Note over IdP: its tokens and sockets stop at once;<br/>future /api/keys/packages/claim<br/>requests for this device fail
 ```
+
+The IdP goes first. It may refuse — a password typed more than 10 minutes ago
+(`identity-provider/specs/auth.md § 1`, "Sensitive actions") — and then nothing
+was done: the user types it again and revokes once more. Once it answered, the
+device is signed out and can read nothing new while the commits go out.
 
 MLS Remove commits provide post-compromise security: future epochs use
 a key schedule the revoked leaf was never part of. The directory-level

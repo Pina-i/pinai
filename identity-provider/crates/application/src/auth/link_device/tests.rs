@@ -35,6 +35,7 @@ async fn a_session_links_its_device_and_takes_it_over_from_the_one_before() {
     let bearer = |session| Bearer {
         user: w.alice.id,
         session,
+        authenticated_at: now(),
     };
 
     w.link.execute(bearer(before), device, now()).await.unwrap();
@@ -62,6 +63,7 @@ async fn a_device_that_isnt_the_accounts_or_was_revoked_is_refused() {
                 Bearer {
                     user: w.alice.id,
                     session,
+                    authenticated_at: now(),
                 },
                 device,
                 now(),

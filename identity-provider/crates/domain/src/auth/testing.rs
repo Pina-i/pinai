@@ -118,6 +118,7 @@ impl InMemorySessions {
                 device: None,
                 created_at: now,
                 last_used_at: now,
+                authenticated_at: now,
                 revoked_at: None,
             },
             None,
@@ -170,6 +171,7 @@ impl Sessions for InMemorySessions {
                 device: None,
                 created_at: now,
                 last_used_at: now,
+                authenticated_at: now,
                 revoked_at: None,
             },
             None,
@@ -191,6 +193,15 @@ impl Sessions for InMemorySessions {
         for (session, _) in self.sessions.lock().unwrap().iter_mut() {
             if session.id == id {
                 session.last_used_at = now;
+            }
+        }
+        Ok(())
+    }
+
+    async fn authenticate(&self, id: SessionId, at: OffsetDateTime) -> Result<(), AuthError> {
+        for (session, _) in self.sessions.lock().unwrap().iter_mut() {
+            if session.id == id {
+                session.authenticated_at = at;
             }
         }
         Ok(())
@@ -545,13 +556,14 @@ impl TokenIssuer for SpelledTokens {
     fn access_token(
         &self,
         account: &SignInAccount,
-        session: SessionId,
+        session: &Session,
         client: &ClientId,
         _ttl: Duration,
     ) -> Result<String, AuthError> {
         Ok(format!(
-            "access:{}:{session}:{}",
+            "access:{}:{}:{}",
             account.id,
+            session.id,
             client.as_str()
         ))
     }
@@ -1708,6 +1720,11 @@ pub mod contract {
         let opened = sessions.find(id).await.unwrap();
         sessions.touch(id, at + Duration::hours(1)).await.unwrap();
         let used = sessions.find(id).await.unwrap().unwrap();
+        sessions
+            .authenticate(id, at + Duration::minutes(90))
+            .await
+            .unwrap();
+        let authenticated = sessions.find(id).await.unwrap().unwrap();
         let revoked = sessions
             .revoke(id, RevokedReason::SignOut, at + Duration::hours(2))
             .await
@@ -1731,9 +1748,16 @@ pub mod contract {
                 device: None,
                 created_at: at,
                 last_used_at: at,
+                authenticated_at: at,
                 revoked_at: None,
             })
         );
+        assert_eq!(
+            (used.authenticated_at, authenticated.authenticated_at),
+            (at, at + Duration::minutes(90)),
+            "a use is no password"
+        );
+        assert_eq!(authenticated.last_used_at, at + Duration::hours(1));
         assert_eq!(sessions.find(apps).await.unwrap().unwrap().kind, app);
         assert_eq!(used.last_used_at, at + Duration::hours(1));
         assert_eq!((revoked, again, reused), (true, false, true), "ended once");

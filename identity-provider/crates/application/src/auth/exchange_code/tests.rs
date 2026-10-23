@@ -140,6 +140,25 @@ async fn an_app_staying_signed_in_gets_a_session_of_its_own_that_outlives_the_br
 }
 
 #[tokio::test]
+async fn an_apps_session_was_signed_in_when_the_browsers_was_not_when_it_opened() {
+    let w = world().await;
+    let (browser, command) = a_desktop_code(&w, "openid profile email offline_access").await;
+
+    w.exchange
+        .execute(command, now() + Duration::minutes(2))
+        .await
+        .unwrap();
+
+    let app = w
+        .sessions
+        .all()
+        .into_iter()
+        .find(|session| session.id != browser)
+        .expect("a second session");
+    assert_eq!(app.authenticated_at, now());
+}
+
+#[tokio::test]
 async fn a_client_not_asking_or_not_allowed_to_stay_signed_in_stays_on_the_browsers_session() {
     let w = world().await;
     let (desktop_browser, not_asking) = a_desktop_code(&w, "openid profile email").await;

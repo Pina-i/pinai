@@ -2,14 +2,14 @@ name: pinai-idp
 
 services:
   postgres:
-    image: postgres:16
+    image: postgres:18
     env_file: .env
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - pgdata:/var/lib/postgresql
     ports:
       - "${POSTGRES_PORT:-5432}:5432"
     healthcheck:
@@ -63,6 +63,8 @@ services:
   # signs JWTs, federation HTTP Signatures and E2EE device attestations, so it is
   # the instance's whole identity: back up IDP_KEYS_DIR with the database, because
   # losing it cannot be recovered from. openssl emits the PKCS#8 PEM the IdP reads.
+  # The production image runs as 65532, so the key is group-readable by it, an
+  # existing one included; its owner stays the directory's.
   idp-keygen:
     image: alpine/openssl:3.5.8
     restart: "no"
@@ -73,10 +75,11 @@ services:
           echo "instance key present, keeping it";
         else
           openssl genpkey -algorithm ed25519 -out /keys/ed25519.pem &&
-          chmod 600 /keys/ed25519.pem &&
-          chown "$$(stat -c '%u:%g' /keys)" /keys/ed25519.pem &&
+          chown "$$(stat -c '%u' /keys)" /keys/ed25519.pem &&
           echo "generated a new instance key";
-        fi
+        fi &&
+        chgrp 65532 /keys/ed25519.pem &&
+        chmod 640 /keys/ed25519.pem
     volumes:
       - ${IDP_KEYS_DIR:-./identity-provider/keys/default}:/keys
 

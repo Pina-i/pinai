@@ -100,7 +100,8 @@ user's own instance, and a new desktop redirect URI or scope ships with the inst
    the login page, carrying the request and the client's theme (§ "The sign-in pages").
 4. `prompt=login` (OpenID Connect Core § 3.1.2.1) always goes to the login page, whatever session
    the browser holds. The desktop app sends it at each sign-in: its window keeps the IdP's
-   cookie like a browser, and the user can pick another account there.
+   cookie like a browser, and the user can pick another account there. Any client sends it to
+   have the password typed again before a sensitive action (§ "Sensitive actions").
 
 ### The sign-in pages
 
@@ -222,7 +223,8 @@ it leads to belongs to it. There are two kinds:
 - An **app session** is opened by a native client's code exchange when it stays signed in on its
   device: its document allows `offline_access`, its request asked for it, and the password sign-in
   agreed (`Grant::opens_app_session`). The desktop app's tokens belong to it, not to the system
-  browser it signed in through, so signing out of that browser leaves the app signed in.
+  browser it signed in through, so signing out of that browser leaves the app signed in. Its
+  password is the browser session's: it was typed there.
 
 ```sql
 CREATE TABLE sessions (
@@ -234,6 +236,8 @@ CREATE TABLE sessions (
                                             -- the E2EE device it signed in (§ "Sessions and devices")
     created_at     TIMESTAMPTZ NOT NULL,
     last_used_at   TIMESTAMPTZ NOT NULL,    -- the last sign-in or refresh that used it
+    authenticated_at TIMESTAMPTZ NOT NULL,  -- the account's password last typed on it
+                                            --   (§ "Sensitive actions")
     revoked_at     TIMESTAMPTZ,
     revoked_reason TEXT                     -- sign_out | replaced | reuse | device_revoked
                                             --   | signed_out_elsewhere
@@ -262,7 +266,8 @@ stateDiagram-v2
   the session may, 90 days, and is **set again at every use**, so it slides with it. A cookie naming
   a session that isn't live is no cookie: the login page shows.
 - **One account per browser.** A password sign-in keeps the browser's live session when it is the
-  same account's, stamping it; another account's is ended (`replaced`) and a new one opened.
+  same account's, stamping its use and its password (`authenticated_at`); another account's is
+  ended (`replaced`) and a new one opened.
 - **Codes and tokens belong to it.** A code is issued under the browser session and refused at
   `/token` once that session has ended. The access token names its session (`sid`), and every
   authenticated request and the `/ws` upgrade check that it still lives — one read by primary key
@@ -339,6 +344,54 @@ sequenceDiagram
   (`signed_out_elsewhere`): other browsers, other apps, linked to a device or not. The devices
   stay, and each may sign in again as the same device. `204`; `400` without `keep=current`.
 
+Both take a recent password (§ "Sensitive actions").
+
+### Sensitive actions
+
+A few actions take the account's password typed on this session in the last **10 minutes**
+(`RECENT_SIGN_IN`), not only a live session: a token left on a device someone else picks up, or
+taken from it, must not be enough to lock the owner out or erase their history.
+
+| Action | Route |
+|---|---|
+| Revoke a device | `POST /api/keys/devices/:device_id/revoke` |
+| Sign out every other device | `DELETE /api/sessions?keep=current` |
+| Turn the second factor on | `POST /api/totp/enroll` |
+| Clear the history backup | `DELETE /api/history/messages` |
+
+Turning the second factor off and replacing the recovery codes take a current authenticator code
+instead (§ 3). Nothing else asks: the profile, the settings, blocking, signing oneself out.
+
+- **What counts** is the password: a sign-in on the login form, the code mailed at sign-up, the
+  second factor. Each dates its session's `authenticated_at`; an app session opened by the code
+  exchange takes its browser session's. A silent `/authorize` and a refresh change nothing.
+- **The access token** carries it as `auth_time` (OpenID Connect Core § 2), so the check reads
+  no table: `Bearer::signed_in_recently`. The token keeps it through its renewals.
+- **A refusal** is `401` with `error: "insufficient_user_authentication"` and the challenge of
+  RFC 9470 § 3, `WWW-Authenticate: Bearer error="insufficient_user_authentication",
+  max_age="600"`. Nothing was done. The session lives on: the client doesn't renew its token for
+  it — a renewal brings no newer password.
+- **The client** tells the user why, sends them to `/authorize` with `prompt=login`, and comes
+  back to the screen they were on, signed in anew on the same session (a new app session on the
+  desktop, replacing the one it held). The user then does it again: nothing is replayed.
+  "← Another home" brings them back there too, still signed in.
+
+```mermaid
+sequenceDiagram
+    participant C as client
+    participant I as IdP
+    C->>I: POST /api/keys/devices/:id/revoke (auth_time 40 min ago)
+    I-->>C: 401 insufficient_user_authentication
+    C->>C: "Type your password again"
+    C->>I: GET /authorize?…&prompt=login
+    I-->>C: the login page, though the cookie lives
+    C->>I: POST /login: the password — authenticated_at = now
+    I-->>C: /callback?code=… → /token: auth_time now
+    C->>C: back on Settings → Devices
+    C->>I: POST /api/keys/devices/:id/revoke
+    I-->>C: 204
+```
+
 ### `POST /token`
 
 `application/x-www-form-urlencoded`, with `grant_type` and `client_id`; each grant takes its own
@@ -386,7 +439,8 @@ valid for one hour.
 
 - **The access token** is addressed to this instance's API (RFC 9068): `aud` is the issuer, and
   `client_id` names the client it was issued to, so the API takes it from any client. `sid` names
-  the session it belongs to (§ "Sessions"): it works while that session lives.
+  the session it belongs to (§ "Sessions"): it works while that session lives. `auth_time` is
+  when the password was last typed on that session (§ "Sensitive actions").
 - **The ID token** is addressed to the client: `aud` is the `client_id`. It adds the request's
   `nonce`. Only a code exchange issues one.
 - **The refresh token** is 256 random bits (base64url, 43 characters). Only its SHA-256 is kept.
@@ -421,7 +475,8 @@ of two answers to two concurrent refreshes, only the later works.
 
 A bearer token that is missing or unusable is answered `401 invalid_token`, with the challenge
 RFC 6750 § 3 asks for: `WWW-Authenticate: Bearer` when none was sent, `Bearer
-error="invalid_token"` when one was.
+error="invalid_token"` when one was. One whose password is too old for the action is answered
+`401 insufficient_user_authentication` (§ "Sensitive actions").
 
 ### `POST /revoke`
 
@@ -447,7 +502,9 @@ through: `/authorize`, the login, sign-up and code forms, and `/logout`. Under `
 exposes the answer to a credentialed request.
 
 The allowed request headers are listed, `Authorization` among them, rather than `*`, which Firefox
-reads as not covering `Authorization`.
+reads as not covering `Authorization`. `WWW-Authenticate` is exposed to the page
+(`Access-Control-Expose-Headers`): its challenge tells a token to renew from a password to type
+again.
 
 ### `GET /logout`
 
@@ -519,6 +576,12 @@ registered, and the JSON `POST /register` creates accounts, not clients.
   and takes it out of every group.
 - **"Sign out other devices".** Every other browser and app signs in again with the password;
   this one stays. The devices aren't revoked: each comes back as itself.
+- **Revoking the phone a day after signing in.** The laptop's password is a day old: "Type your
+  password again", the login page, and back on Settings → Devices, where revoking it now goes
+  through. Within the next 10 minutes, nothing more is asked.
+- **A laptop left open.** Whoever sits at it can read and write as its owner, but can't revoke
+  the owner's other devices, sign them out, turn the second factor on or clear the history
+  backup without the password.
 
 ## 2. Sign-up email verification
 
@@ -734,7 +797,7 @@ sequenceDiagram
 
 | Endpoint | Auth | Body | Result |
 |---|---|---|---|
-| `POST /api/totp/enroll` | Bearer | — | Generates a fresh 20-byte secret, keeps it in `pending_totp_enrollments` (replacing an earlier one), returns `{ secret_base32, provisioning_url }`. The provisioning URL is the `otpauth://totp/...` string the client renders as a QR; its issuer names the instance, `Pina'i (DOMAIN)` — a port written after a space, as the format keeps `:` to split the label. `400` while the second factor is on. |
+| `POST /api/totp/enroll` | Bearer, a recent password (§ 1 "Sensitive actions") | — | Generates a fresh 20-byte secret, keeps it in `pending_totp_enrollments` (replacing an earlier one), returns `{ secret_base32, provisioning_url }`. The provisioning URL is the `otpauth://totp/...` string the client renders as a QR; its issuer names the instance, `Pina'i (DOMAIN)` — a port written after a space, as the format keeps `:` to split the label. `400` while the second factor is on. |
 | `POST /api/totp/enroll/verify` | Bearer | `{ code }` | Checks the first authenticator code against the pending secret. On success, in one transaction: commits the secret, records the code's step, forgets the enrollment, and mints 10 recovery codes, returned in `{ recovery_codes: [...] }` — shown once and never re-served. The second factor is never on without recovery codes. `400 invalid_grant` for a wrong code. |
 | `POST /api/totp/disable` | Bearer | `{ code }` | Requires a current, unused TOTP code (a passive session cannot disarm it). In one transaction: clears the secret and its last step, sets `totp_enabled = false`, deletes the recovery codes and any enrollment. `204`. |
 | `POST /api/totp/recovery-codes/regenerate` | Bearer | `{ code }` | Requires a current, unused TOTP code. Replaces all of the account's recovery codes in one transaction and returns the fresh set. |

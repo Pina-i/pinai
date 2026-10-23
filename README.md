@@ -9,7 +9,8 @@ the backend services of the platform in a single Cargo workspace:
 | `chat-server/` | Layer 3 — chat & voice rooms, attached to one identity provider (not yet implemented) |
 | `crates/` | Shared libraries: `jwt-utils`, `http-signatures`, `activitypub`, `observability`, `federation-transport` |
 | `specs/` | Platform-wide specifications (architecture, federation authentication) |
-| `compose.yaml` | The full platform stack for Docker Compose |
+| `compose.yaml` | The development stack for Docker Compose |
+| `deploy/` | Hosting an instance: the published image behind Caddy, set up by `deploy/setup.sh` — see `deploy/README.md` |
 
 The web client lives in a separate repository (`web-client`) and talks to these
 services over HTTP. Each service has its own `README.md` / `CLAUDE.md` with its
@@ -222,13 +223,35 @@ crates sit above every service):
 
 | Dockerfile | Used by |
 |---|---|
-| `identity-provider/docker/Dockerfile` | `compose.yaml` — release build with cargo-chef, slim Debian runtime |
+| `identity-provider/docker/Dockerfile` | `compose.yaml` — release build with cargo-chef, distroless runtime as the non-root user 65532 |
 | `identity-provider/docker/Dockerfile.dev` | `compose.dev.yml` / `compose-win.dev.yml` — debug profile |
 
 ```bash
 docker compose build idp
 docker compose up -d     # the whole platform, configured by .env
 ```
+
+### Releasing
+
+Every pull request and push to `main` runs `.github/workflows/ci.yml`:
+`make check-all` and an amd64 build of the production image, not published.
+
+Pushing a tag `vX.Y.Z`, the version of `idp-api` (what NodeInfo reports), or a
+release candidate of it (`vX.Y.Z-rc.1`), runs `.github/workflows/release.yml`:
+
+1. the tag checked against the crate version, then `make check-all`;
+2. the image built for amd64 and arm64 on native runners and published to
+   `ghcr.io/pina-i/pinai-idp` as `X.Y.Z`, `X.Y` and `latest` (a release
+   candidate as its own version only);
+3. a GitHub release carrying `pinai-deploy.tar.gz`: `deploy/` with
+   `PINAI_VERSION` set to `X.Y`.
+
+```bash
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+The Rust toolchain is pinned in both Dockerfiles (the cargo-chef image) and in
+both workflows (`RUSTUP_TOOLCHAIN`): change the four together.
 
 ---
 

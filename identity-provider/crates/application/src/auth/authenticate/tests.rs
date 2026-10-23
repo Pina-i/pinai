@@ -23,7 +23,7 @@ async fn a_token_of_a_live_session_names_its_user_and_session() {
         .open(alice, &SessionKind::Browser, now())
         .await
         .unwrap();
-    let token = tokens.issue(alice, session);
+    let token = tokens.issue_signed_in_at(alice, session, now());
 
     let bearer = authenticate(&tokens, &sessions)
         .execute(&token, now())
@@ -34,7 +34,8 @@ async fn a_token_of_a_live_session_names_its_user_and_session() {
         bearer,
         Bearer {
             user: alice,
-            session
+            session,
+            authenticated_at: now(),
         }
     );
 }

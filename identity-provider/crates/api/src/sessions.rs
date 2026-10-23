@@ -13,7 +13,7 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::ApiError;
-use crate::auth::SignedIn;
+use crate::auth::{RecentlySignedIn, SignedIn};
 
 #[derive(Deserialize)]
 pub struct DeviceBody {
@@ -47,7 +47,7 @@ pub struct SignOutParams {
 /// `DELETE /api/sessions?keep=current` — every session but the caller's.
 pub async fn sign_out_others(
     State(sign_out): State<Arc<SignOutOthers>>,
-    SignedIn(bearer): SignedIn,
+    RecentlySignedIn(bearer): RecentlySignedIn,
     Query(params): Query<SignOutParams>,
 ) -> Result<StatusCode, ApiError> {
     if params.keep.as_deref() != Some("current") {

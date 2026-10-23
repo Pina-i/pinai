@@ -95,6 +95,10 @@ mod cors {
                 .unwrap();
 
             assert_eq!(response.headers()[header::ACCESS_CONTROL_ALLOW_ORIGIN], "*");
+            assert_eq!(
+                response.headers()[header::ACCESS_CONTROL_EXPOSE_HEADERS],
+                "www-authenticate"
+            );
         }
     }
 

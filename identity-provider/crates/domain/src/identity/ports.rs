@@ -1,3 +1,5 @@
+use time::{Duration, OffsetDateTime};
+
 use crate::{SessionId, UserId};
 
 use super::{Account, ActorUri, FederatedAddress, Handle, RemoteActor};
@@ -44,11 +46,25 @@ pub enum RemoteActorsError {
     Unexpected(#[from] anyhow::Error),
 }
 
-/// What an access token says: whose it is, and the session it belongs to.
+/// What an access token says: whose it is, the session it belongs to, and when the account last
+/// typed its password on that session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Bearer {
     pub user: UserId,
     pub session: SessionId,
+    pub authenticated_at: OffsetDateTime,
+}
+
+/// How recent a password a sensitive action takes: revoking a device, signing out the others,
+/// turning the second factor on, clearing the history backup.
+pub const RECENT_SIGN_IN: Duration = Duration::minutes(10);
+
+impl Bearer {
+    /// The password was typed within [`RECENT_SIGN_IN`]: a renewal or a silent sign-in since
+    /// doesn't count, only the password.
+    pub fn signed_in_recently(&self, now: OffsetDateTime) -> bool {
+        now - self.authenticated_at <= RECENT_SIGN_IN
+    }
 }
 
 /// Checks the access tokens this instance issued, by their signature and expiry alone: whether

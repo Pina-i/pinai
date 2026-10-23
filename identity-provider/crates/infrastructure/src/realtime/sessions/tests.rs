@@ -14,6 +14,7 @@ fn a_session_ended_closes_its_sockets() {
         device: None,
         created_at: now,
         last_used_at: now,
+        authenticated_at: now,
         revoked_at: Some(now),
     };
     let (_, socket, _) = hub.subscribe(session.user.as_uuid(), session.id.as_uuid());

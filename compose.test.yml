@@ -3,14 +3,14 @@
 # The default port stays clear of Alice's (5432) and Bob's (5433) dev Postgres.
 services:
   postgres-test:
-    image: postgres:16
+    image: postgres:18
     environment:
       POSTGRES_USER: test
       POSTGRES_PASSWORD: test
       POSTGRES_DB: test
     command: ["postgres", "-c", "fsync=off", "-c", "full_page_writes=off", "-c", "max_connections=500"]
     ports: ["${TEST_PG_PORT:-55432}:5432"]
-    tmpfs: ["/var/lib/postgresql/data"]
+    tmpfs: ["/var/lib/postgresql"]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U test"]
       interval: 1s

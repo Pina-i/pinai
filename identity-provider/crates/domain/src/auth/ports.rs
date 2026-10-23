@@ -49,11 +49,12 @@ pub trait PasswordHasher: Send + Sync {
 
 /// Signs the tokens a sign-in leads to, as this instance.
 pub trait TokenIssuer: Send + Sync {
-    /// Names `session`, so it stops working when the session ends.
+    /// Names `session`, so it stops working when the session ends, and when the password was
+    /// last typed on it.
     fn access_token(
         &self,
         account: &SignInAccount,
-        session: SessionId,
+        session: &Session,
         client: &ClientId,
         ttl: Duration,
     ) -> Result<String, AuthError>;
@@ -69,7 +70,7 @@ pub trait TokenIssuer: Send + Sync {
 /// The sessions: each a row, so each can end on its own.
 #[async_trait::async_trait]
 pub trait Sessions: Send + Sync {
-    /// A new session for the account, used `now`.
+    /// A new session for the account, used — and its password typed — `now`.
     async fn open(
         &self,
         user: UserId,
@@ -79,6 +80,8 @@ pub trait Sessions: Send + Sync {
     async fn find(&self, id: SessionId) -> Result<Option<Session>, AuthError>;
     /// Stamps a use of it.
     async fn touch(&self, id: SessionId, now: OffsetDateTime) -> Result<(), AuthError>;
+    /// Records the account's password typed on it at `at`.
+    async fn authenticate(&self, id: SessionId, at: OffsetDateTime) -> Result<(), AuthError>;
     /// Ends it; `false` when it had ended already.
     async fn revoke(
         &self,

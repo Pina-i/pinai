@@ -8,6 +8,7 @@ Discord alternative. One Cargo workspace spans every Rust crate here.
 ```
 compose.yaml               # the platform — `docker compose up` from here
 .env.example               # one deployment unit, one env template
+deploy/                    # hosting an instance: the published image behind Caddy, setup.sh
 specs/                     # platform-wide specs; service specs live in the service
 crates/                    # shared libraries (was the core-libs repo)
   jwt-utils/  http-signatures/  activitypub/  observability/
@@ -137,3 +138,13 @@ every existing device. Back `IDP_KEYS_DIR` up together with the database.
 workspace manifest and the shared crates sit above every service subtree. The
 `alice` / `bob` targets bring up two independent instances (distinct compose
 project names) for exercising federation between them.
+
+The production image is distroless (no shell, no OpenSSL: `reqwest` uses rustls)
+and runs as the non-root user 65532, so `idp-keygen` makes the instance key
+group-readable by 65532. The dev image runs as root and reads the host's keys as
+they are.
+
+A tag `vX.Y.Z` (`idp-api`'s version) publishes the image and the `deploy/` bundle
+through `.github/workflows/release.yml`; the root `README.md` § Releasing has the
+steps. The Rust toolchain is pinned in both Dockerfiles and both workflows: change
+the four together.

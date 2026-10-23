@@ -1,0 +1,132 @@
+# A Pīna'i instance from the published image, behind Caddy for TLS.
+# Run ./setup.sh first: it writes .env and creates ./data. See README.md.
+
+name: pinai
+
+# Docker keeps container logs forever by default.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  caddy:
+    image: caddy:2.11-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      DOMAIN: ${DOMAIN:?run ./setup.sh first}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./data/caddy/data:/data
+      - ./data/caddy/config:/config
+    depends_on:
+      - idp
+    logging: *logging
+
+  idp:
+    image: ghcr.io/pina-i/pinai-idp:${PINAI_VERSION:?set PINAI_VERSION in .env}
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      IDP_ENV: production
+      PORT: "8080"
+      DATABASE_URL: postgres://pinai:${POSTGRES_PASSWORD:?run ./setup.sh first}@postgres:5432/pinai
+      REDIS_URL: redis://redis:6379
+      STORAGE_ENDPOINT: http://rustfs:9000
+      # Avatars are served by RustFS, through Caddy's /avatars/ route.
+      STORAGE_PUBLIC_URL: https://${DOMAIN}
+      JWT_PRIVATE_KEY_PATH: /run/secrets/ed25519.pem
+    volumes:
+      - ./data/keys:/run/secrets:ro
+    depends_on:
+      init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rustfs:
+        condition: service_healthy
+    logging: *logging
+
+  postgres:
+    image: postgres:18
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: pinai
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?run ./setup.sh first}
+      POSTGRES_DB: pinai
+    volumes:
+      - ./data/postgres:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pinai -d pinai"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    logging: *logging
+
+  # The append-only file keeps the durable event streams (DMs) across restarts.
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - ./data/redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    logging: *logging
+
+  rustfs:
+    image: rustfs/rustfs:1.0.3
+    restart: unless-stopped
+    environment:
+      RUSTFS_ACCESS_KEY: ${STORAGE_ACCESS_KEY:?run ./setup.sh first}
+      RUSTFS_SECRET_KEY: ${STORAGE_SECRET_KEY:?run ./setup.sh first}
+      # Empty: logs to stdout, for `docker compose logs`.
+      RUSTFS_OBS_LOG_DIRECTORY: ""
+    volumes:
+      - ./data/rustfs:/data
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/health"]
+      interval: 5s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    logging: *logging
+
+  # Prepares ./data for the services that run as non-root, on every start.
+  # Mints the instance's Ed25519 key once and never touches its content: it signs
+  # JWTs, federation HTTP Signatures and E2EE device attestations, so losing it
+  # cannot be recovered from. The IdP runs as 65532 and reads it through its
+  # group; RustFS runs as 10001 and owns its directory.
+  init:
+    image: alpine/openssl:3.5.8
+    restart: "no"
+    entrypoint: ["sh", "-c"]
+    command:
+      - >-
+        if [ -f /keys/ed25519.pem ]; then
+          echo "instance key present, keeping it";
+        else
+          openssl genpkey -algorithm ed25519 -out /keys/ed25519.pem &&
+          chown "$$(stat -c '%u' /keys)" /keys/ed25519.pem &&
+          echo "generated a new instance key";
+        fi &&
+        chgrp 65532 /keys/ed25519.pem &&
+        chmod 640 /keys/ed25519.pem &&
+        chown 10001:10001 /rustfs
+    volumes:
+      - ./data/keys:/keys
+      - ./data/rustfs:/rustfs
+    logging: *logging

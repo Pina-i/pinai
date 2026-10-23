@@ -8,6 +8,7 @@ const ISSUER: &str = "https://idp.alice.com";
 const AUDIENCE: &str = ISSUER;
 const CLIENT_ID: &str = "https://app.example/oauth-client.json";
 const SESSION_ID: &str = "8c3a1f2e-0b1d-4c55-9a77-1f0e6d2b3a40";
+const AUTH_TIME: i64 = 1_790_000_000;
 const SUBJECT: &str = "3f1b8a2c-0000-4000-8000-000000000001";
 const EMAIL: &str = "alice@example.com";
 const USERNAME: &str = "alice-7G4K";
@@ -46,7 +47,7 @@ fn keypair(name: &str, seed: u8) -> (EdKeyPair, TempPem) {
 
 fn access_token(kp: &EdKeyPair, ttl: i64) -> String {
     issue_access_token(
-        kp, ISSUER, SUBJECT, AUDIENCE, CLIENT_ID, SESSION_ID, EMAIL, USERNAME, ttl,
+        kp, ISSUER, SUBJECT, AUDIENCE, CLIENT_ID, SESSION_ID, AUTH_TIME, EMAIL, USERNAME, ttl,
     )
     .expect("issuing should succeed")
 }
@@ -140,6 +141,7 @@ fn an_issued_access_token_validates_and_carries_its_claims() {
     assert_eq!(claims.aud, AUDIENCE);
     assert_eq!(claims.client_id, CLIENT_ID);
     assert_eq!(claims.sid, SESSION_ID);
+    assert_eq!(claims.auth_time, AUTH_TIME);
     assert_eq!(claims.email, EMAIL);
     assert_eq!(claims.preferred_username, USERNAME);
     assert_eq!(claims.exp - claims.iat, 300);

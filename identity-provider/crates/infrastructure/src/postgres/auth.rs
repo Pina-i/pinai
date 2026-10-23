@@ -220,8 +220,8 @@ impl PgSessions {
     }
 }
 
-const SESSION_COLUMNS: &str =
-    "id, user_id, kind, client_id, device_id, created_at, last_used_at, revoked_at";
+const SESSION_COLUMNS: &str = "id, user_id, kind, client_id, device_id, created_at, last_used_at, \
+     authenticated_at, revoked_at";
 
 #[derive(sqlx::FromRow)]
 struct SessionRow {
@@ -232,6 +232,7 @@ struct SessionRow {
     device_id: Option<uuid::Uuid>,
     created_at: OffsetDateTime,
     last_used_at: OffsetDateTime,
+    authenticated_at: OffsetDateTime,
     revoked_at: Option<OffsetDateTime>,
 }
 
@@ -253,6 +254,7 @@ impl TryFrom<SessionRow> for Session {
             device: row.device_id.map(DeviceId::from),
             created_at: row.created_at,
             last_used_at: row.last_used_at,
+            authenticated_at: row.authenticated_at,
             revoked_at: row.revoked_at,
         })
     }
@@ -272,8 +274,9 @@ impl Sessions for PgSessions {
             SessionKind::App(client) => ("app", Some(client.as_str())),
         };
         sqlx::query(
-            "INSERT INTO sessions (id, user_id, kind, client_id, created_at, last_used_at) \
-             VALUES ($1, $2, $3, $4, $5, $5)",
+            "INSERT INTO sessions \
+             (id, user_id, kind, client_id, created_at, last_used_at, authenticated_at) \
+             VALUES ($1, $2, $3, $4, $5, $5, $5)",
         )
         .bind(id.as_uuid())
         .bind(user.as_uuid())
@@ -304,6 +307,16 @@ impl Sessions for PgSessions {
             .execute(&self.pool)
             .await
             .context("stamp a session's use")?;
+        Ok(())
+    }
+
+    async fn authenticate(&self, id: SessionId, at: OffsetDateTime) -> Result<(), AuthError> {
+        sqlx::query("UPDATE sessions SET authenticated_at = $2 WHERE id = $1")
+            .bind(id.as_uuid())
+            .bind(at)
+            .execute(&self.pool)
+            .await
+            .context("stamp a session's password")?;
         Ok(())
     }
 

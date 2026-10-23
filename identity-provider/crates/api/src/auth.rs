@@ -11,7 +11,8 @@ use axum::http::request::Parts;
 use axum::http::{HeaderMap, Method, Uri};
 use domain::UserId;
 use domain::identity::{
-    ActorUri, Bearer, Requester, SignatureError, SignatureVerifier, SignedRequest, TokenError,
+    ActorUri, Bearer, RECENT_SIGN_IN, Requester, SignatureError, SignatureVerifier, SignedRequest,
+    TokenError,
 };
 use time::OffsetDateTime;
 
@@ -57,6 +58,26 @@ where
         let bearer = Arc::<Authenticate>::from_ref(state)
             .execute(token, OffsetDateTime::now_utc())
             .await?;
+        Ok(Self(bearer))
+    }
+}
+
+/// The same, for a sensitive action: the account's password typed on this session within
+/// [`RECENT_SIGN_IN`].
+pub struct RecentlySignedIn(pub Bearer);
+
+impl<S> FromRequestParts<S> for RecentlySignedIn
+where
+    Arc<Authenticate>: FromRef<S>,
+    S: Send + Sync,
+{
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let SignedIn(bearer) = SignedIn::from_request_parts(parts, state).await?;
+        if !bearer.signed_in_recently(OffsetDateTime::now_utc()) {
+            return Err(ApiError::insufficient_user_authentication(RECENT_SIGN_IN));
+        }
         Ok(Self(bearer))
     }
 }

@@ -21,6 +21,7 @@ async fn every_other_session_of_the_account_ends_and_this_one_stays() {
             Bearer {
                 user: w.alice.id,
                 session: current,
+                authenticated_at: now(),
             },
             now(),
         )

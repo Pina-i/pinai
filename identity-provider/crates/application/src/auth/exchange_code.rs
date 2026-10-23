@@ -82,29 +82,39 @@ impl ExchangeCode {
             .await?
             .ok_or(AuthError::CodeUnusable)?;
         // Signed out between the code and its exchange: the code goes with its session.
-        let live = self
+        let browser = self
             .sessions
             .find(grant.session)
             .await?
-            .is_some_and(|session| session.is_live(now));
-        if !live {
-            return Err(AuthError::CodeUnusable);
-        }
+            .filter(|session| session.is_live(now))
+            .ok_or(AuthError::CodeUnusable)?;
         let session = if grant.opens_app_session(&client) {
-            self.sessions
+            let app = self
+                .sessions
                 .open(account.id, &SessionKind::App(client.id.clone()), now)
+                .await?;
+            // Opened by the password typed on the browser's session: as recent as that, no more.
+            self.sessions
+                .authenticate(app, browser.authenticated_at)
+                .await?;
+            self.sessions
+                .find(app)
                 .await?
+                .ok_or_else(|| anyhow::anyhow!("the app session just opened is gone"))?
         } else {
-            grant.session
+            browser
         };
         Ok(Tokens {
             access_token: self.tokens.access_token(
                 &account,
-                session,
+                &session,
                 &client.id,
                 ACCESS_TOKEN_TTL,
             )?,
-            refresh_token: self.refresh_tokens.start(session, &client.id, now).await?,
+            refresh_token: self
+                .refresh_tokens
+                .start(session.id, &client.id, now)
+                .await?,
             id_token: Some(self.tokens.id_token(
                 &account,
                 &client.id,

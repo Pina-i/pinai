@@ -3,6 +3,7 @@ target/
 .git/
 docs/
 **/specs/
+deploy/
 
 # Never let runtime secrets into a build context.
 **/keys/

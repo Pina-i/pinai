@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 #
-# Production Dockerfile — release build, slim runtime.
+# Production Dockerfile — release build, distroless runtime as the non-root user 65532.
 #
 # Uses cargo-chef to split the build into two layers:
 #   1. dependency-only build (re-runs only when Cargo.toml/Cargo.lock change)
@@ -10,8 +10,7 @@
 # restructures to force a clean dep cache without losing the registry/git cache.
 
 # ── Cargo-chef base ──────────────────────────────────────────────────────────
-FROM rust:bookworm AS chef
-RUN cargo install cargo-chef --locked
+FROM lukemathwalker/cargo-chef:0.1.78-rust-1.98.1-trixie AS chef
 WORKDIR /build
 
 # ── Recipe extraction ────────────────────────────────────────────────────────
@@ -42,12 +41,13 @@ RUN --mount=type=cache,id=idp-cargo-registry-v2,target=/usr/local/cargo/registry
     cp target/release/idp-server /idp-server
 
 # ── Runtime ──────────────────────────────────────────────────────────────────
-FROM debian:bookworm-slim AS runtime
-
-RUN apt-get update && apt-get install -y libssl3 ca-certificates && rm -rf /var/lib/apt/lists/*
+# Same Debian release as the build, for glibc. No shell; the instance key must be
+# readable by 65532, which compose's idp-keygen sees to.
+FROM gcr.io/distroless/cc-debian13:nonroot AS runtime
 
 WORKDIR /app
 COPY --from=builder /idp-server /app/idp-server
 
+USER 65532:65532
 EXPOSE 8080
 CMD ["/app/idp-server"]

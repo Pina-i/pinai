@@ -91,6 +91,7 @@ impl CompleteSignIn {
         let session = match held.filter(|held| held.is_live(now)) {
             Some(held) if held.user == user => {
                 self.sessions.touch(held.id, now).await?;
+                self.sessions.authenticate(held.id, now).await?;
                 held.id
             }
             other => {

@@ -756,6 +756,12 @@ impl TestApp {
         self.tokens.issue(user, session)
     }
 
+    /// The same, the password typed on that session at `at`.
+    pub fn token_signed_in_at(&self, user: UserId, at: time::OffsetDateTime) -> String {
+        let session = self.sign_in.sessions.live(user);
+        self.tokens.issue_signed_in_at(user, session, at)
+    }
+
     /// A request another instance signed, as `peer`, with the `Digest` of its body.
     pub async fn call_as_peer(
         &self,

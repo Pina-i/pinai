@@ -8,6 +8,7 @@ fn used_at(at: OffsetDateTime) -> Session {
         device: None,
         created_at: at,
         last_used_at: at,
+        authenticated_at: at,
         revoked_at: None,
     }
 }

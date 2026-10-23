@@ -1,0 +1,18 @@
+{$DOMAIN} {
+	header Strict-Transport-Security "max-age=31536000"
+
+	# Avatars are public objects in RustFS. Only reads reach it, and without the
+	# query string, so no S3 sub-resource (?acl, ?policy…) can be named from outside.
+	@avatar {
+		method GET HEAD
+		path /avatars/*
+	}
+	handle @avatar {
+		rewrite * {path}?
+		reverse_proxy rustfs:9000
+	}
+
+	handle {
+		reverse_proxy idp:8080
+	}
+}

@@ -84,7 +84,7 @@ impl Refresh {
         Ok(Tokens {
             access_token: self.tokens.access_token(
                 &account,
-                session.id,
+                &session,
                 &client,
                 ACCESS_TOKEN_TTL,
             )?,

@@ -19,7 +19,7 @@ use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
 
 use crate::ApiError;
-use crate::auth::Authenticated;
+use crate::auth::{Authenticated, RecentlySignedIn};
 
 #[derive(Deserialize)]
 pub struct UploadRequest {
@@ -182,9 +182,9 @@ pub async fn page(
 /// `DELETE /api/history/messages`
 pub async fn clear(
     State(clear): State<Arc<ClearArchive>>,
-    Authenticated(user): Authenticated,
+    RecentlySignedIn(bearer): RecentlySignedIn,
 ) -> Result<Json<ClearedBody>, ApiError> {
-    let deleted = clear.execute(user).await?;
+    let deleted = clear.execute(bearer.user).await?;
     Ok(Json(ClearedBody { deleted }))
 }
 
