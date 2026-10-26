@@ -68,9 +68,16 @@ pub fn trace() -> Trace {
 }
 
 /// A request's URI as logged: the path only — a query can carry a credential (`/ws?token=`, a
-/// blob URL's token).
+/// blob URL's token) — and without an invitation's token, which its pages' paths carry.
 fn logged_uri(uri: &Uri) -> String {
-    uri.path().to_owned()
+    let path = uri.path();
+    match path.strip_prefix("/i/") {
+        Some(rest) => match rest.split_once('/') {
+            Some((_, after)) => format!("/i/…/{after}"),
+            None => "/i/…".to_owned(),
+        },
+        None => path.to_owned(),
+    }
 }
 
 #[cfg(test)]

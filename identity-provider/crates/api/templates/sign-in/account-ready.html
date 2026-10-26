@@ -1,0 +1,8 @@
+{% extends "sign-in/base.html" %}
+{% import "sign-in/icons.html" as icon %}
+{% block title %}Your account is ready{% endblock %}
+{% block content %}
+<h2 class="auth-title">Your account on {{ frame.name }} is ready.</h2>
+<p class="lead">Open the Pīna'i app and sign in with</p>
+<div class="address">{% call icon::mail(14) %}{% endcall %}<span>{{ email }}</span></div>
+{% endblock %}

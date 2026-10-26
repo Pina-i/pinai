@@ -9,20 +9,21 @@ use domain::auth::testing::{
     PlainHasher, RecordingMailer, RecordingSessionNotifier, RecordingTickets, SignInSeeds,
     SpelledTokens, StepAuthenticator, signed_up, web_client,
 };
-use domain::auth::{Client, SecondFactors, TotpSecret, desktop_client};
+use domain::auth::{Client, SecondFactors, TotpSecret, WebApp, desktop_client};
 use domain::e2ee::testing::InMemoryKeyDirectory;
 use domain::identity::InstanceOrigin;
 use time::OffsetDateTime;
 
 use super::{
-    Authorize, CompleteSignIn, ConfirmTotpEnrollment, DisableTotp, EnsureAdmin, ExchangeCode,
-    LinkDevice, LogIn, LogOut, PassSecondFactor, Refresh, RegenerateRecoveryCodes, Register,
-    ResendCode, RevokeToken, ShowSignIn, SignOutOthers, StartTotpEnrollment, SweepSignups,
-    VerifyEmail,
+    Authorize, CompleteSignIn, ConfirmTotpEnrollment, CreateInvitation, DisableTotp, EnsureAdmin,
+    ExchangeCode, LinkDevice, ListInvitations, LogIn, LogOut, PassSecondFactor, Refresh,
+    RegenerateRecoveryCodes, Register, RegisterInvited, ResendCode, RevokeInvitation, RevokeToken,
+    ShowSignIn, SignOutOthers, StartTotpEnrollment, SweepSignups, VerifyEmail,
 };
 
 pub struct World {
     pub alice: SignInAccount,
+    pub origin: InstanceOrigin,
     /// The official desktop app: native, and allowed to stay signed in.
     pub desktop: Client,
     pub accounts: Arc<InMemorySignInAccounts>,
@@ -45,6 +46,10 @@ pub struct World {
     pub revoke_token: RevokeToken,
     pub log_out: LogOut,
     pub register: Register,
+    pub register_invited: RegisterInvited,
+    pub create_invitation: CreateInvitation,
+    pub list_invitations: ListInvitations,
+    pub revoke_invitation: RevokeInvitation,
     pub ensure_admin: EnsureAdmin,
     pub verify: VerifyEmail,
     pub resend: ResendCode,
@@ -152,6 +157,19 @@ pub async fn world() -> World {
             signup_codes.clone(),
             mailer.clone(),
         ),
+        register_invited: RegisterInvited::new(
+            origin.clone(),
+            Some(WebApp::parse("http://localhost:5173").unwrap()),
+            accounts.clone(),
+            accounts.clone(),
+            accounts.clone(),
+            hasher.clone(),
+            Arc::new(CountingSuffixes::default()),
+            complete.clone(),
+        ),
+        create_invitation: CreateInvitation::new(accounts.clone(), accounts.clone()),
+        list_invitations: ListInvitations::new(accounts.clone(), accounts.clone()),
+        revoke_invitation: RevokeInvitation::new(accounts.clone(), accounts.clone()),
         ensure_admin: EnsureAdmin::new(
             origin.clone(),
             accounts.clone(),
@@ -171,9 +189,11 @@ pub async fn world() -> World {
             accounts.clone(),
             sessions.clone(),
             refresh_tokens.clone(),
+            accounts.clone(),
         ),
-        show: ShowSignIn::new(clients.clone(), tickets.clone()),
+        show: ShowSignIn::new(clients.clone(), tickets.clone(), accounts.clone()),
         alice,
+        origin,
         desktop,
         accounts,
         codes,
@@ -192,6 +212,16 @@ pub async fn world() -> World {
 impl World {
     pub async fn sign_up(&self, account: &SignInAccount) {
         self.accounts.sign_up(account).await;
+    }
+
+    /// An admin of the instance, signed up.
+    pub async fn an_admin(&self) -> SignInAccount {
+        let admin = SignInAccount {
+            admin: true,
+            ..signed_up("root")
+        };
+        self.sign_up(&admin).await;
+        admin
     }
 
     /// Turns the account's second factor on with a known secret: the codes of its app come from

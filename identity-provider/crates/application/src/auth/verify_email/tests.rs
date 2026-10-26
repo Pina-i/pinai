@@ -1,4 +1,4 @@
-use domain::auth::testing::a_request;
+use domain::auth::testing::{a_request, signed_up};
 use domain::auth::{
     AuthorizationRequest, ClientId, ClientSignIn, Grant, SIGNUP_CODE_TTL, SignInAccount,
 };
@@ -139,4 +139,40 @@ async fn a_request_not_from_a_client_is_refused_before_the_code_is_tried() {
         "{unregistered:?}"
     );
     assert!(matches!(fine, Verification::SignedIn { .. }), "{fine:?}");
+}
+
+#[tokio::test]
+async fn an_admitted_account_never_signs_in_through_a_code() {
+    let w = world().await;
+    let carol = SignInAccount {
+        email_verified: false,
+        admitted: true,
+        ..signed_up("carol")
+    };
+    w.sign_up(&carol).await;
+    // A live code, however it came: it must not stand in for the password.
+    let code = w
+        .signup_codes
+        .issue(carol.id, now() + SIGNUP_CODE_TTL)
+        .await
+        .unwrap();
+
+    let verified = w
+        .verify
+        .execute(carol.id, code.as_str(), &a_request(), None, now())
+        .await
+        .unwrap();
+
+    assert_eq!(verified, Verification::NoCodeNeeded);
+    assert!(w.sessions.all().is_empty());
+    assert!(w.codes.issued().is_empty());
+    assert!(
+        !w.accounts
+            .by_id(carol.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .email_verified,
+        "the code was not spent"
+    );
 }

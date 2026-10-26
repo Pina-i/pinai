@@ -1,4 +1,4 @@
-# Pina'i — Signing in, sign-up, the second factor and the admin
+# Pina'i — Signing in, sign-up, the second factor, admins and invitations
 
 ## 1. Signing in — OpenID Connect
 
@@ -117,6 +117,7 @@ back-forward cache is ready again. Everything else works without it.
 | `GET /verify-email` | The code mailed at sign-up (§ 2), with a form to send another |
 | `GET /login/totp` | The second factor (§ 3); `?mode=recovery` asks a recovery code instead |
 | `GET /signed-out` | Where `/logout` lands when it may not go back to the client |
+| `GET /i/{token}` · `GET /i/{token}/sign-up` | An invitation's doorway and its sign-up form (§ 5) |
 | `GET /assets/{path}` | The stylesheet, the script, the fonts (DM Sans, Instrument Serif, Azeret Mono — latin and latin-ext, OFL), the motifs and the grain, built into the binary; `Cache-Control: public, max-age=86400`. The stylesheet and the script are linked with `?v=<a hash of their content>`, so a release that changes one is fetched anew |
 
 **What a page shows.** On one side the instance: its name, its description, how many people it
@@ -132,7 +133,8 @@ signs in to that app (§ "The session cookie"), so that line is all the consent 
 opened for — the `/authorize` parameters — and the POST it ends in checks it again. A `/login`
 or `/verify-email` link with no request left, or a broken one, shows "This sign-in link has
 expired"; one naming a client that can't be verified shows that page. The second-factor page
-carries its ticket instead (§ 3), which holds the request.
+carries its ticket instead (§ 3), which holds the request; an invitation's pages carry their token
+in their path, and no request: no app asked for them (§ 5).
 
 **Cancel.** "← Another home" sends the browser back to the client with nothing signed in:
 `redirect_uri?error=access_denied&state=…` (RFC 6749 § 4.1.2.1), to a `redirect_uri` checked
@@ -159,6 +161,7 @@ print words of its choosing.
 | | `email_taken` | Email already registered |
 | | `signup_expired` | This sign-up has expired — register again |
 | | `notice=already_verified` | This address is confirmed already — sign in to continue |
+| | `notice=no_code_needed` | This account signs in with its password — sign in to continue |
 | `/login`, no request | `ticket_expired` | This sign-in has expired |
 | | `ticket_exhausted` | Too many attempts |
 | `/verify-email` | `code_format` | Enter the 6-digit code |
@@ -177,7 +180,7 @@ The address on the code page is shown only if it is one (`Email`).
 
 **Safety.**
 - **Same-origin forms.** Every form POST (`/login`, `/register-and-login`,
-  `/verify-email-and-login`, `/verify-email/resend`, `/login/totp`) is refused `403` when the
+  `/verify-email-and-login`, `/verify-email/resend`, `/login/totp`, `/i/{token}/sign-up`) is refused `403` when the
   browser says it was sent from elsewhere: an `Origin` other than the instance's, or else a
   `Sec-Fetch-Site` other than `same-origin`. `Origin: null` alone is refused. A request saying
   neither — a script, a test — is let through: a browser always says. This stops login CSRF.
@@ -189,7 +192,8 @@ The address on the code page is shown only if it is one (`Email`).
     `data:` is the grain shown under reduced motion.
   - `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Cache-Control: no-store`.
   - `Referrer-Policy: same-origin`: nothing reaches the client, and the page's own forms keep
-    their `Origin` — under `no-referrer`, a browser posts them as `Origin: null`.
+    their `Origin` — under `no-referrer`, a browser posts them as `Origin: null`. An invitation's
+    pages without a form, whose URL holds its token, are `no-referrer` (§ 5).
 
 ### `POST /login`
 
@@ -218,8 +222,8 @@ A session is a row, so each one can end on its own, and every code, access token
 it leads to belongs to it. There are two kinds:
 
 - A **browser session** is what a password sign-in opens — the login form, the code mailed at
-  sign-up, the second factor — and what the `idp_session` cookie names. The web client's tokens
-  belong to it.
+  sign-up, the second factor, an invitation's sign-up form (§ 5) — and what the `idp_session`
+  cookie names. The web client's tokens belong to it.
 - An **app session** is opened by a native client's code exchange when it stays signed in on its
   device: its document allows `offline_access`, its request asked for it, and the password sign-in
   agreed (`Grant::opens_app_session`). The desktop app's tokens belong to it, not to the system
@@ -284,7 +288,8 @@ with its password only**.
 Any site can be a client, and any site can send a browser to `/authorize`. If a session alone
 answered with a code, a page you merely visited could take one for your account, and the tokens
 with it. So every sign-in the password goes through — the login form, the code mailed at
-sign-up, the second factor — remembers its app for the account:
+sign-up, the second factor — remembers its app for the account, and joining by invitation, where
+the password is typed for an account to open in the official web app, remembers that app (§ 5):
 
 ```sql
 CREATE TABLE client_sign_ins (
@@ -653,8 +658,8 @@ sequenceDiagram
 | `POST /register` | JSON `{ display_name, email, password }` | `201` with the account (`id`, `username`, `display_name`, `address`, `email`, `email_verified: false`, `pending_user_id`) and a code mailed. `400` names the rule broken, or `Email already registered`. |
 | `POST /register-and-login` | `display_name`, `email`, `password` + the request | Creates the account unconfirmed, mails a code, and goes to `/verify-email?{request}&pending_user_id=…&pending_email=…`. **No session is issued.** A broken rule goes back to `/login?{request}&tab=register&error=<code>`; an unknown client or an unregistered `redirect_uri` is "This app couldn't be verified" (`401` / `400`). |
 | `GET /verify-email` | `pending_user_id`, `pending_email` + the request | The code page (§ 1 "The sign-in pages"). |
-| `POST /verify-email-and-login` | `pending_user_id`, `pending_email`, `code` + the request | The request is checked first; then the code: the right one confirms the address, issues an OIDC auth code and the session cookie, and redirects to `redirect_uri`. A wrong, malformed, expired or exhausted code goes back to `/verify-email` with its `error`; an address confirmed already goes to `/login` with `notice=already_verified`, an account gone to `/login?tab=register&error=signup_expired`. |
-| `POST /verify-email/resend` | `pending_user_id`, `pending_email` + the request | A fresh code, then the code page again with `notice=code_resent`, or `error=too_many_codes` past the resend limit. An address confirmed already goes to `/login` (`notice=already_verified`), an account gone to the register tab (`signup_expired`). |
+| `POST /verify-email-and-login` | `pending_user_id`, `pending_email`, `code` + the request | The request is checked first; then the code: the right one confirms the address, issues an OIDC auth code and the session cookie, and redirects to `redirect_uri`. A wrong, malformed, expired or exhausted code goes back to `/verify-email` with its `error`; an address confirmed already goes to `/login` with `notice=already_verified`, an admitted account (§ 4) to `/login` with `notice=no_code_needed` — no code is tried, no session issued —, an account gone to `/login?tab=register&error=signup_expired`. |
+| `POST /verify-email/resend` | `pending_user_id`, `pending_email` + the request | A fresh code, then the code page again with `notice=code_resent`, or `error=too_many_codes` past the resend limit. An address confirmed already goes to `/login` (`notice=already_verified`), an admitted account to `/login` (`notice=no_code_needed`) with nothing mailed, an account gone to the register tab (`signup_expired`). |
 | `POST /login` | email, password + the request | The right password on an unconfirmed address, never admitted (§ 4), mails a fresh code — within the same resend limit — and goes to `/verify-email` with `notice=confirm_email` instead of issuing a session (§ 1). |
 
 ### Code rules
@@ -682,7 +687,8 @@ Every hour — and once at startup — the IdP deletes:
 3. the sessions (§ 1) ended a month ago: revoked then, or idle past their 90 days, and their
    refresh tokens with them;
 4. the refresh tokens (§ 1) unused for 90 days — a head since its creation, a rotated one since its
-   rotation — so the chains of a session in use, a tab per reload, don't pile up.
+   rotation — so the chains of a session in use, a tab per reload, don't pile up;
+5. the invitations (§ 5) a month after they ended: used, revoked or expired, whichever came first.
 
 ### Scenarios
 
@@ -842,13 +848,19 @@ whether it is one (`admin`), so a client can show an admin the way to what only 
 ### Admitted accounts
 
 An account is **admitted** when it was let in without confirming its email address, because
-something else vouched for it: the instance's first admin is (§ "The first admin").
+something else vouched for it: the instance's first admin is (§ "The first admin"), and so is an
+account an invitation let in, vouched for by the admin who made the invitation (§ 5).
 `users.admitted_at` says when.
 
 - **It signs in with its password alone.** Whether a sign-in asks for a mailed code is one rule,
   `SignInAccount::needs_code`: the address is neither confirmed nor admitted. `POST /login` (§ 1)
   sends an admitted account neither a code nor to `/verify-email`, so it signs in on an instance
   whose mail relay isn't set up yet.
+- **It never gets a code.** Its address was never proven, and the code page signs in whoever
+  types the right code: a code mailed to it would stand in for its password. So a code is mailed
+  only to an account that `needs_code` — `POST /verify-email/resend` sends an admitted one to
+  `/login` with `notice=no_code_needed` and mails nothing — and `POST /verify-email-and-login`
+  tries no code for it, issues no session, and sends it to sign in the same way.
 - **The sign-up sweep (§ 2) never deletes it**, however long its address stays unconfirmed.
 - **Its address stays unconfirmed**: no code reached it, and `/userinfo` says so truthfully,
   `email_verified: false`.
@@ -916,3 +928,191 @@ An instance that sets neither variable only warns, at each start, that it has no
 ### `/userinfo`
 
 Returns `admin: boolean`: `true` for an admin of this instance, `false` for anyone else.
+
+## 5. Invitations
+
+An admin lets someone in with an **invitation**: a link to this instance's own pages, good for one
+account, where the person creates theirs. Nobody types a code: the admin who made the link vouches
+for the account, which is admitted (§ 4) and remembers who invited it (`users.invited_by`). Only
+admins make invitations; any admin may revoke an open one.
+
+### Data model
+
+```sql
+CREATE TABLE invitations (
+    id         UUID PRIMARY KEY,
+    token_hash BYTEA NOT NULL UNIQUE,     -- SHA-256 of the link's token, never the token
+    created_by UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at TIMESTAMPTZ NOT NULL,
+    expires_at TIMESTAMPTZ NOT NULL,      -- created_at + 7 days
+    used_at    TIMESTAMPTZ,               -- set with used_by, by the account it let in
+    used_by    UUID REFERENCES users(id) ON DELETE SET NULL,
+    revoked_at TIMESTAMPTZ
+);
+
+ALTER TABLE users ADD COLUMN invited_by UUID REFERENCES users(id) ON DELETE SET NULL;
+```
+
+### The token
+
+256 bits from the system's random source, written in URL-safe base64 without padding: 43
+characters (`InvitationToken`). Only its SHA-256 is kept, as a refresh token's is, so the table
+alone lets nobody in. The token is in one answer only — the admin's `POST`, as the link
+`{issuer}/i/{token}` — and in no log: a request's path is logged as `/i/…`, and the token's
+`Debug` prints `InvitationToken(..)`. Anything else in the token's place names no invitation.
+
+### Open, used, revoked, expired
+
+An invitation is **open** while it is unused, unrevoked and unexpired (`Invitation::is_open`): it
+expires the second its 7 days (`INVITATION_TTL`) are up. Only an open one lets anyone in, and
+only an open one can be revoked.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Open: an admin creates it (7 days)
+    Open --> Used: an account is created with it
+    Open --> Revoked: an admin revokes it
+    Open --> Expired: its 7 days are up
+    Used --> [*]: swept 30 days later
+    Revoked --> [*]: swept 30 days later
+    Expired --> [*]: swept 30 days later
+```
+
+### The admin API
+
+Every route takes the bearer token of an admin of this instance: without one, `401`; a member's
+is `403 access_denied` "Only an admin may do this" (`AuthError::NotAdmin`, decided by the use
+cases from `SignInAccount::admin`).
+
+| Route | Answer |
+|---|---|
+| `POST /api/admin/invitations` | No body. `201 { id, link, expires_at }`: `link` is `{issuer}/i/{token}`, the only answer the token is ever in |
+| `GET /api/admin/invitations` | The open invitations, newest first: `[{ id, created_at, expires_at, created_by: { display_name } }]`. Used, expired and revoked invitations are not listed |
+| `DELETE /api/admin/invitations/{id}` | Revokes an open one: `204`. Anything else — used, revoked, expired, unknown, not an id — is `404` "Invitation not found" |
+
+### Joining by invitation
+
+```mermaid
+sequenceDiagram
+    participant A as admin (Pīna'i)
+    participant P as the person's browser
+    participant I as IdP
+    participant W as official web app
+
+    A->>I: POST /api/admin/invitations
+    I-->>A: 201 { link: {issuer}/i/{token} }
+    A-->>P: the link, by any means
+    P->>I: GET /i/{token}
+    I-->>P: the doorway: who invites, to which instance, until when
+    P->>I: GET /i/{token}/sign-up (Continue)
+    I-->>P: the instance's sign-up form
+    P->>I: POST /i/{token}/sign-up (display name, email, password)
+    I->>I: one transaction: the invitation spent, the account admitted, invited_by its admin
+    alt the official web app is known
+        I->>I: a browser session, its password typed now; the web app remembered (client_sign_ins)
+        I-->>P: 303 {web app}/?instance={domain} + session cookie
+        P->>W: the web app opens on the instance
+        W->>I: GET /authorize (its usual sign-in)
+        I-->>W: 303 redirect_uri?code&state — a live session, for an app it signed in to
+        W->>I: POST /token
+        I-->>W: access_token + refresh_token + id_token
+    else no web app known
+        I-->>P: "Your account on {instance} is ready" — sign in from the app
+    end
+```
+
+**The doorway**, `GET /i/{token}`, takes the whole page: the instance's motif as a field and its
+initial set large behind; a top bar with the Pīna'i mark and "Self-hosted · Federated ·
+Open-source"; "— {domain}"; "You've been invited by *{inviter}* to join *{instance name}*." — the
+inviter by their display name only, never a handle or an address, and left out when they have
+none —; the instance's description, when `INSTANCE_DESCRIPTION` is set, then "This link lets one
+person create an account and expires in {N days, or hours under a day}."; **Continue**; and at
+the foot "Only the admins of {domain} make invitations".
+
+**The form**, `GET /i/{token}/sign-up`, is laid out as the sign-in pages are. Beside it, the
+instance: its initial in a square and its name, its domain, its description as the headline,
+"Invited by {inviter}" with their initial, the motif band. In the column: "— {domain}", "← Back to
+the invitation", "Create your account", the display name, the address and the password, **Create
+account**, "Your password goes to {domain}, never to Pīna'i", and, when the web app is known,
+"Already have an account on {domain}? Sign in instead", a link to the web app on this instance.
+There are no Sign in / Register tabs: the link decided.
+
+**Posting it** (`RegisterInvited`) checks the invitation is open, then the registration rules of
+§ 2 — the same words as the register tab's —, and creates the account through
+`SignUps::create_invited`, sharing the handle draw of every account created
+(`create_account`):
+
+1. the invitation is spent by a guarded `UPDATE … WHERE used_at IS NULL AND revoked_at IS NULL
+   AND expires_at > now RETURNING created_by`;
+2. the account is inserted admitted (`admitted_at` now), `invited_by` the invitation's creator;
+3. the invitation records it (`used_by`);
+
+in one transaction. An address or a handle already taken rolls it all back, so the invitation
+stays open. No code is mailed, ever (§ 4).
+
+**Then, with the official web app known**, the browser is signed in as a password sign-in signs
+it in (`CompleteSignIn`, without its code): a browser session whose password was typed now — one
+another account held on this browser ends, `replaced` — and the web app remembered in
+`client_sign_ins`, which is the app's consent (§ 1 "The session cookie"). The answer is `303` to
+`{web app}/?instance={DOMAIN}`, with the session cookie, and no authorization code: no request
+is in flight. The web app then starts its own sign-in, and `/authorize`, finding a live session
+of an account that signed in to it, answers with a code at once. With no web app known, the
+answer is the page "Your account on {instance name} is ready. Open the Pīna'i app and sign in
+with {email}." — no session: the app asks for the password at its first sign-in, which is its
+consent.
+
+**What goes wrong:**
+- Signing the browser in fails after the account was created: the account stands and the
+  invitation is spent, so the answer is the "ready" page, and the failure is logged once.
+- A broken rule or an address taken shows the form again, `400`, with its sentence and what was
+  typed, the password aside.
+- An invitation used, revoked or expired, or no invitation at all — on either page, or spent by
+  someone else while the form was filled in — is the one page "This invitation can no longer be
+  used. Ask the person who sent it for a new one.", `404`, the same whatever happened.
+
+**Headers.** The pages are the sign-in pages' (§ 1: the strict CSP, `no-store`, the instance's
+own script only). Their URL holds the token, so none sends it off the instance: the doorway, the
+"can no longer be used" page, the redirect to the web app and the "ready" page are
+`Referrer-Policy: no-referrer`; the form's page keeps the sign-in pages' `same-origin`, under which
+the form posts its `Origin` — a browser without `Sec-Fetch-Site` can join too. The form's
+`form-action` also names the web app's origin, where its answer redirects. The form is refused
+`403` from another site.
+
+### The official web app
+
+The official web app is built into the IdP like the desktop app's document: its origin is
+`OFFICIAL_WEB_APP_ORIGIN` (`domain::auth`; none until it is published), its client ID
+`{origin}/oauth-client.json`, the document it serves (`WebApp`). `WEB_APP_ORIGIN`, an `http(s)`
+origin, overrides that address in any environment. Unset, a development instance uses the web
+client of a checkout, `http://localhost:5173`, and a production one the official web app, if any.
+The redirect after joining goes to that origin only, never to anything a request names. An origin
+that is not one — or whose document's URL is no client ID — stops the instance from starting.
+
+### Racing for one link
+
+Two sign-ups posted at once with one link create one account. The guarded `UPDATE` locks the
+invitation's row: the second waits for the first's transaction, then finds the invitation used
+and creates nothing — its sender gets the "can no longer be used" page. Had the first been rolled
+back (its address taken), the second goes through.
+
+### Sweep
+
+The hourly sign-up sweep (§ 2) deletes an invitation 30 days after it ended — used, revoked or
+expired, whichever came first (`INVITATION_RETENTION`). An open one is never swept.
+
+### Scenarios
+
+- **Inviting someone.** An admin creates an invitation in Pīna'i and sends the link. The person
+  opens it, continues, fills in the form and lands in the web app signed in; no mail is sent. The
+  invitation, used, is not in the admin's list of open ones.
+- **A link used, revoked or expired** shows "This invitation can no longer be used. Ask the person
+  who sent it for a new one." — which of the three, it never says.
+- **Two people racing on one link**: one account is created; the other is told the link can no
+  longer be used.
+- **An address already registered**: the form says so; the link stays open, for another address
+  or for signing in instead.
+- **A browser signed in as someone else**: joining signs it in as the new account, ending the
+  other's session there.
+- **No web app known** (a production instance before the official web app exists): the person is
+  told their account is ready, and signs in from the app with their password, no code asked.
+- **A link sent to the wrong person**: an admin revokes it and creates another.

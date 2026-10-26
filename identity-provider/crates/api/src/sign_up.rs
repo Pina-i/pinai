@@ -276,6 +276,10 @@ pub async fn verify_email(
             "/login",
             &carried(&request, appearance, &[("notice", "already_verified")]),
         ),
+        Verification::NoCodeNeeded => to(
+            "/login",
+            &carried(&request, appearance, &[("notice", "no_code_needed")]),
+        ),
         Verification::Malformed => again(&[("error", "code_format")]),
         Verification::Refused(attempt) => match attempt {
             CodeAttempt::NoCode => again(&[("error", "code_expired")]),
@@ -326,6 +330,10 @@ pub async fn resend(
             Err(AuthError::AlreadyVerified) => to(
                 "/login",
                 &carried(&request, appearance, &[("notice", "already_verified")]),
+            ),
+            Err(AuthError::NoCodeNeeded) => to(
+                "/login",
+                &carried(&request, appearance, &[("notice", "no_code_needed")]),
             ),
             Err(AuthError::UnknownUser) => to(
                 "/login",

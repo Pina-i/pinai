@@ -958,6 +958,182 @@ input {
     color: var(--foreground);
 }
 
+/* An invitation: the doorway (identity-lab, `Invite`'s door stage), then the instance's own
+   sign-up form (its form stage) — two pages here, where the prototype switches stages by script. */
+.auth-top {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 3;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 22px 30px 0;
+}
+.auth-p {
+    max-width: 38ch;
+    margin: 26px 0 0;
+    font-size: 14px;
+    line-height: 1.6;
+    color: var(--muted-foreground);
+}
+.btn--auto {
+    width: auto;
+}
+.door {
+    position: relative;
+    z-index: 2;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 0;
+    padding: 84px 32px 72px;
+    overflow: hidden;
+    text-align: center;
+}
+.door-ini {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: var(--serif);
+    font-size: min(78vh, 620px);
+    font-weight: 600;
+    line-height: 1;
+    color: var(--acc);
+    opacity: 0.07;
+    pointer-events: none;
+    user-select: none;
+}
+.door-brand {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+}
+.door-brand-name {
+    font-family: var(--serif);
+    font-size: 20px;
+    font-weight: 600;
+}
+.mark--door {
+    width: 35.36px;
+    height: 26px;
+    color: var(--foreground);
+}
+.mark--door .ripple {
+    fill: var(--acc);
+}
+.door-body {
+    position: relative;
+    max-width: 900px;
+}
+.door-h {
+    margin-top: 18px;
+    font-size: clamp(44px, 7vw, 84px);
+}
+.door-by {
+    color: var(--sec);
+}
+.door-to {
+    color: var(--acc);
+}
+.door-p {
+    max-width: 46ch;
+    margin: 26px auto 0;
+}
+.door-go {
+    margin-top: 30px;
+    padding: 14px 26px;
+}
+.door-foot {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    align-items: center;
+    gap: 10px 16px;
+    padding: 0 30px 22px;
+}
+.door-shield {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    white-space: nowrap;
+}
+@media (max-width: 760px) {
+    .door-foot {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+    /* Kept on one line, the shield runs off a phone's edge. */
+    .door-shield {
+        white-space: normal;
+        text-align: left;
+    }
+}
+.inst-ini {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+    width: 34px;
+    height: 34px;
+    border-radius: 12px;
+    background: var(--surf2);
+    border: 1px solid var(--line2);
+    font-family: var(--serif);
+    font-size: 14px;
+    font-weight: 600;
+}
+.invited {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 24px;
+}
+.inv-av {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+    width: 26px;
+    height: 26px;
+    border-radius: 50%;
+    background: var(--secsoft);
+    color: var(--sec);
+    font-family: var(--serif);
+    font-size: 11px;
+    font-weight: 600;
+}
+.invited-by {
+    font-size: 13px;
+    color: var(--muted-foreground);
+}
+.invited-name {
+    color: var(--foreground);
+}
+.inv-alt {
+    margin: 14px 0 0;
+    font-size: 12px;
+    color: var(--muted-foreground);
+}
+.tlink {
+    color: var(--muted-foreground);
+    text-decoration: underline;
+    text-underline-offset: 3px;
+    text-decoration-color: var(--line2);
+}
+.tlink:hover {
+    color: var(--foreground);
+}
+
 /* Below the split, the columns stack: the instance first, as AuthShell does. */
 @media (max-width: 1023px) {
     body {

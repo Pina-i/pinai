@@ -31,6 +31,8 @@ pub struct SignInAccount {
     pub email_verified: bool,
     /// Let in without confirming its address, someone having vouched for it.
     pub admitted: bool,
+    /// An admin of the instance.
+    pub admin: bool,
     pub totp_enabled: bool,
 }
 

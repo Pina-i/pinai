@@ -54,12 +54,16 @@ pub struct NewAccount {
     pub actor_uri: ActorUri,
 }
 
-/// What the store made of a new account: the address and the handle are each one account's.
+/// What the store made of a new account: the address and the handle are each one account's,
+/// and an invitation lets one account in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Registration {
     Created,
     EmailTaken,
     HandleTaken,
+    /// The invitation it came with is no longer open: used — perhaps by another sign-up at the
+    /// same moment —, revoked or expired.
+    InvitationSpent,
 }
 
 /// A code typed on the confirmation page, against the account's latest one.

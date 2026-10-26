@@ -9,6 +9,8 @@ mod groups;
 mod history;
 mod http;
 mod inbox;
+mod invitations;
+mod invite;
 mod key_directory;
 mod messaging;
 mod mls;
@@ -32,9 +34,10 @@ mod ws;
 use std::sync::Arc;
 
 use application::auth::{
-    Authenticate, Authorize, ConfirmTotpEnrollment, DisableTotp, ExchangeCode, LinkDevice, LogIn,
-    LogOut, PassSecondFactor, Refresh, RegenerateRecoveryCodes, Register, ResendCode, RevokeToken,
-    SendTestMail, SignOutOthers, StartTotpEnrollment, VerifyEmail,
+    Authenticate, Authorize, ConfirmTotpEnrollment, CreateInvitation, DisableTotp, ExchangeCode,
+    LinkDevice, ListInvitations, LogIn, LogOut, PassSecondFactor, Refresh, RegenerateRecoveryCodes,
+    Register, RegisterInvited, ResendCode, RevokeInvitation, RevokeToken, SendTestMail,
+    SignOutOthers, StartTotpEnrollment, VerifyEmail,
 };
 use application::e2ee::{
     AppendCommit, ArchiveMessages, CatchUpCommits, ClaimKeyPackage, ClaimWelcomes, ClearArchive,
@@ -97,6 +100,11 @@ pub struct AppState {
     pub sign_out_others: Arc<SignOutOthers>,
     pub login_attempts: LoginAttempts,
     pub register: Arc<Register>,
+    /// The sign-up form an invitation opens.
+    pub register_invited: Arc<RegisterInvited>,
+    pub create_invitation: Arc<CreateInvitation>,
+    pub list_invitations: Arc<ListInvitations>,
+    pub revoke_invitation: Arc<RevokeInvitation>,
     pub verify_email: Arc<VerifyEmail>,
     pub resend_code: Arc<ResendCode>,
     pub send_test_mail: Arc<SendTestMail>,
@@ -234,6 +242,16 @@ pub fn router(state: AppState) -> Router {
         .route("/verify-email", get(sign_up::verify_page))
         .route("/verify-email-and-login", post(sign_up::verify_email))
         .route("/verify-email/resend", post(sign_up::resend))
+        .route("/i/{token}", get(invite::page))
+        .route(
+            "/i/{token}/sign-up",
+            get(invite::sign_up_page).post(invite::sign_up),
+        )
+        .route(
+            "/api/admin/invitations",
+            get(invitations::list).post(invitations::create),
+        )
+        .route("/api/admin/invitations/{id}", delete(invitations::revoke))
         .route(
             "/login/totp",
             get(second_factor::page).post(second_factor::pass),

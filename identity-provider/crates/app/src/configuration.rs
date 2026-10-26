@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use domain::auth::{OFFICIAL_WEB_APP_ORIGIN, WebApp};
 use infrastructure::email::SmtpTls;
 
 /// Deployment environment. Controls scheme selection (http vs https) for the
@@ -98,7 +99,16 @@ pub struct Config {
     pub admin_email: Option<String>,
     /// `ADMIN_PASSWORD`: read only to create that account, never to change it.
     pub admin_password: Option<String>,
+
+    // ── The official web app ─────────────────────────────────────────────
+    /// Where someone who joins by invitation lands signed in: the official web app, or
+    /// `WEB_APP_ORIGIN` in its stead — `http://localhost:5173` in development. `None`: the
+    /// joining ends on a page saying to sign in from the app.
+    pub web_app: Option<WebApp>,
 }
+
+/// The web client of a development checkout, `pnpm dev`'s.
+pub const DEV_WEB_APP_ORIGIN: &str = "http://localhost:5173";
 
 /// `SESSION_SECRET` used when development leaves it unset. Public, so production refuses it.
 pub const DEV_SESSION_SECRET: &str =
@@ -213,6 +223,7 @@ impl Config {
             email_otp_pepper: parse_email_otp_pepper()?,
             admin_email: unless_empty(env_var("ADMIN_EMAIL").ok()),
             admin_password: unless_empty(env_var("ADMIN_PASSWORD").ok()),
+            web_app: web_app(environment, env_var("WEB_APP_ORIGIN").ok())?,
         })
     }
 
@@ -294,6 +305,21 @@ fn smtp_port(raw: Option<String>) -> Result<u16, ConfigError> {
 /// A `.env` keeps `ADMIN_PASSWORD=` once the admin exists: empty is unset.
 fn unless_empty(raw: Option<String>) -> Option<String> {
     raw.filter(|v| !v.is_empty())
+}
+
+/// `WEB_APP_ORIGIN` stands in for the official web app; unset, development has its own and
+/// production the official one, when it has one.
+fn web_app(environment: Environment, raw: Option<String>) -> Result<Option<WebApp>, ConfigError> {
+    let origin = match unless_empty(raw) {
+        Some(raw) => {
+            return WebApp::parse(&raw)
+                .map(Some)
+                .map_err(|e| ConfigError::InvalidValue("WEB_APP_ORIGIN", e.reason));
+        }
+        None if environment.is_dev() => Some(DEV_WEB_APP_ORIGIN),
+        None => OFFICIAL_WEB_APP_ORIGIN,
+    };
+    Ok(origin.map(|origin| WebApp::parse(origin).expect("a built-in origin")))
 }
 
 fn smtp_tls(environment: Environment, raw: Option<String>) -> Result<SmtpTls, ConfigError> {

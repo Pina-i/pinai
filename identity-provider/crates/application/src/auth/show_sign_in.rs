@@ -1,19 +1,41 @@
 use std::sync::Arc;
 
 use domain::TicketId;
-use domain::auth::{AuthError, AuthorizationRequest, Client, Clients, LoginTickets};
+use domain::auth::{
+    AuthError, AuthorizationRequest, Client, Clients, InvitationToken, Invitations, LoginTickets,
+    OpenInvitation,
+};
 use time::OffsetDateTime;
 
 /// What a sign-in page needs before it is shown: a request from a client it may go back to, so
-/// that its cancel link never points anywhere else.
+/// that its cancel link never points anywhere else — or, on an invitation's pages, the
+/// invitation, while it is open.
 pub struct ShowSignIn {
     clients: Arc<dyn Clients>,
     tickets: Arc<dyn LoginTickets>,
+    invitations: Arc<dyn Invitations>,
 }
 
 impl ShowSignIn {
-    pub fn new(clients: Arc<dyn Clients>, tickets: Arc<dyn LoginTickets>) -> Self {
-        Self { clients, tickets }
+    pub fn new(
+        clients: Arc<dyn Clients>,
+        tickets: Arc<dyn LoginTickets>,
+        invitations: Arc<dyn Invitations>,
+    ) -> Self {
+        Self {
+            clients,
+            tickets,
+            invitations,
+        }
+    }
+
+    /// The invitation `token` names, while it is open.
+    pub async fn invitation(
+        &self,
+        token: &InvitationToken,
+        now: OffsetDateTime,
+    ) -> Result<Option<OpenInvitation>, AuthError> {
+        self.invitations.find_open(token, now).await
     }
 
     /// The request's client, if it lists the request's redirect URI.

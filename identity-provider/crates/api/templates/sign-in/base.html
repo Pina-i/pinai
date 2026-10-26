@@ -1,5 +1,6 @@
-{#- Every sign-in page: the instance on the left, the page's own column on the right. No inline
-    script and no `style` attribute, which the CSP refuses; one script of the instance's own. -#}
+{#- Every sign-in page: the instance on the left, the page's own column on the right — or, for an
+    invitation's doorway, a layout of its own. No inline script and no `style` attribute, which
+    the CSP refuses; one script of the instance's own. -#}
 <!doctype html>
 <html lang="en" data-theme="{{ frame.theme }}" data-motif="{{ frame.motif }}" class="{{ frame.mode }}">
 <head>
@@ -13,16 +14,16 @@
 <body>
 <div class="app">
 <div class="amb"></div>
-<div class="auth">
+{% block layout %}<div class="auth">
 <aside class="auth-l">
 <div class="auth-l-motif"></div>
-<span class="brand"><span class="mark mark--brand">{% include "sign-in/mark.svg.html" %}</span><span class="brand-name">{{ frame.name }}</span></span>
+{% block aside %}<span class="brand"><span class="mark mark--brand">{% include "sign-in/mark.svg.html" %}</span><span class="brand-name">{{ frame.name }}</span></span>
 <div class="intro">
 <p class="fact fact--plain">{{ frame.host }}</p>
 <h1 class="auth-h">{{ frame.description }}</h1>
 <div class="facts"><span class="fact fact--plain">{{ frame.people }}</span>{% if frame.open %}<span class="fact fact--plain open">open registration</span>{% endif %}</div>
 <div class="band"></div>
-</div>
+</div>{% endblock %}
 <p class="fact fact--plain runs"><span class="mark mark--small">{% include "sign-in/mark.svg.html" %}</span> Runs the Pīna'i identity provider v{{ frame.version }}</p>
 </aside>
 <main class="auth-r">
@@ -31,7 +32,7 @@
 {% block content %}{% endblock %}
 </div>
 </main>
-</div>
+</div>{% endblock %}
 <div class="grain"></div>
 </div>
 </body>

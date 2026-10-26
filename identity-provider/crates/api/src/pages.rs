@@ -49,6 +49,14 @@ impl SignInPages {
         self.origin.domain().to_string()
     }
 
+    /// The host an address on this instance would have: the domain without its port.
+    pub(crate) fn email_host(&self) -> String {
+        let host = self.host();
+        host.rsplit_once(':')
+            .map_or(host.as_str(), |(name, _)| name)
+            .to_owned()
+    }
+
     pub(crate) async fn frame(&self, appearance: Appearance) -> Result<Frame, ApiError> {
         let facts = self
             .describe
@@ -227,6 +235,8 @@ pub(crate) struct Frame {
     name: String,
     host: String,
     description: String,
+    /// The instance said something of itself: `INSTANCE_DESCRIPTION`.
+    described: bool,
     people: String,
     open: bool,
     version: &'static str,
@@ -242,6 +252,7 @@ impl Frame {
         Self {
             name: facts.name,
             host,
+            described: facts.description.is_some(),
             description: facts
                 .description
                 .unwrap_or_else(|| "An identity provider.".to_owned()),
@@ -254,6 +265,35 @@ impl Frame {
             stylesheet: STYLESHEET.as_str(),
             script: SCRIPT.as_str(),
         }
+    }
+
+    /// The instance's initial, as the invitation's pages set it large.
+    pub(crate) fn initial(&self) -> String {
+        initial_of(&self.name)
+    }
+}
+
+/// A name's first letter, upper-cased: what stands for an instance or an account in a badge.
+pub(crate) fn initial_of(name: &str) -> String {
+    name.chars()
+        .next()
+        .map(|first| first.to_uppercase().collect())
+        .unwrap_or_default()
+}
+
+/// How long is left, in days — in hours when under a day: `7 days`, `5 hours`, `1 hour`.
+pub(crate) fn time_left(left: time::Duration) -> String {
+    let seconds = left.whole_seconds().max(1);
+    let hours = (seconds + 3_599) / 3_600;
+    let (count, unit) = if hours < 24 {
+        (hours, "hour")
+    } else {
+        ((seconds + 86_399) / 86_400, "day")
+    };
+    if count == 1 {
+        format!("1 {unit}")
+    } else {
+        format!("{count} {unit}s")
     }
 }
 
@@ -318,6 +358,44 @@ pub(crate) struct SecondFactorPage<'a> {
 }
 
 #[derive(Template)]
+#[template(path = "sign-in/invitation.html")]
+pub(crate) struct InvitationPage {
+    pub frame: Frame,
+    /// Its creator's display name — never a handle or an address.
+    pub inviter: Option<String>,
+    pub expires_in: String,
+    pub sign_up_href: String,
+}
+
+#[derive(Template)]
+#[template(path = "sign-in/invited-sign-up.html")]
+pub(crate) struct InvitedSignUpPage {
+    pub frame: Frame,
+    pub inviter: Option<String>,
+    pub inviter_initial: String,
+    /// The invitation's own page.
+    pub back_href: String,
+    pub action: String,
+    /// Where the web app opens on this instance, when one is known: the button says the person
+    /// goes on there, and someone with an account already signs in there instead.
+    pub web_app: Option<String>,
+    pub alert: Option<&'static str>,
+    /// The field the alert is about, or "".
+    pub bad: &'static str,
+    /// What was typed, kept but the password.
+    pub display_name: String,
+    pub email: String,
+    pub email_host: String,
+}
+
+#[derive(Template)]
+#[template(path = "sign-in/account-ready.html")]
+pub(crate) struct AccountReadyPage {
+    pub frame: Frame,
+    pub email: String,
+}
+
+#[derive(Template)]
 #[template(path = "sign-in/notice.html")]
 pub(crate) struct NoticePage {
     pub frame: Frame,
@@ -337,6 +415,13 @@ pub(crate) const UNVERIFIED: Notice = Notice {
     title: "This app couldn't be verified",
     text: "Its description couldn't be read, or doesn't list where it asked to go back to. \
            Go back to the app and try again.",
+};
+
+/// The one answer for an invitation that is unknown, used, revoked or expired: which, the link
+/// never tells.
+pub(crate) const INVITATION_UNUSABLE: Notice = Notice {
+    title: "This invitation can no longer be used",
+    text: "Ask the person who sent it for a new one.",
 };
 
 pub(crate) const SIGNED_OUT: Notice = Notice {
@@ -380,6 +465,7 @@ pub(crate) fn login_alert(code: &str) -> Option<(&'static str, &'static str)> {
 pub(crate) fn login_note(code: &str) -> Option<&'static str> {
     match code {
         "already_verified" => Some("This address is confirmed already — sign in to continue"),
+        "no_code_needed" => Some("This account signs in with its password — sign in to continue"),
         _ => None,
     }
 }
@@ -465,6 +551,16 @@ pub(crate) fn render(
         HeaderValue::from_static("nosniff"),
     );
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
+/// A page whose URL carries an invitation's token and that holds no form: no `Referer` takes the
+/// token anywhere.
+pub(crate) fn unreferred(mut response: Response) -> Response {
+    response.headers_mut().insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
     response
 }
 

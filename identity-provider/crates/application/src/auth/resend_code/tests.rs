@@ -55,3 +55,20 @@ async fn a_confirmed_or_unknown_account_is_mailed_nothing() {
     );
     assert!(w.mailer.sent().is_empty());
 }
+
+#[tokio::test]
+async fn an_admitted_account_is_mailed_no_code() {
+    let w = world().await;
+    let carol = SignInAccount {
+        email_verified: false,
+        admitted: true,
+        ..signed_up("carol")
+    };
+    w.sign_up(&carol).await;
+
+    let resent = w.resend.execute(carol.id, now()).await;
+
+    assert!(matches!(resent, Err(AuthError::NoCodeNeeded)), "{resent:?}");
+    assert!(w.mailer.sent().is_empty());
+    assert!(w.signup_codes.issued().is_empty());
+}

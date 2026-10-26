@@ -7,18 +7,18 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use time::{Duration, OffsetDateTime};
 
 use crate::identity::{ActorUri, Handle, HandleSuffix};
-use crate::{DeviceId, SessionId, TicketId, UserId};
+use crate::{DeviceId, InvitationId, SessionId, TicketId, UserId};
 
 use super::{
     AddressHolder, AdminFacts, AuthError, Authenticator, AuthorizationCode, AuthorizationCodes,
     AuthorizationRequest, CODE_ATTEMPTS, Client, ClientDocument, ClientId, ClientKind,
     ClientPolicy, ClientSignIn, ClientSignIns, Clients, CodeAttempt, CodeChallenge, Email, Grant,
-    HandleSuffixes, LOGIN_TICKET_TTL, LoginTickets, NewAccount, OtpCode, PasswordHash,
-    PasswordHasher, Presentation, RECOVERY_CODES, RefreshLink, RefreshToken, RefreshTokens,
-    Registration, RevokedReason, Rotation, SESSION_IDLE, SESSION_RETENTION, SIGNUP_CODE_TTL,
-    SecondFactors, Session, SessionKind, SessionNotifier, Sessions, SignInAccount, SignInAccounts,
-    SignUps, SignupCodes, SignupMailer, TICKET_ATTEMPTS, Ticket, TicketAttempt, TokenIssuer,
-    TotpSecret,
+    HandleSuffixes, INVITATION_TTL, Invitation, InvitationToken, Invitations, LOGIN_TICKET_TTL,
+    LoginTickets, NewAccount, OpenInvitation, OtpCode, PasswordHash, PasswordHasher, Presentation,
+    RECOVERY_CODES, RefreshLink, RefreshToken, RefreshTokens, Registration, RevokedReason,
+    Rotation, SESSION_IDLE, SESSION_RETENTION, SIGNUP_CODE_TTL, SecondFactors, Session,
+    SessionKind, SessionNotifier, Sessions, SignInAccount, SignInAccounts, SignUps, SignupCodes,
+    SignupMailer, TICKET_ATTEMPTS, Ticket, TicketAttempt, TokenIssuer, TotpSecret,
 };
 
 pub const CLIENT_ID: &str = "http://localhost:5173/oauth-client.json";
@@ -62,6 +62,7 @@ pub fn signed_up(name: &str) -> SignInAccount {
         password_hash: PlainHasher::hash(&format!("{name}-password")),
         email_verified: true,
         admitted: false,
+        admin: false,
         totp_enabled: false,
     }
 }
@@ -410,12 +411,21 @@ impl AuthorizationCodes for InMemoryCodes {
     }
 }
 
+struct InvitationRow {
+    invitation: Invitation,
+    token: InvitationToken,
+}
+
+/// The accounts and the invitations that let some in, as `users` and `invitations` keep them.
 #[derive(Default)]
 pub struct InMemorySignInAccounts {
     /// Each with when it was created.
     accounts: Mutex<Vec<(SignInAccount, OffsetDateTime)>>,
     created: Mutex<Vec<NewAccount>>,
-    admins: Mutex<Vec<UserId>>,
+    invitations: Mutex<Vec<InvitationRow>>,
+    tokens: AtomicUsize,
+    /// Who vouched for each account an invitation let in.
+    vouched: Mutex<HashMap<UserId, UserId>>,
 }
 
 impl InMemorySignInAccounts {
@@ -423,8 +433,7 @@ impl InMemorySignInAccounts {
         let now = OffsetDateTime::now_utc();
         Self {
             accounts: Mutex::new(accounts.into_iter().map(|a| (a, now)).collect()),
-            created: Mutex::default(),
-            admins: Mutex::default(),
+            ..Self::default()
         }
     }
 
@@ -473,21 +482,24 @@ impl SignInAccounts for InMemorySignInAccounts {
     }
 }
 
+type Held = Vec<(SignInAccount, OffsetDateTime)>;
+
 impl InMemorySignInAccounts {
-    fn insert(&self, account: &NewAccount, admitted: bool) -> Registration {
-        let mut accounts = self.accounts.lock().unwrap();
+    /// Why the account can't be created beside those held, if it can't.
+    fn taken(accounts: &Held, account: &NewAccount) -> Option<Registration> {
         if accounts
             .iter()
             .any(|(held, _)| held.email.to_lowercase() == account.email.as_str())
         {
-            return Registration::EmailTaken;
+            return Some(Registration::EmailTaken);
         }
-        if accounts
+        accounts
             .iter()
             .any(|(held, _)| held.username == account.username.as_str())
-        {
-            return Registration::HandleTaken;
-        }
+            .then_some(Registration::HandleTaken)
+    }
+
+    fn add(&self, accounts: &mut Held, account: &NewAccount, admitted: bool, admin: bool) {
         self.created.lock().unwrap().push(account.clone());
         accounts.push((
             SignInAccount {
@@ -498,18 +510,40 @@ impl InMemorySignInAccounts {
                 password_hash: account.password_hash.clone(),
                 email_verified: false,
                 admitted,
+                admin,
                 totp_enabled: false,
             },
             OffsetDateTime::now_utc(),
         ));
+    }
+
+    fn insert(&self, account: &NewAccount, admitted: bool, admin: bool) -> Registration {
+        let mut accounts = self.accounts.lock().unwrap();
+        if let Some(taken) = Self::taken(&accounts, account) {
+            return taken;
+        }
+        self.add(&mut accounts, account, admitted, admin);
         Registration::Created
+    }
+
+    /// The invitation as it is shown, while its creator is held.
+    fn open_one(accounts: &Held, invitation: &Invitation) -> Option<OpenInvitation> {
+        let (creator, _) = accounts
+            .iter()
+            .find(|(held, _)| held.id == invitation.created_by)?;
+        Some(OpenInvitation {
+            id: invitation.id,
+            inviter: creator.display_name.clone(),
+            created_at: invitation.created_at,
+            expires_at: invitation.expires_at,
+        })
     }
 }
 
 #[async_trait::async_trait]
 impl SignUps for InMemorySignInAccounts {
     async fn create(&self, account: &NewAccount) -> Result<Registration, AuthError> {
-        Ok(self.insert(account, false))
+        Ok(self.insert(account, false, false))
     }
 
     async fn create_admin(
@@ -517,17 +551,38 @@ impl SignUps for InMemorySignInAccounts {
         account: &NewAccount,
         _admitted_at: OffsetDateTime,
     ) -> Result<Registration, AuthError> {
-        let created = self.insert(account, true);
-        if created == Registration::Created {
-            self.admins.lock().unwrap().push(account.id);
+        Ok(self.insert(account, true, true))
+    }
+
+    async fn create_invited(
+        &self,
+        account: &NewAccount,
+        invitation: InvitationId,
+        now: OffsetDateTime,
+    ) -> Result<Registration, AuthError> {
+        let mut accounts = self.accounts.lock().unwrap();
+        let mut invitations = self.invitations.lock().unwrap();
+        let Some(row) = invitations
+            .iter_mut()
+            .find(|row| row.invitation.id == invitation && row.invitation.is_open(now))
+        else {
+            return Ok(Registration::InvitationSpent);
+        };
+        if let Some(taken) = Self::taken(&accounts, account) {
+            return Ok(taken);
         }
-        Ok(created)
+        row.invitation.used_at = Some(now);
+        self.vouched
+            .lock()
+            .unwrap()
+            .insert(account.id, row.invitation.created_by);
+        self.add(&mut accounts, account, true, false);
+        Ok(Registration::Created)
     }
 
     async fn admin_facts(&self, address: Option<&Email>) -> Result<AdminFacts, AuthError> {
-        let admins = self.admins.lock().unwrap();
         let accounts = self.accounts.lock().unwrap();
-        let admin_exists = accounts.iter().any(|(held, _)| admins.contains(&held.id));
+        let admin_exists = accounts.iter().any(|(held, _)| held.admin);
         let held = address.and_then(|address| {
             accounts
                 .iter()
@@ -535,7 +590,7 @@ impl SignUps for InMemorySignInAccounts {
         });
         let holder = match held {
             None => AddressHolder::Nobody,
-            Some((held, _)) if admins.contains(&held.id) => AddressHolder::Admin,
+            Some((held, _)) if held.admin => AddressHolder::Admin,
             Some(_) => AddressHolder::NotAdmin,
         };
         Ok(AdminFacts {
@@ -551,6 +606,79 @@ impl SignUps for InMemorySignInAccounts {
             account.email_verified || account.admitted || *created >= created_before
         });
         Ok(before - accounts.len())
+    }
+}
+
+/// Tokens of known bytes — a fake's tokens are no secret — kept as they are.
+#[async_trait::async_trait]
+impl Invitations for InMemorySignInAccounts {
+    async fn issue(
+        &self,
+        by: UserId,
+        now: OffsetDateTime,
+        expires_at: OffsetDateTime,
+    ) -> Result<(InvitationId, InvitationToken), AuthError> {
+        let n = self.tokens.fetch_add(1, Ordering::SeqCst) + 1;
+        let mut bytes = [0u8; 32];
+        bytes[..8].copy_from_slice(&u64::try_from(n).unwrap_or(u64::MAX).to_le_bytes());
+        let token = InvitationToken::from_bytes(bytes);
+        let id = InvitationId::generate();
+        self.invitations.lock().unwrap().push(InvitationRow {
+            invitation: Invitation {
+                id,
+                created_by: by,
+                created_at: now,
+                expires_at,
+                used_at: None,
+                revoked_at: None,
+            },
+            token: token.clone(),
+        });
+        Ok((id, token))
+    }
+
+    async fn find_open(
+        &self,
+        token: &InvitationToken,
+        now: OffsetDateTime,
+    ) -> Result<Option<OpenInvitation>, AuthError> {
+        let accounts = self.accounts.lock().unwrap();
+        let invitations = self.invitations.lock().unwrap();
+        Ok(invitations
+            .iter()
+            .find(|row| row.token == *token && row.invitation.is_open(now))
+            .and_then(|row| Self::open_one(&accounts, &row.invitation)))
+    }
+
+    async fn list_open(&self, now: OffsetDateTime) -> Result<Vec<OpenInvitation>, AuthError> {
+        let accounts = self.accounts.lock().unwrap();
+        let invitations = self.invitations.lock().unwrap();
+        let mut open: Vec<OpenInvitation> = invitations
+            .iter()
+            .filter(|row| row.invitation.is_open(now))
+            .filter_map(|row| Self::open_one(&accounts, &row.invitation))
+            .collect();
+        open.sort_by_key(|open| std::cmp::Reverse((open.created_at, open.id)));
+        Ok(open)
+    }
+
+    async fn revoke(&self, id: InvitationId, now: OffsetDateTime) -> Result<bool, AuthError> {
+        let mut invitations = self.invitations.lock().unwrap();
+        let Some(row) = invitations
+            .iter_mut()
+            .find(|row| row.invitation.id == id && row.invitation.is_open(now))
+        else {
+            return Ok(false);
+        };
+        row.invitation.revoked_at = Some(now);
+        Ok(true)
+    }
+
+    async fn delete_ended(&self, before: OffsetDateTime) -> Result<usize, AuthError> {
+        let mut invitations = self.invitations.lock().unwrap();
+        let held = invitations.len();
+        invitations.retain(|row| row.invitation.ended_at() >= before);
+        Ok(held - invitations.len())
     }
 }
 
@@ -1252,6 +1380,20 @@ pub trait SignInSeeds: Send + Sync {
     async fn sign_up(&self, account: &SignInAccount);
 }
 
+/// What the sign-up store keeps that no port reads back.
+#[async_trait::async_trait]
+pub trait SignUpRecords: Send + Sync {
+    /// Who vouched for the account, if anyone did.
+    async fn invited_by(&self, user: UserId) -> Option<UserId>;
+}
+
+#[async_trait::async_trait]
+impl SignUpRecords for InMemorySignInAccounts {
+    async fn invited_by(&self, user: UserId) -> Option<UserId> {
+        self.vouched.lock().unwrap().get(&user).copied()
+    }
+}
+
 /// Publishes client documents where a [`Clients`] adapter will look for them.
 #[async_trait::async_trait]
 pub trait ClientSeeds: Send + Sync {
@@ -1485,6 +1627,7 @@ pub mod contract {
                 password_hash: bob.password_hash.clone(),
                 email_verified: false,
                 admitted: false,
+                admin: false,
                 totp_enabled: false,
             })
         );
@@ -1593,6 +1736,7 @@ pub mod contract {
                 password_hash: admin.password_hash.clone(),
                 email_verified: false,
                 admitted: true,
+                admin: true,
                 totp_enabled: false,
             })
         );
@@ -2418,6 +2562,308 @@ pub mod contract {
         assert_eq!(
             codes.attempt(user, &live, now).await.unwrap(),
             CodeAttempt::Confirmed
+        );
+    }
+
+    /// The instance's admin, who creates invitations.
+    async fn an_admin(sign_ups: &dyn SignUps, now: OffsetDateTime) -> NewAccount {
+        let admin = a_new_account("admin");
+        sign_ups.create_admin(&admin, now).await.unwrap();
+        admin
+    }
+
+    pub async fn an_invited_account_is_created_admitted_vouched_for_and_spends_its_invitation(
+        sign_ups: &dyn SignUps,
+        invitations: &dyn Invitations,
+        accounts: &dyn SignInAccounts,
+        records: &dyn SignUpRecords,
+    ) {
+        let now = OffsetDateTime::from_unix_timestamp(1_790_000_000).unwrap();
+        let admin = an_admin(sign_ups, now).await;
+        let (id, token) = invitations
+            .issue(admin.id, now, now + INVITATION_TTL)
+            .await
+            .unwrap();
+        let (_, other) = invitations
+            .issue(admin.id, now, now + INVITATION_TTL)
+            .await
+            .unwrap();
+        let joined_at = now + Duration::hours(1);
+
+        let open = invitations.find_open(&token, now).await.unwrap();
+        let bob = a_new_account("bob");
+        let created = sign_ups.create_invited(&bob, id, joined_at).await.unwrap();
+        let carol = a_new_account("carol");
+        let again = sign_ups
+            .create_invited(&carol, id, joined_at)
+            .await
+            .unwrap();
+
+        assert_ne!(token, other);
+        assert_eq!(
+            open,
+            Some(OpenInvitation {
+                id,
+                inviter: Some("admin".to_owned()),
+                created_at: now,
+                expires_at: now + INVITATION_TTL,
+            })
+        );
+        assert_eq!(
+            (created, again),
+            (Registration::Created, Registration::InvitationSpent)
+        );
+        assert_eq!(
+            accounts.by_id(bob.id).await.unwrap(),
+            Some(SignInAccount {
+                id: bob.id,
+                email: bob.email.as_str().to_owned(),
+                username: bob.username.as_str().to_owned(),
+                display_name: Some("bob".to_owned()),
+                password_hash: bob.password_hash.clone(),
+                email_verified: false,
+                admitted: true,
+                admin: false,
+                totp_enabled: false,
+            })
+        );
+        assert_eq!(records.invited_by(bob.id).await, Some(admin.id));
+        assert_eq!(accounts.by_id(carol.id).await.unwrap(), None);
+        assert_eq!(
+            invitations.find_open(&token, joined_at).await.unwrap(),
+            None
+        );
+        assert!(
+            !invitations.revoke(id, joined_at).await.unwrap(),
+            "a used invitation is not revoked"
+        );
+        assert!(
+            !invitations
+                .list_open(joined_at)
+                .await
+                .unwrap()
+                .iter()
+                .any(|open| open.id == id)
+        );
+    }
+
+    pub async fn a_revoked_expired_or_unknown_invitation_lets_nobody_in(
+        sign_ups: &dyn SignUps,
+        invitations: &dyn Invitations,
+        accounts: &dyn SignInAccounts,
+    ) {
+        let now = OffsetDateTime::from_unix_timestamp(1_790_000_000).unwrap();
+        let admin = an_admin(sign_ups, now).await;
+        let expires_at = now + INVITATION_TTL;
+        let (revoked, revoked_token) = invitations.issue(admin.id, now, expires_at).await.unwrap();
+        let (expired, expired_token) = invitations.issue(admin.id, now, expires_at).await.unwrap();
+
+        let first = invitations.revoke(revoked, now).await.unwrap();
+        let twice = invitations.revoke(revoked, now).await.unwrap();
+        let past_expiry = invitations.revoke(expired, expires_at).await.unwrap();
+        let bob = a_new_account("bob");
+        let carol = a_new_account("carol");
+        let dave = a_new_account("dave");
+        let with_revoked = sign_ups.create_invited(&bob, revoked, now).await.unwrap();
+        let with_expired = sign_ups
+            .create_invited(&carol, expired, expires_at)
+            .await
+            .unwrap();
+        let with_unknown = sign_ups
+            .create_invited(&dave, InvitationId::generate(), now)
+            .await
+            .unwrap();
+
+        assert_eq!((first, twice, past_expiry), (true, false, false));
+        assert_eq!(
+            (with_revoked, with_expired, with_unknown),
+            (
+                Registration::InvitationSpent,
+                Registration::InvitationSpent,
+                Registration::InvitationSpent
+            )
+        );
+        for nobody in [bob.id, carol.id, dave.id] {
+            assert_eq!(accounts.by_id(nobody).await.unwrap(), None);
+        }
+        assert_eq!(
+            invitations.find_open(&revoked_token, now).await.unwrap(),
+            None
+        );
+        assert!(
+            invitations
+                .find_open(&expired_token, expires_at - Duration::seconds(1))
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            invitations
+                .find_open(&expired_token, expires_at)
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            invitations
+                .find_open(&InvitationToken::from_bytes([9; 32]), now)
+                .await
+                .unwrap(),
+            None
+        );
+    }
+
+    pub async fn an_address_already_taken_leaves_the_invitation_open(
+        sign_ups: &dyn SignUps,
+        invitations: &dyn Invitations,
+        seeds: &dyn SignInSeeds,
+    ) {
+        let now = OffsetDateTime::from_unix_timestamp(1_790_000_000).unwrap();
+        let admin = an_admin(sign_ups, now).await;
+        let alice = signed_up("alice");
+        seeds.sign_up(&alice).await;
+        let (id, token) = invitations
+            .issue(admin.id, now, now + INVITATION_TTL)
+            .await
+            .unwrap();
+        let bob = a_new_account("bob");
+
+        let taken = sign_ups
+            .create_invited(
+                &NewAccount {
+                    email: email(&alice.email),
+                    ..bob.clone()
+                },
+                id,
+                now,
+            )
+            .await
+            .unwrap();
+        let still_open = invitations.find_open(&token, now).await.unwrap();
+        let created = sign_ups.create_invited(&bob, id, now).await.unwrap();
+
+        assert_eq!(
+            (taken, created),
+            (Registration::EmailTaken, Registration::Created)
+        );
+        assert!(still_open.is_some());
+    }
+
+    pub async fn the_open_invitations_are_listed_newest_first(
+        sign_ups: &dyn SignUps,
+        invitations: &dyn Invitations,
+    ) {
+        let now = OffsetDateTime::from_unix_timestamp(1_790_000_000).unwrap();
+        let admin = an_admin(sign_ups, now - Duration::days(60)).await;
+        let issue = async |at: OffsetDateTime| {
+            invitations
+                .issue(admin.id, at, at + INVITATION_TTL)
+                .await
+                .unwrap()
+                .0
+        };
+        let used = issue(now - Duration::days(2)).await;
+        sign_ups
+            .create_invited(&a_new_account("bob"), used, now - Duration::days(1))
+            .await
+            .unwrap();
+        let expired = issue(now - Duration::days(10)).await;
+        let open_older = issue(now - Duration::days(3)).await;
+        let revoked = issue(now - Duration::days(1)).await;
+        invitations
+            .revoke(revoked, now - Duration::hours(2))
+            .await
+            .unwrap();
+        let open_newer = issue(now - Duration::hours(1)).await;
+
+        let listed = invitations.list_open(now).await.unwrap();
+
+        let open = |id, at: OffsetDateTime| OpenInvitation {
+            id,
+            inviter: Some("admin".to_owned()),
+            created_at: at,
+            expires_at: at + INVITATION_TTL,
+        };
+        assert_eq!(
+            listed,
+            vec![
+                open(open_newer, now - Duration::hours(1)),
+                open(open_older, now - Duration::days(3)),
+            ]
+        );
+        assert!(
+            !listed
+                .iter()
+                .any(|listed| [used, expired, revoked].contains(&listed.id))
+        );
+    }
+
+    pub async fn invitations_are_swept_a_while_after_they_ended(
+        sign_ups: &dyn SignUps,
+        invitations: &dyn Invitations,
+    ) {
+        let before = OffsetDateTime::from_unix_timestamp(1_790_000_000).unwrap();
+        let admin = an_admin(sign_ups, before - Duration::days(60)).await;
+        let issue = async |at: OffsetDateTime| {
+            invitations
+                .issue(admin.id, at, at + INVITATION_TTL)
+                .await
+                .unwrap()
+        };
+        let (used_before, _) = issue(before - Duration::days(2)).await;
+        sign_ups
+            .create_invited(
+                &a_new_account("bob"),
+                used_before,
+                before - Duration::days(1),
+            )
+            .await
+            .unwrap();
+        let (revoked_before, _) = issue(before - Duration::days(2)).await;
+        invitations
+            .revoke(revoked_before, before - Duration::days(1))
+            .await
+            .unwrap();
+        issue(before - INVITATION_TTL - Duration::days(1)).await;
+        let (used_after, _) = issue(before - Duration::days(1)).await;
+        sign_ups
+            .create_invited(
+                &a_new_account("carol"),
+                used_after,
+                before + Duration::days(1),
+            )
+            .await
+            .unwrap();
+        let (_, expiring_after) = issue(before - INVITATION_TTL + Duration::days(2)).await;
+        let (_, open) = issue(before + Duration::days(1)).await;
+
+        let swept = invitations.delete_ended(before).await.unwrap();
+        let again = invitations.delete_ended(before).await.unwrap();
+        let still_open = invitations
+            .find_open(&expiring_after, before)
+            .await
+            .unwrap();
+        let used_later = invitations
+            .delete_ended(before + Duration::days(1) + Duration::hours(1))
+            .await
+            .unwrap();
+        let expired_later = invitations
+            .delete_ended(before + Duration::days(2) + Duration::hours(1))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            (swept, again, used_later, expired_later),
+            (3, 0, 1, 1),
+            "each a while after it ended, not before"
+        );
+        assert!(still_open.is_some());
+        assert!(
+            invitations
+                .find_open(&open, before + Duration::days(2))
+                .await
+                .unwrap()
+                .is_some()
         );
     }
 }

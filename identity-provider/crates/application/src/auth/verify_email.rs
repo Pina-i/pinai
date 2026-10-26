@@ -19,6 +19,9 @@ pub enum Verification {
     },
     /// Confirmed before: nothing to spend, signing in will do.
     AlreadyConfirmed,
+    /// Admitted: it signs in with its password alone, never with a code — its address was never
+    /// proven, so a code must not stand in for the password.
+    NoCodeNeeded,
     /// Not six digits: not tried.
     Malformed,
     /// Tried and refused.
@@ -65,8 +68,12 @@ impl VerifyEmail {
             .by_id(user)
             .await?
             .ok_or(AuthError::UnknownUser)?;
-        if account.email_verified {
-            return Ok(Verification::AlreadyConfirmed);
+        if !account.needs_code() {
+            return Ok(if account.email_verified {
+                Verification::AlreadyConfirmed
+            } else {
+                Verification::NoCodeNeeded
+            });
         }
         // The request is checked before the code is tried: a code is spent only on a sign-in
         // that can go through.

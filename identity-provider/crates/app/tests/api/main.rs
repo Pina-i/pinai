@@ -6,6 +6,7 @@ mod blocking;
 mod federation;
 mod groups;
 mod helpers;
+mod invitations;
 mod sessions;
 mod shutdown;
 mod sign_up;

@@ -3,10 +3,10 @@
 use std::sync::Arc;
 
 use application::auth::{
-    Authenticate, Authorize, CompleteSignIn, ConfirmTotpEnrollment, DisableTotp, ExchangeCode,
-    LinkDevice, LogIn, LogOut, PassSecondFactor, Refresh, RegenerateRecoveryCodes, Register,
-    ResendCode, RevokeToken, SendTestMail, ShowSignIn, SignOutOthers, StartTotpEnrollment,
-    VerifyEmail,
+    Authenticate, Authorize, CompleteSignIn, ConfirmTotpEnrollment, CreateInvitation, DisableTotp,
+    ExchangeCode, LinkDevice, ListInvitations, LogIn, LogOut, PassSecondFactor, Refresh,
+    RegenerateRecoveryCodes, Register, RegisterInvited, ResendCode, RevokeInvitation, RevokeToken,
+    SendTestMail, ShowSignIn, SignOutOthers, StartTotpEnrollment, VerifyEmail,
 };
 use application::e2ee::{
     AppendCommit, ArchiveMessages, CatchUpCommits, ClaimKeyPackage, ClaimWelcomes, ClearArchive,
@@ -39,6 +39,7 @@ use axum::http::{Method, Request, StatusCode, header};
 use axum::response::IntoResponse;
 use axum_extra::extract::cookie::Key;
 use domain::UserId;
+use domain::auth::WebApp;
 use domain::auth::testing::{
     CountingSuffixes, InMemoryClientSignIns, InMemoryClients, InMemoryCodes, InMemoryRefreshTokens,
     InMemorySecondFactors, InMemorySessions, InMemorySignInAccounts, InMemorySignupCodes,
@@ -140,6 +141,20 @@ impl TestApp {
         accounts: impl IntoIterator<Item = Account>,
         remote_actors: InMemoryRemoteActors,
     ) -> Self {
+        let web_app = WebApp::parse("http://localhost:5173").unwrap();
+        Self::built(accounts, remote_actors, Some(web_app))
+    }
+
+    /// An instance that knows of no official web app: joining by invitation ends on a page.
+    pub fn without_web_app() -> Self {
+        Self::built([], InMemoryRemoteActors::default(), None)
+    }
+
+    fn built(
+        accounts: impl IntoIterator<Item = Account>,
+        remote_actors: InMemoryRemoteActors,
+        web_app: Option<WebApp>,
+    ) -> Self {
         let accounts: Arc<dyn Accounts> = Arc::new(InMemoryAccounts::with(accounts));
         let remote_actors: Arc<dyn RemoteActors> = Arc::new(remote_actors);
         let graph = Arc::new(InMemorySocialGraph::default());
@@ -225,7 +240,11 @@ impl TestApp {
             cookie_key: Key::from(&[7u8; 64]),
             sign_in_pages: SignInPages::new(
                 describe_instance.clone(),
-                Arc::new(ShowSignIn::new(clients.clone(), sign_in.tickets.clone())),
+                Arc::new(ShowSignIn::new(
+                    clients.clone(),
+                    sign_in.tickets.clone(),
+                    sign_in.accounts.clone(),
+                )),
                 origin.clone(),
                 false,
             ),
@@ -292,6 +311,28 @@ impl TestApp {
                 Arc::new(CountingSuffixes::default()),
                 sign_in.signup_codes.clone(),
                 sign_in.mailer.clone(),
+            )),
+            register_invited: Arc::new(RegisterInvited::new(
+                origin.clone(),
+                web_app,
+                sign_in.accounts.clone(),
+                sign_in.accounts.clone(),
+                sign_in.accounts.clone(),
+                Arc::new(PlainHasher::default()),
+                Arc::new(CountingSuffixes::default()),
+                complete.clone(),
+            )),
+            create_invitation: Arc::new(CreateInvitation::new(
+                sign_in.accounts.clone(),
+                sign_in.accounts.clone(),
+            )),
+            list_invitations: Arc::new(ListInvitations::new(
+                sign_in.accounts.clone(),
+                sign_in.accounts.clone(),
+            )),
+            revoke_invitation: Arc::new(RevokeInvitation::new(
+                sign_in.accounts.clone(),
+                sign_in.accounts.clone(),
             )),
             verify_email: Arc::new(VerifyEmail::new(
                 clients.clone(),

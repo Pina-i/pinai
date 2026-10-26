@@ -250,3 +250,40 @@ async fn the_admin_facts_tell_who_has_an_address_and_whether_any_admin_exists() 
     )
     .await;
 }
+
+#[tokio::test]
+async fn an_invited_account_is_created_admitted_vouched_for_and_spends_its_invitation() {
+    let accounts = InMemorySignInAccounts::default();
+    contract::an_invited_account_is_created_admitted_vouched_for_and_spends_its_invitation(
+        &accounts, &accounts, &accounts, &accounts,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_revoked_expired_or_unknown_invitation_lets_nobody_in() {
+    let accounts = InMemorySignInAccounts::default();
+    contract::a_revoked_expired_or_unknown_invitation_lets_nobody_in(
+        &accounts, &accounts, &accounts,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn an_address_already_taken_leaves_the_invitation_open() {
+    let accounts = InMemorySignInAccounts::default();
+    contract::an_address_already_taken_leaves_the_invitation_open(&accounts, &accounts, &accounts)
+        .await;
+}
+
+#[tokio::test]
+async fn the_open_invitations_are_listed_newest_first() {
+    let accounts = InMemorySignInAccounts::default();
+    contract::the_open_invitations_are_listed_newest_first(&accounts, &accounts).await;
+}
+
+#[tokio::test]
+async fn invitations_are_swept_a_while_after_they_ended() {
+    let accounts = InMemorySignInAccounts::default();
+    contract::invitations_are_swept_a_while_after_they_ended(&accounts, &accounts).await;
+}

@@ -6,14 +6,15 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use domain::auth::{
     AddressHolder, AdminFacts, AuthError, AuthorizationCode, AuthorizationCodes,
     AuthorizationRequest, CODE_ATTEMPTS, ClientId, ClientSignIn, ClientSignIns, CodeAttempt,
-    CodeChallenge, Email, Grant, LoginTickets, NewAccount, OtpCode, PasswordHash, Presentation,
-    RefreshLink, RefreshToken, RefreshTokens, Registration, RevokedReason, Rotation, SESSION_IDLE,
-    Session, SessionKind, Sessions, SignInAccount, SignInAccounts, SignUps, SignupCodes,
+    CodeChallenge, Email, Grant, Invitation, InvitationToken, Invitations, LoginTickets,
+    NewAccount, OpenInvitation, OtpCode, PasswordHash, Presentation, RefreshLink, RefreshToken,
+    RefreshTokens, Registration, RevokedReason, Rotation, SESSION_IDLE, Session, SessionKind,
+    Sessions, SignInAccount, SignInAccounts, SignUps, SignupCodes,
 };
 use domain::auth::{
     RECOVERY_CODES, SecondFactors, TICKET_ATTEMPTS, Ticket, TicketAttempt, TotpSecret,
 };
-use domain::{DeviceId, SessionId, TicketId, UserId};
+use domain::{DeviceId, InvitationId, SessionId, TicketId, UserId};
 use hmac::{Hmac, Mac};
 use rand::RngCore;
 use rand::rngs::OsRng;
@@ -125,7 +126,7 @@ impl PgSignInAccounts {
 
 const SIGN_IN_COLUMNS: &str = "id, email, username, display_name, password_hash, \
      email_verified_at IS NOT NULL AS email_verified, admitted_at IS NOT NULL AS admitted, \
-     totp_enabled";
+     is_admin, totp_enabled";
 
 #[derive(sqlx::FromRow)]
 struct SignInRow {
@@ -136,6 +137,7 @@ struct SignInRow {
     password_hash: String,
     email_verified: bool,
     admitted: bool,
+    is_admin: bool,
     totp_enabled: bool,
 }
 
@@ -149,6 +151,7 @@ impl From<SignInRow> for SignInAccount {
             password_hash: PasswordHash::new(row.password_hash),
             email_verified: row.email_verified,
             admitted: row.admitted,
+            admin: row.is_admin,
             totp_enabled: row.totp_enabled,
         }
     }
@@ -955,33 +958,46 @@ impl PgSignUps {
         is_admin: bool,
         admitted_at: Option<OffsetDateTime>,
     ) -> Result<Registration, AuthError> {
-        let created = sqlx::query(
-            "INSERT INTO users \
-                 (id, username, email, password_hash, display_name, actor_uri, inbox_url, \
-                  outbox_url, is_admin, admitted_at) \
-             VALUES ($1, $2, $3, $4, $5, $6, $6 || '/inbox', $6 || '/outbox', $7, $8)",
-        )
-        .bind(account.id.as_uuid())
-        .bind(account.username.as_str())
-        .bind(account.email.as_str())
-        .bind(account.password_hash.as_str())
-        .bind(&account.display_name)
-        .bind(account.actor_uri.as_str())
-        .bind(is_admin)
-        .bind(admitted_at)
-        .execute(&self.pool)
-        .await;
-        match created {
-            Ok(_) => Ok(Registration::Created),
-            Err(sqlx::Error::Database(e)) if e.is_unique_violation() => match e.constraint() {
-                Some("users_email_key" | "users_email_lower_key") => Ok(Registration::EmailTaken),
-                Some("users_username_key" | "users_actor_uri_key") => Ok(Registration::HandleTaken),
-                _ => Err(anyhow::Error::from(sqlx::Error::Database(e))
-                    .context("create an account")
-                    .into()),
-            },
-            Err(e) => Err(anyhow::Error::from(e).context("create an account").into()),
-        }
+        let mut connection = self.pool.acquire().await.context("acquire a connection")?;
+        insert_account(&mut connection, account, is_admin, admitted_at, None).await
+    }
+}
+
+/// The account, unless its address or its handle is another's already.
+async fn insert_account(
+    connection: &mut sqlx::PgConnection,
+    account: &NewAccount,
+    is_admin: bool,
+    admitted_at: Option<OffsetDateTime>,
+    invited_by: Option<UserId>,
+) -> Result<Registration, AuthError> {
+    let created = sqlx::query(
+        "INSERT INTO users \
+             (id, username, email, password_hash, display_name, actor_uri, inbox_url, \
+              outbox_url, is_admin, admitted_at, invited_by) \
+         VALUES ($1, $2, $3, $4, $5, $6, $6 || '/inbox', $6 || '/outbox', $7, $8, $9)",
+    )
+    .bind(account.id.as_uuid())
+    .bind(account.username.as_str())
+    .bind(account.email.as_str())
+    .bind(account.password_hash.as_str())
+    .bind(&account.display_name)
+    .bind(account.actor_uri.as_str())
+    .bind(is_admin)
+    .bind(admitted_at)
+    .bind(invited_by.map(|user| user.as_uuid()))
+    .execute(connection)
+    .await;
+    match created {
+        Ok(_) => Ok(Registration::Created),
+        Err(sqlx::Error::Database(e)) if e.is_unique_violation() => match e.constraint() {
+            Some("users_email_key" | "users_email_lower_key") => Ok(Registration::EmailTaken),
+            Some("users_username_key" | "users_actor_uri_key") => Ok(Registration::HandleTaken),
+            _ => Err(anyhow::Error::from(sqlx::Error::Database(e))
+                .context("create an account")
+                .into()),
+        },
+        Err(e) => Err(anyhow::Error::from(e).context("create an account").into()),
     }
 }
 
@@ -1003,6 +1019,47 @@ impl SignUps for PgSignUps {
         admitted_at: OffsetDateTime,
     ) -> Result<Registration, AuthError> {
         self.insert(account, true, Some(admitted_at)).await
+    }
+
+    async fn create_invited(
+        &self,
+        account: &NewAccount,
+        invitation: InvitationId,
+        now: OffsetDateTime,
+    ) -> Result<Registration, AuthError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .context("begin an invited sign-up")?;
+        // Spent first: a sign-up racing for the same invitation waits on its row, then finds it
+        // spent.
+        let inviter: Option<uuid::Uuid> = sqlx::query_scalar(
+            "UPDATE invitations SET used_at = $2 \
+             WHERE id = $1 AND used_at IS NULL AND revoked_at IS NULL AND expires_at > $2 \
+             RETURNING created_by",
+        )
+        .bind(invitation.as_uuid())
+        .bind(now)
+        .fetch_optional(&mut *tx)
+        .await
+        .context("spend an invitation")?;
+        let Some(inviter) = inviter else {
+            return Ok(Registration::InvitationSpent);
+        };
+        let registration =
+            insert_account(&mut tx, account, false, Some(now), Some(inviter.into())).await?;
+        if registration != Registration::Created {
+            return Ok(registration);
+        }
+        sqlx::query("UPDATE invitations SET used_by = $2 WHERE id = $1")
+            .bind(invitation.as_uuid())
+            .bind(account.id.as_uuid())
+            .execute(&mut *tx)
+            .await
+            .context("record who an invitation let in")?;
+        tx.commit().await.context("commit an invited sign-up")?;
+        Ok(Registration::Created)
     }
 
     async fn admin_facts(&self, address: Option<&Email>) -> Result<AdminFacts, AuthError> {
@@ -1035,6 +1092,141 @@ impl SignUps for PgSignUps {
         .context("delete the accounts never confirmed")?
         .rows_affected();
         Ok(usize::try_from(deleted).unwrap_or_default())
+    }
+}
+
+/// `invitations`: a token is kept as its SHA-256, like a refresh token; a spend or a revocation
+/// is a guarded `UPDATE`, so it happens once.
+pub struct PgInvitations {
+    pool: PgPool,
+}
+
+impl PgInvitations {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+}
+
+fn invitation_hash(token: &InvitationToken) -> Vec<u8> {
+    Sha256::digest(token.as_str().as_bytes()).to_vec()
+}
+
+const INVITATION_COLUMNS: &str = "i.id, i.created_by, i.created_at, i.expires_at, i.used_at, \
+     i.revoked_at, c.display_name AS inviter";
+
+#[derive(sqlx::FromRow)]
+struct InvitationRow {
+    id: uuid::Uuid,
+    created_by: uuid::Uuid,
+    created_at: OffsetDateTime,
+    expires_at: OffsetDateTime,
+    used_at: Option<OffsetDateTime>,
+    revoked_at: Option<OffsetDateTime>,
+    inviter: Option<String>,
+}
+
+impl InvitationRow {
+    /// The invitation, while it is open at `now`.
+    fn open(self, now: OffsetDateTime) -> Option<OpenInvitation> {
+        let invitation = Invitation {
+            id: self.id.into(),
+            created_by: self.created_by.into(),
+            created_at: self.created_at,
+            expires_at: self.expires_at,
+            used_at: self.used_at,
+            revoked_at: self.revoked_at,
+        };
+        invitation.is_open(now).then_some(OpenInvitation {
+            id: invitation.id,
+            inviter: self.inviter,
+            created_at: invitation.created_at,
+            expires_at: invitation.expires_at,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl Invitations for PgInvitations {
+    async fn issue(
+        &self,
+        by: UserId,
+        now: OffsetDateTime,
+        expires_at: OffsetDateTime,
+    ) -> Result<(InvitationId, InvitationToken), AuthError> {
+        let mut bytes = [0u8; 32];
+        OsRng.fill_bytes(&mut bytes);
+        let token = InvitationToken::from_bytes(bytes);
+        let id = InvitationId::generate();
+        sqlx::query(
+            "INSERT INTO invitations (id, token_hash, created_by, created_at, expires_at) \
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(id.as_uuid())
+        .bind(invitation_hash(&token))
+        .bind(by.as_uuid())
+        .bind(now)
+        .bind(expires_at)
+        .execute(&self.pool)
+        .await
+        .context("create an invitation")?;
+        Ok((id, token))
+    }
+
+    async fn find_open(
+        &self,
+        token: &InvitationToken,
+        now: OffsetDateTime,
+    ) -> Result<Option<OpenInvitation>, AuthError> {
+        let row: Option<InvitationRow> = sqlx::query_as(&format!(
+            "SELECT {INVITATION_COLUMNS} \
+             FROM invitations i JOIN users c ON c.id = i.created_by \
+             WHERE i.token_hash = $1"
+        ))
+        .bind(invitation_hash(token))
+        .fetch_optional(&self.pool)
+        .await
+        .context("find an invitation")?;
+        Ok(row.and_then(|row| row.open(now)))
+    }
+
+    async fn list_open(&self, now: OffsetDateTime) -> Result<Vec<OpenInvitation>, AuthError> {
+        // Every unused, unrevoked one, then the rule decides: the sweep keeps the table small.
+        let rows: Vec<InvitationRow> = sqlx::query_as(&format!(
+            "SELECT {INVITATION_COLUMNS} \
+             FROM invitations i JOIN users c ON c.id = i.created_by \
+             WHERE i.used_at IS NULL AND i.revoked_at IS NULL \
+             ORDER BY i.created_at DESC, i.id DESC"
+        ))
+        .fetch_all(&self.pool)
+        .await
+        .context("list the open invitations")?;
+        Ok(rows.into_iter().filter_map(|row| row.open(now)).collect())
+    }
+
+    async fn revoke(&self, id: InvitationId, now: OffsetDateTime) -> Result<bool, AuthError> {
+        let revoked = sqlx::query(
+            "UPDATE invitations SET revoked_at = $2 \
+             WHERE id = $1 AND used_at IS NULL AND revoked_at IS NULL AND expires_at > $2",
+        )
+        .bind(id.as_uuid())
+        .bind(now)
+        .execute(&self.pool)
+        .await
+        .context("revoke an invitation")?;
+        Ok(revoked.rows_affected() == 1)
+    }
+
+    async fn delete_ended(&self, before: OffsetDateTime) -> Result<usize, AuthError> {
+        // `LEAST` skips the NULLs: whichever of used, revoked and expired came first.
+        let deleted = sqlx::query(
+            "DELETE FROM invitations WHERE LEAST(used_at, revoked_at, expires_at) < $1",
+        )
+        .bind(before)
+        .execute(&self.pool)
+        .await
+        .context("delete the ended invitations")?
+        .rows_affected();
+        Ok(usize::try_from(deleted).unwrap_or(usize::MAX))
     }
 }
 

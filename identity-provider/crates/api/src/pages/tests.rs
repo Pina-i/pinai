@@ -6,6 +6,29 @@ use crate::testing::TestApp;
 use super::*;
 
 #[test]
+fn the_time_left_is_told_in_days_or_in_hours_under_a_day() {
+    let left = |seconds: i64| time_left(time::Duration::seconds(seconds));
+    let (hour, day) = (3_600, 86_400);
+
+    assert_eq!(left(7 * day), "7 days");
+    assert_eq!(left(7 * day - 1), "7 days");
+    assert_eq!(left(day + hour), "2 days");
+    assert_eq!(left(day), "1 day");
+    assert_eq!(left(day - 30 * 60), "1 day");
+    assert_eq!(left(23 * hour), "23 hours");
+    assert_eq!(left(hour), "1 hour");
+    assert_eq!(left(60), "1 hour");
+    assert_eq!(left(0), "1 hour");
+}
+
+#[test]
+fn an_initial_is_a_names_first_letter_upper_cased() {
+    assert_eq!(initial_of("aotearoa"), "A");
+    assert_eq!(initial_of("ōtautahi"), "Ō");
+    assert_eq!(initial_of(""), "");
+}
+
+#[test]
 fn a_count_of_people_is_grouped_by_thousands() {
     for (count, said) in [
         (0, "0 people"),

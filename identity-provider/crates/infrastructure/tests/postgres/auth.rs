@@ -1,16 +1,15 @@
 use std::sync::Arc;
 
-use domain::auth::SignUps;
-use domain::auth::testing::{SignInSeeds, a_request, contract};
+use domain::auth::testing::{SignInSeeds, SignUpRecords, a_request, contract};
 use domain::auth::{
-    AuthorizationCodes, LoginTickets, RefreshTokens, Rotation, SessionKind, Sessions,
-    SignInAccount, SignupCodes,
+    AuthorizationCodes, INVITATION_TTL, Invitations, LoginTickets, RefreshTokens, Registration,
+    Rotation, SessionKind, Sessions, SignInAccount, SignUps, SignupCodes,
 };
 use domain::{DeviceId, SessionId, UserId};
 use hmac::{Hmac, Mac};
 use infrastructure::postgres::{
-    PgAuthorizationCodes, PgClientSignIns, PgLoginTickets, PgRefreshTokens, PgSecondFactors,
-    PgSessions, PgSignInAccounts, PgSignUps, PgSignupCodes,
+    PgAuthorizationCodes, PgClientSignIns, PgInvitations, PgLoginTickets, PgRefreshTokens,
+    PgSecondFactors, PgSessions, PgSignInAccounts, PgSignUps, PgSignupCodes,
 };
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
@@ -25,9 +24,9 @@ impl SignInSeeds for PgSignInSeeds {
     async fn sign_up(&self, account: &SignInAccount) {
         sqlx::query(
             "INSERT INTO users (id, username, email, password_hash, display_name, \
-                                email_verified_at, admitted_at, totp_enabled) \
+                                email_verified_at, admitted_at, is_admin, totp_enabled) \
              VALUES ($1, $2, $3, $4, $5, CASE WHEN $6 THEN now() END, \
-                     CASE WHEN $7 THEN now() END, $8)",
+                     CASE WHEN $7 THEN now() END, $8, $9)",
         )
         .bind(account.id.as_uuid())
         .bind(&account.username)
@@ -36,10 +35,24 @@ impl SignInSeeds for PgSignInSeeds {
         .bind(&account.display_name)
         .bind(account.email_verified)
         .bind(account.admitted)
+        .bind(account.admin)
         .bind(account.totp_enabled)
         .execute(&self.0)
         .await
         .expect("seed an account");
+    }
+}
+
+#[async_trait::async_trait]
+impl SignUpRecords for PgSignInSeeds {
+    async fn invited_by(&self, user: UserId) -> Option<UserId> {
+        sqlx::query_scalar::<_, Option<uuid::Uuid>>("SELECT invited_by FROM users WHERE id = $1")
+            .bind(user.as_uuid())
+            .fetch_optional(&self.0)
+            .await
+            .expect("read who vouched for an account")
+            .flatten()
+            .map(UserId::from)
     }
 }
 
@@ -583,4 +596,134 @@ async fn parallel_attempts_on_a_ticket_never_pass_its_five(pool: PgPool) {
     }
 
     assert_eq!(open, 5);
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn an_invited_account_is_created_admitted_vouched_for_and_spends_its_invitation(
+    pool: PgPool,
+) {
+    contract::an_invited_account_is_created_admitted_vouched_for_and_spends_its_invitation(
+        &PgSignUps::new(pool.clone()),
+        &PgInvitations::new(pool.clone()),
+        &PgSignInAccounts::new(pool.clone()),
+        &PgSignInSeeds(pool),
+    )
+    .await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn a_revoked_expired_or_unknown_invitation_lets_nobody_in(pool: PgPool) {
+    contract::a_revoked_expired_or_unknown_invitation_lets_nobody_in(
+        &PgSignUps::new(pool.clone()),
+        &PgInvitations::new(pool.clone()),
+        &PgSignInAccounts::new(pool),
+    )
+    .await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn an_address_already_taken_leaves_the_invitation_open(pool: PgPool) {
+    contract::an_address_already_taken_leaves_the_invitation_open(
+        &PgSignUps::new(pool.clone()),
+        &PgInvitations::new(pool.clone()),
+        &PgSignInSeeds(pool),
+    )
+    .await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn the_open_invitations_are_listed_newest_first(pool: PgPool) {
+    contract::the_open_invitations_are_listed_newest_first(
+        &PgSignUps::new(pool.clone()),
+        &PgInvitations::new(pool),
+    )
+    .await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn invitations_are_swept_a_while_after_they_ended(pool: PgPool) {
+    contract::invitations_are_swept_a_while_after_they_ended(
+        &PgSignUps::new(pool.clone()),
+        &PgInvitations::new(pool),
+    )
+    .await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn sign_ups_racing_for_one_invitation_create_one_account(pool: PgPool) {
+    let now = OffsetDateTime::now_utc();
+    let sign_ups = Arc::new(PgSignUps::new(pool.clone()));
+    let admin = contract::a_new_account("admin");
+    sign_ups.create_admin(&admin, now).await.unwrap();
+    let (invitation, _) = PgInvitations::new(pool.clone())
+        .issue(admin.id, now, now + INVITATION_TTL)
+        .await
+        .unwrap();
+
+    let racers: Vec<_> = (0..8)
+        .map(|n| {
+            let sign_ups = sign_ups.clone();
+            let account = contract::a_new_account(&format!("racer{n}"));
+            tokio::spawn(async move {
+                sign_ups
+                    .create_invited(&account, invitation, now)
+                    .await
+                    .unwrap()
+            })
+        })
+        .collect();
+    let mut answers = Vec::new();
+    for racer in racers {
+        answers.push(racer.await.unwrap());
+    }
+
+    let created = answers
+        .iter()
+        .filter(|answer| **answer == Registration::Created)
+        .count();
+    let spent = answers
+        .iter()
+        .filter(|answer| **answer == Registration::InvitationSpent)
+        .count();
+    let invited: i64 = sqlx::query_scalar("SELECT count(*) FROM users WHERE invited_by = $1")
+        .bind(admin.id.as_uuid())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!((created, spent, invited), (1, 7, 1), "{answers:?}");
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn an_invitation_token_is_kept_as_its_hash_and_goes_with_its_creator(pool: PgPool) {
+    let now = OffsetDateTime::now_utc();
+    let admin = contract::a_new_account("admin");
+    PgSignUps::new(pool.clone())
+        .create_admin(&admin, now)
+        .await
+        .unwrap();
+    let (_, token) = PgInvitations::new(pool.clone())
+        .issue(admin.id, now, now + INVITATION_TTL)
+        .await
+        .unwrap();
+
+    let kept: Vec<Vec<u8>> = sqlx::query_scalar("SELECT token_hash FROM invitations")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(admin.id.as_uuid())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let left: i64 = sqlx::query_scalar("SELECT count(*) FROM invitations")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+    assert_eq!(token.as_str().len(), 43, "256 bits, base64url");
+    assert_eq!(
+        kept,
+        vec![Sha256::digest(token.as_str().as_bytes()).to_vec()]
+    );
+    assert_eq!(left, 0);
 }

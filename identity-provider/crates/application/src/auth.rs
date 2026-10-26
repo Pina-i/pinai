@@ -5,12 +5,14 @@ mod authenticate;
 mod authorize;
 mod ensure_admin;
 mod exchange_code;
+mod invitations;
 mod link_device;
 mod log_in;
 mod log_out;
 mod pass_second_factor;
 mod refresh;
 mod register;
+mod register_invited;
 mod resend_code;
 mod revoke_token;
 mod send_test_mail;
@@ -27,12 +29,14 @@ pub use authenticate::Authenticate;
 pub use authorize::{Authorize, AuthorizeCommand, Authorized};
 pub use ensure_admin::EnsureAdmin;
 pub use exchange_code::{ExchangeCode, TokenCommand};
+pub use invitations::{CreateInvitation, CreatedInvitation, ListInvitations, RevokeInvitation};
 pub use link_device::LinkDevice;
 pub use log_in::{LogIn, LoginOutcome};
 pub use log_out::LogOut;
 pub use pass_second_factor::{PassSecondFactor, SecondFactorOutcome};
 pub use refresh::{Refresh, RefreshCommand};
 pub use register::{Register, RegisterCommand, Registered};
+pub use register_invited::{Joined, RegisterInvited};
 pub use resend_code::ResendCode;
 pub use revoke_token::RevokeToken;
 pub use send_test_mail::SendTestMail;
@@ -49,18 +53,19 @@ use domain::auth::{
     AuthError, AuthorizationCode, AuthorizationCodes, AuthorizationRequest, CODE_TTL, ClientSignIn,
     ClientSignIns, Email, Grant, HandleSuffixes, NewAccount, PasswordHash, RESEND_LIMIT,
     RESEND_WINDOW, Registration, RevokedReason, SIGNUP_CODE_TTL, Session, SessionKind,
-    SessionNotifier, Sessions, SignInAccount, SignUps, SignupCodes, SignupMailer,
+    SessionNotifier, Sessions, SignInAccount, SignInAccounts, SignUps, SignupCodes, SignupMailer,
 };
 use domain::identity::{Handle, InstanceOrigin, UsernameChoice};
 use domain::profile::DisplayName;
-use domain::{SessionId, UserId};
+use domain::{InvitationId, SessionId, UserId};
 use time::OffsetDateTime;
 
 /// Suffixes drawn for one chosen name before giving up: 36⁵ of them make a second a rarity.
 const SUFFIX_DRAWS: usize = 3;
 
 /// The end every password sign-in shares — the login form, the sign-up code, the second factor:
-/// the app remembered for the account, the browser's session, and the code.
+/// the app remembered for the account, the browser's session, and the code. Joining by invitation
+/// shares it too, but the code: `signed_in`.
 pub struct CompleteSignIn {
     sign_ins: Arc<dyn ClientSignIns>,
     codes: Arc<dyn AuthorizationCodes>,
@@ -92,6 +97,26 @@ impl CompleteSignIn {
         current: Option<SessionId>,
         now: OffsetDateTime,
     ) -> Result<(SessionId, AuthorizationCode), AuthError> {
+        let session = self
+            .signed_in(user, &ClientSignIn::of(user, request), current, now)
+            .await?;
+        let code = self
+            .codes
+            .issue(&Grant::answering(user, session, request), now + CODE_TTL)
+            .await?;
+        Ok((session, code))
+    }
+
+    /// All a password sign-in leaves but the code: the browser's session, its password typed
+    /// `now`, and the app it signed in to remembered — that app's consent. `current` as for
+    /// [`Self::execute`].
+    pub(crate) async fn signed_in(
+        &self,
+        user: UserId,
+        app: &ClientSignIn,
+        current: Option<SessionId>,
+        now: OffsetDateTime,
+    ) -> Result<SessionId, AuthError> {
         let held = match current {
             Some(id) => self.sessions.find(id).await?,
             None => None,
@@ -116,14 +141,8 @@ impl CompleteSignIn {
                 self.sessions.open(user, &SessionKind::Browser, now).await?
             }
         };
-        self.sign_ins
-            .remember(&ClientSignIn::of(user, request), now)
-            .await?;
-        let code = self
-            .codes
-            .issue(&Grant::answering(user, session, request), now + CODE_TTL)
-            .await?;
-        Ok((session, code))
+        self.sign_ins.remember(app, now).await?;
+        Ok(session)
     }
 }
 
@@ -179,6 +198,11 @@ pub(crate) enum Creation {
     SignUp,
     /// The instance's admin, admitted then.
     Admin(OffsetDateTime),
+    /// Let in by an invitation, which it spends, and admitted then.
+    Invited {
+        invitation: InvitationId,
+        at: OffsetDateTime,
+    },
 }
 
 /// The account named `name`, its handle drawn from the name. The store has the last word on
@@ -207,10 +231,14 @@ pub(crate) async fn create_account(
         let registration = match creation {
             Creation::SignUp => sign_ups.create(&account).await?,
             Creation::Admin(admitted_at) => sign_ups.create_admin(&account, admitted_at).await?,
+            Creation::Invited { invitation, at } => {
+                sign_ups.create_invited(&account, invitation, at).await?
+            }
         };
         match registration {
             Registration::Created => return Ok(account),
             Registration::EmailTaken => return Err(AuthError::EmailTaken),
+            Registration::InvitationSpent => return Err(AuthError::InvitationUnusable),
             Registration::HandleTaken => continue,
         }
     }
@@ -219,4 +247,15 @@ pub(crate) async fn create_account(
         choice.as_str()
     )
     .into())
+}
+
+/// Only an admin of the instance gets past: anyone else is `NotAdmin`.
+pub(crate) async fn require_admin(
+    accounts: &dyn SignInAccounts,
+    caller: UserId,
+) -> Result<(), AuthError> {
+    match accounts.by_id(caller).await? {
+        Some(account) if account.admin => Ok(()),
+        _ => Err(AuthError::NotAdmin),
+    }
 }

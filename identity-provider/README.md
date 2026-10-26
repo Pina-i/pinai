@@ -86,6 +86,8 @@ Paths only — the rules, bodies and status codes of each route are in `CLAUDE.m
 | `POST` | `/register-and-login` | The web client's sign-up form, carrying the OIDC request on |
 | `POST` | `/verify-email-and-login` | The mailed code — confirms the address, continues the flow |
 | `POST` | `/verify-email/resend` | Another code |
+| `GET` | `/i/{token}` | An invitation's doorway |
+| `GET` · `POST` | `/i/{token}/sign-up` | Its sign-up form — an admitted account, then into the web app signed in |
 | `POST` | `/dev/send-test-email` | Development instances only — checks SMTP |
 
 ### Account (Bearer)
@@ -99,6 +101,8 @@ Paths only — the rules, bodies and status codes of each route are in `CLAUDE.m
 | `POST` | `/api/totp/enroll` · `/api/totp/enroll/verify` | Enroll an authenticator |
 | `POST` | `/api/totp/disable` · `/api/totp/recovery-codes/regenerate` | Turn it off, or new recovery codes |
 | `GET` | `/api/users/search?q=` | Accounts by handle |
+| `POST` · `GET` | `/api/admin/invitations` | An admin's: create an invitation, list the open ones |
+| `DELETE` | `/api/admin/invitations/{id}` | An admin's: revoke an open invitation |
 
 ### Friends and blocks (Bearer)
 

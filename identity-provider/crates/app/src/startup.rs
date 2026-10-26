@@ -507,6 +507,8 @@ impl Application {
             Arc::new(infrastructure::auth::TotpAuthenticator);
         let sign_ups: Arc<dyn domain::auth::SignUps> =
             Arc::new(infrastructure::postgres::PgSignUps::new(pool.clone()));
+        let invitations: Arc<dyn domain::auth::Invitations> =
+            Arc::new(infrastructure::postgres::PgInvitations::new(pool.clone()));
         // Before anything is served: nobody can register the admin's address first.
         let admin = application::auth::EnsureAdmin::new(
             origin.clone(),
@@ -528,6 +530,7 @@ impl Application {
             sign_ups.clone(),
             Arc::clone(&sessions),
             Arc::clone(&refresh_tokens),
+            Arc::clone(&invitations),
         ));
 
         let receive_follow = Arc::new(ReceiveFollow::new(
@@ -582,6 +585,7 @@ impl Application {
                 Arc::new(application::auth::ShowSignIn::new(
                     Arc::clone(&clients),
                     Arc::clone(&login_tickets),
+                    Arc::clone(&invitations),
                 )),
                 origin.clone(),
                 config.secure_cookies(),
@@ -612,6 +616,28 @@ impl Application {
                 Arc::new(infrastructure::auth::RandomSuffixes),
                 Arc::clone(&signup_codes),
                 Arc::clone(&mailer),
+            )),
+            register_invited: Arc::new(application::auth::RegisterInvited::new(
+                origin.clone(),
+                config.web_app.clone(),
+                Arc::clone(&sign_in_accounts),
+                Arc::clone(&sign_ups),
+                Arc::clone(&invitations),
+                Arc::clone(&hasher),
+                Arc::new(infrastructure::auth::RandomSuffixes),
+                Arc::clone(&complete_sign_in),
+            )),
+            create_invitation: Arc::new(application::auth::CreateInvitation::new(
+                Arc::clone(&sign_in_accounts),
+                Arc::clone(&invitations),
+            )),
+            list_invitations: Arc::new(application::auth::ListInvitations::new(
+                Arc::clone(&sign_in_accounts),
+                Arc::clone(&invitations),
+            )),
+            revoke_invitation: Arc::new(application::auth::RevokeInvitation::new(
+                Arc::clone(&sign_in_accounts),
+                invitations,
             )),
             verify_email: Arc::new(application::auth::VerifyEmail::new(
                 Arc::clone(&clients),

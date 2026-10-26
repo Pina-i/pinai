@@ -31,6 +31,9 @@ CREATE TABLE users (
                                             -- (identity-provider/specs/auth.md § 4)
   is_admin      BOOLEAN NOT NULL DEFAULT false, -- an admin of this instance; the first is created
                                             -- from ADMIN_EMAIL (identity-provider/specs/auth.md § 4)
+  invited_by    UUID REFERENCES users(id) ON DELETE SET NULL,
+                                            -- who vouched for it: the admin whose invitation let
+                                            -- it in (identity-provider/specs/auth.md § 5)
   contact_policy TEXT NOT NULL DEFAULT 'friends_and_groups',
                                             -- who may message the account (identity-provider/specs/social.md § 2):
                                             -- everyone | friends_and_groups | friends

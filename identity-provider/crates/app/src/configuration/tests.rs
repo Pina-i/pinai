@@ -37,6 +37,7 @@ fn config() -> Config {
         e2ee_keypackage_lifetime: Duration::from_secs(90 * 24 * 3600),
         admin_email: None,
         admin_password: None,
+        web_app: None,
     }
 }
 
@@ -245,6 +246,57 @@ fn an_empty_admin_variable_counts_as_unset() {
         unless_empty(Some("root@idp.alice.com".into())).as_deref(),
         Some("root@idp.alice.com")
     );
+}
+
+// ─── The official web app ────────────────────────────────────────────────────
+
+#[test]
+fn development_lands_invited_people_in_its_own_web_client() {
+    for raw in [None, Some(String::new())] {
+        assert_eq!(
+            web_app(Environment::Development, raw).unwrap(),
+            Some(WebApp::parse("http://localhost:5173").unwrap())
+        );
+    }
+}
+
+#[test]
+fn production_has_no_web_app_but_the_official_one() {
+    let official = OFFICIAL_WEB_APP_ORIGIN.map(|origin| WebApp::parse(origin).unwrap());
+
+    assert_eq!(web_app(Environment::Production, None).unwrap(), official);
+    assert_ne!(
+        web_app(Environment::Production, None).unwrap(),
+        Some(WebApp::parse(DEV_WEB_APP_ORIGIN).unwrap()),
+        "never the development client"
+    );
+}
+
+#[test]
+fn a_web_app_origin_given_stands_in_for_the_official_one() {
+    for environment in [Environment::Development, Environment::Production] {
+        assert_eq!(
+            web_app(environment, Some("https://App.Example.org/".into())).unwrap(),
+            Some(WebApp::parse("https://app.example.org").unwrap())
+        );
+    }
+}
+
+#[test]
+fn a_web_app_origin_that_is_not_one_is_refused() {
+    for raw in [
+        "app.example.org",
+        "https://app.example.org/app",
+        "ftp://x.test",
+    ] {
+        assert!(
+            matches!(
+                web_app(Environment::Development, Some(raw.into())),
+                Err(ConfigError::InvalidValue("WEB_APP_ORIGIN", _))
+            ),
+            "{raw}"
+        );
+    }
 }
 
 // ─── SMTP TLS ────────────────────────────────────────────────────────────────

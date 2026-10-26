@@ -1,5 +1,7 @@
 use domain::auth::testing::{a_request, signed_up};
-use domain::auth::{AuthorizationRequest, ClientId, LOGIN_TICKET_TTL};
+use domain::auth::{
+    AuthorizationRequest, ClientId, INVITATION_TTL, LOGIN_TICKET_TTL, SignInAccount,
+};
 
 use crate::auth::world::{now, world};
 
@@ -58,4 +60,36 @@ async fn a_second_factor_page_is_shown_for_an_open_ticket_only() {
         w.show.ticket(TicketId::generate(), now()).await.unwrap(),
         None
     );
+}
+
+#[tokio::test]
+async fn an_invitation_page_is_shown_for_an_open_invitation_only() {
+    let w = world().await;
+    let admin = SignInAccount {
+        admin: true,
+        display_name: Some("Kahu".to_owned()),
+        ..signed_up("kahu")
+    };
+    w.sign_up(&admin).await;
+    let expires_at = now() + INVITATION_TTL;
+    let (id, token) = w.accounts.issue(admin.id, now(), expires_at).await.unwrap();
+
+    let open = w.show.invitation(&token, now()).await.unwrap();
+    let expired = w.show.invitation(&token, expires_at).await.unwrap();
+    let unknown = w
+        .show
+        .invitation(&InvitationToken::from_bytes([1; 32]), now())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        open,
+        Some(OpenInvitation {
+            id,
+            inviter: Some("Kahu".to_owned()),
+            created_at: now(),
+            expires_at,
+        })
+    );
+    assert_eq!((expired, unknown), (None, None));
 }

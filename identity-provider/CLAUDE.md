@@ -137,6 +137,8 @@ connections ──► (no internal deps)
 | `GET /authorize` | Authorization endpoint (code + PKCE `S256`). The client is the URL of its document, fetched and kept (`identity-provider/specs/auth.md § 1` "Clients"). A client whose document can't be had or breaks a rule, or a `redirect_uri` it doesn't list, is answered here, on the "This app couldn't be verified" page (401 / 400); a bad flow goes back to the client with `error` and `state`. A live session cookie — a browser session used in the last 90 days, its cookie then set again — gets a code at once for an app its account signed in to with the password (`client_sign_ins`), else the instance's own `/login` page, naming the app, carrying the request and the optional `theme` / `motif` the client is painted in. `prompt=login` always shows the login page (the desktop app sends it at each sign-in; any client before a sensitive action) |
 | `GET /login` · `GET /verify-email` · `GET /login/totp` · `GET /signed-out` | The sign-in pages, rendered here (askama, no inline script, a strict CSP, `no-store`): the instance's name, description and facts beside the form; errors arrive as codes and only known codes have words; "← Another home" goes back to the client with `error=access_denied`. A link with no request left, or a gone ticket, says the sign-in expired (`identity-provider/specs/auth.md § 1` "The sign-in pages") |
 | `GET /assets/{path}` | The pages' stylesheet, script, fonts, motifs and grain, built into the binary, kept a day |
+| `GET /i/{token}` | An invitation's doorway, rendered here like the sign-in pages (strict CSP, `no-store`, `Referrer-Policy: no-referrer` — its URL holds the token): "You've been invited by {inviter's display name} to join {instance}.", the description, "This link lets one person create an account and expires in {N days / hours}", **Continue** to `/i/{token}/sign-up`, "Only the admins of {domain} make invitations". Anything but an open invitation — unknown, used, revoked, expired — is one `404` page, "This invitation can no longer be used. Ask the person who sent it for a new one." (`identity-provider/specs/auth.md § 5`) |
+| `GET /i/{token}/sign-up` · `POST /i/{token}/sign-up` | The invitation's sign-up form (display name, email, password; the same headers but the sign-in pages' `Referrer-Policy: same-origin`, so the form posts its `Origin`; the POST refused 403 from another site). The account is created admitted, `invited_by` the invitation's admin, the invitation spent — one transaction, so two sign-ups racing on one link create one account — and no code is mailed. With the official web app known (`WEB_APP_ORIGIN` overrides its address): a browser session and the web app remembered in `client_sign_ins`, then `303` to `{web app}/?instance={domain}` (`no-referrer`), whose `/authorize` then gets a code at once. Without one — or should that sign-in fail —: the "Your account on {instance} is ready" page (`no-referrer`). A broken rule or a taken address shows the form again (`400`); an invitation spent meanwhile, the `404` page |
 | `GET /.well-known/nodeinfo` · `GET /nodeinfo/2.1` | NodeInfo 2.1: `software.name` `pinai`, `openRegistrations`, `usage.users.total` (counted at most a minute ago), `metadata.nodeName` / `nodeDescription` from `INSTANCE_NAME` / `INSTANCE_DESCRIPTION` (`identity-provider/specs/identity.md § 6`) |
 | `POST /login` | The login form, refused 403 when posted from another site: the request checked again (401 / 400), 10 guesses per email then 1/min, an unknown email costs a decoy hash check. A code + session cookie, or on to `/verify-email` (a code is mailed — an address neither confirmed nor admitted, `SignInAccount::needs_code`) or `/login/totp?ticket=`, or back to `/login` with `error=<code>` |
 | `POST /token` | `authorization_code`: code exchange (single use, spent even when refused) for access + refresh + ID token, 1 h; a code whose session ended is `invalid_grant`; a native client staying signed in (`offline_access`) gets an app session of its own. `refresh_token`: rotates the token — access + the next refresh token, no ID token; a rotated one presented again past its 60 s grace ends the session (`reuse`). `Cache-Control: no-store`. The access token's `aud` is this instance, its `client_id` the client (RFC 9068), its `sid` its session, its `auth_time` the password last typed on that session. `unsupported_grant_type`, `invalid_client`, `invalid_grant` |
@@ -151,10 +153,13 @@ connections ──► (no internal deps)
 | `GET /api/profiles?actor=<actor URI>` | Bearer-auth. The profile card: `actor_uri`, `display_name`, `avatar_url`, `pronouns`, `bio`, `friends_since` (RFC 3339 or null). An account here for anyone here; one elsewhere, from `remote_actors`, only for an accepted friend or an active co-member — any other is `404 User not found`, cached or not. A cache over 24 h old is answered and rediscovered in the background |
 | `POST /register` | JSON self-registration `{ display_name, email, password }`: `201` with the account, its handle derived from the display name, a code mailed, no session. `400` names the rule broken (a 1–50 character name, an address, 8-byte passwords) or `Email already registered` — whatever its case, races included |
 | `POST /register-and-login` | The register tab's form (403 from another site): the same, carrying the OIDC request on to `/verify-email`; a broken rule goes back to `/login?tab=register&error=<code>` |
-| `POST /verify-email-and-login` | The mailed code: 5 guesses a code, counted under a row lock; the right one confirms the address, issues an auth code + session, redirects to `redirect_uri` |
-| `POST /verify-email/resend` | The code page's "Send a new code" form: another code, then the page again with `notice=code_resent`, or `error=too_many_codes` past 5 codes in 10 min — a sign-in on the unconfirmed address counts too; on to `/login` once confirmed |
+| `POST /verify-email-and-login` | The mailed code: 5 guesses a code, counted under a row lock; the right one confirms the address, issues an auth code + session, redirects to `redirect_uri`. An admitted account (`SignInAccount::needs_code` false) is never signed in by a code: no code tried, no session, on to `/login?notice=no_code_needed` |
+| `POST /verify-email/resend` | The code page's "Send a new code" form: another code, then the page again with `notice=code_resent`, or `error=too_many_codes` past 5 codes in 10 min — a sign-in on the unconfirmed address counts too; on to `/login` once confirmed, or, mailing nothing, for an admitted account (`notice=no_code_needed`) |
 | `POST /dev/send-test-email` | Development instances only: a signup mail with a fixed code, to check SMTP |
 | `POST /login/totp` | The code page's form: the authenticator's code — good once, for a step later than the last used — or a recovery code, against the ticket the password step opened (5 attempts, reserved atomically). An auth code + session, or back with `error=<code>`, or `/login?error=ticket_expired` / `ticket_exhausted` |
+| `POST /api/admin/invitations` | An admin's bearer (`401` without one, `403` for a member). No body. `201 { id, link, expires_at }`: `link` = `{issuer}/i/{token}`, open 7 days, the token in this answer only |
+| `GET /api/admin/invitations` | An admin's bearer. The open invitations, newest first: `id`, `created_at`, `expires_at`, `created_by: { display_name }`; used, expired and revoked ones are not listed |
+| `DELETE /api/admin/invitations/{id}` | An admin's bearer — a member is `403` whatever the id. Revokes an open invitation: `204`; anything else `404` |
 | `POST /api/totp/enroll` | Bearer auth, a recent password. Start TOTP enrollment — returns `{ secret_base32, provisioning_url }` |
 | `POST /api/totp/enroll/verify` | Bearer auth. The first code: in one transaction the secret committed, its step recorded, the enrollment forgotten and 10 one-time recovery codes minted and returned |
 | `POST /api/totp/disable` | Bearer auth + a current, unused TOTP code. Clears the secret, its last step, the recovery codes and any enrollment in one transaction |
@@ -226,7 +231,7 @@ file wherever it is read from.
 | File | Contents | Read when working on… |
 |---|---|---|
 | `identity-provider/specs/identity.md` | `users` and `remote_actors` schema, the remote actor cache and how a group's remote members are reached, what peers read of an account (WebFinger, the actor documents), the address and name formats | Accounts, handles and display names, actor URIs and addresses, WebFinger, the actor documents |
-| `identity-provider/specs/auth.md` | OpenID Connect sign-in (clients, `/authorize`, `/login`, the session cookie, `/token`, tokens, logout, discovery), sign-up email verification, TOTP two-factor and recovery codes, admins and admitted accounts (the first admin from `ADMIN_EMAIL` / `ADMIN_PASSWORD`) | Signing in, sessions, tokens, sign-up, email codes, the second factor, admins |
+| `identity-provider/specs/auth.md` | OpenID Connect sign-in (clients, `/authorize`, `/login`, the session cookie, `/token`, tokens, logout, discovery), sign-up email verification, TOTP two-factor and recovery codes, admins and admitted accounts (the first admin from `ADMIN_EMAIL` / `ADMIN_PASSWORD`), invitations (the admin API, the `/i/{token}` pages, joining into the official web app) | Signing in, sessions, tokens, sign-up, email codes, the second factor, admins, invitations |
 | `identity-provider/specs/social.md` | `friendships` and `user_blocks` schema, a friendship's life (request, accept opening the DM, decline, unfriend), who can reach a user (the contact setting, blocks, the rule and where it is enforced) | Friend requests, the friends list, blocking, the contact setting |
 | `identity-provider/specs/profile-and-settings.md` | Profile editing and avatar storage, the profile card (`GET /api/profiles`), `user_settings`, real-time profile propagation (`friend_profile_updated`, `Update{Person}`) | Profile fields, avatars, the profile card, account settings, profile federation |
 | `identity-provider/specs/event-delivery.md` | Redis Streams vs pub-sub, federation delivery semantics (best-effort, each activity's recovery), reconnect and catch-up | The broker, the WebSocket replay, outbound ActivityPub delivery |
@@ -320,7 +325,8 @@ users                    — local accounts (actor_uri, inbox_url, display_name,
                             email lowercase and unique whatever its case,
                                                         avatar_url, pronouns ∈ {he, she, non-binary}, bio, email_verified_at,
                             admitted_at: let in without confirming the address — signs in without a
-                            code, never swept; is_admin: an admin of the instance,
+                            code, is never mailed one, never swept; is_admin: an admin of the
+                            instance; invited_by: the admin whose invitation let it in,
                             totp_secret, totp_enabled, totp_last_step — a code is good once,
                             contact_policy: everyone | friends_and_groups (default) | friends)
 email_verification_codes — signup codes (peppered HMAC, 10-min expiry, 5 attempts, 5 codes / 10 min)
@@ -341,6 +347,9 @@ refresh_tokens           — chains of refresh tokens, kept as SHA-256 (session_
 client_sign_ins          — the apps each account signed in to with its password (offline_access
                             once asked, kept): a session signs in silently to these only
 recovery_codes           — 10 per user, single-use, peppered HMAC
+invitations              — an admin's single-use links (token_hash: SHA-256 only, created_by,
+                            created_at, expires_at = 7 days on, used_at + used_by, revoked_at):
+                            open while unused, unrevoked, unexpired; swept 30 days after it ended
 remote_actors            — cache of federated users (inbox_url, display_name, avatar_url, pronouns,
                             bio — as the actor's own `Update{Person}` or document last said, within
                             the profile limits; fetched_at dates the last resolution)
@@ -419,7 +428,10 @@ archive under HAK).
   history backup — takes the `RecentlySignedIn` extractor: the token's `auth_time` within
   `RECENT_SIGN_IN` (10 min), else `401 insufficient_user_authentication` (RFC 9470)
   (`identity-provider/specs/auth.md § 1` "Sensitive actions")
-- A refresh token is never stored, only its SHA-256
+- A refresh token is never stored, only its SHA-256; nor is an invitation's token, whose path
+  (`/i/{token}`) the request log writes as `/i/…`
+- Only admins create, list and revoke invitations: the use cases refuse anyone else
+  (`AuthError::NotAdmin`, `403`)
 - The password is typed on this instance's own pages only: never a form on a client. The pages run
   no script but their own file (`/assets/sign-in.js`), their forms take same-origin POSTs only, and an error reaches them as a code —
   never as words a link chooses
@@ -448,6 +460,9 @@ task finish its run under way, and drops what is still open ten seconds on
 `.env.example` at the repo root documents every variable the service reads, and the root
 `README.md` groups them; `app::configuration` is where they are read. `ADMIN_PASSWORD` is only
 ever read to create the first admin, never logged and never written over the account's password.
+`WEB_APP_ORIGIN` overrides the built-in official web app's address
+(`domain::auth::OFFICIAL_WEB_APP_ORIGIN`) in any environment; development defaults it to
+`http://localhost:5173`.
 
 ---
 

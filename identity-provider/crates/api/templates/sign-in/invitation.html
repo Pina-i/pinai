@@ -1,0 +1,20 @@
+{% extends "sign-in/base.html" %}
+{% import "sign-in/icons.html" as icon %}
+{% block title %}You're invited{% endblock %}
+{% block layout %}<div class="door">
+<div class="auth-l-motif"></div>
+<div class="door-ini" aria-hidden="true">{{ frame.initial() }}</div>
+<div class="auth-top">
+<span class="door-brand"><span class="mark mark--door">{% include "sign-in/mark.svg.html" %}</span><span class="door-brand-name">Pīna'i</span></span>
+<span class="eye">Self-hosted · Federated · Open-source</span>
+</div>
+<main class="door-body auth-rise">
+<p class="eye">— {{ frame.host }}</p>
+<h1 class="auth-h door-h">You've been invited {% if let Some(inviter) = inviter %}by <em class="door-by">{{ inviter }}</em> {% endif %}to join <em class="door-to">{{ frame.name }}</em>.</h1>
+<p class="auth-p door-p">{% if frame.described %}{{ frame.description }} {% endif %}This link lets one person create an account and expires in {{ expires_in }}.</p>
+<a class="btn btn1 btn--auto door-go" href="{{ sign_up_href }}">Continue{% call icon::arrow_right(15) %}{% endcall %}</a>
+</main>
+<div class="door-foot">
+<p class="fact fact--plain door-shield">{% call icon::shield_check(12) %}{% endcall %}<span>Only the admins of {{ frame.host }} make invitations</span></p>
+</div>
+</div>{% endblock %}

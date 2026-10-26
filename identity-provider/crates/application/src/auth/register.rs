@@ -18,12 +18,33 @@ pub struct RegisterCommand {
     pub password: String,
 }
 
+impl RegisterCommand {
+    /// The name and the address within the rules, and the password checked.
+    pub(crate) fn parse(&self) -> Result<(DisplayName, Email), AuthError> {
+        let name = DisplayName::parse(&self.display_name).map_err(AuthError::BadDisplayName)?;
+        let email = Email::parse(&self.email).map_err(AuthError::BadEmail)?;
+        check_password(&self.password)?;
+        Ok((name, email))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Registered {
     pub user: UserId,
     pub username: String,
     pub display_name: String,
     pub email: String,
+}
+
+impl Registered {
+    pub(crate) fn of(account: &NewAccount) -> Self {
+        Self {
+            user: account.id,
+            username: account.username.as_str().to_owned(),
+            display_name: account.display_name.clone(),
+            email: account.email.as_str().to_owned(),
+        }
+    }
 }
 
 /// `POST /register` and `/register-and-login`: an account, unconfirmed until the code mailed to
@@ -76,9 +97,7 @@ impl Register {
         if request.is_none() && blank {
             return Err(AuthError::MissingField);
         }
-        let name = DisplayName::parse(&command.display_name).map_err(AuthError::BadDisplayName)?;
-        let email = Email::parse(&command.email).map_err(AuthError::BadEmail)?;
-        check_password(&command.password)?;
+        let (name, email) = command.parse()?;
         if self.accounts.by_email(&email).await?.is_some() {
             return Err(AuthError::EmailTaken);
         }
@@ -110,23 +129,20 @@ impl Register {
         account: NewAccount,
         now: OffsetDateTime,
     ) -> Result<Registered, AuthError> {
+        let registered = Registered::of(&account);
         let signing_in = SignInAccount {
             id: account.id,
-            email: account.email.as_str().to_owned(),
-            username: account.username.as_str().to_owned(),
-            display_name: Some(account.display_name.clone()),
+            email: registered.email.clone(),
+            username: registered.username.clone(),
+            display_name: Some(registered.display_name.clone()),
             password_hash: account.password_hash,
             email_verified: false,
             admitted: false,
+            admin: false,
             totp_enabled: false,
         };
         mail_signup_code(&*self.codes, &*self.mailer, &signing_in, now).await?;
-        Ok(Registered {
-            user: account.id,
-            username: signing_in.username,
-            display_name: account.display_name,
-            email: signing_in.email,
-        })
+        Ok(registered)
     }
 }
 

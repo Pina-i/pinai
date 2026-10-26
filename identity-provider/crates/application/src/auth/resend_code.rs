@@ -6,7 +6,7 @@ use time::OffsetDateTime;
 
 use super::mail_signup_code;
 
-/// `POST /verify-email/resend`: another code, within the limit.
+/// `POST /verify-email/resend`: another code, within the limit, to an account that needs one.
 pub struct ResendCode {
     accounts: Arc<dyn SignInAccounts>,
     codes: Arc<dyn SignupCodes>,
@@ -32,8 +32,12 @@ impl ResendCode {
             .by_id(user)
             .await?
             .ok_or(AuthError::UnknownUser)?;
-        if account.email_verified {
-            return Err(AuthError::AlreadyVerified);
+        if !account.needs_code() {
+            return Err(if account.email_verified {
+                AuthError::AlreadyVerified
+            } else {
+                AuthError::NoCodeNeeded
+            });
         }
         mail_signup_code(&*self.codes, &*self.mailer, &account, now).await
     }

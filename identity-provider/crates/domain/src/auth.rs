@@ -7,6 +7,7 @@ mod admin;
 mod client;
 mod client_sign_in;
 mod error;
+mod invitation;
 mod ports;
 mod refresh;
 mod request;
@@ -15,6 +16,7 @@ mod session;
 mod signup;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod testing;
+mod web_app;
 
 pub use account::{PasswordHash, SignInAccount};
 pub use admin::{
@@ -27,10 +29,13 @@ pub use client::{
 };
 pub use client_sign_in::ClientSignIn;
 pub use error::AuthError;
+pub use invitation::{
+    INVITATION_RETENTION, INVITATION_TTL, Invitation, InvitationToken, OpenInvitation,
+};
 pub use ports::{
-    Authenticator, AuthorizationCodes, ClientSignIns, Clients, HandleSuffixes, LoginTickets,
-    PasswordHasher, RefreshTokens, SecondFactors, SessionNotifier, Sessions, SignInAccounts,
-    SignUps, SignupCodes, SignupMailer, TokenIssuer,
+    Authenticator, AuthorizationCodes, ClientSignIns, Clients, HandleSuffixes, Invitations,
+    LoginTickets, PasswordHasher, RefreshTokens, SecondFactors, SessionNotifier, Sessions,
+    SignInAccounts, SignUps, SignupCodes, SignupMailer, TokenIssuer,
 };
 pub use refresh::{
     Presentation, REFRESH_GRACE, REFRESH_GRANT_TYPE, RefreshLink, RefreshToken, Rotation,
@@ -49,3 +54,4 @@ pub use signup::{
     CODE_ATTEMPTS, CodeAttempt, Email, NewAccount, RESEND_LIMIT, RESEND_WINDOW, Registration,
     SPENT_RETENTION, UNVERIFIED_TTL, check_password,
 };
+pub use web_app::{OFFICIAL_WEB_APP_ORIGIN, WebApp};

@@ -1,7 +1,9 @@
 use domain::auth::SessionKind;
 use domain::auth::testing::{a_request, signed_up};
+use domain::auth::{
+    INVITATION_TTL, Invitations, RefreshTokens, SESSION_IDLE, SIGNUP_CODE_TTL, SignInAccount,
+};
 use domain::auth::{LoginTickets, SignInAccounts, SignupCodes};
-use domain::auth::{RefreshTokens, SESSION_IDLE, SIGNUP_CODE_TTL, SignInAccount};
 use time::Duration;
 
 use crate::auth::world::world;
@@ -43,6 +45,7 @@ async fn the_sweep_deletes_what_was_spent_a_day_ago_and_the_accounts_never_confi
             accounts: 0,
             sessions: 0,
             refresh_tokens: 0,
+            invitations: 0,
         }
     );
     assert_eq!(
@@ -53,6 +56,7 @@ async fn the_sweep_deletes_what_was_spent_a_day_ago_and_the_accounts_never_confi
             accounts: 1,
             sessions: 0,
             refresh_tokens: 0,
+            invitations: 0,
         }
     );
     assert_eq!(w.accounts.by_id(bob.id).await.unwrap(), None);
@@ -126,4 +130,40 @@ async fn a_refresh_token_is_swept_after_ninety_days_unused() {
     assert_eq!(swept.refresh_tokens, 1);
     assert_eq!(w.refresh_tokens.of(session), vec![used, head]);
     assert!(!w.refresh_tokens.of(session).contains(&abandoned));
+}
+
+#[tokio::test]
+async fn an_invitation_is_swept_a_month_after_it_ended() {
+    let w = world().await;
+    let now = OffsetDateTime::from_unix_timestamp(1_790_000_000).unwrap();
+    let admin = w.an_admin().await;
+    let (_, expiring) = w
+        .accounts
+        .issue(admin.id, now, now + INVITATION_TTL)
+        .await
+        .unwrap();
+    let (revoked, _) = w
+        .accounts
+        .issue(admin.id, now, now + INVITATION_TTL)
+        .await
+        .unwrap();
+    w.accounts.revoke(revoked, now).await.unwrap();
+
+    let a_month_on = w
+        .sweep
+        .execute(now + INVITATION_RETENTION + Duration::minutes(1))
+        .await
+        .unwrap();
+    let after_expiry = w
+        .sweep
+        .execute(now + INVITATION_TTL + INVITATION_RETENTION + Duration::minutes(1))
+        .await
+        .unwrap();
+
+    assert_eq!((a_month_on.invitations, after_expiry.invitations), (1, 1));
+    assert_eq!(
+        w.accounts.find_open(&expiring, now).await.unwrap(),
+        None,
+        "gone"
+    );
 }

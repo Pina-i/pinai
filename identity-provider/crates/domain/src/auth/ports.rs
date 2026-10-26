@@ -1,13 +1,13 @@
 use time::{Duration, OffsetDateTime};
 
 use crate::identity::HandleSuffix;
-use crate::{DeviceId, SessionId, TicketId, UserId};
+use crate::{DeviceId, InvitationId, SessionId, TicketId, UserId};
 
 use super::{
     AdminFacts, AuthError, AuthorizationCode, AuthorizationRequest, Client, ClientId, ClientSignIn,
-    CodeAttempt, Email, Grant, NewAccount, OtpCode, PasswordHash, RefreshToken, Registration,
-    RevokedReason, Rotation, Session, SessionKind, SignInAccount, Ticket, TicketAttempt,
-    TotpSecret,
+    CodeAttempt, Email, Grant, InvitationToken, NewAccount, OpenInvitation, OtpCode, PasswordHash,
+    RefreshToken, Registration, RevokedReason, Rotation, Session, SessionKind, SignInAccount,
+    Ticket, TicketAttempt, TotpSecret,
 };
 
 #[async_trait::async_trait]
@@ -234,12 +234,47 @@ pub trait SignUps: Send + Sync {
         account: &NewAccount,
         admitted_at: OffsetDateTime,
     ) -> Result<Registration, AuthError>;
+    /// An account an invitation lets in: admitted at `now`, vouched for by the invitation's
+    /// creator, and the invitation spent by it — all or nothing, so one invitation lets one
+    /// account in, however many sign-ups race for it. Refused as `create` refuses, or
+    /// `InvitationSpent` when the invitation is no longer open at `now`.
+    async fn create_invited(
+        &self,
+        account: &NewAccount,
+        invitation: InvitationId,
+        now: OffsetDateTime,
+    ) -> Result<Registration, AuthError>;
     /// Who has `address`, whatever its case — nobody without one — and whether any account is
     /// an admin.
     async fn admin_facts(&self, address: Option<&Email>) -> Result<AdminFacts, AuthError>;
     /// The accounts still unconfirmed, never admitted, and created before `created_before`. How
     /// many went.
     async fn delete_unverified(&self, created_before: OffsetDateTime) -> Result<usize, AuthError>;
+}
+
+/// The invitations admins create: each a single-use link that lets someone in without a mailed
+/// code. Only a hash of each token is kept.
+#[async_trait::async_trait]
+pub trait Invitations: Send + Sync {
+    /// A new invitation by `by`, open until `expires_at`, and its token — shown once.
+    async fn issue(
+        &self,
+        by: UserId,
+        now: OffsetDateTime,
+        expires_at: OffsetDateTime,
+    ) -> Result<(InvitationId, InvitationToken), AuthError>;
+    /// The invitation `token` names, while it is open at `now`.
+    async fn find_open(
+        &self,
+        token: &InvitationToken,
+        now: OffsetDateTime,
+    ) -> Result<Option<OpenInvitation>, AuthError>;
+    /// The invitations open at `now`, newest first.
+    async fn list_open(&self, now: OffsetDateTime) -> Result<Vec<OpenInvitation>, AuthError>;
+    /// Revokes it, if it is open at `now`; `false` otherwise.
+    async fn revoke(&self, id: InvitationId, now: OffsetDateTime) -> Result<bool, AuthError>;
+    /// The invitations that ended — used, revoked or expired — before `before`. How many went.
+    async fn delete_ended(&self, before: OffsetDateTime) -> Result<usize, AuthError>;
 }
 
 /// The random part appended to a chosen name.

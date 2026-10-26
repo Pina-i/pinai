@@ -146,6 +146,8 @@ pub async fn try_spawn_app(configure: impl FnOnce(&mut Config)) -> anyhow::Resul
         email_otp_pepper: rand::random::<[u8; 32]>().to_vec(),
         admin_email: None,
         admin_password: None,
+        // The journeys' web client stands in for the official one.
+        web_app: Some(domain::auth::WebApp::parse(&client.uri()).unwrap()),
     };
     configure(&mut config);
     let built = Application::build(config, listener).await;

@@ -34,8 +34,10 @@ You need:
 - a Linux server, amd64 or arm64, with Docker and its Compose plugin;
 - a domain pointing at the server, with ports 80 and 443 open. It becomes part of
   every account's address (`alice_xk9mp@your.domain`), so it cannot change later;
-- an SMTP relay, over STARTTLS (port 587) or TLS (port 465): sign-up codes are
-  mailed. `deploy/README.md` lists some, with their settings.
+- for a public instance, an SMTP relay, over STARTTLS (port 587) or TLS (port 465):
+  sign-up codes are mailed. `deploy/README.md` lists some, with their settings;
+- for an invite-only instance, its first admin's address and password, set in
+  `.env` before the first start ([Public or invite-only](#public-or-invite-only)).
 
 Then, on the server:
 
@@ -54,6 +56,23 @@ carries too.
 > **Back up `.env` and `data/` together.** The instance key and the secrets in
 > `.env` cannot be regenerated: a new key breaks every device that signed in, a
 > new `EMAIL_OTP_PEPPER` every recovery code.
+
+### Public or invite-only
+
+An instance is public or invite-only, set by `REGISTRATIONS` in `.env`:
+
+- **Public** (`REGISTRATIONS=open`, the default): anyone can create an account from
+  the app, and a mailed code confirms their address. It needs the SMTP relay, which
+  `./setup.sh` asks for, and doesn't start without `SMTP_HOST`. Add the DNS records
+  the relay gives you for the sender's domain (SPF, DKIM), or the codes land in spam.
+- **Invite-only** (`REGISTRATIONS=invite`): only people an admin invited can create
+  an account. No code is mailed, so the relay is optional. It needs a first admin:
+  add `ADMIN_EMAIL` and `ADMIN_PASSWORD` to `.env` before `docker compose up -d`;
+  without an admin, the instance doesn't start.
+
+Invite-only is about who can join, not federation: its members still talk with
+people on other instances. [`deploy/README.md`](deploy/README.md#public-or-invite-only)
+has the details: the first admin, invitations, password resets, switching modes.
 
 ---
 
@@ -359,6 +378,7 @@ The main groups:
 - **Session** — `SESSION_SECRET`
 - **Instance** — `INSTANCE_NAME`, `INSTANCE_DESCRIPTION`: how the sign-in pages and NodeInfo present it
 - **Admin** — `ADMIN_EMAIL`, `ADMIN_PASSWORD`: the first admin account, created at startup when no account has that address, never written over
+- **Web app** — `WEB_APP_ORIGIN`: overrides, in any environment, the built-in address of the official web app, where someone joining by invitation lands signed in (default `http://localhost:5173` in development)
 - **Redis** — `REDIS_PORT`, from which `REDIS_URL` is built (event streams and presence pub-sub)
 - **Object storage** — `RUSTFS_PORT`, from which `STORAGE_ENDPOINT` is built, `STORAGE_ACCESS_KEY`, `STORAGE_SECRET_KEY`, optional `STORAGE_PUBLIC_URL` and bucket names
 - **Email** — `SMTP_*`, `EMAIL_OTP_PEPPER`, `MAILPIT_*` ports

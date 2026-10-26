@@ -1,8 +1,8 @@
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
 use axum::response::Response;
-use domain::auth::SignInAccount;
 use domain::auth::testing::{CHALLENGE, CLIENT_ID, Mail, REDIRECT_URI, SignInSeeds, signed_up};
+use domain::auth::{SignInAccount, SignupCodes};
 use serde_json::json;
 
 use crate::testing::TestApp;
@@ -296,6 +296,38 @@ async fn resending_to_a_confirmed_or_unknown_account_goes_to_sign_in_or_up() {
         location(&unknown),
         format!("/login?{CARRIED}&nonce=the-nonce&tab=register&error=signup_expired")
     );
+}
+
+#[tokio::test]
+async fn an_admitted_account_gets_no_code_and_never_signs_in_through_one() {
+    let app = TestApp::with([], []);
+    let carol = SignInAccount {
+        email_verified: false,
+        admitted: true,
+        ..signed_up("carol")
+    };
+    app.sign_in.accounts.sign_up(&carol).await;
+    let code = app
+        .sign_in
+        .signup_codes
+        .issue(
+            carol.id,
+            time::OffsetDateTime::now_utc() + domain::auth::SIGNUP_CODE_TTL,
+        )
+        .await
+        .unwrap();
+    let carol_id = carol.id.to_string();
+
+    let resent = app.respond(resend(&carol_id)).await;
+    let verified = app.respond(verify(&carol_id, code.as_str())).await;
+
+    let to_sign_in = format!("/login?{CARRIED}&nonce=the-nonce&notice=no_code_needed");
+    assert_eq!(location(&resent), to_sign_in);
+    assert_eq!(location(&verified), to_sign_in);
+    assert!(verified.headers().get(header::SET_COOKIE).is_none());
+    assert!(app.sign_in.mailer.sent().is_empty());
+    assert!(app.sign_in.codes.issued().is_empty());
+    assert!(app.sign_in.sessions.all().is_empty());
 }
 
 fn code_page(extra: &[(&str, &str)]) -> Request<Body> {

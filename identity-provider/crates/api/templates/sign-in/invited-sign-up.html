@@ -1,0 +1,23 @@
+{% extends "sign-in/base.html" %}
+{% import "sign-in/icons.html" as icon %}
+{% block title %}Create your account{% endblock %}
+{% block aside %}<span class="brand"><span class="inst-ini">{{ frame.initial() }}</span><span class="brand-name">{{ frame.name }}</span></span>
+<div class="intro">
+<p class="fact fact--plain">{{ frame.host }}</p>
+<h1 class="auth-h">{{ frame.description }}</h1>
+{% if let Some(inviter) = inviter %}<div class="invited"><span class="inv-av">{{ inviter_initial }}</span><span class="invited-by">Invited by <span class="invited-name">{{ inviter }}</span></span></div>{% endif %}
+<div class="band"></div>
+</div>{% endblock %}
+{% block back %}<a class="back" href="{{ back_href }}">← Back to the invitation</a>{% endblock %}
+{% block content %}
+<h2 class="auth-title">Create your account</h2>
+{% if let Some(alert) = alert %}<p class="alert" role="alert">{{ alert }}</p>{% endif %}
+<form class="stack" method="post" action="{{ action }}">
+<div class="lfield"><label class="eye" for="display_name">Display name</label><span class="field{% if bad == "display_name" %} field--err{% endif %}"><input id="display_name" name="display_name" value="{{ display_name }}" placeholder="Tiare" autocomplete="nickname" maxlength="50" required{% if display_name.is_empty() %} autofocus{% endif %}></span></div>
+<div class="lfield"><label class="eye" for="email">Email</label><span class="field{% if bad == "email" %} field--err{% endif %}">{% call icon::mail(15) %}{% endcall %}<input id="email" name="email" type="email" value="{{ email }}" placeholder="tiare@{{ email_host }}" autocomplete="email" required></span></div>
+<div class="lfield"><label class="eye" for="password">Password</label><span class="field{% if bad == "password" %} field--err{% endif %}">{% call icon::lock_keyhole(15) %}{% endcall %}<input id="password" name="password" type="password" placeholder="••••••••••" autocomplete="new-password" minlength="8" required{% if !display_name.is_empty() %} autofocus{% endif %}></span></div>
+<button class="btn btn1" type="submit">Create account{% call icon::spinner() %}{% endcall %}</button>
+</form>
+<p class="fact fact--plain auth-foot">{% call icon::shield_check(11) %}{% endcall %}<span>Your password goes to {{ frame.host }}, never to Pīna'i</span></p>
+{% if let Some(web_app) = web_app %}<p class="inv-alt">Already have an account on {{ frame.host }}? <a class="tlink" href="{{ web_app }}">Sign in instead</a></p>{% endif %}
+{% endblock %}

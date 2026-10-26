@@ -16,8 +16,8 @@ mod social;
 pub use archive::PgHistoryArchive;
 pub use attachments::PgAttachments;
 pub use auth::{
-    PgAuthorizationCodes, PgClientSignIns, PgLoginTickets, PgRefreshTokens, PgSecondFactors,
-    PgSessions, PgSignInAccounts, PgSignUps, PgSignupCodes,
+    PgAuthorizationCodes, PgClientSignIns, PgInvitations, PgLoginTickets, PgRefreshTokens,
+    PgSecondFactors, PgSessions, PgSignInAccounts, PgSignUps, PgSignupCodes,
 };
 pub use delivery::{PgCommitLog, PgWelcomes};
 pub use group_events::PgGroupEvents;

@@ -16,6 +16,17 @@ fn a_logged_uri_never_carries_its_query() {
     }
 }
 
+#[test]
+fn a_logged_uri_never_carries_an_invitations_token() {
+    let token = "q7Yp0aZk3mW8xRt2LbN5vHc9JdE4sF6uG1iO0pQ-_wA";
+    for (uri, logged) in [
+        (format!("/i/{token}"), "/i/…"),
+        (format!("/i/{token}/sign-up"), "/i/…/sign-up"),
+    ] {
+        assert_eq!(logged_uri(&uri.parse::<Uri>().unwrap()), logged);
+    }
+}
+
 mod logging {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};

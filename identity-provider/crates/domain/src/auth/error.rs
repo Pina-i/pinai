@@ -36,6 +36,12 @@ pub enum AuthError {
     UnknownUser,
     #[error("the address is confirmed already")]
     AlreadyVerified,
+    #[error("the account signs in without a code")]
+    NoCodeNeeded,
+    #[error("only an admin may do this")]
+    NotAdmin,
+    #[error("no open invitation")]
+    InvitationUnusable,
     #[error("too many codes mailed lately")]
     TooManyCodes,
     #[error("TOTP already enabled — disable it first to re-enroll")]
