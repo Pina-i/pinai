@@ -73,6 +73,18 @@ impl Account {
 }
 
 pub async fn spawn_app() -> TestApp {
+    spawn_app_with(|_| {}).await
+}
+
+/// The application, `configure` changing its configuration first.
+pub async fn spawn_app_with(configure: impl FnOnce(&mut Config)) -> TestApp {
+    try_spawn_app(configure)
+        .await
+        .expect("the application builds")
+}
+
+/// The application as `configure` changes its configuration, or why it would not start.
+pub async fn try_spawn_app(configure: impl FnOnce(&mut Config)) -> anyhow::Result<TestApp> {
     LazyLock::force(&TRACING);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -98,7 +110,7 @@ pub async fn spawn_app() -> TestApp {
         .to_pkcs8_pem(LineEnding::LF)
         .unwrap();
     std::fs::write(&key, pem.as_bytes()).unwrap();
-    let config = Config {
+    let mut config = Config {
         database_url,
         domain: domain.clone(),
         environment: Environment::Development,
@@ -132,14 +144,22 @@ pub async fn spawn_app() -> TestApp {
         smtp_from: "Pīna'i <no-reply@journey.test>".into(),
         smtp_tls: infrastructure::email::SmtpTls::None,
         email_otp_pepper: rand::random::<[u8; 32]>().to_vec(),
+        admin_email: None,
+        admin_password: None,
     };
-    let application = Application::build(config, listener)
-        .await
-        .expect("the application builds");
+    configure(&mut config);
+    let built = Application::build(config, listener).await;
     std::fs::remove_file(&key).unwrap();
+    let application = match built {
+        Ok(application) => application,
+        Err(refused) => {
+            drop_database(&database).await;
+            return Err(refused);
+        }
+    };
     let stop = application.stop_token();
     let running = tokio::spawn(application.run_until_stopped());
-    TestApp {
+    Ok(TestApp {
         address: format!("http://{domain}"),
         domain,
         mail,
@@ -153,13 +173,17 @@ pub async fn spawn_app() -> TestApp {
         database,
         stop,
         running,
-    }
+    })
+}
+
+fn test_server() -> String {
+    std::env::var("DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://test:test@localhost:55432/test".into())
 }
 
 /// A database of its own, on the server `DATABASE_URL` names; the application migrates it.
 async fn fresh_database() -> (String, String) {
-    let server = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "postgres://test:test@localhost:55432/test".into());
+    let server = test_server();
     let name = format!("journey_{}", Uuid::new_v4().simple());
     let mut connection = PgConnection::connect(&server)
         .await
@@ -351,8 +375,7 @@ impl TestApp {
 
     /// A count straight from the instance's database, for what no route shows.
     pub async fn count(&self, query: &str) -> i64 {
-        let server = std::env::var("DATABASE_URL")
-            .unwrap_or_else(|_| "postgres://test:test@localhost:55432/test".into());
+        let server = test_server();
         let base = &server[..server.rfind('/').unwrap()];
         let mut connection = PgConnection::connect(&format!("{base}/{}", self.database))
             .await
@@ -367,16 +390,15 @@ impl TestApp {
     pub async fn stop(self) -> anyhow::Result<()> {
         self.stop.cancel();
         let stopped = self.running.await.unwrap();
-        let server = std::env::var("DATABASE_URL")
-            .unwrap_or_else(|_| "postgres://test:test@localhost:55432/test".into());
-        if let Ok(mut connection) = PgConnection::connect(&server).await {
-            let drop = format!(
-                r#"DROP DATABASE IF EXISTS "{}" WITH (FORCE)"#,
-                self.database
-            );
-            let _ = connection.execute(drop.as_str()).await;
-        }
+        drop_database(&self.database).await;
         stopped
+    }
+}
+
+async fn drop_database(name: &str) {
+    if let Ok(mut connection) = PgConnection::connect(&test_server()).await {
+        let drop = format!(r#"DROP DATABASE IF EXISTS "{name}" WITH (FORCE)"#);
+        let _ = connection.execute(drop.as_str()).await;
     }
 }
 

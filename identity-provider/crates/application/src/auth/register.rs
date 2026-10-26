@@ -3,17 +3,13 @@ use std::sync::Arc;
 use domain::UserId;
 use domain::auth::{
     AuthError, AuthorizationRequest, Clients, Email, HandleSuffixes, NewAccount, PasswordHasher,
-    Registration, SignInAccount, SignInAccounts, SignUps, SignupCodes, SignupMailer,
-    check_password,
+    SignInAccount, SignInAccounts, SignUps, SignupCodes, SignupMailer, check_password,
 };
-use domain::identity::{Handle, InstanceOrigin, UsernameChoice};
+use domain::identity::InstanceOrigin;
 use domain::profile::DisplayName;
 use time::OffsetDateTime;
 
-use super::mail_signup_code;
-
-/// Suffixes drawn for one chosen name before giving up: 36⁵ of them make a second a rarity.
-const SUFFIX_DRAWS: usize = 3;
+use super::{Creation, create_account, mail_signup_code};
 
 #[derive(Debug, Clone)]
 pub struct RegisterCommand {
@@ -81,7 +77,6 @@ impl Register {
             return Err(AuthError::MissingField);
         }
         let name = DisplayName::parse(&command.display_name).map_err(AuthError::BadDisplayName)?;
-        let choice = UsernameChoice::derived_from(name.as_str());
         let email = Email::parse(&command.email).map_err(AuthError::BadEmail)?;
         check_password(&command.password)?;
         if self.accounts.by_email(&email).await?.is_some() {
@@ -97,30 +92,17 @@ impl Register {
                 return Err(AuthError::UnregisteredRedirect);
             }
         }
-        let password_hash = self.hasher.hash(&command.password)?;
-        // The store has the last word on both: an address registered in between is refused,
-        // and a handle taken by chance is drawn again.
-        for _ in 0..SUFFIX_DRAWS {
-            let handle = Handle::compose(&choice, &self.suffixes.fresh());
-            let account = NewAccount {
-                id: UserId::generate(),
-                actor_uri: self.origin.actor_uri(&handle),
-                username: handle,
-                display_name: name.as_str().to_owned(),
-                email: email.clone(),
-                password_hash: password_hash.clone(),
-            };
-            match self.sign_ups.create(&account).await? {
-                Registration::Created => return self.mail(account, now).await,
-                Registration::EmailTaken => return Err(AuthError::EmailTaken),
-                Registration::HandleTaken => continue,
-            }
-        }
-        Err(anyhow::anyhow!(
-            "no free handle for {} in {SUFFIX_DRAWS} draws",
-            choice.as_str()
+        let account = create_account(
+            &*self.sign_ups,
+            &self.origin,
+            &*self.suffixes,
+            Creation::SignUp,
+            &name,
+            &email,
+            &self.hasher.hash(&command.password)?,
         )
-        .into())
+        .await?;
+        self.mail(account, now).await
     }
 
     async fn mail(
@@ -135,6 +117,7 @@ impl Register {
             display_name: Some(account.display_name.clone()),
             password_hash: account.password_hash,
             email_verified: false,
+            admitted: false,
             totp_enabled: false,
         };
         mail_signup_code(&*self.codes, &*self.mailer, &signing_in, now).await?;

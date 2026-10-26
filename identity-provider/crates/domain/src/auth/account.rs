@@ -29,5 +29,17 @@ pub struct SignInAccount {
     pub display_name: Option<String>,
     pub password_hash: PasswordHash,
     pub email_verified: bool,
+    /// Let in without confirming its address, someone having vouched for it.
+    pub admitted: bool,
     pub totp_enabled: bool,
 }
+
+impl SignInAccount {
+    /// Its address must be confirmed with a mailed code before it signs in.
+    pub fn needs_code(&self) -> bool {
+        !self.email_verified && !self.admitted
+    }
+}
+
+#[cfg(test)]
+mod tests;

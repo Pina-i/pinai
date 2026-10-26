@@ -15,9 +15,10 @@ use domain::identity::InstanceOrigin;
 use time::OffsetDateTime;
 
 use super::{
-    Authorize, CompleteSignIn, ConfirmTotpEnrollment, DisableTotp, ExchangeCode, LinkDevice, LogIn,
-    LogOut, PassSecondFactor, Refresh, RegenerateRecoveryCodes, Register, ResendCode, RevokeToken,
-    ShowSignIn, SignOutOthers, StartTotpEnrollment, SweepSignups, VerifyEmail,
+    Authorize, CompleteSignIn, ConfirmTotpEnrollment, DisableTotp, EnsureAdmin, ExchangeCode,
+    LinkDevice, LogIn, LogOut, PassSecondFactor, Refresh, RegenerateRecoveryCodes, Register,
+    ResendCode, RevokeToken, ShowSignIn, SignOutOthers, StartTotpEnrollment, SweepSignups,
+    VerifyEmail,
 };
 
 pub struct World {
@@ -44,6 +45,7 @@ pub struct World {
     pub revoke_token: RevokeToken,
     pub log_out: LogOut,
     pub register: Register,
+    pub ensure_admin: EnsureAdmin,
     pub verify: VerifyEmail,
     pub resend: ResendCode,
     pub sweep: SweepSignups,
@@ -149,6 +151,12 @@ pub async fn world() -> World {
             Arc::new(CountingSuffixes::default()),
             signup_codes.clone(),
             mailer.clone(),
+        ),
+        ensure_admin: EnsureAdmin::new(
+            origin.clone(),
+            accounts.clone(),
+            hasher.clone(),
+            Arc::new(CountingSuffixes::default()),
         ),
         verify: VerifyEmail::new(
             clients.clone(),

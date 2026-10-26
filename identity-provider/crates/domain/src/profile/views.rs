@@ -11,6 +11,8 @@ pub struct OwnProfile {
     pub email: String,
     pub email_verified: bool,
     pub totp_enabled: bool,
+    /// An admin of this instance.
+    pub admin: bool,
     /// `None` on an account older than actor URIs.
     pub actor_uri: Option<ActorUri>,
     pub display_name: Option<String>,

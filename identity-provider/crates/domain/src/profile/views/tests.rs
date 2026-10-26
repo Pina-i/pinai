@@ -76,6 +76,7 @@ fn an_account_shows_others_its_name_avatar_pronouns_and_bio() {
         email: "aroha@idp.test".to_owned(),
         email_verified: true,
         totp_enabled: false,
+        admin: false,
         actor_uri: Some(remote_actor("aroha_x1y2z@idp.test").actor_uri),
         display_name: Some("Aroha".to_owned()),
         avatar_url: Some("http://s3.test/avatars/aroha.png?v=1".to_owned()),

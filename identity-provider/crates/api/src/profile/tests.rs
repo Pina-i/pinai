@@ -43,6 +43,7 @@ async fn userinfo_answers_the_account_its_address_and_its_settings() {
             "email": "alice@idp.test",
             "email_verified": true,
             "totp_enabled": false,
+            "admin": false,
             "preferred_username": "alice_t3st0",
             "display_name": "alice",
             "address": "alice_t3st0@localhost:8080",
@@ -54,6 +55,21 @@ async fn userinfo_answers_the_account_its_address_and_its_settings() {
             "privacy": { "contact_policy": "friends_and_groups" },
         })
     );
+}
+
+#[tokio::test]
+async fn userinfo_tells_an_admin_it_is_one() {
+    let root = OwnProfile {
+        admin: true,
+        ..own_profile("root")
+    };
+    let app = app_with(&root).await;
+
+    let (_, body) = app
+        .call(Method::GET, "/userinfo", Some(root.id), None)
+        .await;
+
+    assert_eq!(body["admin"], true);
 }
 
 #[tokio::test]

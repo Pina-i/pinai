@@ -225,3 +225,28 @@ async fn a_refresh_token_names_its_session_to_its_own_client_only() {
     )
     .await;
 }
+
+#[tokio::test]
+async fn an_admitted_account_is_never_swept_as_unconfirmed() {
+    let accounts = InMemorySignInAccounts::default();
+    contract::an_admitted_account_is_never_swept_as_unconfirmed(&accounts, &accounts, &accounts)
+        .await;
+}
+
+#[tokio::test]
+async fn the_admin_is_created_admitted_unconfirmed_and_never_written_over() {
+    let accounts = InMemorySignInAccounts::default();
+    contract::the_admin_is_created_admitted_unconfirmed_and_never_written_over(
+        &accounts, &accounts,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn the_admin_facts_tell_who_has_an_address_and_whether_any_admin_exists() {
+    let accounts = InMemorySignInAccounts::default();
+    contract::the_admin_facts_tell_who_has_an_address_and_whether_any_admin_exists(
+        &accounts, &accounts,
+    )
+    .await;
+}

@@ -18,6 +18,7 @@ use application::social::{
 };
 use axum::Router;
 use connections::Hub;
+use domain::auth::{AdminBootstrap, AdminRefusal, Email};
 use federation_transport::{KeyCache, UrlPolicy};
 use jwt_utils::load_ed_keypair_from_pem;
 use sqlx::postgres::PgPoolOptions;
@@ -40,9 +41,10 @@ pub struct Application {
 }
 
 impl Application {
-    /// Connects to Postgres, Redis and the object store, runs the migrations, builds every
-    /// adapter and use case, and starts the background tasks. The caller binds `listener`, so
-    /// that `config.domain` can name the port it got.
+    /// Connects to Postgres, Redis and the object store, runs the migrations, creates the first
+    /// admin from `ADMIN_EMAIL` / `ADMIN_PASSWORD` or refuses to start, builds every adapter and
+    /// use case, and starts the background tasks. The caller binds `listener`, so that
+    /// `config.domain` can name the port it got.
     pub async fn build(config: Config, listener: TcpListener) -> anyhow::Result<Self> {
         if config.session_secret == DEV_SESSION_SECRET {
             warn!("SESSION_SECRET is using the insecure dev default — set it in production");
@@ -505,6 +507,21 @@ impl Application {
             Arc::new(infrastructure::auth::TotpAuthenticator);
         let sign_ups: Arc<dyn domain::auth::SignUps> =
             Arc::new(infrastructure::postgres::PgSignUps::new(pool.clone()));
+        // Before anything is served: nobody can register the admin's address first.
+        let admin = application::auth::EnsureAdmin::new(
+            origin.clone(),
+            Arc::clone(&sign_ups),
+            Arc::clone(&hasher),
+            Arc::new(infrastructure::auth::RandomSuffixes),
+        )
+        .execute(
+            config.admin_email.as_deref(),
+            config.admin_password.as_deref(),
+            time::OffsetDateTime::now_utc(),
+        )
+        .await
+        .map_err(|e| anyhow::Error::new(e).context("settling the instance's admin"))?;
+        report_admin(admin)?;
         let sweep_signups = Arc::new(application::auth::SweepSignups::new(
             Arc::clone(&signup_codes),
             login_tickets.clone(),
@@ -1084,6 +1101,50 @@ impl Application {
         info!("stopped");
         Ok(())
     }
+}
+
+/// Says what starting did about the admin; a refusal stops the start.
+fn report_admin(bootstrap: AdminBootstrap<Email>) -> anyhow::Result<()> {
+    const NO_ADMIN: &str = "the instance has no admin: set ADMIN_EMAIL and ADMIN_PASSWORD, then \
+                            restart, to create one";
+    match bootstrap {
+        AdminBootstrap::Create(_) => {
+            info!("admin account created from ADMIN_EMAIL and ADMIN_PASSWORD")
+        }
+        AdminBootstrap::AlreadyAdmin {
+            password_unused: true,
+        } => warn!(
+            "ADMIN_PASSWORD is unused once the admin account exists, which keeps its own \
+             password: remove it from .env"
+        ),
+        AdminBootstrap::AlreadyAdmin {
+            password_unused: false,
+        }
+        | AdminBootstrap::Settled => {}
+        AdminBootstrap::NotPromoted { no_admin } => {
+            warn!(
+                "ADMIN_EMAIL names an account that is not an admin, and it is not made one: \
+                 name an address no account has"
+            );
+            if no_admin {
+                warn!("{NO_ADMIN}");
+            }
+        }
+        AdminBootstrap::NoAdmin => warn!("{NO_ADMIN}"),
+        AdminBootstrap::Refused(AdminRefusal::NoPassword) => {
+            anyhow::bail!("ADMIN_PASSWORD is needed to create the admin account ADMIN_EMAIL names")
+        }
+        AdminBootstrap::Refused(AdminRefusal::BadAddress(reason)) => {
+            anyhow::bail!("ADMIN_EMAIL: {reason}")
+        }
+        AdminBootstrap::Refused(AdminRefusal::PasswordTooShort) => {
+            anyhow::bail!("ADMIN_PASSWORD: at least 8 bytes")
+        }
+        AdminBootstrap::Refused(AdminRefusal::PasswordRefused(rule)) => {
+            anyhow::bail!("ADMIN_PASSWORD: {rule}")
+        }
+    }
+    Ok(())
 }
 
 async fn check_mail_relay(

@@ -4,11 +4,11 @@ use anyhow::Context;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use domain::auth::{
-    AuthError, AuthorizationCode, AuthorizationCodes, AuthorizationRequest, CODE_ATTEMPTS,
-    ClientId, ClientSignIn, ClientSignIns, CodeAttempt, CodeChallenge, Email, Grant, LoginTickets,
-    NewAccount, OtpCode, PasswordHash, Presentation, RefreshLink, RefreshToken, RefreshTokens,
-    Registration, RevokedReason, Rotation, SESSION_IDLE, Session, SessionKind, Sessions,
-    SignInAccount, SignInAccounts, SignUps, SignupCodes,
+    AddressHolder, AdminFacts, AuthError, AuthorizationCode, AuthorizationCodes,
+    AuthorizationRequest, CODE_ATTEMPTS, ClientId, ClientSignIn, ClientSignIns, CodeAttempt,
+    CodeChallenge, Email, Grant, LoginTickets, NewAccount, OtpCode, PasswordHash, Presentation,
+    RefreshLink, RefreshToken, RefreshTokens, Registration, RevokedReason, Rotation, SESSION_IDLE,
+    Session, SessionKind, Sessions, SignInAccount, SignInAccounts, SignUps, SignupCodes,
 };
 use domain::auth::{
     RECOVERY_CODES, SecondFactors, TICKET_ATTEMPTS, Ticket, TicketAttempt, TotpSecret,
@@ -124,7 +124,8 @@ impl PgSignInAccounts {
 }
 
 const SIGN_IN_COLUMNS: &str = "id, email, username, display_name, password_hash, \
-     email_verified_at IS NOT NULL AS email_verified, totp_enabled";
+     email_verified_at IS NOT NULL AS email_verified, admitted_at IS NOT NULL AS admitted, \
+     totp_enabled";
 
 #[derive(sqlx::FromRow)]
 struct SignInRow {
@@ -134,6 +135,7 @@ struct SignInRow {
     display_name: Option<String>,
     password_hash: String,
     email_verified: bool,
+    admitted: bool,
     totp_enabled: bool,
 }
 
@@ -146,6 +148,7 @@ impl From<SignInRow> for SignInAccount {
             display_name: row.display_name,
             password_hash: PasswordHash::new(row.password_hash),
             email_verified: row.email_verified,
+            admitted: row.admitted,
             totp_enabled: row.totp_enabled,
         }
     }
@@ -945,16 +948,18 @@ impl PgSignUps {
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
     }
-}
 
-#[async_trait::async_trait]
-impl SignUps for PgSignUps {
-    async fn create(&self, account: &NewAccount) -> Result<Registration, AuthError> {
+    async fn insert(
+        &self,
+        account: &NewAccount,
+        is_admin: bool,
+        admitted_at: Option<OffsetDateTime>,
+    ) -> Result<Registration, AuthError> {
         let created = sqlx::query(
             "INSERT INTO users \
                  (id, username, email, password_hash, display_name, actor_uri, inbox_url, \
-                  outbox_url) \
-             VALUES ($1, $2, $3, $4, $5, $6, $6 || '/inbox', $6 || '/outbox')",
+                  outbox_url, is_admin, admitted_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $6 || '/inbox', $6 || '/outbox', $7, $8)",
         )
         .bind(account.id.as_uuid())
         .bind(account.username.as_str())
@@ -962,6 +967,8 @@ impl SignUps for PgSignUps {
         .bind(account.password_hash.as_str())
         .bind(&account.display_name)
         .bind(account.actor_uri.as_str())
+        .bind(is_admin)
+        .bind(admitted_at)
         .execute(&self.pool)
         .await;
         match created {
@@ -976,15 +983,57 @@ impl SignUps for PgSignUps {
             Err(e) => Err(anyhow::Error::from(e).context("create an account").into()),
         }
     }
+}
+
+#[derive(sqlx::FromRow)]
+struct AdminFactsRow {
+    holder_is_admin: Option<bool>,
+    admin_exists: bool,
+}
+
+#[async_trait::async_trait]
+impl SignUps for PgSignUps {
+    async fn create(&self, account: &NewAccount) -> Result<Registration, AuthError> {
+        self.insert(account, false, None).await
+    }
+
+    async fn create_admin(
+        &self,
+        account: &NewAccount,
+        admitted_at: OffsetDateTime,
+    ) -> Result<Registration, AuthError> {
+        self.insert(account, true, Some(admitted_at)).await
+    }
+
+    async fn admin_facts(&self, address: Option<&Email>) -> Result<AdminFacts, AuthError> {
+        let row: AdminFactsRow = sqlx::query_as(
+            "SELECT (SELECT is_admin FROM users WHERE lower(email) = $1) AS holder_is_admin, \
+                    EXISTS (SELECT 1 FROM users WHERE is_admin) AS admin_exists",
+        )
+        .bind(address.map(Email::as_str))
+        .fetch_one(&self.pool)
+        .await
+        .context("read the admin facts")?;
+        Ok(AdminFacts {
+            holder: match row.holder_is_admin {
+                None => AddressHolder::Nobody,
+                Some(true) => AddressHolder::Admin,
+                Some(false) => AddressHolder::NotAdmin,
+            },
+            admin_exists: row.admin_exists,
+        })
+    }
 
     async fn delete_unverified(&self, created_before: OffsetDateTime) -> Result<usize, AuthError> {
-        let deleted =
-            sqlx::query("DELETE FROM users WHERE email_verified_at IS NULL AND created_at < $1")
-                .bind(created_before)
-                .execute(&self.pool)
-                .await
-                .context("delete the accounts never confirmed")?
-                .rows_affected();
+        let deleted = sqlx::query(
+            "DELETE FROM users \
+             WHERE email_verified_at IS NULL AND admitted_at IS NULL AND created_at < $1",
+        )
+        .bind(created_before)
+        .execute(&self.pool)
+        .await
+        .context("delete the accounts never confirmed")?
+        .rows_affected();
         Ok(usize::try_from(deleted).unwrap_or_default())
     }
 }

@@ -10,14 +10,15 @@ use crate::identity::{ActorUri, Handle, HandleSuffix};
 use crate::{DeviceId, SessionId, TicketId, UserId};
 
 use super::{
-    AuthError, Authenticator, AuthorizationCode, AuthorizationCodes, AuthorizationRequest,
-    CODE_ATTEMPTS, Client, ClientDocument, ClientId, ClientKind, ClientPolicy, ClientSignIn,
-    ClientSignIns, Clients, CodeAttempt, CodeChallenge, Email, Grant, HandleSuffixes,
-    LOGIN_TICKET_TTL, LoginTickets, NewAccount, OtpCode, PasswordHash, PasswordHasher,
-    Presentation, RECOVERY_CODES, RefreshLink, RefreshToken, RefreshTokens, Registration,
-    RevokedReason, Rotation, SESSION_IDLE, SESSION_RETENTION, SIGNUP_CODE_TTL, SecondFactors,
-    Session, SessionKind, SessionNotifier, Sessions, SignInAccount, SignInAccounts, SignUps,
-    SignupCodes, SignupMailer, TICKET_ATTEMPTS, Ticket, TicketAttempt, TokenIssuer, TotpSecret,
+    AddressHolder, AdminFacts, AuthError, Authenticator, AuthorizationCode, AuthorizationCodes,
+    AuthorizationRequest, CODE_ATTEMPTS, Client, ClientDocument, ClientId, ClientKind,
+    ClientPolicy, ClientSignIn, ClientSignIns, Clients, CodeAttempt, CodeChallenge, Email, Grant,
+    HandleSuffixes, LOGIN_TICKET_TTL, LoginTickets, NewAccount, OtpCode, PasswordHash,
+    PasswordHasher, Presentation, RECOVERY_CODES, RefreshLink, RefreshToken, RefreshTokens,
+    Registration, RevokedReason, Rotation, SESSION_IDLE, SESSION_RETENTION, SIGNUP_CODE_TTL,
+    SecondFactors, Session, SessionKind, SessionNotifier, Sessions, SignInAccount, SignInAccounts,
+    SignUps, SignupCodes, SignupMailer, TICKET_ATTEMPTS, Ticket, TicketAttempt, TokenIssuer,
+    TotpSecret,
 };
 
 pub const CLIENT_ID: &str = "http://localhost:5173/oauth-client.json";
@@ -60,6 +61,7 @@ pub fn signed_up(name: &str) -> SignInAccount {
         display_name: Some(name.to_owned()),
         password_hash: PlainHasher::hash(&format!("{name}-password")),
         email_verified: true,
+        admitted: false,
         totp_enabled: false,
     }
 }
@@ -413,6 +415,7 @@ pub struct InMemorySignInAccounts {
     /// Each with when it was created.
     accounts: Mutex<Vec<(SignInAccount, OffsetDateTime)>>,
     created: Mutex<Vec<NewAccount>>,
+    admins: Mutex<Vec<UserId>>,
 }
 
 impl InMemorySignInAccounts {
@@ -421,6 +424,7 @@ impl InMemorySignInAccounts {
         Self {
             accounts: Mutex::new(accounts.into_iter().map(|a| (a, now)).collect()),
             created: Mutex::default(),
+            admins: Mutex::default(),
         }
     }
 
@@ -469,21 +473,20 @@ impl SignInAccounts for InMemorySignInAccounts {
     }
 }
 
-#[async_trait::async_trait]
-impl SignUps for InMemorySignInAccounts {
-    async fn create(&self, account: &NewAccount) -> Result<Registration, AuthError> {
+impl InMemorySignInAccounts {
+    fn insert(&self, account: &NewAccount, admitted: bool) -> Registration {
         let mut accounts = self.accounts.lock().unwrap();
         if accounts
             .iter()
             .any(|(held, _)| held.email.to_lowercase() == account.email.as_str())
         {
-            return Ok(Registration::EmailTaken);
+            return Registration::EmailTaken;
         }
         if accounts
             .iter()
             .any(|(held, _)| held.username == account.username.as_str())
         {
-            return Ok(Registration::HandleTaken);
+            return Registration::HandleTaken;
         }
         self.created.lock().unwrap().push(account.clone());
         accounts.push((
@@ -494,17 +497,59 @@ impl SignUps for InMemorySignInAccounts {
                 display_name: Some(account.display_name.clone()),
                 password_hash: account.password_hash.clone(),
                 email_verified: false,
+                admitted,
                 totp_enabled: false,
             },
             OffsetDateTime::now_utc(),
         ));
-        Ok(Registration::Created)
+        Registration::Created
+    }
+}
+
+#[async_trait::async_trait]
+impl SignUps for InMemorySignInAccounts {
+    async fn create(&self, account: &NewAccount) -> Result<Registration, AuthError> {
+        Ok(self.insert(account, false))
+    }
+
+    async fn create_admin(
+        &self,
+        account: &NewAccount,
+        _admitted_at: OffsetDateTime,
+    ) -> Result<Registration, AuthError> {
+        let created = self.insert(account, true);
+        if created == Registration::Created {
+            self.admins.lock().unwrap().push(account.id);
+        }
+        Ok(created)
+    }
+
+    async fn admin_facts(&self, address: Option<&Email>) -> Result<AdminFacts, AuthError> {
+        let admins = self.admins.lock().unwrap();
+        let accounts = self.accounts.lock().unwrap();
+        let admin_exists = accounts.iter().any(|(held, _)| admins.contains(&held.id));
+        let held = address.and_then(|address| {
+            accounts
+                .iter()
+                .find(|(held, _)| held.email.to_lowercase() == address.as_str())
+        });
+        let holder = match held {
+            None => AddressHolder::Nobody,
+            Some((held, _)) if admins.contains(&held.id) => AddressHolder::Admin,
+            Some(_) => AddressHolder::NotAdmin,
+        };
+        Ok(AdminFacts {
+            holder,
+            admin_exists,
+        })
     }
 
     async fn delete_unverified(&self, created_before: OffsetDateTime) -> Result<usize, AuthError> {
         let mut accounts = self.accounts.lock().unwrap();
         let before = accounts.len();
-        accounts.retain(|(account, created)| account.email_verified || *created >= created_before);
+        accounts.retain(|(account, created)| {
+            account.email_verified || account.admitted || *created >= created_before
+        });
         Ok(before - accounts.len())
     }
 }
@@ -1289,6 +1334,7 @@ pub mod contract {
         let bob = SignInAccount {
             display_name: None,
             email_verified: false,
+            admitted: true,
             totp_enabled: true,
             ..signed_up("bob")
         };
@@ -1438,6 +1484,7 @@ pub mod contract {
                 display_name: Some("bob".to_owned()),
                 password_hash: bob.password_hash.clone(),
                 email_verified: false,
+                admitted: false,
                 totp_enabled: false,
             })
         );
@@ -1467,6 +1514,149 @@ pub mod contract {
         assert_eq!((early, late), (0, 1));
         assert_eq!(accounts.by_id(bob.id).await.unwrap(), None);
         assert!(accounts.by_id(alice.id).await.unwrap().is_some());
+    }
+
+    pub async fn an_admitted_account_is_never_swept_as_unconfirmed(
+        sign_ups: &dyn SignUps,
+        accounts: &dyn SignInAccounts,
+        seeds: &dyn SignInSeeds,
+    ) {
+        let now = OffsetDateTime::now_utc();
+        let carol = SignInAccount {
+            email_verified: false,
+            admitted: true,
+            ..signed_up("carol")
+        };
+        seeds.sign_up(&carol).await;
+        let admin = a_new_account("admin");
+        sign_ups.create_admin(&admin, now).await.unwrap();
+        let bob = a_new_account("bob");
+        sign_ups.create(&bob).await.unwrap();
+
+        let swept = sign_ups
+            .delete_unverified(now + Duration::minutes(1))
+            .await
+            .unwrap();
+
+        assert_eq!(swept, 1);
+        assert_eq!(accounts.by_id(bob.id).await.unwrap(), None);
+        assert!(accounts.by_id(carol.id).await.unwrap().is_some());
+        assert!(accounts.by_id(admin.id).await.unwrap().is_some());
+    }
+
+    pub async fn the_admin_is_created_admitted_unconfirmed_and_never_written_over(
+        sign_ups: &dyn SignUps,
+        accounts: &dyn SignInAccounts,
+    ) {
+        let now = OffsetDateTime::now_utc();
+        let admin = a_new_account("admin");
+
+        let created = sign_ups.create_admin(&admin, now).await.unwrap();
+        let again = sign_ups
+            .create_admin(
+                &NewAccount {
+                    email: admin.email.clone(),
+                    password_hash: PlainHasher::hash("another-password"),
+                    ..a_new_account("root")
+                },
+                now,
+            )
+            .await
+            .unwrap();
+        let its_handle = sign_ups
+            .create_admin(
+                &NewAccount {
+                    id: UserId::generate(),
+                    email: email("root@idp.test"),
+                    ..admin.clone()
+                },
+                now,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            (created, again, its_handle),
+            (
+                Registration::Created,
+                Registration::EmailTaken,
+                Registration::HandleTaken
+            )
+        );
+        assert_eq!(
+            accounts.by_email(&admin.email).await.unwrap(),
+            Some(SignInAccount {
+                id: admin.id,
+                email: admin.email.as_str().to_owned(),
+                username: admin.username.as_str().to_owned(),
+                display_name: Some("admin".to_owned()),
+                password_hash: admin.password_hash.clone(),
+                email_verified: false,
+                admitted: true,
+                totp_enabled: false,
+            })
+        );
+        assert_eq!(
+            sign_ups.admin_facts(Some(&admin.email)).await.unwrap(),
+            AdminFacts {
+                holder: AddressHolder::Admin,
+                admin_exists: true,
+            }
+        );
+    }
+
+    pub async fn the_admin_facts_tell_who_has_an_address_and_whether_any_admin_exists(
+        sign_ups: &dyn SignUps,
+        seeds: &dyn SignInSeeds,
+    ) {
+        let facts = async |address: Option<&str>| {
+            sign_ups
+                .admin_facts(address.map(email).as_ref())
+                .await
+                .unwrap()
+        };
+        let none = facts(None).await;
+        let nobody = facts(Some("alice@idp.test")).await;
+        // Stored before addresses were kept lowercase.
+        seeds
+            .sign_up(&SignInAccount {
+                email: "Alice@IDP.test".to_owned(),
+                ..signed_up("alice")
+            })
+            .await;
+        let alice_alone = facts(Some("alice@idp.test")).await;
+        let admin = a_new_account("admin");
+        sign_ups
+            .create_admin(&admin, OffsetDateTime::now_utc())
+            .await
+            .unwrap();
+
+        let fact = |holder, admin_exists| AdminFacts {
+            holder,
+            admin_exists,
+        };
+        assert_eq!(
+            (none, nobody, alice_alone),
+            (
+                fact(AddressHolder::Nobody, false),
+                fact(AddressHolder::Nobody, false),
+                fact(AddressHolder::NotAdmin, false)
+            )
+        );
+        assert_eq!(
+            (
+                facts(None).await,
+                facts(Some("alice@idp.test")).await,
+                facts(Some("ADMIN@idp.test")).await,
+                facts(Some("carol@idp.test")).await,
+            ),
+            (
+                fact(AddressHolder::Nobody, true),
+                fact(AddressHolder::NotAdmin, true),
+                fact(AddressHolder::Admin, true),
+                fact(AddressHolder::Nobody, true)
+            )
+        );
     }
 
     fn another_than(code: &OtpCode) -> OtpCode {

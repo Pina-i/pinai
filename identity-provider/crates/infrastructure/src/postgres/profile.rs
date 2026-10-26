@@ -22,7 +22,7 @@ impl PgProfiles {
 }
 
 const PROFILE_COLUMNS: &str = "id, username, email, email_verified_at IS NOT NULL AS email_verified, \
-     totp_enabled, actor_uri, display_name, avatar_url, pronouns, bio";
+     totp_enabled, is_admin, actor_uri, display_name, avatar_url, pronouns, bio";
 
 #[derive(sqlx::FromRow)]
 struct ProfileRow {
@@ -31,6 +31,7 @@ struct ProfileRow {
     email: String,
     email_verified: bool,
     totp_enabled: bool,
+    is_admin: bool,
     actor_uri: Option<String>,
     display_name: Option<String>,
     avatar_url: Option<String>,
@@ -48,6 +49,7 @@ impl TryFrom<ProfileRow> for OwnProfile {
             email: row.email,
             email_verified: row.email_verified,
             totp_enabled: row.totp_enabled,
+            admin: row.is_admin,
             actor_uri: row
                 .actor_uri
                 .as_deref()

@@ -138,12 +138,12 @@ connections ──► (no internal deps)
 | `GET /login` · `GET /verify-email` · `GET /login/totp` · `GET /signed-out` | The sign-in pages, rendered here (askama, no inline script, a strict CSP, `no-store`): the instance's name, description and facts beside the form; errors arrive as codes and only known codes have words; "← Another home" goes back to the client with `error=access_denied`. A link with no request left, or a gone ticket, says the sign-in expired (`identity-provider/specs/auth.md § 1` "The sign-in pages") |
 | `GET /assets/{path}` | The pages' stylesheet, script, fonts, motifs and grain, built into the binary, kept a day |
 | `GET /.well-known/nodeinfo` · `GET /nodeinfo/2.1` | NodeInfo 2.1: `software.name` `pinai`, `openRegistrations`, `usage.users.total` (counted at most a minute ago), `metadata.nodeName` / `nodeDescription` from `INSTANCE_NAME` / `INSTANCE_DESCRIPTION` (`identity-provider/specs/identity.md § 6`) |
-| `POST /login` | The login form, refused 403 when posted from another site: the request checked again (401 / 400), 10 guesses per email then 1/min, an unknown email costs a decoy hash check. A code + session cookie, or on to `/verify-email` (a code is mailed) or `/login/totp?ticket=`, or back to `/login` with `error=<code>` |
+| `POST /login` | The login form, refused 403 when posted from another site: the request checked again (401 / 400), 10 guesses per email then 1/min, an unknown email costs a decoy hash check. A code + session cookie, or on to `/verify-email` (a code is mailed — an address neither confirmed nor admitted, `SignInAccount::needs_code`) or `/login/totp?ticket=`, or back to `/login` with `error=<code>` |
 | `POST /token` | `authorization_code`: code exchange (single use, spent even when refused) for access + refresh + ID token, 1 h; a code whose session ended is `invalid_grant`; a native client staying signed in (`offline_access`) gets an app session of its own. `refresh_token`: rotates the token — access + the next refresh token, no ID token; a rotated one presented again past its 60 s grace ends the session (`reuse`). `Cache-Control: no-store`. The access token's `aud` is this instance, its `client_id` the client (RFC 9068), its `sid` its session, its `auth_time` the password last typed on that session. `unsupported_grant_type`, `invalid_client`, `invalid_grant` |
 | `POST /revoke` | RFC 7009: `client_id`, `token` (a refresh token). Ends the token's session (`sign_out`) — how the desktop app signs out; the browser session its window signed in through is left alone. `200` for an unknown or another client's token too; `400` without a token, `401` for a malformed `client_id` |
 | `GET /logout` | Ends the browser session — its tokens refused at once, its WebSockets closed with `1008` — and drops the cookie; back to `post_logout_redirect_uri` only when the named `client_id`'s document lists it exactly, else `/signed-out` |
 | `GET /clients/desktop.json` | The official desktop app's client document, as every instance describes it (`io.github.pina-i:/callback`, native, `offline_access`) |
-| `GET /userinfo` | The account (handle, `address`, `actor_uri`, name, avatar, pronouns, bio, `email_verified`, `totp_enabled`), its `settings` document, and `privacy: { contact_policy }`. A token outliving its account is `401 invalid_token` |
+| `GET /userinfo` | The account (handle, `address`, `actor_uri`, name, avatar, pronouns, bio, `email_verified` — `false` for an admitted account too —, `totp_enabled`, `admin`), its `settings` document, and `privacy: { contact_policy }`. A token outliving its account is `401 invalid_token` |
 | `PATCH /api/profile` | Bearer-auth. Every field on every save: `display_name` trimmed 1–50, `pronouns` ∈ {he, she, non-binary} or empty, `bio` ≤ 190 or empty; `400` names the rule broken. Answers the new userinfo; the friends are told (`friend_profile_updated` here, `Update{Person}` elsewhere) |
 | `PATCH /api/settings` | Bearer-auth. Replace the account-settings sections the body names (`{ appearance: {…} }`), keep the others; returns the merged document and pushes it to the user's sessions as `settings_updated`. Read back on `GET /userinfo` (`settings`). Device-scoped settings never reach the IdP — see `identity-provider/specs/profile-and-settings.md § 2` |
 | `PUT /api/avatar` | Replace the avatar (raw image bytes; 1 byte–2 MiB; jpeg/png/webp/gif): stored, shown, then the other types removed; URL cache-busted with `?v=<unix_secs>`; the friends are told |
@@ -226,7 +226,7 @@ file wherever it is read from.
 | File | Contents | Read when working on… |
 |---|---|---|
 | `identity-provider/specs/identity.md` | `users` and `remote_actors` schema, the remote actor cache and how a group's remote members are reached, what peers read of an account (WebFinger, the actor documents), the address and name formats | Accounts, handles and display names, actor URIs and addresses, WebFinger, the actor documents |
-| `identity-provider/specs/auth.md` | OpenID Connect sign-in (clients, `/authorize`, `/login`, the session cookie, `/token`, tokens, logout, discovery), sign-up email verification, TOTP two-factor and recovery codes | Signing in, sessions, tokens, sign-up, email codes, the second factor |
+| `identity-provider/specs/auth.md` | OpenID Connect sign-in (clients, `/authorize`, `/login`, the session cookie, `/token`, tokens, logout, discovery), sign-up email verification, TOTP two-factor and recovery codes, admins and admitted accounts (the first admin from `ADMIN_EMAIL` / `ADMIN_PASSWORD`) | Signing in, sessions, tokens, sign-up, email codes, the second factor, admins |
 | `identity-provider/specs/social.md` | `friendships` and `user_blocks` schema, a friendship's life (request, accept opening the DM, decline, unfriend), who can reach a user (the contact setting, blocks, the rule and where it is enforced) | Friend requests, the friends list, blocking, the contact setting |
 | `identity-provider/specs/profile-and-settings.md` | Profile editing and avatar storage, the profile card (`GET /api/profiles`), `user_settings`, real-time profile propagation (`friend_profile_updated`, `Update{Person}`) | Profile fields, avatars, the profile card, account settings, profile federation |
 | `identity-provider/specs/event-delivery.md` | Redis Streams vs pub-sub, federation delivery semantics (best-effort, each activity's recovery), reconnect and catch-up | The broker, the WebSocket replay, outbound ActivityPub delivery |
@@ -319,6 +319,8 @@ Don't mention any "phase" development or what is currently being worked on. The 
 users                    — local accounts (actor_uri, inbox_url, display_name, username (the handle),
                             email lowercase and unique whatever its case,
                                                         avatar_url, pronouns ∈ {he, she, non-binary}, bio, email_verified_at,
+                            admitted_at: let in without confirming the address — signs in without a
+                            code, never swept; is_admin: an admin of the instance,
                             totp_secret, totp_enabled, totp_last_step — a code is good once,
                             contact_policy: everyone | friends_and_groups (default) | friends)
 email_verification_codes — signup codes (peppered HMAC, 10-min expiry, 5 attempts, 5 codes / 10 min)
@@ -430,8 +432,10 @@ archive under HAK).
 
 ## Running and stopping
 
-`Application::build` connects to Postgres, Redis and the object store, runs the migrations and
-starts the background tasks; `run_until_stopped` serves until its stop token is cancelled — by
+`Application::build` connects to Postgres, Redis and the object store, runs the migrations, creates
+the first admin from `ADMIN_EMAIL` / `ADMIN_PASSWORD` when no account has that address — or
+refuses to start, saying why (`identity-provider/specs/auth.md § 4`) — and starts the background
+tasks; `run_until_stopped` serves until its stop token is cancelled — by
 `SIGTERM` or Ctrl-C in the binary. It then takes no new connection, answers the requests under
 way, closes each WebSocket with `1001` and ends the peers' presence streams, lets every background
 task finish its run under way, and drops what is still open ten seconds on
@@ -442,7 +446,8 @@ task finish its run under way, and drops what is still open ten seconds on
 ## Environment variables
 
 `.env.example` at the repo root documents every variable the service reads, and the root
-`README.md` groups them; `app::configuration` is where they are read.
+`README.md` groups them; `app::configuration` is where they are read. `ADMIN_PASSWORD` is only
+ever read to create the first admin, never logged and never written over the account's password.
 
 ---
 

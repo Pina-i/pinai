@@ -24,7 +24,13 @@ CREATE TABLE users (
   inbox_url     TEXT NOT NULL,              -- e.g. "https://idp.alice.com/users/alice/inbox"
   outbox_url    TEXT NOT NULL,              -- e.g. "https://idp.alice.com/users/alice/outbox"
   email_verified_at TIMESTAMPTZ,            -- NULL until the signup OTP is consumed;
-                                            -- /login refuses to issue a session while NULL
+                                            -- /login refuses to issue a session while NULL,
+                                            -- unless the account is admitted
+  admitted_at   TIMESTAMPTZ,                -- let in without confirming its address: signs in
+                                            -- without a code, never swept as unconfirmed
+                                            -- (identity-provider/specs/auth.md § 4)
+  is_admin      BOOLEAN NOT NULL DEFAULT false, -- an admin of this instance; the first is created
+                                            -- from ADMIN_EMAIL (identity-provider/specs/auth.md § 4)
   contact_policy TEXT NOT NULL DEFAULT 'friends_and_groups',
                                             -- who may message the account (identity-provider/specs/social.md § 2):
                                             -- everyone | friends_and_groups | friends

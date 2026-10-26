@@ -3,6 +3,7 @@
 
 mod authenticate;
 mod authorize;
+mod ensure_admin;
 mod exchange_code;
 mod link_device;
 mod log_in;
@@ -24,6 +25,7 @@ mod world;
 
 pub use authenticate::Authenticate;
 pub use authorize::{Authorize, AuthorizeCommand, Authorized};
+pub use ensure_admin::EnsureAdmin;
 pub use exchange_code::{ExchangeCode, TokenCommand};
 pub use link_device::LinkDevice;
 pub use log_in::{LogIn, LoginOutcome};
@@ -45,11 +47,17 @@ use std::sync::Arc;
 
 use domain::auth::{
     AuthError, AuthorizationCode, AuthorizationCodes, AuthorizationRequest, CODE_TTL, ClientSignIn,
-    ClientSignIns, Grant, RESEND_LIMIT, RESEND_WINDOW, RevokedReason, SIGNUP_CODE_TTL, Session,
-    SessionKind, SessionNotifier, Sessions, SignInAccount, SignupCodes, SignupMailer,
+    ClientSignIns, Email, Grant, HandleSuffixes, NewAccount, PasswordHash, RESEND_LIMIT,
+    RESEND_WINDOW, Registration, RevokedReason, SIGNUP_CODE_TTL, Session, SessionKind,
+    SessionNotifier, Sessions, SignInAccount, SignUps, SignupCodes, SignupMailer,
 };
+use domain::identity::{Handle, InstanceOrigin, UsernameChoice};
+use domain::profile::DisplayName;
 use domain::{SessionId, UserId};
 use time::OffsetDateTime;
+
+/// Suffixes drawn for one chosen name before giving up: 36⁵ of them make a second a rarity.
+const SUFFIX_DRAWS: usize = 3;
 
 /// The end every password sign-in shares — the login form, the sign-up code, the second factor:
 /// the app remembered for the account, the browser's session, and the code.
@@ -162,4 +170,53 @@ pub(crate) async fn mail_signup_code(
         .filter(|name| !name.is_empty())
         .unwrap_or(&account.username);
     mailer.send_code(&account.email, name, &code).await
+}
+
+/// What a new account is created as.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Creation {
+    /// Registering: its address yet to confirm.
+    SignUp,
+    /// The instance's admin, admitted then.
+    Admin(OffsetDateTime),
+}
+
+/// The account named `name`, its handle drawn from the name. The store has the last word on
+/// both: an address registered in between is refused, and a handle taken by chance is drawn
+/// again.
+pub(crate) async fn create_account(
+    sign_ups: &dyn SignUps,
+    origin: &InstanceOrigin,
+    suffixes: &dyn HandleSuffixes,
+    creation: Creation,
+    name: &DisplayName,
+    email: &Email,
+    password_hash: &PasswordHash,
+) -> Result<NewAccount, AuthError> {
+    let choice = UsernameChoice::derived_from(name.as_str());
+    for _ in 0..SUFFIX_DRAWS {
+        let handle = Handle::compose(&choice, &suffixes.fresh());
+        let account = NewAccount {
+            id: UserId::generate(),
+            actor_uri: origin.actor_uri(&handle),
+            username: handle,
+            display_name: name.as_str().to_owned(),
+            email: email.clone(),
+            password_hash: password_hash.clone(),
+        };
+        let registration = match creation {
+            Creation::SignUp => sign_ups.create(&account).await?,
+            Creation::Admin(admitted_at) => sign_ups.create_admin(&account, admitted_at).await?,
+        };
+        match registration {
+            Registration::Created => return Ok(account),
+            Registration::EmailTaken => return Err(AuthError::EmailTaken),
+            Registration::HandleTaken => continue,
+        }
+    }
+    Err(anyhow::anyhow!(
+        "no free handle for {} in {SUFFIX_DRAWS} draws",
+        choice.as_str()
+    )
+    .into())
 }

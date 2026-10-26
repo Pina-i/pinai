@@ -13,7 +13,8 @@ use super::{CompleteSignIn, mail_signup_code};
 pub enum LoginOutcome {
     /// Wrong email or password — which one is never said.
     Refused,
-    /// The right password, but the address is unconfirmed: a code was mailed to it.
+    /// The right password, but the address is unconfirmed and was never admitted: a code was
+    /// mailed to it.
     Unverified { user: UserId, email: String },
     /// The right password; the authenticator's code comes next, against this ticket.
     SecondFactor(TicketId),
@@ -88,7 +89,7 @@ impl LogIn {
         let Some(account) = account.filter(|_| matched) else {
             return Ok(LoginOutcome::Refused);
         };
-        if !account.email_verified {
+        if account.needs_code() {
             match mail_signup_code(&*self.signup_codes, &*self.mailer, &account, now).await {
                 // The codes already mailed still work.
                 Ok(()) | Err(AuthError::TooManyCodes) => {}

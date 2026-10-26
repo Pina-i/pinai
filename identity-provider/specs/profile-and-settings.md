@@ -7,7 +7,7 @@ them back on `/userinfo`; it reads another account's on `/api/profiles` (§ 1, P
 
 | Endpoint | Body | Answer |
 |---|---|---|
-| `GET /userinfo` | — | The account: `sub`, `email`, `email_verified`, `totp_enabled`, `preferred_username` (the handle), `display_name`, `address` (`handle@domain`), `actor_uri`, `avatar_url`, `pronouns`, `bio`, its `settings` (§ 2), and `privacy` (`identity-provider/specs/social.md § 2`). A token whose account is gone is `401 invalid_token` (`User not found`). |
+| `GET /userinfo` | — | The account: `sub`, `email`, `email_verified`, `totp_enabled`, `admin` (an admin of this instance, `identity-provider/specs/auth.md § 4`), `preferred_username` (the handle), `display_name`, `address` (`handle@domain`), `actor_uri`, `avatar_url`, `pronouns`, `bio`, its `settings` (§ 2), and `privacy` (`identity-provider/specs/social.md § 2`). A token whose account is gone is `401 invalid_token` (`User not found`). |
 | `PATCH /api/profile` | `{ display_name, pronouns?, bio? }` | The new `/userinfo` document. |
 | `PUT /api/avatar` | the raw image, typed by its `Content-Type`: `image/jpeg`, `image/png`, `image/webp` or `image/gif` | `{ avatar_url }` |
 | `DELETE /api/avatar` | — | `204` |

@@ -10,6 +10,7 @@ async fn a_new_account_signs_up_confirms_its_address_and_is_signed_in() {
     assert_eq!(status, 200, "{userinfo}");
     assert_eq!(userinfo["email"], "alice@journey.test");
     assert_eq!(userinfo["email_verified"], true);
+    assert_eq!(userinfo["admin"], false);
     assert!(alice.handle.starts_with("alice_"), "{}", alice.handle);
     assert_eq!(userinfo["address"], alice.address(&app));
     assert_eq!(

@@ -25,8 +25,9 @@ impl SignInSeeds for PgSignInSeeds {
     async fn sign_up(&self, account: &SignInAccount) {
         sqlx::query(
             "INSERT INTO users (id, username, email, password_hash, display_name, \
-                                email_verified_at, totp_enabled) \
-             VALUES ($1, $2, $3, $4, $5, CASE WHEN $6 THEN now() END, $7)",
+                                email_verified_at, admitted_at, totp_enabled) \
+             VALUES ($1, $2, $3, $4, $5, CASE WHEN $6 THEN now() END, \
+                     CASE WHEN $7 THEN now() END, $8)",
         )
         .bind(account.id.as_uuid())
         .bind(&account.username)
@@ -34,6 +35,7 @@ impl SignInSeeds for PgSignInSeeds {
         .bind(account.password_hash.as_str())
         .bind(&account.display_name)
         .bind(account.email_verified)
+        .bind(account.admitted)
         .bind(account.totp_enabled)
         .execute(&self.0)
         .await
@@ -356,6 +358,34 @@ async fn accounts_left_unconfirmed_are_deleted_after_their_grace(pool: PgPool) {
     contract::accounts_left_unconfirmed_are_deleted_after_their_grace(
         &PgSignUps::new(pool.clone()),
         &PgSignInAccounts::new(pool.clone()),
+        &PgSignInSeeds(pool),
+    )
+    .await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn an_admitted_account_is_never_swept_as_unconfirmed(pool: PgPool) {
+    contract::an_admitted_account_is_never_swept_as_unconfirmed(
+        &PgSignUps::new(pool.clone()),
+        &PgSignInAccounts::new(pool.clone()),
+        &PgSignInSeeds(pool),
+    )
+    .await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn the_admin_is_created_admitted_unconfirmed_and_never_written_over(pool: PgPool) {
+    contract::the_admin_is_created_admitted_unconfirmed_and_never_written_over(
+        &PgSignUps::new(pool.clone()),
+        &PgSignInAccounts::new(pool.clone()),
+    )
+    .await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn the_admin_facts_tell_who_has_an_address_and_whether_any_admin_exists(pool: PgPool) {
+    contract::the_admin_facts_tell_who_has_an_address_and_whether_any_admin_exists(
+        &PgSignUps::new(pool.clone()),
         &PgSignInSeeds(pool),
     )
     .await;

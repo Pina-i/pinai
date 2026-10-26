@@ -1,6 +1,7 @@
 //! End-to-end journeys through the whole application — one binary, run by
 //! `make test-integration`.
 
+mod admin;
 mod blocking;
 mod federation;
 mod groups;

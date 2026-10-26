@@ -12,8 +12,9 @@ impl ProfileSeeds for PgProfileSeeds {
     async fn sign_up(&self, profile: &OwnProfile) {
         sqlx::query(
             "INSERT INTO users (id, username, email, password_hash, email_verified_at, \
-                                totp_enabled, actor_uri, display_name, avatar_url, pronouns, bio) \
-             VALUES ($1, $2, $3, 'x', CASE WHEN $4 THEN now() END, $5, $6, $7, $8, $9, $10)",
+                                totp_enabled, actor_uri, display_name, avatar_url, pronouns, bio, \
+                                is_admin) \
+             VALUES ($1, $2, $3, 'x', CASE WHEN $4 THEN now() END, $5, $6, $7, $8, $9, $10, $11)",
         )
         .bind(profile.id.as_uuid())
         .bind(&profile.username)
@@ -25,6 +26,7 @@ impl ProfileSeeds for PgProfileSeeds {
         .bind(&profile.avatar_url)
         .bind(profile.pronouns.map(|p| p.as_str()))
         .bind(&profile.bio)
+        .bind(profile.admin)
         .execute(&self.0)
         .await
         .expect("seed an account");

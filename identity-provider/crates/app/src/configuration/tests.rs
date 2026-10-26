@@ -35,6 +35,8 @@ fn config() -> Config {
         e2ee_keypackage_cap_per_device: 100,
         e2ee_keypackage_refill_threshold: 20,
         e2ee_keypackage_lifetime: Duration::from_secs(90 * 24 * 3600),
+        admin_email: None,
+        admin_password: None,
     }
 }
 
@@ -230,6 +232,18 @@ fn development_accepts_any_session_secret() {
     assert_eq!(
         session_secret(Environment::Development, Some("alice-secret".into())).unwrap(),
         "alice-secret"
+    );
+}
+
+// ─── The first admin ─────────────────────────────────────────────────────────
+
+#[test]
+fn an_empty_admin_variable_counts_as_unset() {
+    assert_eq!(unless_empty(None), None);
+    assert_eq!(unless_empty(Some(String::new())), None);
+    assert_eq!(
+        unless_empty(Some("root@idp.alice.com".into())).as_deref(),
+        Some("root@idp.alice.com")
     );
 }
 

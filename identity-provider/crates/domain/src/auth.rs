@@ -3,6 +3,7 @@
 //! identity-provider/specs/auth.md § 1.
 
 mod account;
+mod admin;
 mod client;
 mod client_sign_in;
 mod error;
@@ -16,6 +17,10 @@ mod signup;
 pub mod testing;
 
 pub use account::{PasswordHash, SignInAccount};
+pub use admin::{
+    AddressHolder, AdminBootstrap, AdminFacts, AdminPassword, AdminRefusal, NewAdmin,
+    admin_bootstrap, admin_display_name,
+};
 pub use client::{
     Client, ClientDocument, ClientId, ClientKind, ClientPolicy, DESKTOP_DOCUMENT_PATH,
     DESKTOP_REDIRECT_URI, desktop_client,

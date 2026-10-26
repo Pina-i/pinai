@@ -4,7 +4,7 @@ use crate::identity::HandleSuffix;
 use crate::{DeviceId, SessionId, TicketId, UserId};
 
 use super::{
-    AuthError, AuthorizationCode, AuthorizationRequest, Client, ClientId, ClientSignIn,
+    AdminFacts, AuthError, AuthorizationCode, AuthorizationRequest, Client, ClientId, ClientSignIn,
     CodeAttempt, Email, Grant, NewAccount, OtpCode, PasswordHash, RefreshToken, Registration,
     RevokedReason, Rotation, Session, SessionKind, SignInAccount, Ticket, TicketAttempt,
     TotpSecret,
@@ -222,12 +222,23 @@ pub trait SignupCodes: Send + Sync {
     ) -> Result<usize, AuthError>;
 }
 
-/// The accounts registering creates.
+/// The accounts registering creates, and the instance's first admin.
 #[async_trait::async_trait]
 pub trait SignUps: Send + Sync {
     /// Refused — nothing written — when the address or the handle is another account's already.
     async fn create(&self, account: &NewAccount) -> Result<Registration, AuthError>;
-    /// The accounts still unconfirmed and created before `created_before`. How many went.
+    /// The instance's admin, refused as `create` refuses: its address unconfirmed, but the
+    /// account admitted at `admitted_at`.
+    async fn create_admin(
+        &self,
+        account: &NewAccount,
+        admitted_at: OffsetDateTime,
+    ) -> Result<Registration, AuthError>;
+    /// Who has `address`, whatever its case — nobody without one — and whether any account is
+    /// an admin.
+    async fn admin_facts(&self, address: Option<&Email>) -> Result<AdminFacts, AuthError>;
+    /// The accounts still unconfirmed, never admitted, and created before `created_before`. How
+    /// many went.
     async fn delete_unverified(&self, created_before: OffsetDateTime) -> Result<usize, AuthError>;
 }
 

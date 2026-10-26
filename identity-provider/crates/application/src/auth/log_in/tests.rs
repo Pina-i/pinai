@@ -108,6 +108,30 @@ async fn an_unconfirmed_address_is_mailed_a_code_instead_of_signing_in() {
 }
 
 #[tokio::test]
+async fn an_admitted_account_signs_in_without_confirming_its_address() {
+    let w = world().await;
+    let bob = SignInAccount {
+        email_verified: false,
+        admitted: true,
+        ..signed_up("bob")
+    };
+    w.sign_up(&bob).await;
+
+    let outcome = w
+        .log_in
+        .execute(&bob.email, "bob-password", &a_request(), None, now())
+        .await
+        .unwrap();
+
+    assert!(
+        matches!(outcome, LoginOutcome::SignedIn { user, .. } if user == bob.id),
+        "{outcome:?}"
+    );
+    assert!(w.signup_codes.issued().is_empty());
+    assert!(w.mailer.sent().is_empty());
+}
+
+#[tokio::test]
 async fn a_mail_that_cannot_leave_still_sends_the_account_to_confirm_its_address() {
     let w = world().await;
     let bob = SignInAccount {

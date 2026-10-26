@@ -1,4 +1,4 @@
-# Pina'i — Signing in, sign-up and the second factor
+# Pina'i — Signing in, sign-up, the second factor and the admin
 
 ## 1. Signing in — OpenID Connect
 
@@ -23,9 +23,9 @@ sequenceDiagram
     else
         I-->>P: 303 /login?client_id&redirect_uri&scope&state&code_challenge…
         P->>I: POST /login (email, password + the request)
-        alt the right password, address confirmed, no authenticator
+        alt the right password, address confirmed or admitted, no authenticator
             I-->>C: 303 redirect_uri?code&state + session cookie
-        else address unconfirmed
+        else address neither confirmed nor admitted
             I-->>P: 303 /verify-email (a code is mailed — § 2)
         else authenticator
             I-->>P: 303 /login/totp?ticket (§ 3)
@@ -204,9 +204,9 @@ The login form, posted by the browser with the request it carries.
 - An unknown email is checked against a decoy hash as costly as a real one, and answered like a
   wrong password: `error=invalid_credentials`. Neither the answer nor its timing tells whether
   the address has an account.
-- The right password on an unconfirmed address mails a fresh code and goes to `/verify-email`
-  (§ 2); on an account with an authenticator it opens a ticket and goes to `/login/totp`
-  (§ 3). Otherwise it issues a code and sets the session cookie.
+- The right password on an address neither confirmed nor admitted (§ 4) mails a fresh code and
+  goes to `/verify-email` (§ 2); on an account with an authenticator it opens a ticket and goes
+  to `/login/totp` (§ 3). Otherwise it issues a code and sets the session cookie.
 
 A code is good for 10 minutes, once. It remembers the account, the client, the
 `redirect_uri`, the scope, the challenge and the nonce; the `state` goes back with it and is not
@@ -586,8 +586,8 @@ registered, and the JSON `POST /register` creates accounts, not clients.
 ## 2. Sign-up email verification
 
 Every new account must prove ownership of its email address before a session
-cookie or access token is issued. Federation, friend graph, and DMs are all
-inaccessible to an unverified user.
+cookie or access token is issued, unless it was admitted (§ 4). Federation, friend graph, and DMs
+are all inaccessible to an unverified user.
 
 ### Data model
 
@@ -655,7 +655,7 @@ sequenceDiagram
 | `GET /verify-email` | `pending_user_id`, `pending_email` + the request | The code page (§ 1 "The sign-in pages"). |
 | `POST /verify-email-and-login` | `pending_user_id`, `pending_email`, `code` + the request | The request is checked first; then the code: the right one confirms the address, issues an OIDC auth code and the session cookie, and redirects to `redirect_uri`. A wrong, malformed, expired or exhausted code goes back to `/verify-email` with its `error`; an address confirmed already goes to `/login` with `notice=already_verified`, an account gone to `/login?tab=register&error=signup_expired`. |
 | `POST /verify-email/resend` | `pending_user_id`, `pending_email` + the request | A fresh code, then the code page again with `notice=code_resent`, or `error=too_many_codes` past the resend limit. An address confirmed already goes to `/login` (`notice=already_verified`), an account gone to the register tab (`signup_expired`). |
-| `POST /login` | email, password + the request | The right password on an unconfirmed address mails a fresh code — within the same resend limit — and goes to `/verify-email` with `notice=confirm_email` instead of issuing a session (§ 1). |
+| `POST /login` | email, password + the request | The right password on an unconfirmed address, never admitted (§ 4), mails a fresh code — within the same resend limit — and goes to `/verify-email` with `notice=confirm_email` instead of issuing a session (§ 1). |
 
 ### Code rules
 
@@ -678,7 +678,7 @@ sequenceDiagram
 Every hour — and once at startup — the IdP deletes:
 1. the codes and the login tickets (§ 3) spent or expired, once a day old;
 2. the accounts never confirmed, once a week old: an abandoned sign-up frees its address and
-   handle;
+   handle. An admitted account (§ 4) is never deleted so;
 3. the sessions (§ 1) ended a month ago: revoked then, or idle past their 90 days, and their
    refresh tokens with them;
 4. the refresh tokens (§ 1) unused for 90 days — a head since its creation, a rotated one since its
@@ -705,7 +705,7 @@ Mailpit ships in the root `compose.yaml` (`MP_SMTP_AUTH_ACCEPT_ANY=true`, `MP_SM
 
 ### `/userinfo`
 
-Returns `email_verified: boolean` derived from `email_verified_at IS NOT NULL` so clients can show / hide flow-gates without an extra round trip.
+Returns `email_verified: boolean` derived from `email_verified_at IS NOT NULL` so clients can show / hide flow-gates without an extra round trip. An admitted account's (§ 4) is `false`: no code ever confirmed its address.
 
 ## 3. TOTP two-factor authentication
 
@@ -833,3 +833,86 @@ Returns `totp_enabled: boolean` so the web client knows whether to render the
 
 The hourly sign-up sweep (§ 2) also deletes the login tickets spent or expired, once a day
 old.
+
+## 4. Admins and admitted accounts
+
+An instance's **admins** are the accounts with `users.is_admin`. `/userinfo` tells an account
+whether it is one (`admin`), so a client can show an admin the way to what only admins do.
+
+### Admitted accounts
+
+An account is **admitted** when it was let in without confirming its email address, because
+something else vouched for it: the instance's first admin is (§ "The first admin").
+`users.admitted_at` says when.
+
+- **It signs in with its password alone.** Whether a sign-in asks for a mailed code is one rule,
+  `SignInAccount::needs_code`: the address is neither confirmed nor admitted. `POST /login` (§ 1)
+  sends an admitted account neither a code nor to `/verify-email`, so it signs in on an instance
+  whose mail relay isn't set up yet.
+- **The sign-up sweep (§ 2) never deletes it**, however long its address stays unconfirmed.
+- **Its address stays unconfirmed**: no code reached it, and `/userinfo` says so truthfully,
+  `email_verified: false`.
+
+### The first admin
+
+`ADMIN_EMAIL` and `ADMIN_PASSWORD` name the first admin. An empty value counts as unset. They are
+read once, as the instance starts: `Application::build` runs `application::auth::EnsureAdmin`
+after the migrations and before anything is served, so nobody can register that address first.
+The decision is a domain rule, `admin_bootstrap`, over the address paired with who has it (found
+as signing in finds it, whatever its case) and whether any admin exists, both read in one query
+(`SignUps::admin_facts`). A decision to create carries the address and the password, so none is
+taken without them; the use case carries it out and reports what it did without the password,
+and the start logs that, or stops on a refusal — a bad address and a bad password alike.
+
+```mermaid
+flowchart TD
+    S[The instance starts] --> E{ADMIN_EMAIL set?}
+    E -- no --> A{an admin exists?}
+    A -- yes --> OK[serve]
+    A -- no --> W[warning: no admin, and how to create one] --> OK
+    E -- yes --> F{who has the address?}
+    F -- nobody --> P{ADMIN_PASSWORD set, 8 bytes or more?}
+    P -- no --> X[refuse to start, saying why]
+    P -- yes --> C[create the admin account] --> OK
+    F -- the admin --> R["left as it is, a configured password reported unused"] --> OK
+    F -- an account that is no admin --> N[warning: not made admin] --> A
+```
+
+- **Nobody has the address**: the admin account is created, in one insert through the sign-up
+  store, which settles a race for the address or the handle as for a registration (§ 2): display
+  name `Admin` (the admin edits it like any name), a handle drawn from it as a registration draws
+  one (`admin_xk9mp`), the password hashed as a registration's, `is_admin`, admitted, its address
+  unconfirmed. No code is mailed. Without `ADMIN_PASSWORD`, or with one shorter than the
+  instance's 8 bytes, the instance refuses to start ("ADMIN_PASSWORD is needed to create the admin
+  account ADMIN_EMAIL names", "ADMIN_PASSWORD: at least 8 bytes"); an `ADMIN_EMAIL` that is not an
+  address stops it too ("ADMIN_EMAIL: an address like name@example.com").
+- **The admin has the address**: the account is left as it is. `ADMIN_PASSWORD` never writes over
+  its password, so a password the admin chose is never reverted by a restart. While
+  `ADMIN_PASSWORD` is set, each start warns that it is unused once the account exists and can be
+  removed from `.env`.
+- **An account that is not an admin has the address**: it is not made one, so a typo can't make a
+  stranger admin. A warning says so, then the start goes on as without `ADMIN_EMAIL`.
+- **No admin at all**: each start warns that the instance has no admin, and that setting
+  `ADMIN_EMAIL` and `ADMIN_PASSWORD`, then restarting, creates one.
+- **`ADMIN_EMAIL` unset and an admin exists**: nothing.
+
+An instance that sets neither variable only warns, at each start, that it has no admin.
+
+### Scenarios
+
+- **Setting up an instance.** The operator sets `ADMIN_EMAIL` and `ADMIN_PASSWORD` in `.env`
+  and starts it. The admin account exists before the first request, and signs in at once with
+  that password, no code asked — mail may not be set up yet. `/userinfo` answers `admin: true`.
+- **The restarts after.** The admin account is left as it is; a warning asks to remove
+  `ADMIN_PASSWORD` from `.env`.
+- **A password that breaks the rule** (`ADMIN_PASSWORD=admin`): the instance doesn't start, and
+  says why. Nothing is created until a valid one is set.
+- **A typo** in `ADMIN_EMAIL` that happens to be a member's address: the member stays a member,
+  and the log warns.
+- **Admin access lost** — the password forgotten, the mailbox gone: the operator sets
+  `ADMIN_EMAIL` to an address no account has, and `ADMIN_PASSWORD`, then restarts. Another admin
+  account is created beside the first.
+
+### `/userinfo`
+
+Returns `admin: boolean`: `true` for an admin of this instance, `false` for anyone else.

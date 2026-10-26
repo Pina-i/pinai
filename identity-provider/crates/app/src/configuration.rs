@@ -92,6 +92,12 @@ pub struct Config {
     /// HMAC pepper for email OTP code hashes. Required — startup fails if unset.
     /// Same value also peppers TOTP recovery codes (one secret to manage).
     pub email_otp_pepper: Vec<u8>,
+
+    // ── The first admin ──────────────────────────────────────────────────
+    /// `ADMIN_EMAIL`: the admin account is created with it at startup when no account has it.
+    pub admin_email: Option<String>,
+    /// `ADMIN_PASSWORD`: read only to create that account, never to change it.
+    pub admin_password: Option<String>,
 }
 
 /// `SESSION_SECRET` used when development leaves it unset. Public, so production refuses it.
@@ -205,6 +211,8 @@ impl Config {
                 .unwrap_or_else(|_| "Pīna'i <no-reply@localhost>".into()),
             smtp_tls: smtp_tls(environment, env_var("SMTP_TLS").ok())?,
             email_otp_pepper: parse_email_otp_pepper()?,
+            admin_email: unless_empty(env_var("ADMIN_EMAIL").ok()),
+            admin_password: unless_empty(env_var("ADMIN_PASSWORD").ok()),
         })
     }
 
@@ -281,6 +289,11 @@ fn smtp_port(raw: Option<String>) -> Result<u16, ConfigError> {
             .parse()
             .map_err(|e: std::num::ParseIntError| ConfigError::InvalidPort(e.to_string())),
     }
+}
+
+/// A `.env` keeps `ADMIN_PASSWORD=` once the admin exists: empty is unset.
+fn unless_empty(raw: Option<String>) -> Option<String> {
+    raw.filter(|v| !v.is_empty())
 }
 
 fn smtp_tls(environment: Environment, raw: Option<String>) -> Result<SmtpTls, ConfigError> {

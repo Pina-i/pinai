@@ -24,6 +24,7 @@ pub fn own_profile(name: &str) -> OwnProfile {
         email: format!("{name}@idp.test"),
         email_verified: true,
         totp_enabled: false,
+        admin: false,
         actor_uri: Some(account.actor_uri),
         username: account.username,
         display_name: account.display_name,
@@ -456,6 +457,7 @@ pub mod contract {
             pronouns: Some(Pronouns::NonBinary),
             bio: Some("kia ora".to_owned()),
             totp_enabled: true,
+            admin: true,
             ..own_profile("alice")
         };
         let bob = OwnProfile {
