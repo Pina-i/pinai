@@ -7,9 +7,12 @@ use time::{Duration, OffsetDateTime};
 
 use crate::testing::TestApp;
 
-/// The instance with an admin and a member.
+/// The instance, invite-only, with an admin and a member.
 async fn app() -> (TestApp, UserId, UserId) {
-    let app = TestApp::with([], []);
+    with_people(TestApp::invite_only()).await
+}
+
+async fn with_people(app: TestApp) -> (TestApp, UserId, UserId) {
     let admin = SignInAccount {
         admin: true,
         display_name: Some("Kahu".to_owned()),
@@ -203,4 +206,52 @@ async fn an_admin_revokes_an_open_invitation_and_nothing_else() {
             .unwrap(),
         None
     );
+}
+
+#[tokio::test]
+async fn an_open_instance_makes_no_invitation_but_lists_and_revokes_the_ones_left() {
+    let (app, admin, member) = with_people(TestApp::with([], [])).await;
+    let now = OffsetDateTime::now_utc();
+    let (left, _) = app
+        .sign_in
+        .accounts
+        .issue(admin, now, now + Duration::days(7))
+        .await
+        .unwrap();
+
+    let (created, refusal) = app
+        .call(Method::POST, "/api/admin/invitations", Some(admin), None)
+        .await;
+    let (by_member, _) = app
+        .call(Method::POST, "/api/admin/invitations", Some(member), None)
+        .await;
+    let (listed, open) = app
+        .call(Method::GET, "/api/admin/invitations", Some(admin), None)
+        .await;
+    let (revoked, _) = app
+        .call(
+            Method::DELETE,
+            &format!("/api/admin/invitations/{left}"),
+            Some(admin),
+            None,
+        )
+        .await;
+
+    assert_eq!(created, StatusCode::CONFLICT, "{refusal}");
+    assert_eq!(
+        refusal,
+        json!({
+            "error": "registrations_open",
+            "error_description": "This instance is open: people sign up themselves",
+        })
+    );
+    assert_eq!(
+        by_member,
+        StatusCode::FORBIDDEN,
+        "the admin check comes first"
+    );
+    assert_eq!(listed, StatusCode::OK);
+    assert_eq!(open[0]["id"], left.to_string(), "{open}");
+    assert_eq!(open.as_array().unwrap().len(), 1, "none made: {open}");
+    assert_eq!(revoked, StatusCode::NO_CONTENT);
 }

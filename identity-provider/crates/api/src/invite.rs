@@ -99,7 +99,7 @@ async fn form_page(
 ) -> Result<Response, ApiError> {
     let (alert, bad) = match refused
         .as_ref()
-        .and_then(|refused| login_alert(refused.code))
+        .and_then(|refused| login_alert(refused.code, &pages.host()))
     {
         Some((alert, field)) => (Some(alert), field),
         None => (None, ""),

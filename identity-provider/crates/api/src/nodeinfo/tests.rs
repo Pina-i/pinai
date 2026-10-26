@@ -55,3 +55,13 @@ async fn an_instances_nodeinfo_names_it_and_counts_its_accounts() {
         })
     );
 }
+
+#[tokio::test]
+async fn an_invite_only_instances_nodeinfo_says_its_registrations_are_closed() {
+    let app = TestApp::invite_only();
+
+    let (status, document) = app.send(get("/nodeinfo/2.1")).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(document["openRegistrations"], false);
+}

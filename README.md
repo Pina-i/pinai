@@ -36,8 +36,8 @@ You need:
   every account's address (`alice_xk9mp@your.domain`), so it cannot change later;
 - for a public instance, an SMTP relay, over STARTTLS (port 587) or TLS (port 465):
   sign-up codes are mailed. `deploy/README.md` lists some, with their settings;
-- for an invite-only instance, its first admin's address and password, set in
-  `.env` before the first start ([Public or invite-only](#public-or-invite-only)).
+- for an invite-only instance, the default, its first admin's address and password,
+  set in `.env` before the first start ([Public or invite-only](#public-or-invite-only)).
 
 Then, on the server:
 
@@ -61,14 +61,15 @@ carries too.
 
 An instance is public or invite-only, set by `REGISTRATIONS` in `.env`:
 
-- **Public** (`REGISTRATIONS=open`, the default): anyone can create an account from
-  the app, and a mailed code confirms their address. It needs the SMTP relay, which
-  `./setup.sh` asks for, and doesn't start without `SMTP_HOST`. Add the DNS records
-  the relay gives you for the sender's domain (SPF, DKIM), or the codes land in spam.
-- **Invite-only** (`REGISTRATIONS=invite`): only people an admin invited can create
-  an account. No code is mailed, so the relay is optional. It needs a first admin:
-  add `ADMIN_EMAIL` and `ADMIN_PASSWORD` to `.env` before `docker compose up -d`;
-  without an admin, the instance doesn't start.
+- **Public** (`REGISTRATIONS=open`): anyone can create an account from the app, and
+  a mailed code confirms their address. Add `REGISTRATIONS=open` to `.env`. It needs
+  the SMTP relay, which `./setup.sh` asks for, and doesn't start without `SMTP_HOST`.
+  Add the DNS records the relay gives you for the sender's domain (SPF, DKIM), or the
+  codes land in spam.
+- **Invite-only** (`REGISTRATIONS=invite`, the default): only people an admin invited
+  can create an account. No code is mailed, so the relay is optional. It needs a
+  first admin: add `ADMIN_EMAIL` and `ADMIN_PASSWORD` to `.env` before
+  `docker compose up -d`; without an admin, the instance doesn't start.
 
 Invite-only is about who can join, not federation: its members still talk with
 people on other instances. [`deploy/README.md`](deploy/README.md#public-or-invite-only)
@@ -113,6 +114,7 @@ Then edit each one. At a minimum:
 | `RUSTFS_PORT` / `RUSTFS_CONSOLE_PORT` | `9004` / `9005` | `9002` / `9003` |
 | `MAILPIT_SMTP_PORT` / `MAILPIT_UI_PORT` | `1025` / `8025` | `1026` / `8026` |
 | `SMTP_HOST` / `SMTP_PORT` | `localhost` / `1025` | `localhost` / `1026` |
+| `REGISTRATIONS` | `open` | `invite` |
 | `IDP_KEYS_DIR` | `./identity-provider/keys/alice` | `./identity-provider/keys/bob` |
 | `JWT_PRIVATE_KEY_PATH` | `./identity-provider/keys/alice/ed25519.pem` | `./identity-provider/keys/bob/ed25519.pem` |
 
@@ -239,10 +241,16 @@ signup OTP flow:
 |---|---|---|---|---|
 | Alice | Alice | `alice_dev01` | `alice@test.fr` | `yonolulu` |
 | Alice | Pierre | `pierre_dev01` | `pierre@test.fr` | `yonolulu` |
-| Bob | Bob | `bob_dev01` | `bob@test.fr` | `yonolulu` |
+| Bob | Bob (admin) | `bob_dev01` | `bob@test.fr` | `yonolulu` |
 
 Pierre lives on Alice's instance so group conversations and same-instance E2EE
 can be tested without federation.
+
+Alice's instance is public, so signing up can be tried there. Bob's is
+invite-only, and Bob is its admin — an invite-only instance doesn't start without
+one, and `ADMIN_EMAIL` never makes the account the seed created first an admin.
+Invitations are created there with `POST /api/admin/invitations`, under Bob's
+bearer token.
 
 **Alice and Bob are already friends after seeding**, with the DM between them
 ready to open — no friend request, no accept, no federation round-trip. That
@@ -377,6 +385,7 @@ The main groups:
 - **Keys** — `IDP_KEYS_DIR`, `JWT_PRIVATE_KEY_PATH`, `JWT_KEY_ID`
 - **Session** — `SESSION_SECRET`
 - **Instance** — `INSTANCE_NAME`, `INSTANCE_DESCRIPTION`: how the sign-in pages and NodeInfo present it
+- **Who can join** — `REGISTRATIONS`: `open` (anyone signs up; needs an SMTP relay) or `invite` (only people an admin invited; needs an admin), `invite` when unset
 - **Admin** — `ADMIN_EMAIL`, `ADMIN_PASSWORD`: the first admin account, created at startup when no account has that address, never written over
 - **Web app** — `WEB_APP_ORIGIN`: overrides, in any environment, the built-in address of the official web app, where someone joining by invitation lands signed in (default `http://localhost:5173` in development)
 - **Redis** — `REDIS_PORT`, from which `REDIS_URL` is built (event streams and presence pub-sub)

@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use domain::auth::{OFFICIAL_WEB_APP_ORIGIN, WebApp};
+use domain::auth::{OFFICIAL_WEB_APP_ORIGIN, Registrations, WebApp};
 use infrastructure::email::SmtpTls;
 
 /// Deployment environment. Controls scheme selection (http vs https) for the
@@ -82,6 +82,7 @@ pub struct Config {
     pub e2ee_keypackage_lifetime: Duration,
 
     // ── Outbound email (SMTP — Mailpit in dev, real relay in prod) ───────
+    /// Empty when the instance has no relay.
     pub smtp_host: String,
     pub smtp_port: u16,
     pub smtp_username: String,
@@ -93,6 +94,10 @@ pub struct Config {
     /// HMAC pepper for email OTP code hashes. Required — startup fails if unset.
     /// Same value also peppers TOTP recovery codes (one secret to manage).
     pub email_otp_pepper: Vec<u8>,
+
+    // ── Who can join ─────────────────────────────────────────────────────
+    /// `REGISTRATIONS`: `open`, anyone signs up, or `invite`, the default, only the invited.
+    pub registrations: Registrations,
 
     // ── The first admin ──────────────────────────────────────────────────
     /// `ADMIN_EMAIL`: the admin account is created with it at startup when no account has it.
@@ -146,6 +151,8 @@ pub enum ConfigError {
     InvalidAttachmentValue(&'static str, String),
     #[error("Invalid {0}: {1}")]
     InvalidValue(&'static str, String),
+    #[error("REGISTRATIONS=open needs an SMTP relay: set SMTP_HOST, or REGISTRATIONS=invite")]
+    OpenWithoutRelay,
 }
 
 impl Config {
@@ -158,7 +165,7 @@ impl Config {
             Ok(other) => return Err(ConfigError::InvalidEnvironment(other.to_string())),
         };
 
-        Ok(Self {
+        let config = Self {
             database_url: require_env("DATABASE_URL")?,
             domain: require_env("DOMAIN")?,
             environment,
@@ -213,7 +220,7 @@ impl Config {
                 30 * 24 * 60 * 60,
             )?),
 
-            smtp_host: env_var("SMTP_HOST").unwrap_or_else(|_| "mailpit".into()),
+            smtp_host: smtp_host(env_var("SMTP_HOST").ok()),
             smtp_port: smtp_port(env_var("SMTP_PORT").ok())?,
             smtp_username: env_var("SMTP_USERNAME").unwrap_or_default(),
             smtp_password: env_var("SMTP_PASSWORD").unwrap_or_default(),
@@ -221,10 +228,13 @@ impl Config {
                 .unwrap_or_else(|_| "Pīna'i <no-reply@localhost>".into()),
             smtp_tls: smtp_tls(environment, env_var("SMTP_TLS").ok())?,
             email_otp_pepper: parse_email_otp_pepper()?,
+            registrations: registrations(env_var("REGISTRATIONS").ok())?,
             admin_email: unless_empty(env_var("ADMIN_EMAIL").ok()),
             admin_password: unless_empty(env_var("ADMIN_PASSWORD").ok()),
             web_app: web_app(environment, env_var("WEB_APP_ORIGIN").ok())?,
-        })
+        };
+        require_relay(config.registrations, &config.smtp_host)?;
+        Ok(config)
     }
 
     /// Returns true when all required storage env vars are set.
@@ -320,6 +330,32 @@ fn web_app(environment: Environment, raw: Option<String>) -> Result<Option<WebAp
         None => OFFICIAL_WEB_APP_ORIGIN,
     };
     Ok(origin.map(|origin| WebApp::parse(origin).expect("a built-in origin")))
+}
+
+/// Unset or empty, the instance has no relay: never a host it wasn't given.
+fn smtp_host(raw: Option<String>) -> String {
+    raw.unwrap_or_default()
+}
+
+/// Unset or empty, an instance lets in only the people its admins invite.
+fn registrations(raw: Option<String>) -> Result<Registrations, ConfigError> {
+    match raw.map(|v| v.to_lowercase()).as_deref() {
+        None | Some("") | Some("invite") => Ok(Registrations::Invite),
+        Some("open") => Ok(Registrations::Open),
+        Some(other) => Err(ConfigError::InvalidValue(
+            "REGISTRATIONS",
+            format!("'{other}' (expected open or invite)"),
+        )),
+    }
+}
+
+/// An open instance mails every sign-up a code: without a relay — `SMTP_HOST` unset or empty —
+/// nobody could finish signing up.
+fn require_relay(registrations: Registrations, smtp_host: &str) -> Result<(), ConfigError> {
+    if registrations.are_open() && smtp_host.is_empty() {
+        return Err(ConfigError::OpenWithoutRelay);
+    }
+    Ok(())
 }
 
 fn smtp_tls(environment: Environment, raw: Option<String>) -> Result<SmtpTls, ConfigError> {

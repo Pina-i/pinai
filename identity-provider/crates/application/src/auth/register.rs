@@ -2,8 +2,9 @@ use std::sync::Arc;
 
 use domain::UserId;
 use domain::auth::{
-    AuthError, AuthorizationRequest, Clients, Email, HandleSuffixes, NewAccount, PasswordHasher,
-    SignInAccount, SignInAccounts, SignUps, SignupCodes, SignupMailer, check_password,
+    AuthError, AuthorizationRequest, Clients, Email, HandleSuffixes, Joining, NewAccount,
+    PasswordHasher, Registrations, SignInAccount, SignInAccounts, SignUps, SignupCodes,
+    SignupMailer, check_password,
 };
 use domain::identity::InstanceOrigin;
 use domain::profile::DisplayName;
@@ -48,9 +49,10 @@ impl Registered {
 }
 
 /// `POST /register` and `/register-and-login`: an account, unconfirmed until the code mailed to
-/// its address comes back.
+/// its address comes back. Only on an open instance.
 pub struct Register {
     origin: InstanceOrigin,
+    registrations: Registrations,
     clients: Arc<dyn Clients>,
     accounts: Arc<dyn SignInAccounts>,
     sign_ups: Arc<dyn SignUps>,
@@ -64,6 +66,7 @@ impl Register {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         origin: InstanceOrigin,
+        registrations: Registrations,
         clients: Arc<dyn Clients>,
         accounts: Arc<dyn SignInAccounts>,
         sign_ups: Arc<dyn SignUps>,
@@ -74,6 +77,7 @@ impl Register {
     ) -> Self {
         Self {
             origin,
+            registrations,
             clients,
             accounts,
             sign_ups,
@@ -91,6 +95,8 @@ impl Register {
         request: Option<&AuthorizationRequest>,
         now: OffsetDateTime,
     ) -> Result<Registered, AuthError> {
+        // First: an invite-only instance tells nobody which addresses it holds.
+        self.registrations.admit(Joining::Uninvited)?;
         let blank = [&command.display_name, &command.email, &command.password]
             .iter()
             .any(|field| field.is_empty());

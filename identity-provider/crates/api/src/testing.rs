@@ -39,13 +39,13 @@ use axum::http::{Method, Request, StatusCode, header};
 use axum::response::IntoResponse;
 use axum_extra::extract::cookie::Key;
 use domain::UserId;
-use domain::auth::WebApp;
 use domain::auth::testing::{
     CountingSuffixes, InMemoryClientSignIns, InMemoryClients, InMemoryCodes, InMemoryRefreshTokens,
     InMemorySecondFactors, InMemorySessions, InMemorySignInAccounts, InMemorySignupCodes,
     PlainHasher, RecordingMailer, RecordingSessionNotifier, RecordingTickets, SpelledTokens,
     StepAuthenticator, web_client,
 };
+use domain::auth::{Registrations, WebApp};
 use domain::e2ee::KeyPackagePolicy;
 use domain::e2ee::testing::{
     InMemoryArchive, InMemoryDelivery, InMemoryKeyDirectory, InMemoryRemoteKeyPackages,
@@ -111,6 +111,11 @@ pub struct PeerFakes {
     pub message_notifier: Arc<RecordingMessageNotifier>,
 }
 
+/// The web client of a development checkout, standing in for the official web app.
+fn web_app() -> WebApp {
+    WebApp::parse("http://localhost:5173").unwrap()
+}
+
 /// What the actor documents publish as the instance key.
 pub const PUBLIC_KEY_PEM: &str =
     "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAtest\n-----END PUBLIC KEY-----\n";
@@ -141,19 +146,39 @@ impl TestApp {
         accounts: impl IntoIterator<Item = Account>,
         remote_actors: InMemoryRemoteActors,
     ) -> Self {
-        let web_app = WebApp::parse("http://localhost:5173").unwrap();
-        Self::built(accounts, remote_actors, Some(web_app))
+        Self::built(
+            accounts,
+            remote_actors,
+            Some(web_app()),
+            Registrations::Open,
+        )
     }
 
     /// An instance that knows of no official web app: joining by invitation ends on a page.
     pub fn without_web_app() -> Self {
-        Self::built([], InMemoryRemoteActors::default(), None)
+        Self::built(
+            [],
+            InMemoryRemoteActors::default(),
+            None,
+            Registrations::Open,
+        )
+    }
+
+    /// An instance where only the invited sign up.
+    pub fn invite_only() -> Self {
+        Self::built(
+            [],
+            InMemoryRemoteActors::default(),
+            Some(web_app()),
+            Registrations::Invite,
+        )
     }
 
     fn built(
         accounts: impl IntoIterator<Item = Account>,
         remote_actors: InMemoryRemoteActors,
         web_app: Option<WebApp>,
+        registrations: Registrations,
     ) -> Self {
         let accounts: Arc<dyn Accounts> = Arc::new(InMemoryAccounts::with(accounts));
         let remote_actors: Arc<dyn RemoteActors> = Arc::new(remote_actors);
@@ -233,6 +258,7 @@ impl TestApp {
         };
         let describe_instance = Arc::new(DescribeInstance::new(
             InstanceIntro::new(&origin, Some("Aotearoa"), Some("Design and type people.")).unwrap(),
+            registrations,
             accounts.clone(),
         ));
         let state = AppState {
@@ -304,6 +330,7 @@ impl TestApp {
             login_attempts: crate::LoginAttempts::new(),
             register: Arc::new(Register::new(
                 origin.clone(),
+                registrations,
                 clients.clone(),
                 sign_in.accounts.clone(),
                 sign_in.accounts.clone(),
@@ -314,6 +341,7 @@ impl TestApp {
             )),
             register_invited: Arc::new(RegisterInvited::new(
                 origin.clone(),
+                registrations,
                 web_app,
                 sign_in.accounts.clone(),
                 sign_in.accounts.clone(),
@@ -323,6 +351,7 @@ impl TestApp {
                 complete.clone(),
             )),
             create_invitation: Arc::new(CreateInvitation::new(
+                registrations,
                 sign_in.accounts.clone(),
                 sign_in.accounts.clone(),
             )),

@@ -71,6 +71,11 @@ pub async fn register(
                 ApiError::bad_request("password must be at least 8 characters")
             }
             AuthError::EmailTaken => ApiError::bad_request("Email already registered"),
+            AuthError::InvitationRequired => ApiError::new(
+                StatusCode::FORBIDDEN,
+                "invitation_required",
+                format!("Accounts on {} are by invitation only", origin.domain()),
+            ),
             other => internal(other),
         })?;
     Ok((
@@ -133,6 +138,10 @@ pub async fn register_and_log_in(
         Err(AuthError::BadEmail(_)) => return Ok(refused("invalid_email")),
         Err(AuthError::PasswordTooShort) => return Ok(refused("weak_password")),
         Err(AuthError::EmailTaken) => return Ok(refused("email_taken")),
+        Err(AuthError::InvitationRequired) => {
+            let pairs = [("error", "invitation_required")];
+            return Ok(to("/login", &carried(&request, appearance, &pairs)));
+        }
         Err(error @ (AuthError::UnknownClient | AuthError::UnregisteredRedirect)) => {
             return pages.misdirected(error, appearance).await;
         }

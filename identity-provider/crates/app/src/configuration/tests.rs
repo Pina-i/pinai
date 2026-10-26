@@ -32,6 +32,7 @@ fn config() -> Config {
         smtp_from: "no-reply@alice.com".into(),
         smtp_tls: SmtpTls::StartTls,
         email_otp_pepper: vec![0u8; 32],
+        registrations: Registrations::Invite,
         e2ee_keypackage_cap_per_device: 100,
         e2ee_keypackage_refill_threshold: 20,
         e2ee_keypackage_lifetime: Duration::from_secs(90 * 24 * 3600),
@@ -234,6 +235,69 @@ fn development_accepts_any_session_secret() {
         session_secret(Environment::Development, Some("alice-secret".into())).unwrap(),
         "alice-secret"
     );
+}
+
+// ─── Who can join ────────────────────────────────────────────────────────────
+
+#[test]
+fn an_instance_is_invite_only_unless_told_otherwise() {
+    for raw in [None, Some(String::new())] {
+        assert_eq!(registrations(raw).unwrap(), Registrations::Invite);
+    }
+}
+
+#[test]
+fn each_registrations_setting_is_read_by_its_name_in_any_case() {
+    for (raw, setting) in [
+        ("open", Registrations::Open),
+        ("invite", Registrations::Invite),
+        ("Open", Registrations::Open),
+        ("INVITE", Registrations::Invite),
+    ] {
+        assert_eq!(registrations(Some(raw.into())).unwrap(), setting, "{raw}");
+    }
+}
+
+#[test]
+fn an_unknown_registrations_setting_is_refused_naming_the_two() {
+    let refused = registrations(Some("closed".into())).unwrap_err();
+
+    assert_eq!(
+        refused.to_string(),
+        "Invalid REGISTRATIONS: 'closed' (expected open or invite)"
+    );
+}
+
+#[test]
+fn an_unset_or_empty_smtp_host_means_no_relay() {
+    for raw in [None, Some(String::new())] {
+        assert_eq!(smtp_host(raw), "");
+    }
+    assert_eq!(
+        smtp_host(Some("smtp.example.com".into())),
+        "smtp.example.com"
+    );
+}
+
+#[test]
+fn an_open_instance_with_smtp_host_unset_or_empty_is_refused() {
+    for raw in [None, Some(String::new())] {
+        let refused = require_relay(Registrations::Open, &smtp_host(raw)).unwrap_err();
+
+        assert!(matches!(refused, ConfigError::OpenWithoutRelay));
+        assert_eq!(
+            refused.to_string(),
+            "REGISTRATIONS=open needs an SMTP relay: set SMTP_HOST, or REGISTRATIONS=invite"
+        );
+    }
+}
+
+#[test]
+fn an_invite_only_instance_needs_no_relay_and_an_open_one_with_a_relay_starts() {
+    assert!(require_relay(Registrations::Invite, &smtp_host(None)).is_ok());
+    assert!(require_relay(Registrations::Invite, "").is_ok());
+    assert!(require_relay(Registrations::Invite, "smtp.example.com").is_ok());
+    assert!(require_relay(Registrations::Open, "smtp.example.com").is_ok());
 }
 
 // ─── The first admin ─────────────────────────────────────────────────────────

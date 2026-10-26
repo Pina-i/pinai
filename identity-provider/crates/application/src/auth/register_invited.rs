@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use domain::auth::{
-    AuthError, ClientSignIn, HandleSuffixes, InvitationToken, Invitations, PasswordHasher,
-    SignInAccounts, SignUps, WebApp,
+    AuthError, ClientSignIn, HandleSuffixes, InvitationToken, Invitations, Joining, PasswordHasher,
+    Registrations, SignInAccounts, SignUps, WebApp,
 };
 use domain::identity::InstanceOrigin;
 use domain::{SessionId, UserId};
@@ -30,6 +30,7 @@ pub enum Joined {
 /// password just typed: the person lands there signed in.
 pub struct RegisterInvited {
     origin: InstanceOrigin,
+    registrations: Registrations,
     web_app: Option<WebApp>,
     accounts: Arc<dyn SignInAccounts>,
     sign_ups: Arc<dyn SignUps>,
@@ -43,6 +44,7 @@ impl RegisterInvited {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         origin: InstanceOrigin,
+        registrations: Registrations,
         web_app: Option<WebApp>,
         accounts: Arc<dyn SignInAccounts>,
         sign_ups: Arc<dyn SignUps>,
@@ -53,6 +55,7 @@ impl RegisterInvited {
     ) -> Self {
         Self {
             origin,
+            registrations,
             web_app,
             accounts,
             sign_ups,
@@ -79,6 +82,7 @@ impl RegisterInvited {
         current: Option<SessionId>,
         now: OffsetDateTime,
     ) -> Result<Joined, AuthError> {
+        self.registrations.admit(Joining::Invited)?;
         let invitation = self
             .invitations
             .find_open(token, now)

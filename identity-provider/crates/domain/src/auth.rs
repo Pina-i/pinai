@@ -10,6 +10,7 @@ mod error;
 mod invitation;
 mod ports;
 mod refresh;
+mod registrations;
 mod request;
 mod second_factor;
 mod session;
@@ -40,6 +41,7 @@ pub use ports::{
 pub use refresh::{
     Presentation, REFRESH_GRACE, REFRESH_GRANT_TYPE, RefreshLink, RefreshToken, Rotation,
 };
+pub use registrations::{Joining, Registrations};
 pub use request::{
     ACCESS_TOKEN_TTL, AuthorizationCode, AuthorizationRequest, CODE_TTL, CodeChallenge, GRANT_TYPE,
     Grant, LOGIN_TICKET_TTL, OtpCode, RESPONSE_TYPE, SIGNUP_CODE_TTL, Tokens, prompts_login,

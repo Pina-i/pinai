@@ -1062,3 +1062,65 @@ async fn revoking_an_unknown_token_is_answered_alike_and_a_missing_one_is_a_bad_
     );
     assert_eq!(stranger, StatusCode::UNAUTHORIZED);
 }
+
+#[tokio::test]
+async fn an_open_instance_links_its_register_tab() {
+    let app = app_with(&[]).await;
+
+    let (_, page) = TestApp::html_of(app.respond(login_page(&[])).await).await;
+
+    assert!(page.contains("tab=register\">Register</a>"), "{page}");
+    assert!(!page.contains("Invite only"), "{page}");
+    assert!(!page.contains("invite only"), "{page}");
+}
+
+#[tokio::test]
+async fn an_invite_only_instance_shows_a_disabled_invite_only_tab_and_says_so_beside_the_form() {
+    let app = TestApp::invite_only();
+
+    let (status, page) = TestApp::html_of(app.respond(login_page(&[])).await).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        page.contains("<span class=\"tab tab--off\">Invite only</span>"),
+        "{page}"
+    );
+    assert!(
+        page.contains("<span class=\"fact fact--plain invite-only\">invite only</span>"),
+        "{page}"
+    );
+    assert!(
+        !page.contains("tab=register"),
+        "no link to a Register tab: {page}"
+    );
+    assert!(!page.contains("open registration"), "{page}");
+}
+
+#[tokio::test]
+async fn an_invite_only_instance_asked_for_its_register_tab_shows_the_sign_in_tab() {
+    let app = TestApp::invite_only();
+
+    let (status, page) =
+        TestApp::html_of(app.respond(login_page(&[("tab", "register")])).await).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(page.contains("action=\"/login\""), "{page}");
+    assert!(!page.contains("name=\"display_name\""), "{page}");
+    assert!(!page.contains("Create account"), "{page}");
+}
+
+#[tokio::test]
+async fn a_sign_up_refused_for_want_of_an_invitation_is_told_in_the_instances_words() {
+    let app = TestApp::invite_only();
+
+    let (_, page) = TestApp::html_of(
+        app.respond(login_page(&[("error", "invitation_required")]))
+            .await,
+    )
+    .await;
+
+    assert!(
+        page.contains("Accounts on localhost:8080 are by invitation only"),
+        "{page}"
+    );
+}

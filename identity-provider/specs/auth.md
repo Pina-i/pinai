@@ -1,4 +1,4 @@
-# Pina'i — Signing in, sign-up, the second factor, admins and invitations
+# Pina'i — Signing in, sign-up, the second factor, admins, invitations and who can join
 
 ## 1. Signing in — OpenID Connect
 
@@ -113,7 +113,7 @@ back-forward cache is ready again. Everything else works without it.
 
 | Route | Page |
 |---|---|
-| `GET /login` | Sign in, or Register with `?tab=register` — two links, not script tabs |
+| `GET /login` | Sign in, or Register with `?tab=register` — two links, not script tabs. On an invite-only instance (§ 6) the Register tab is no link but a disabled "Invite only", and `?tab=register` shows Sign in |
 | `GET /verify-email` | The code mailed at sign-up (§ 2), with a form to send another |
 | `GET /login/totp` | The second factor (§ 3); `?mode=recovery` asks a recovery code instead |
 | `GET /signed-out` | Where `/logout` lands when it may not go back to the client |
@@ -121,8 +121,9 @@ back-forward cache is ready again. Everything else works without it.
 | `GET /assets/{path}` | The stylesheet, the script, the fonts (DM Sans, Instrument Serif, Azeret Mono — latin and latin-ext, OFL), the motifs and the grain, built into the binary; `Cache-Control: public, max-age=86400`. The stylesheet and the script are linked with `?v=<a hash of their content>`, so a release that changes one is fetched anew |
 
 **What a page shows.** On one side the instance: its name, its description, how many people it
-holds and that registration is open (`identity-provider/specs/identity.md § 6`), and "Runs the
-Pīna'i identity provider v<version>". On the other "Sign in to <name>" under "— <domain>" and
+holds and who may join — "open registration", or "invite only" (§ 6;
+`identity-provider/specs/identity.md § 6`) —, and "Runs the Pīna'i identity provider
+v<version>". On the other "Sign in to <name>" under "— <domain>" and
 "← Another home"; on the login page, the app asking — "to continue to *Pīna'i* app.example", its
 `client_name` and where its document lives, left out for the instance's own desktop app — then
 the form, ending with "Your password goes to <domain>, never to Pīna'i". A password typed there
@@ -160,6 +161,7 @@ print words of its choosing.
 | | `weak_password` | Password must be at least 8 characters |
 | | `email_taken` | Email already registered |
 | | `signup_expired` | This sign-up has expired — register again |
+| | `invitation_required` | Accounts on <domain> are by invitation only |
 | | `notice=already_verified` | This address is confirmed already — sign in to continue |
 | | `notice=no_code_needed` | This account signs in with its password — sign in to continue |
 | `/login`, no request | `ticket_expired` | This sign-in has expired |
@@ -655,8 +657,8 @@ sequenceDiagram
 
 | Endpoint | Body | Result |
 |---|---|---|
-| `POST /register` | JSON `{ display_name, email, password }` | `201` with the account (`id`, `username`, `display_name`, `address`, `email`, `email_verified: false`, `pending_user_id`) and a code mailed. `400` names the rule broken, or `Email already registered`. |
-| `POST /register-and-login` | `display_name`, `email`, `password` + the request | Creates the account unconfirmed, mails a code, and goes to `/verify-email?{request}&pending_user_id=…&pending_email=…`. **No session is issued.** A broken rule goes back to `/login?{request}&tab=register&error=<code>`; an unknown client or an unregistered `redirect_uri` is "This app couldn't be verified" (`401` / `400`). |
+| `POST /register` | JSON `{ display_name, email, password }` | `201` with the account (`id`, `username`, `display_name`, `address`, `email`, `email_verified: false`, `pending_user_id`) and a code mailed. `400` names the rule broken, or `Email already registered`. On an invite-only instance (§ 6), `403 invitation_required` before anything else is looked at. |
+| `POST /register-and-login` | `display_name`, `email`, `password` + the request | Creates the account unconfirmed, mails a code, and goes to `/verify-email?{request}&pending_user_id=…&pending_email=…`. **No session is issued.** A broken rule goes back to `/login?{request}&tab=register&error=<code>`; an unknown client or an unregistered `redirect_uri` is "This app couldn't be verified" (`401` / `400`). On an invite-only instance (§ 6), back to `/login?{request}&error=invitation_required`, nothing created. |
 | `GET /verify-email` | `pending_user_id`, `pending_email` + the request | The code page (§ 1 "The sign-in pages"). |
 | `POST /verify-email-and-login` | `pending_user_id`, `pending_email`, `code` + the request | The request is checked first; then the code: the right one confirms the address, issues an OIDC auth code and the session cookie, and redirects to `redirect_uri`. A wrong, malformed, expired or exhausted code goes back to `/verify-email` with its `error`; an address confirmed already goes to `/login` with `notice=already_verified`, an admitted account (§ 4) to `/login` with `notice=no_code_needed` — no code is tried, no session issued —, an account gone to `/login?tab=register&error=signup_expired`. |
 | `POST /verify-email/resend` | `pending_user_id`, `pending_email` + the request | A fresh code, then the code page again with `notice=code_resent`, or `error=too_many_codes` past the resend limit. An address confirmed already goes to `/login` (`notice=already_verified`), an admitted account to `/login` (`notice=no_code_needed`) with nothing mailed, an account gone to the register tab (`signup_expired`). |
@@ -705,7 +707,7 @@ Every hour — and once at startup — the IdP deletes:
 
 ### SMTP
 
-Codes go out through a relay, `SMTP_HOST`/`SMTP_PORT`, over `SMTP_TLS`: `none` (plain), `starttls` (port 587) or `tls` (port 465). Unset, it is `none` in development and `starttls` in production. The connection is opened on the first send, so the instance starts whether or not the relay is up; an empty `SMTP_HOST` means no relay, and every code then fails to send. In the background of every start, the IdP connects, signs in and quits, logging `SMTP relay reachable` or `SMTP relay unusable` with the reason, so a wrong relay shows before anyone signs up.
+Codes go out through a relay, `SMTP_HOST`/`SMTP_PORT`, over `SMTP_TLS`: `none` (plain), `starttls` (port 587) or `tls` (port 465). Unset, it is `none` in development and `starttls` in production. The connection is opened on the first send, so the instance starts whether or not the relay is up; an unset or empty `SMTP_HOST` means no relay — never a host the instance wasn't given —, and every code then fails to send — only an invite-only instance starts without one (§ 6). In the background of every start, the IdP connects, signs in and quits, logging `SMTP relay reachable` or `SMTP relay unusable` with the reason, so a wrong relay shows before anyone signs up; an invite-only instance with no relay logs `no SMTP relay: mail is off` instead.
 
 Mailpit ships in the root `compose.yaml` (`MP_SMTP_AUTH_ACCEPT_ANY=true`, `MP_SMTP_AUTH_ALLOW_INSECURE=true`). Web UI on `MAILPIT_UI_PORT` (Alice 8025, Bob 8026) lets a developer click through to the rendered email and copy the code. `POST /dev/send-test-email` (JSON `{ to, display_name? }`) is mounted only when `IDP_ENV=development` and mails a fixed `123456` code to check the SMTP path.
 
@@ -870,24 +872,31 @@ account an invitation let in, vouched for by the admin who made the invitation (
 `ADMIN_EMAIL` and `ADMIN_PASSWORD` name the first admin. An empty value counts as unset. They are
 read once, as the instance starts: `Application::build` runs `application::auth::EnsureAdmin`
 after the migrations and before anything is served, so nobody can register that address first.
-The decision is a domain rule, `admin_bootstrap`, over the address paired with who has it (found
-as signing in finds it, whatever its case) and whether any admin exists, both read in one query
-(`SignUps::admin_facts`). A decision to create carries the address and the password, so none is
-taken without them; the use case carries it out and reports what it did without the password,
-and the start logs that, or stops on a refusal — a bad address and a bad password alike.
+The decision is a domain rule, `admin_bootstrap`, over who may join (§ 6), the address paired
+with who has it (found as signing in finds it, whatever its case) and whether any admin exists,
+both read in one query (`SignUps::admin_facts`). A decision to create carries the address and
+the password, so none is taken without them; the use case carries it out and reports what it did
+without the password, and the start logs that, or stops on a refusal — a bad address and a bad
+password alike.
 
 ```mermaid
 flowchart TD
     S[The instance starts] --> E{ADMIN_EMAIL set?}
     E -- no --> A{an admin exists?}
     A -- yes --> OK[serve]
-    A -- no --> W[warning: no admin, and how to create one] --> OK
+    A -- no --> G{REGISTRATIONS}
+    G -- open --> W[warning: no admin, and how to create one] --> OK
+    G -- invite --> Y[refuse to start: an invite-only instance needs an admin]
     E -- yes --> F{who has the address?}
     F -- nobody --> P{ADMIN_PASSWORD set, 8 bytes or more?}
     P -- no --> X[refuse to start, saying why]
     P -- yes --> C[create the admin account] --> OK
     F -- the admin --> R["left as it is, a configured password reported unused"] --> OK
-    F -- an account that is no admin --> N[warning: not made admin] --> A
+    F -- an account that is no admin --> M{an admin exists?}
+    M -- yes --> N[warning: not made admin] --> OK
+    M -- no --> K{REGISTRATIONS}
+    K -- open --> N2[warnings: not made admin; no admin, and how to create one] --> OK
+    K -- invite --> Y2["refuse to start, in one message: not made admin, and an invite-only instance needs an admin"]
 ```
 
 - **Nobody has the address**: the admin account is created, in one insert through the sign-up
@@ -903,12 +912,18 @@ flowchart TD
   `ADMIN_PASSWORD` is set, each start warns that it is unused once the account exists and can be
   removed from `.env`.
 - **An account that is not an admin has the address**: it is not made one, so a typo can't make a
-  stranger admin. A warning says so, then the start goes on as without `ADMIN_EMAIL`.
-- **No admin at all**: each start warns that the instance has no admin, and that setting
-  `ADMIN_EMAIL` and `ADMIN_PASSWORD`, then restarting, creates one.
+  stranger admin. A warning says so, then the start goes on as without `ADMIN_EMAIL` — on an
+  open instance, or on an invite-only one that has an admin already. An invite-only instance with
+  no admin stops instead, with a single refusal that says both — the account is never promoted,
+  and the instance needs an admin — and no warning before it.
+- **No admin at all**: an open instance warns, at each start, that it has no admin, and that
+  setting `ADMIN_EMAIL` and `ADMIN_PASSWORD`, then restarting, creates one. An invite-only
+  instance refuses to start, saying the same and that `REGISTRATIONS=open` with a relay is the
+  other way out (§ 6): nobody could ever get in.
 - **`ADMIN_EMAIL` unset and an admin exists**: nothing.
 
-An instance that sets neither variable only warns, at each start, that it has no admin.
+An open instance that sets neither variable only warns, at each start, that it has no admin. An
+invite-only one — `REGISTRATIONS` unset is invite-only — doesn't start until it has one.
 
 ### Scenarios
 
@@ -934,7 +949,8 @@ Returns `admin: boolean`: `true` for an admin of this instance, `false` for anyo
 An admin lets someone in with an **invitation**: a link to this instance's own pages, good for one
 account, where the person creates theirs. Nobody types a code: the admin who made the link vouches
 for the account, which is admitted (§ 4) and remembers who invited it (`users.invited_by`). Only
-admins make invitations; any admin may revoke an open one.
+admins make invitations, and only on an invite-only instance (§ 6); any admin may revoke an open
+one.
 
 ### Data model
 
@@ -986,7 +1002,7 @@ cases from `SignInAccount::admin`).
 
 | Route | Answer |
 |---|---|
-| `POST /api/admin/invitations` | No body. `201 { id, link, expires_at }`: `link` is `{issuer}/i/{token}`, the only answer the token is ever in |
+| `POST /api/admin/invitations` | No body. `201 { id, link, expires_at }`: `link` is `{issuer}/i/{token}`, the only answer the token is ever in. On an open instance (§ 6), `409 registrations_open` "This instance is open: people sign up themselves" — to an admin; a member is `403` first |
 | `GET /api/admin/invitations` | The open invitations, newest first: `[{ id, created_at, expires_at, created_by: { display_name } }]`. Used, expired and revoked invitations are not listed |
 | `DELETE /api/admin/invitations/{id}` | Revokes an open one: `204`. Anything else — used, revoked, expired, unknown, not an id — is `404` "Invitation not found" |
 
@@ -1116,3 +1132,131 @@ expired, whichever came first (`INVITATION_RETENTION`). An open one is never swe
 - **No web app known** (a production instance before the official web app exists): the person is
   told their account is ready, and signs in from the app with their password, no code asked.
 - **A link sent to the wrong person**: an admin revokes it and creates another.
+
+## 6. Who can join
+
+An instance is **open** or **invite-only**, as `REGISTRATIONS` says: `open` or `invite`, in any
+case. Unset or empty, it is `invite`: an instance lets in only the people its admins invite,
+unless told otherwise. Any other value stops the start ("Invalid REGISTRATIONS: 'closed' (expected
+open or invite)"). The setting is `domain::auth::Registrations`, read once as the instance starts
+(`app::configuration`), and given to the use cases that depend on it.
+
+| | Open — `REGISTRATIONS=open` | Invite-only — `REGISTRATIONS=invite`, the default |
+|---|---|---|
+| Who creates an account | Anyone: the register tab or `POST /register` (§ 2) | Only someone invited (§ 5) |
+| A new account's address | Confirmed by a mailed code (§ 2) | Never confirmed by a code: the invitation admits it (§ 4) |
+| Invitations | None made (`409`); those left from before still work, are listed and revoked | Made by admins |
+| Mail relay (`SMTP_HOST`) | Required: no start without one | Optional |
+| An admin | Optional: each start without one warns | Required: no start without one |
+| NodeInfo `openRegistrations` | `true` | `false` |
+| The sign-in pages | "open registration"; the Register tab | "invite only"; a disabled "Invite only" tab |
+
+### The sign-up rule
+
+An uninvited sign-up is allowed only on an open instance; a sign-up through an invitation is
+allowed in both modes (`Registrations::admit`, with `Joining::Uninvited` or `Joining::Invited`).
+So a link made while the instance was invite-only lets its person in until it ends — used, revoked
+or expired — whatever the instance has become since.
+
+`Register`, behind `POST /register` and `POST /register-and-login`, asks the rule before anything
+else, and so does `RegisterInvited`, behind `POST /i/{token}/sign-up`. On an invite-only instance
+every uninvited sign-up gets the same refusal,
+`AuthError::InvitationRequired`, whatever was typed — an address already registered included —,
+so it tells nothing of who has an account; nothing is created and nothing is mailed:
+
+- `POST /register` answers `403 {"error": "invitation_required", "error_description": "Accounts on
+  {domain} are by invitation only"}`;
+- the register form goes back to `/login?{request}&error=invitation_required`, where the page says
+  "Accounts on {domain} are by invitation only".
+
+```mermaid
+flowchart TD
+    S[A sign-up] --> I{through an invitation?}
+    I -- "yes: /i/{token}/sign-up" --> A[created admitted, no code — § 5]
+    I -- "no: the register tab, POST /register" --> R{REGISTRATIONS}
+    R -- open --> C[created unconfirmed, a code mailed — § 2]
+    R -- invite --> X[refused: invitation_required, nothing created]
+```
+
+### Invitations only on invite-only instances
+
+An open instance has no need to invite: its people sign up themselves. `CreateInvitation` refuses
+there (`Registrations::allow_invitations`), once the caller is known to be an admin — a member is
+`403` first, as on any instance: `POST /api/admin/invitations` answers `409 {"error":
+"registrations_open", "error_description": "This instance is open: people sign up themselves"}`.
+Listing and revoking work in both modes, so the links left over after a switch to open can be
+seen and revoked; until then each still lets its person in.
+
+### Starting
+
+Two rules keep an instance from starting, each saying how to set it right:
+
+- **An open instance needs a mail relay**: it mails every sign-up a code, and an unset or empty
+  `SMTP_HOST` means no relay (§ 2 "SMTP"). Reading the configuration refuses it:
+  "REGISTRATIONS=open needs an SMTP relay: set SMTP_HOST, or REGISTRATIONS=invite".
+- **An invite-only instance needs an admin**: nobody else makes the invitations that let anyone
+  in. The rule of § 4, `admin_bootstrap`, takes the setting: where an open instance only warns
+  that it has no admin — `ADMIN_EMAIL` unset, or naming an account that is not an admin — an
+  invite-only one is refused (`AdminRefusal::NoAdminToInvite`), and `report_admin` stops the
+  start: "REGISTRATIONS=invite (the default) needs an admin: set ADMIN_EMAIL and ADMIN_PASSWORD,
+  or REGISTRATIONS=open with an SMTP relay"; when `ADMIN_EMAIL` names an account that is not an
+  admin, the one refusal also says it is never promoted. So an instance that sets neither
+  `REGISTRATIONS` nor the admin's variables, and has no admin yet, doesn't start.
+
+An invite-only instance without a relay starts: it logs `no SMTP relay: mail is off`, and checks
+no relay. A relay that is set but can't be used is warned about in both modes (`SMTP relay
+unusable`).
+
+```mermaid
+flowchart TD
+    S[The instance starts] --> R{REGISTRATIONS}
+    R -- another value --> X1[refuse: open or invite]
+    R -- open --> M{SMTP_HOST set?}
+    M -- no --> X2[refuse: an open instance needs a relay]
+    M -- yes --> A1["the first admin (§ 4): none is a warning"] --> OK[serve]
+    R -- "invite, or unset" --> A2["the first admin (§ 4)"]
+    A2 -- an admin exists, or is created --> OK
+    A2 -- no admin --> X3[refuse: an invite-only instance needs an admin]
+```
+
+### What the instance tells
+
+- **NodeInfo**: `openRegistrations` is `true` on an open instance, `false` on an invite-only one
+  (`identity-provider/specs/identity.md § 6`).
+- **The sign-in pages** (§ 1): beside the form, "open registration" in the colour of something
+  on, or "invite only" in the idle one. On the login page, an open instance has its Register tab;
+  an invite-only one shows in its place a label that is no link, "Invite only", and
+  `/login?tab=register` shows the Sign in tab.
+- **The invitation pages** (`/i/{token}` and its form, § 5) are the same in both modes. The
+  "ready" page that can end joining carries the instance's facts like every sign-in page, so it
+  shows "open registration" or "invite only".
+
+### Switching modes
+
+`REGISTRATIONS` is read as the instance starts: change it, then restart.
+
+- **Invite-only to open** needs a relay first: an open instance doesn't start without one. The
+  accounts that joined by invitation, and the first admin, keep signing in with their password
+  alone: admitted (§ 4), they are never asked to confirm their address. Invitations still open
+  keep letting their person in until they end; no new one is made.
+- **Open to invite-only** closes sign-up. The instance needs an admin, as every invite-only one
+  does. Existing accounts keep signing in, except one that never confirmed its address: it still
+  needs its code — which, without a relay, can't be mailed — and the sign-up sweep (§ 2) deletes
+  it a week after it was created.
+
+### Scenarios
+
+- **A circle of friends.** The operator sets `ADMIN_EMAIL` and `ADMIN_PASSWORD`, leaves
+  `REGISTRATIONS` unset, and sets up no relay. The instance starts invite-only and logs that mail
+  is off; the admin signs in without a code and invites each friend.
+- **A public instance.** `REGISTRATIONS=open` and a relay: anyone signs up on the register tab and
+  confirms with the mailed code. NodeInfo says `openRegistrations: true`.
+- **Someone at an invite-only instance's register tab** — an old link with `?tab=register` — sees
+  the Sign in tab, and "Invite only" beside it, no link. The form posted anyway, or `POST /register`,
+  is refused "Accounts on {domain} are by invitation only", and no account is created.
+- **An admin of an open instance asking for an invitation** is answered `409`: people sign up
+  themselves there.
+- **Forgetting the admin.** An instance started with neither `REGISTRATIONS` nor `ADMIN_EMAIL`
+  stops at once, saying to set the admin's address and password, or to open sign-up with a relay.
+- **`REGISTRATIONS=open` without `SMTP_HOST`** stops at once, saying to set the relay or to go
+  invite-only.

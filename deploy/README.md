@@ -13,13 +13,14 @@ their address on your instance; there is no client to host.
   and cannot change once people have signed up.
 - For a public instance, an SMTP relay, over STARTTLS (port 587) or TLS (port 465):
   sign-up codes are mailed. See [Mail relay](#mail-relay).
-- For an invite-only instance, its first admin's address and password, set in
-  `.env` before the first start. See [Public or invite-only](#public-or-invite-only).
+- For an invite-only instance, the default, its first admin's address and password,
+  set in `.env` before the first start. See [Public or invite-only](#public-or-invite-only).
 
 ## Install
 
-For an invite-only instance, add its lines to `.env` after `./setup.sh` and before
-`docker compose up -d`: see [Public or invite-only](#public-or-invite-only).
+After `./setup.sh` and before `docker compose up -d`, add the mode's lines to `.env`:
+the first admin for an invite-only instance, the default, or `REGISTRATIONS=open` for a
+public one. See [Public or invite-only](#public-or-invite-only).
 
 ```bash
 curl -L https://github.com/Pina-i/pinai/releases/latest/download/pinai-deploy.tar.gz | tar xz
@@ -38,19 +39,19 @@ answers. Settings live in `.env` (see `.env.example`); after changing one,
 
 An instance is public or invite-only, set by `REGISTRATIONS` in `.env`.
 
-- **Public**, `REGISTRATIONS=open`, the default: anyone can create an account. In the
+- **Public**, `REGISTRATIONS=open`: anyone can create an account. In the
   official Pīna'i app, they enter the instance's domain and sign up on the instance's
   own page, and a one-time code mailed to them confirms their email address. So a
   public instance needs a [mail relay](#mail-relay), with the domain of `SMTP_FROM`
   verified by the relay, or the codes land in spam. It refuses to start without
   `SMTP_HOST`: nobody could finish signing up.
-- **Invite-only**, `REGISTRATIONS=invite`: only people an admin invited can create an
-  account. The invitation vouches for them, so no code is needed and the mail relay
-  is optional. It refuses to start without an admin: nobody could ever get in.
+- **Invite-only**, `REGISTRATIONS=invite`, the default: only people an admin invited can
+  create an account. The invitation vouches for them, so no code is needed and the mail
+  relay is optional. It refuses to start without an admin: nobody could ever get in.
 
 | | Public | Invite-only |
 |---|---|---|
-| `REGISTRATIONS` | `open`, the default | `invite` |
+| `REGISTRATIONS` | `open` | `invite`, the default |
 | Who can create an account | Anyone | People an admin invited |
 | A new account's address | Confirmed by a mailed code | Never confirmed by a code |
 | Mail relay (`SMTP_*`) | Required | Optional |
@@ -61,7 +62,7 @@ An instance is public or invite-only, set by `REGISTRATIONS` in `.env`.
 The lines involved, in `.env`:
 
 ```sh
-# Public: the default, with its relay (see Mail relay)
+# Public, with its relay (see Mail relay)
 REGISTRATIONS=open
 SMTP_HOST=smtp.example.com
 SMTP_PORT=587
@@ -70,7 +71,7 @@ SMTP_USERNAME=…
 SMTP_PASSWORD=…
 SMTP_FROM="Pīna'i <no-reply@your.domain>"
 
-# Invite-only
+# Invite-only: the default, so REGISTRATIONS may be left out; its admin may not
 REGISTRATIONS=invite
 ADMIN_EMAIL=you@example.com
 ADMIN_PASSWORD='at least 8 bytes'
@@ -127,7 +128,7 @@ them. Setting the new password there signs the member out everywhere.
 
 ### Switching modes
 
-Change `REGISTRATIONS` in `.env`, then `docker compose up -d`.
+Change `REGISTRATIONS` in `.env` — unset, it is `invite` —, then `docker compose up -d`.
 
 - **Invite-only to public**: set up the mail relay first, since a public instance
   doesn't start without one. Accounts that joined by invitation keep signing in,
@@ -164,7 +165,8 @@ sending limits; `SMTP_FROM` must then be that mailbox's address. The provider's
 own documentation has the current details.
 
 On every start the identity provider connects to the relay, signs in and logs
-`SMTP relay reachable`, or `SMTP relay unusable` with the reason:
+`SMTP relay reachable`, or `SMTP relay unusable` with the reason; an invite-only
+instance without a relay logs `no SMTP relay: mail is off` instead:
 
 ```bash
 docker compose logs idp | grep SMTP

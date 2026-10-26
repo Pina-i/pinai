@@ -144,6 +144,8 @@ pub async fn try_spawn_app(configure: impl FnOnce(&mut Config)) -> anyhow::Resul
         smtp_from: "Pīna'i <no-reply@journey.test>".into(),
         smtp_tls: infrastructure::email::SmtpTls::None,
         email_otp_pepper: rand::random::<[u8; 32]>().to_vec(),
+        // The journeys sign up on their own; the invite-only ones say so.
+        registrations: domain::auth::Registrations::Open,
         admin_email: None,
         admin_password: None,
         // The journeys' web client stands in for the official one.

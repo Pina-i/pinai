@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use domain::auth::{
-    AdminBootstrap, AdminRefusal, AuthError, Email, HandleSuffixes, PasswordHasher, SignUps,
-    admin_bootstrap, admin_display_name,
+    AdminBootstrap, AdminRefusal, AuthError, Email, HandleSuffixes, PasswordHasher, Registrations,
+    SignUps, admin_bootstrap, admin_display_name,
 };
 use domain::identity::InstanceOrigin;
 use time::OffsetDateTime;
@@ -35,6 +35,7 @@ impl EnsureAdmin {
     /// What was done about the admin: `Create` with the address of the account created.
     pub async fn execute(
         &self,
+        registrations: Registrations,
         address: Option<&str>,
         password: Option<&str>,
         now: OffsetDateTime,
@@ -49,6 +50,7 @@ impl EnsureAdmin {
         };
         let facts = self.sign_ups.admin_facts(address.as_ref()).await?;
         let bootstrap = admin_bootstrap(
+            registrations,
             facts.admin_exists,
             address.map(|address| (address, facts.holder)),
             password,

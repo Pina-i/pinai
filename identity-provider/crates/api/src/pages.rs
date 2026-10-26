@@ -2,6 +2,7 @@
 //! request each one carries, their headers, the origin check on their forms, and their assets —
 //! see identity-provider/specs/auth.md § 1.
 
+use std::borrow::Cow;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::{Arc, LazyLock};
 
@@ -271,6 +272,11 @@ impl Frame {
     pub(crate) fn initial(&self) -> String {
         initial_of(&self.name)
     }
+
+    /// Anyone may sign up: the login page has its Register tab.
+    pub(crate) fn registrations_open(&self) -> bool {
+        self.open
+    }
 }
 
 /// A name's first letter, upper-cased: what stands for an instance or an account in a badge.
@@ -326,7 +332,7 @@ pub(crate) struct LoginPage<'a> {
     pub register: bool,
     pub sign_in_href: String,
     pub register_href: String,
-    pub alert: Option<&'static str>,
+    pub alert: Option<Cow<'static, str>>,
     pub note: Option<&'static str>,
     /// The field the alert is about, or "".
     pub bad: &'static str,
@@ -379,7 +385,7 @@ pub(crate) struct InvitedSignUpPage {
     /// Where the web app opens on this instance, when one is known: the button says the person
     /// goes on there, and someone with an account already signs in there instead.
     pub web_app: Option<String>,
-    pub alert: Option<&'static str>,
+    pub alert: Option<Cow<'static, str>>,
     /// The field the alert is about, or "".
     pub bad: &'static str,
     /// What was typed, kept but the password.
@@ -447,17 +453,22 @@ pub(crate) fn expired(code: Option<&str>) -> Notice {
     }
 }
 
-/// The login page's error codes: the sentence, and the field it is about.
-pub(crate) fn login_alert(code: &str) -> Option<(&'static str, &'static str)> {
+/// The login page's error codes: the sentence, and the field it is about. `host` is this
+/// instance's domain, which one sentence names.
+pub(crate) fn login_alert(code: &str, host: &str) -> Option<(Cow<'static, str>, &'static str)> {
     Some(match code {
-        "invalid_credentials" => ("Invalid email or password", ""),
-        "rate_limited" => ("Too many attempts — try again in a minute", ""),
-        "missing_field" => ("Fill in every field", ""),
-        "invalid_display_name" => ("Display name: 1–50 characters", "display_name"),
-        "invalid_email" => ("Enter a valid email address", "email"),
-        "weak_password" => ("Password must be at least 8 characters", "password"),
-        "email_taken" => ("Email already registered", "email"),
-        "signup_expired" => ("This sign-up has expired — register again", ""),
+        "invalid_credentials" => ("Invalid email or password".into(), ""),
+        "rate_limited" => ("Too many attempts — try again in a minute".into(), ""),
+        "missing_field" => ("Fill in every field".into(), ""),
+        "invalid_display_name" => ("Display name: 1–50 characters".into(), "display_name"),
+        "invalid_email" => ("Enter a valid email address".into(), "email"),
+        "weak_password" => ("Password must be at least 8 characters".into(), "password"),
+        "email_taken" => ("Email already registered".into(), "email"),
+        "signup_expired" => ("This sign-up has expired — register again".into(), ""),
+        "invitation_required" => (
+            format!("Accounts on {host} are by invitation only").into(),
+            "",
+        ),
         _ => return None,
     })
 }

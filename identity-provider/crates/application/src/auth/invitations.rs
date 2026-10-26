@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use domain::auth::{
-    AuthError, INVITATION_TTL, InvitationToken, Invitations, OpenInvitation, SignInAccounts,
+    AuthError, INVITATION_TTL, InvitationToken, Invitations, OpenInvitation, Registrations,
+    SignInAccounts,
 };
 use domain::{InvitationId, UserId};
 use time::OffsetDateTime;
@@ -16,15 +17,22 @@ pub struct CreatedInvitation {
     pub expires_at: OffsetDateTime,
 }
 
-/// `POST /api/admin/invitations`: an admin's single-use link, open for [`INVITATION_TTL`].
+/// `POST /api/admin/invitations`: an admin's single-use link, open for [`INVITATION_TTL`]. Only
+/// on an invite-only instance.
 pub struct CreateInvitation {
+    registrations: Registrations,
     accounts: Arc<dyn SignInAccounts>,
     invitations: Arc<dyn Invitations>,
 }
 
 impl CreateInvitation {
-    pub fn new(accounts: Arc<dyn SignInAccounts>, invitations: Arc<dyn Invitations>) -> Self {
+    pub fn new(
+        registrations: Registrations,
+        accounts: Arc<dyn SignInAccounts>,
+        invitations: Arc<dyn Invitations>,
+    ) -> Self {
         Self {
+            registrations,
             accounts,
             invitations,
         }
@@ -36,6 +44,7 @@ impl CreateInvitation {
         now: OffsetDateTime,
     ) -> Result<CreatedInvitation, AuthError> {
         require_admin(&*self.accounts, caller).await?;
+        self.registrations.allow_invitations()?;
         let expires_at = now + INVITATION_TTL;
         let (id, token) = self.invitations.issue(caller, now, expires_at).await?;
         Ok(CreatedInvitation {

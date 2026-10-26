@@ -7,7 +7,7 @@
 <p class="for">to continue to <span class="for-name">{{ app_name }}</span>{% if let Some(app_host) = app_host %} <span class="fact fact--plain">{{ app_host }}</span>{% endif %}</p>
 <nav class="tabs">
 <a class="tab{% if !register %} tab--on{% endif %}" href="{{ sign_in_href }}"{% if !register %} aria-current="page"{% endif %}>Sign in</a>
-<a class="tab{% if register %} tab--on{% endif %}" href="{{ register_href }}"{% if register %} aria-current="page"{% endif %}>Register</a>
+{% if frame.open %}<a class="tab{% if register %} tab--on{% endif %}" href="{{ register_href }}"{% if register %} aria-current="page"{% endif %}>Register</a>{% else %}<span class="tab tab--off">Invite only</span>{% endif %}
 </nav>
 {% if let Some(alert) = alert %}<p class="alert" role="alert">{{ alert }}</p>{% endif %}
 {% if let Some(note) = note %}<p class="note" role="status">{{ note }}</p>{% endif %}

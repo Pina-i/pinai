@@ -42,6 +42,10 @@ pub enum AuthError {
     NotAdmin,
     #[error("no open invitation")]
     InvitationUnusable,
+    #[error("the instance is invite-only: an account takes an invitation")]
+    InvitationRequired,
+    #[error("the instance is open: people sign up themselves")]
+    RegistrationsOpen,
     #[error("too many codes mailed lately")]
     TooManyCodes,
     #[error("TOTP already enabled — disable it first to re-enroll")]

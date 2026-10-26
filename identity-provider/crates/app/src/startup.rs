@@ -129,9 +129,13 @@ impl Application {
             })
             .map_err(|e| anyhow::anyhow!("email sender init failed: {e}"))?,
         );
-        info!(host = %config.smtp_host, port = config.smtp_port, tls = ?config.smtp_tls, "email sender ready");
-        // A wrong relay would otherwise show only when a sign-up's code never arrives.
-        tasks.spawn(check_mail_relay(smtp.clone(), stop.clone()));
+        if config.smtp_host.is_empty() {
+            info!("no SMTP relay: mail is off");
+        } else {
+            info!(host = %config.smtp_host, port = config.smtp_port, tls = ?config.smtp_tls, "email sender ready");
+            // A wrong relay would otherwise show only when a sign-up's code never arrives.
+            tasks.spawn(check_mail_relay(smtp.clone(), stop.clone()));
+        }
         let mailer: Arc<dyn domain::auth::SignupMailer> = smtp;
 
         let email_otp_pepper = Arc::new(config.email_otp_pepper.clone());
@@ -517,6 +521,7 @@ impl Application {
             Arc::new(infrastructure::auth::RandomSuffixes),
         )
         .execute(
+            config.registrations,
             config.admin_email.as_deref(),
             config.admin_password.as_deref(),
             time::OffsetDateTime::now_utc(),
@@ -568,6 +573,7 @@ impl Application {
         .map_err(|e| anyhow::anyhow!("INSTANCE_NAME or INSTANCE_DESCRIPTION: {e}"))?;
         let describe_instance = Arc::new(application::identity::DescribeInstance::new(
             intro,
+            config.registrations,
             Arc::clone(&accounts),
         ));
 
@@ -609,6 +615,7 @@ impl Application {
             )),
             register: Arc::new(application::auth::Register::new(
                 origin.clone(),
+                config.registrations,
                 Arc::clone(&clients),
                 Arc::clone(&sign_in_accounts),
                 Arc::clone(&sign_ups),
@@ -619,6 +626,7 @@ impl Application {
             )),
             register_invited: Arc::new(application::auth::RegisterInvited::new(
                 origin.clone(),
+                config.registrations,
                 config.web_app.clone(),
                 Arc::clone(&sign_in_accounts),
                 Arc::clone(&sign_ups),
@@ -628,6 +636,7 @@ impl Application {
                 Arc::clone(&complete_sign_in),
             )),
             create_invitation: Arc::new(application::auth::CreateInvitation::new(
+                config.registrations,
                 Arc::clone(&sign_in_accounts),
                 Arc::clone(&invitations),
             )),
@@ -1168,6 +1177,20 @@ fn report_admin(bootstrap: AdminBootstrap<Email>) -> anyhow::Result<()> {
         }
         AdminBootstrap::Refused(AdminRefusal::PasswordRefused(rule)) => {
             anyhow::bail!("ADMIN_PASSWORD: {rule}")
+        }
+        AdminBootstrap::Refused(AdminRefusal::NoAdminToInvite {
+            not_promoted: false,
+        }) => anyhow::bail!(
+            "REGISTRATIONS=invite (the default) needs an admin: set ADMIN_EMAIL and \
+             ADMIN_PASSWORD, or REGISTRATIONS=open with an SMTP relay"
+        ),
+        AdminBootstrap::Refused(AdminRefusal::NoAdminToInvite { not_promoted: true }) => {
+            anyhow::bail!(
+                "REGISTRATIONS=invite (the default) needs an admin, and ADMIN_EMAIL names an \
+                 existing account that is not one — it is never promoted: set ADMIN_EMAIL to an \
+                 address no account has, with ADMIN_PASSWORD, or set REGISTRATIONS=open with an \
+                 SMTP relay"
+            )
         }
     }
     Ok(())

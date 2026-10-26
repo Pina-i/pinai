@@ -1,3 +1,5 @@
+use domain::auth::Registrations;
+
 use crate::helpers::{Account, PASSWORD, location, query_of, spawn_app_with, try_spawn_app};
 
 const ADMIN: &str = "root@journey.test";
@@ -46,4 +48,37 @@ async fn an_instance_told_to_create_its_admin_without_a_password_does_not_start(
         refused.to_string().contains("ADMIN_PASSWORD"),
         "{refused:#}"
     );
+}
+
+#[tokio::test]
+async fn an_invite_only_instance_without_an_admin_does_not_start_and_says_how_to_fix_it() {
+    let started = try_spawn_app(|config| config.registrations = Registrations::Invite).await;
+
+    let Err(refused) = started else {
+        panic!("an invite-only instance started without an admin");
+    };
+    let said = refused.to_string();
+    for fix in ["ADMIN_EMAIL and ADMIN_PASSWORD", "REGISTRATIONS=open"] {
+        assert!(said.contains(fix), "{fix} not in {refused:#}");
+    }
+}
+
+#[tokio::test]
+async fn an_invite_only_instance_starts_without_a_relay_and_its_admin_signs_in() {
+    let app = spawn_app_with(|config| {
+        config.registrations = Registrations::Invite;
+        config.smtp_host = String::new();
+        config.admin_email = Some(ADMIN.into());
+        config.admin_password = Some(PASSWORD.into());
+    })
+    .await;
+
+    let signed_in = app
+        .form("/login", &[("email", ADMIN), ("password", PASSWORD)])
+        .await;
+
+    assert_eq!(signed_in.status(), 303);
+    let landed = location(&signed_in);
+    assert!(landed.starts_with(&app.redirect_uri), "{landed}");
+    app.stop().await.unwrap();
 }

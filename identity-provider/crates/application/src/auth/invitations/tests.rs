@@ -2,13 +2,13 @@ use domain::auth::SignUps;
 use domain::auth::testing::contract;
 use time::Duration;
 
-use crate::auth::world::{now, world};
+use crate::auth::world::{invite_only, now, world};
 
 use super::*;
 
 #[tokio::test]
 async fn an_admin_creates_an_invitation_open_for_a_week() {
-    let w = world().await;
+    let w = invite_only().await;
     let admin = w.an_admin().await;
 
     let created = w.create_invitation.execute(admin.id, now()).await.unwrap();
@@ -28,7 +28,7 @@ async fn an_admin_creates_an_invitation_open_for_a_week() {
 
 #[tokio::test]
 async fn only_an_admin_creates_lists_or_revokes_invitations() {
-    let w = world().await;
+    let w = invite_only().await;
     let admin = w.an_admin().await;
     let open = w.create_invitation.execute(admin.id, now()).await.unwrap();
 
@@ -58,7 +58,7 @@ async fn only_an_admin_creates_lists_or_revokes_invitations() {
 
 #[tokio::test]
 async fn an_admin_lists_the_open_invitations_only() {
-    let w = world().await;
+    let w = invite_only().await;
     let admin = w.an_admin().await;
     let used = w
         .create_invitation
@@ -104,7 +104,7 @@ async fn an_admin_lists_the_open_invitations_only() {
 
 #[tokio::test]
 async fn an_admin_revokes_an_open_invitation_once() {
-    let w = world().await;
+    let w = invite_only().await;
     let admin = w.an_admin().await;
     let created = w.create_invitation.execute(admin.id, now()).await.unwrap();
 
@@ -147,4 +147,52 @@ async fn an_admin_revokes_an_open_invitation_once() {
             .is_empty(),
         "a revoked invitation is not listed"
     );
+}
+
+#[tokio::test]
+async fn an_open_instance_makes_no_invitation_once_the_caller_is_an_admin() {
+    let w = world().await;
+    let admin = w.an_admin().await;
+
+    let by_admin = w.create_invitation.execute(admin.id, now()).await;
+    let by_member = w.create_invitation.execute(w.alice.id, now()).await;
+
+    assert!(
+        matches!(by_admin, Err(AuthError::RegistrationsOpen)),
+        "{by_admin:?}"
+    );
+    assert!(
+        matches!(by_member, Err(AuthError::NotAdmin)),
+        "the admin check comes first: {by_member:?}"
+    );
+    assert!(
+        w.list_invitations
+            .execute(admin.id, now())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn an_open_instance_still_lists_and_revokes_the_invitations_left_from_before() {
+    let w = world().await;
+    let admin = w.an_admin().await;
+    let (left, _) = w
+        .accounts
+        .issue(admin.id, now(), now() + INVITATION_TTL)
+        .await
+        .unwrap();
+
+    let listed = w.list_invitations.execute(admin.id, now()).await.unwrap();
+    let revoked = w
+        .revoke_invitation
+        .execute(admin.id, Some(left), now())
+        .await;
+
+    assert_eq!(
+        listed.iter().map(|open| open.id).collect::<Vec<_>>(),
+        vec![left]
+    );
+    assert!(revoked.is_ok(), "{revoked:?}");
 }

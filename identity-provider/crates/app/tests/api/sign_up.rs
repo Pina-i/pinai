@@ -86,7 +86,9 @@ async fn the_instance_describes_itself_on_its_login_page_and_in_its_nodeinfo() {
     assert_eq!(status, 200);
     assert!(html.contains(&format!("Sign in to {host}")), "{html}");
     assert!(html.contains("1 person"), "{html}");
+    assert!(html.contains("open registration"), "{html}");
     assert_eq!(nodeinfo["usage"]["users"]["total"], 1);
+    assert_eq!(nodeinfo["openRegistrations"], true);
     assert_eq!(nodeinfo["metadata"]["nodeName"], host);
     app.stop().await.unwrap();
 }

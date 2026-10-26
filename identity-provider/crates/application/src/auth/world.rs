@@ -9,7 +9,7 @@ use domain::auth::testing::{
     PlainHasher, RecordingMailer, RecordingSessionNotifier, RecordingTickets, SignInSeeds,
     SpelledTokens, StepAuthenticator, signed_up, web_client,
 };
-use domain::auth::{Client, SecondFactors, TotpSecret, WebApp, desktop_client};
+use domain::auth::{Client, Registrations, SecondFactors, TotpSecret, WebApp, desktop_client};
 use domain::e2ee::testing::InMemoryKeyDirectory;
 use domain::identity::InstanceOrigin;
 use time::OffsetDateTime;
@@ -67,7 +67,16 @@ pub fn now() -> OffsetDateTime {
     OffsetDateTime::from_unix_timestamp(1_790_000_000).unwrap()
 }
 
+/// An open instance.
 pub async fn world() -> World {
+    world_with(Registrations::Open).await
+}
+
+pub async fn invite_only() -> World {
+    world_with(Registrations::Invite).await
+}
+
+async fn world_with(registrations: Registrations) -> World {
     let alice = signed_up("alice");
     let accounts = Arc::new(InMemorySignInAccounts::with([alice.clone()]));
     let origin = InstanceOrigin::parse("http://localhost:8080").unwrap();
@@ -149,6 +158,7 @@ pub async fn world() -> World {
         log_out: LogOut::new(clients.clone(), sessions.clone(), ended.clone()),
         register: Register::new(
             origin.clone(),
+            registrations,
             clients.clone(),
             accounts.clone(),
             accounts.clone(),
@@ -159,6 +169,7 @@ pub async fn world() -> World {
         ),
         register_invited: RegisterInvited::new(
             origin.clone(),
+            registrations,
             Some(WebApp::parse("http://localhost:5173").unwrap()),
             accounts.clone(),
             accounts.clone(),
@@ -167,7 +178,7 @@ pub async fn world() -> World {
             Arc::new(CountingSuffixes::default()),
             complete.clone(),
         ),
-        create_invitation: CreateInvitation::new(accounts.clone(), accounts.clone()),
+        create_invitation: CreateInvitation::new(registrations, accounts.clone(), accounts.clone()),
         list_invitations: ListInvitations::new(accounts.clone(), accounts.clone()),
         revoke_invitation: RevokeInvitation::new(accounts.clone(), accounts.clone()),
         ensure_admin: EnsureAdmin::new(

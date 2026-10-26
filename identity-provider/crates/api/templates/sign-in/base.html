@@ -21,7 +21,7 @@
 <div class="intro">
 <p class="fact fact--plain">{{ frame.host }}</p>
 <h1 class="auth-h">{{ frame.description }}</h1>
-<div class="facts"><span class="fact fact--plain">{{ frame.people }}</span>{% if frame.open %}<span class="fact fact--plain open">open registration</span>{% endif %}</div>
+<div class="facts"><span class="fact fact--plain">{{ frame.people }}</span>{% if frame.open %}<span class="fact fact--plain open">open registration</span>{% else %}<span class="fact fact--plain invite-only">invite only</span>{% endif %}</div>
 <div class="band"></div>
 </div>{% endblock %}
 <p class="fact fact--plain runs"><span class="mark mark--small">{% include "sign-in/mark.svg.html" %}</span> Runs the Pīna'i identity provider v{{ frame.version }}</p>

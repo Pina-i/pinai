@@ -14,8 +14,8 @@
 //! have to be pinned down for that to work.
 //!
 //! Idempotent: re-running the seed against an existing user updates the
-//! password hash + display name + handle and flips `email_verified_at` back to
-//! the current time, and every friendship write is an upsert. Applies sqlx
+//! password hash + display name + handle + admin flag and flips `email_verified_at`
+//! back to the current time, and every friendship write is an upsert. Applies sqlx
 //! migrations first so it can race the IdP's own startup safely (whoever runs
 //! `MIGRATE` first wins; the other is a no-op).
 //!
@@ -50,6 +50,9 @@ struct Fixture {
     /// federated one — where a fixture actually lands is still decided by the
     /// sourced `DOMAIN`.
     home_domain: &'static str,
+    /// An admin of its instance. Bob's is invite-only, which won't start without one, and
+    /// `ADMIN_EMAIL` never promotes an account the seed created first.
+    admin: bool,
 }
 
 const ALICE: Fixture = Fixture {
@@ -59,6 +62,7 @@ const ALICE: Fixture = Fixture {
     email: "alice@test.fr",
     password: "yonolulu",
     home_domain: "localhost:8088",
+    admin: false,
 };
 
 const BOB: Fixture = Fixture {
@@ -68,6 +72,7 @@ const BOB: Fixture = Fixture {
     email: "bob@test.fr",
     password: "yonolulu",
     home_domain: "localhost:8081",
+    admin: true,
 };
 
 const PIERRE: Fixture = Fixture {
@@ -77,6 +82,7 @@ const PIERRE: Fixture = Fixture {
     email: "pierre@test.fr",
     password: "yonolulu",
     home_domain: "localhost:8088",
+    admin: false,
 };
 
 const FIXTURES: &[Fixture] = &[ALICE, BOB, PIERRE];
@@ -279,9 +285,9 @@ async fn upsert_user(
         INSERT INTO users (
             id, username, email, password_hash,
             actor_uri, inbox_url, outbox_url,
-            display_name, email_verified_at
+            display_name, email_verified_at, is_admin
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now(), $9)
         ON CONFLICT (email) DO UPDATE SET
             password_hash      = EXCLUDED.password_hash,
             display_name       = EXCLUDED.display_name,
@@ -289,7 +295,8 @@ async fn upsert_user(
             actor_uri          = EXCLUDED.actor_uri,
             inbox_url          = EXCLUDED.inbox_url,
             outbox_url         = EXCLUDED.outbox_url,
-            email_verified_at  = now()
+            email_verified_at  = now(),
+            is_admin           = EXCLUDED.is_admin
         RETURNING id
         "#,
     )
@@ -301,6 +308,7 @@ async fn upsert_user(
     .bind(&inbox_url)
     .bind(&outbox_url)
     .bind(fixture.display_name)
+    .bind(fixture.admin)
     .fetch_one(pool)
     .await
     .context("upserting user row")?;

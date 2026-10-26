@@ -410,3 +410,43 @@ async fn a_test_mail_goes_to_the_address_given() {
         }]
     );
 }
+
+#[tokio::test]
+async fn registering_on_an_invite_only_instance_is_refused_creating_and_mailing_nothing() {
+    let app = TestApp::invite_only();
+
+    let (status, body) = app
+        .call(
+            Method::POST,
+            "/register",
+            None,
+            Some(json!({ "display_name": "Bōb", "email": "bob@idp.test", "password": "bob-password" })),
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        body,
+        json!({
+            "error": "invitation_required",
+            "error_description": "Accounts on localhost:8080 are by invitation only",
+        })
+    );
+    assert!(app.sign_in.accounts.created().is_empty());
+    assert!(app.sign_in.mailer.sent().is_empty());
+}
+
+#[tokio::test]
+async fn the_sign_up_form_on_an_invite_only_instance_goes_back_to_the_login_page_saying_so() {
+    let app = TestApp::invite_only();
+
+    let response = app.respond(sign_up("Bob", "bob-password")).await;
+
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        location(&response),
+        format!("/login?{CARRIED}&nonce=the-nonce&error=invitation_required")
+    );
+    assert!(app.sign_in.accounts.created().is_empty());
+    assert!(app.sign_in.mailer.sent().is_empty());
+}

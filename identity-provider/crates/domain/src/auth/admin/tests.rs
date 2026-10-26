@@ -6,7 +6,9 @@ fn root() -> Email {
     Email::parse("root@idp.test").unwrap()
 }
 
-fn held_by(holder: AddressHolder) -> Option<(Email, AddressHolder)> {
+type Configured = Option<(Email, AddressHolder)>;
+
+fn held_by(holder: AddressHolder) -> Configured {
     Some((root(), holder))
 }
 
@@ -17,11 +19,27 @@ fn create(password: &str) -> AdminBootstrap<NewAdmin> {
     })
 }
 
+fn open(
+    admin_exists: bool,
+    configured: Configured,
+    password: Option<&str>,
+) -> AdminBootstrap<NewAdmin> {
+    admin_bootstrap(Registrations::Open, admin_exists, configured, password)
+}
+
+fn invite(
+    admin_exists: bool,
+    configured: Configured,
+    password: Option<&str>,
+) -> AdminBootstrap<NewAdmin> {
+    admin_bootstrap(Registrations::Invite, admin_exists, configured, password)
+}
+
 #[test]
 fn an_address_nobody_has_is_given_to_a_new_admin_account_with_the_password() {
     for admin_exists in [false, true] {
         assert_eq!(
-            admin_bootstrap(admin_exists, held_by(AddressHolder::Nobody), PASSWORD),
+            open(admin_exists, held_by(AddressHolder::Nobody), PASSWORD),
             create("admin-password")
         );
     }
@@ -29,7 +47,7 @@ fn an_address_nobody_has_is_given_to_a_new_admin_account_with_the_password() {
 
 #[test]
 fn a_new_admin_account_needs_a_password_within_the_rule() {
-    let nobody = |password| admin_bootstrap(false, held_by(AddressHolder::Nobody), password);
+    let nobody = |password| open(false, held_by(AddressHolder::Nobody), password);
 
     assert_eq!(
         nobody(None),
@@ -44,7 +62,7 @@ fn a_new_admin_account_needs_a_password_within_the_rule() {
 
 #[test]
 fn the_admin_holding_the_address_is_left_alone_and_a_password_still_set_called_unused() {
-    let admin = |password| admin_bootstrap(true, held_by(AddressHolder::Admin), password);
+    let admin = |password| open(true, held_by(AddressHolder::Admin), password);
 
     assert_eq!(
         admin(PASSWORD),
@@ -69,11 +87,11 @@ fn the_admin_holding_the_address_is_left_alone_and_a_password_still_set_called_u
 #[test]
 fn an_account_holding_the_address_is_never_promoted_and_a_missing_admin_said_so() {
     assert_eq!(
-        admin_bootstrap(false, held_by(AddressHolder::NotAdmin), PASSWORD),
+        open(false, held_by(AddressHolder::NotAdmin), PASSWORD),
         AdminBootstrap::NotPromoted { no_admin: true }
     );
     assert_eq!(
-        admin_bootstrap(true, held_by(AddressHolder::NotAdmin), None),
+        open(true, held_by(AddressHolder::NotAdmin), None),
         AdminBootstrap::NotPromoted { no_admin: false }
     );
 }
@@ -81,15 +99,56 @@ fn an_account_holding_the_address_is_never_promoted_and_a_missing_admin_said_so(
 #[test]
 fn without_an_address_an_instance_with_no_admin_is_said_so_and_one_with_an_admin_left_alone() {
     for password in [PASSWORD, None] {
+        assert_eq!(open(false, None, password), AdminBootstrap::NoAdmin);
+        assert_eq!(open(true, None, password), AdminBootstrap::Settled);
+    }
+}
+
+#[test]
+fn an_invite_only_instance_without_an_admin_is_refused() {
+    assert_eq!(
+        invite(false, None, PASSWORD),
+        AdminBootstrap::Refused(AdminRefusal::NoAdminToInvite {
+            not_promoted: false
+        })
+    );
+}
+
+#[test]
+fn an_invite_only_instance_whose_admin_address_is_a_members_and_no_admin_is_refused() {
+    assert_eq!(
+        invite(false, held_by(AddressHolder::NotAdmin), PASSWORD),
+        AdminBootstrap::Refused(AdminRefusal::NoAdminToInvite { not_promoted: true })
+    );
+    assert_eq!(
+        invite(true, held_by(AddressHolder::NotAdmin), PASSWORD),
+        AdminBootstrap::NotPromoted { no_admin: false },
+        "an admin there already lets people in"
+    );
+}
+
+#[test]
+fn an_invite_only_instance_with_its_admin_or_creating_one_starts_as_an_open_one_does() {
+    for (admin_exists, configured) in [
+        (false, held_by(AddressHolder::Nobody)),
+        (true, held_by(AddressHolder::Nobody)),
+        (true, held_by(AddressHolder::Admin)),
+        (true, None),
+    ] {
         assert_eq!(
-            admin_bootstrap(false, None, password),
-            AdminBootstrap::NoAdmin
-        );
-        assert_eq!(
-            admin_bootstrap(true, None, password),
-            AdminBootstrap::Settled
+            invite(admin_exists, configured.clone(), PASSWORD),
+            open(admin_exists, configured, PASSWORD),
         );
     }
+    assert_eq!(invite(true, None, None), AdminBootstrap::Settled);
+}
+
+#[test]
+fn an_invite_only_instance_creating_its_admin_still_needs_a_password_within_the_rule() {
+    assert_eq!(
+        invite(false, held_by(AddressHolder::Nobody), None),
+        AdminBootstrap::Refused(AdminRefusal::NoPassword)
+    );
 }
 
 #[test]

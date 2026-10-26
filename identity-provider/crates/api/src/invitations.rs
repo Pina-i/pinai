@@ -63,6 +63,11 @@ fn refusal(error: AuthError) -> ApiError {
             "Only an admin may do this",
         ),
         AuthError::InvitationUnusable => ApiError::not_found("Invitation not found"),
+        AuthError::RegistrationsOpen => ApiError::new(
+            StatusCode::CONFLICT,
+            "registrations_open",
+            "This instance is open: people sign up themselves",
+        ),
         other => ApiError::internal(anyhow::Error::from(other)),
     }
 }

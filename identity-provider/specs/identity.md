@@ -150,7 +150,7 @@ every fediverse server publishes about itself.
 | Name | `INSTANCE_NAME`, trimmed, 60 characters at most; unset or blank, the instance's domain |
 | Description | `INSTANCE_DESCRIPTION`, trimmed, 280 characters at most; unset or blank, none |
 | People | Every local account, counted at most a minute ago (`Accounts::count`) |
-| Open registration | Always: there is no way to close it yet |
+| Open registration | `REGISTRATIONS`: yes for `open`, no for `invite`, the default (`identity-provider/specs/auth.md § 6`) |
 
 A name or a description past its limit stops the instance at startup (`InstanceIntro`).
 
@@ -172,6 +172,7 @@ A name or a description past its limit stops the instance at startup (`InstanceI
 }
 ```
 
-`nodeDescription` is left out when there is none. The web client's landing reads it while the user
+`openRegistrations` follows `REGISTRATIONS`: `true` on an open instance, `false` on an invite-only
+one. `nodeDescription` is left out when there is none. The web client's landing reads it while the user
 types an instance's address, to show `✓ resolved · Aotearoa · 1,204 people` before sending them
 there; a client tells a Pīna'i instance by `software.name`.

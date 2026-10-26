@@ -237,18 +237,24 @@ pub async fn login_page(
         Ok(client) => client,
         Err(error) => return pages.misdirected(error, appearance).await,
     };
-    let register = query.tab.as_deref() == Some("register");
-    let (alert, bad) = match query.error.as_deref().and_then(login_alert) {
+    let host = pages.host();
+    let frame = pages.frame(appearance).await?;
+    // An invite-only instance has no Register tab to show, whatever the link asks.
+    let register = query.tab.as_deref() == Some("register") && frame.registrations_open();
+    let (alert, bad) = match query
+        .error
+        .as_deref()
+        .and_then(|code| login_alert(code, &host))
+    {
         Some((alert, field)) => (Some(alert), field),
         None => (None, ""),
     };
     let pairs = carried(&request, appearance, &[]);
     let mut on_register = pairs.clone();
     on_register.push(("tab", "register"));
-    let host = pages.host();
     let app_host = client.id.authority();
     let page = LoginPage {
-        frame: pages.frame(appearance).await?,
+        frame,
         back: cancel(&request),
         app_name: client.name,
         app_host: (app_host != host).then_some(app_host),

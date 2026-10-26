@@ -60,7 +60,9 @@ async fn join(app: &TestApp, token: &str, email: &str) -> reqwest::Response {
         .unwrap()
 }
 
+/// An invite-only instance, and its admin.
 fn with_admin(config: &mut app::configuration::Config) {
+    config.registrations = domain::auth::Registrations::Invite;
     config.admin_email = Some(ADMIN.into());
     config.admin_password = Some(PASSWORD.into());
 }
@@ -173,5 +175,55 @@ async fn without_a_web_app_someone_invited_is_told_to_sign_in_and_does_so_withou
     let tokens = app.tokens_for(&query_of(&landed)["code"]).await;
     assert!(tokens["access_token"].is_string(), "{tokens}");
     assert_eq!(app.mail.count_for(INVITEE), 0, "no code was mailed");
+    app.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn an_invite_only_instance_refuses_an_uninvited_sign_up_and_says_why() {
+    let app = spawn_app_with(with_admin).await;
+    let typed = [
+        ("display_name", "Hōkū"),
+        ("email", INVITEE),
+        ("password", PASSWORD),
+    ];
+
+    let form = app.form("/register-and-login", &typed).await;
+    let json = app
+        .http
+        .post(format!("{}/register", app.address))
+        .json(&serde_json::json!({
+            "display_name": "Hōkū", "email": INVITEE, "password": PASSWORD,
+        }))
+        .send()
+        .await
+        .unwrap();
+    let (json_status, refusal) = (json.status(), json.json::<Value>().await.unwrap());
+
+    assert_eq!(form.status(), 303);
+    let back = location(&form);
+    assert_eq!(query_of(&back)["error"], "invitation_required", "{back}");
+    let (status, login) = page(&app, &back).await;
+    assert_eq!(status, 200);
+    for shown in [
+        format!("Accounts on {} are by invitation only", app.domain),
+        "Invite only</span>".to_owned(),
+        "invite only</span>".to_owned(),
+    ] {
+        assert!(login.contains(&shown), "{shown} not in {login}");
+    }
+    assert!(!login.contains("Create account"), "{login}");
+    assert_eq!(json_status, 403);
+    assert_eq!(refusal["error"], "invitation_required");
+    let (_, nodeinfo) = page(&app, "/nodeinfo/2.1").await;
+    let nodeinfo: Value = serde_json::from_str(&nodeinfo).unwrap();
+    assert_eq!(nodeinfo["openRegistrations"], false);
+    assert_eq!(
+        app.count(&format!(
+            "SELECT count(*) FROM users WHERE email = '{INVITEE}'"
+        ))
+        .await,
+        0
+    );
+    assert_eq!(app.mail.count_for(INVITEE), 0);
     app.stop().await.unwrap();
 }

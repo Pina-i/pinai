@@ -1,6 +1,6 @@
 use crate::profile::DisplayName;
 
-use super::{AuthError, Email, check_password};
+use super::{AuthError, Email, Registrations, check_password};
 
 /// The name the instance's first admin account is created with.
 pub fn admin_display_name() -> DisplayName {
@@ -64,9 +64,9 @@ pub enum AdminBootstrap<Account> {
     /// reverted. `password_unused` when a password is still configured.
     AlreadyAdmin { password_unused: bool },
     /// An account that is not an admin has the address, and is not made one: a typo must not
-    /// make a stranger admin. `no_admin` when the instance has none at all.
+    /// make a stranger admin. `no_admin` when the instance, open, has none at all.
     NotPromoted { no_admin: bool },
-    /// No address is configured, and the instance has no admin.
+    /// No address is configured, and the instance has no admin: an open instance starts so.
     NoAdmin,
     /// No address is configured, and the instance has its admin.
     Settled,
@@ -97,10 +97,35 @@ pub enum AdminRefusal {
     PasswordTooShort,
     /// The password breaks another of the instance's rules.
     PasswordRefused(String),
+    /// An invite-only instance without an admin: nobody could ever get in. `not_promoted` when
+    /// the configured address is an account that is not an admin.
+    NoAdminToInvite {
+        not_promoted: bool,
+    },
 }
 
 /// What starting does about the admin: `configured` is the admin's address, with who has it.
+/// An invite-only instance needs an admin; an open one starts without.
 pub fn admin_bootstrap(
+    registrations: Registrations,
+    admin_exists: bool,
+    configured: Option<(Email, AddressHolder)>,
+    password: Option<&str>,
+) -> AdminBootstrap<NewAdmin> {
+    match (registrations, settle(admin_exists, configured, password)) {
+        (Registrations::Invite, AdminBootstrap::NoAdmin) => {
+            AdminBootstrap::Refused(AdminRefusal::NoAdminToInvite {
+                not_promoted: false,
+            })
+        }
+        (Registrations::Invite, AdminBootstrap::NotPromoted { no_admin: true }) => {
+            AdminBootstrap::Refused(AdminRefusal::NoAdminToInvite { not_promoted: true })
+        }
+        (_, bootstrap) => bootstrap,
+    }
+}
+
+fn settle(
     admin_exists: bool,
     configured: Option<(Email, AddressHolder)>,
     password: Option<&str>,

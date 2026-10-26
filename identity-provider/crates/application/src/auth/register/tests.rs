@@ -2,7 +2,7 @@ use domain::auth::testing::{Mail, PlainHasher, a_request};
 use domain::auth::{AuthorizationRequest, ClientId, Email, SignInAccount};
 use domain::identity::{ActorUri, Handle};
 
-use crate::auth::world::{now, world};
+use crate::auth::world::{invite_only, now, world};
 
 use super::*;
 
@@ -156,4 +156,29 @@ async fn a_registration_continuing_a_sign_in_is_refused_for_a_request_not_from_a
     );
     assert!(fine.is_ok(), "{fine:?}");
     assert_eq!(w.accounts.created().len(), 1);
+}
+
+#[tokio::test]
+async fn an_invite_only_instance_refuses_a_registration_creating_and_mailing_nothing() {
+    let w = invite_only().await;
+    let taken = RegisterCommand {
+        email: w.alice.email.clone(),
+        ..bob()
+    };
+
+    let refusals = [
+        w.register.execute(bob(), None, now()).await,
+        w.register.execute(bob(), Some(&a_request()), now()).await,
+        w.register.execute(taken, None, now()).await,
+    ];
+
+    for refused in refusals {
+        assert!(
+            matches!(refused, Err(AuthError::InvitationRequired)),
+            "whatever was typed, the instance tells nothing of its accounts: {refused:?}"
+        );
+    }
+    assert!(w.accounts.created().is_empty());
+    assert!(w.signup_codes.issued().is_empty());
+    assert!(w.mailer.sent().is_empty());
 }

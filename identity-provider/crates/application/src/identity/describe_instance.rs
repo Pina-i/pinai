@@ -1,5 +1,6 @@
 use std::sync::{Arc, Mutex};
 
+use domain::auth::Registrations;
 use domain::identity::{Accounts, AccountsError, InstanceIntro};
 use time::{Duration, OffsetDateTime};
 
@@ -10,7 +11,7 @@ pub struct InstanceFacts {
     pub description: Option<String>,
     /// Its accounts, as counted at most a minute ago.
     pub people: u64,
-    /// Anyone may sign up: there is no way to close registration yet.
+    /// Anyone may sign up: `REGISTRATIONS=open`.
     pub open_registrations: bool,
 }
 
@@ -18,6 +19,7 @@ pub struct InstanceFacts {
 /// so asking again costs nothing.
 pub struct DescribeInstance {
     intro: InstanceIntro,
+    registrations: Registrations,
     accounts: Arc<dyn Accounts>,
     counted: Mutex<Option<(OffsetDateTime, u64)>>,
 }
@@ -25,9 +27,14 @@ pub struct DescribeInstance {
 impl DescribeInstance {
     pub const COUNT_KEPT: Duration = Duration::minutes(1);
 
-    pub fn new(intro: InstanceIntro, accounts: Arc<dyn Accounts>) -> Self {
+    pub fn new(
+        intro: InstanceIntro,
+        registrations: Registrations,
+        accounts: Arc<dyn Accounts>,
+    ) -> Self {
         Self {
             intro,
+            registrations,
             accounts,
             counted: Mutex::new(None),
         }
@@ -47,7 +54,7 @@ impl DescribeInstance {
             name: self.intro.name().to_owned(),
             description: self.intro.description().map(str::to_owned),
             people,
-            open_registrations: true,
+            open_registrations: self.registrations.are_open(),
         })
     }
 }

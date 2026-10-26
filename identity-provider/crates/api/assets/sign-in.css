@@ -613,6 +613,9 @@ input {
 .facts .open {
     color: var(--on);
 }
+.facts .invite-only {
+    color: var(--idle);
+}
 .band {
     height: 10px;
     max-width: 300px;
@@ -728,6 +731,9 @@ input {
     background: var(--acc);
     color: var(--accink);
     font-weight: 700;
+}
+.tab--off {
+    cursor: default;
 }
 .stack {
     display: flex;

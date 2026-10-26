@@ -6,7 +6,7 @@ use domain::auth::{
     ClientSignIns, INVITATION_TTL, Invitations, RevokedReason, SessionKind, Sessions, SignInAccount,
 };
 
-use crate::auth::world::{World, now, world};
+use crate::auth::world::{World, invite_only, now, world};
 use crate::auth::{AuthorizeCommand, Authorized};
 
 use super::*;
@@ -159,6 +159,7 @@ async fn without_a_web_app_the_account_is_ready_and_nobody_signed_in() {
     let (_, token) = invited(&w).await;
     let register = RegisterInvited::new(
         w.origin.clone(),
+        Registrations::Open,
         None,
         w.accounts.clone(),
         w.accounts.clone(),
@@ -209,6 +210,7 @@ async fn an_account_created_but_not_signed_in_is_ready_to_sign_in_from_the_app()
     let (_, token) = invited(&w).await;
     let register = RegisterInvited::new(
         w.origin.clone(),
+        Registrations::Open,
         Some(WebApp::parse("http://localhost:5173").unwrap()),
         w.accounts.clone(),
         w.accounts.clone(),
@@ -275,6 +277,7 @@ async fn an_invitation_spent_after_it_was_found_lets_nobody_in() {
     let elsewhere = Arc::new(InMemorySignInAccounts::default());
     let register = RegisterInvited::new(
         w.origin.clone(),
+        Registrations::Open,
         None,
         elsewhere.clone(),
         elsewhere.clone(),
@@ -364,4 +367,18 @@ async fn an_unknown_or_expired_invitation_lets_nobody_in() {
         "{expired:?}"
     );
     assert!(w.accounts.created().is_empty());
+}
+
+#[tokio::test]
+async fn an_invitation_lets_its_person_in_whether_the_instance_is_open_or_invite_only() {
+    for w in [world().await, invite_only().await] {
+        let (_, token) = invited(&w).await;
+
+        let joined = w
+            .register_invited
+            .execute(&token, hoku(), None, now())
+            .await;
+
+        assert!(matches!(joined, Ok(Joined::InWebApp { .. })), "{joined:?}");
+    }
 }

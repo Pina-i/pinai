@@ -13,7 +13,7 @@ async fn an_instance_is_described_by_its_intro_and_its_accounts() {
     let intro = InstanceIntro::new(&origin, Some("Aotearoa"), Some("Design people.")).unwrap();
     let accounts = Arc::new(InMemoryAccounts::with([account("alice"), account("bob")]));
 
-    let facts = DescribeInstance::new(intro, accounts)
+    let facts = DescribeInstance::new(intro, Registrations::Open, accounts)
         .execute(now())
         .await
         .unwrap();
@@ -35,6 +35,7 @@ async fn the_accounts_are_counted_again_a_minute_on() {
     let accounts = Arc::new(InMemoryAccounts::with([account("alice")]));
     let describe = DescribeInstance::new(
         InstanceIntro::new(&origin, None, None).unwrap(),
+        Registrations::Open,
         accounts.clone(),
     );
 
@@ -50,4 +51,23 @@ async fn the_accounts_are_counted_again_a_minute_on() {
         .unwrap();
 
     assert_eq!((soon.people, later.people), (1, 2));
+}
+
+#[tokio::test]
+async fn an_instance_says_whether_its_registrations_are_open() {
+    let origin = InstanceOrigin::parse("http://localhost:8080").unwrap();
+    let described = async |registrations| {
+        DescribeInstance::new(
+            InstanceIntro::new(&origin, None, None).unwrap(),
+            registrations,
+            Arc::new(InMemoryAccounts::default()),
+        )
+        .execute(now())
+        .await
+        .unwrap()
+        .open_registrations
+    };
+
+    assert!(described(Registrations::Open).await);
+    assert!(!described(Registrations::Invite).await);
 }
