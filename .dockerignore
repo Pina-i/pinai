@@ -6,7 +6,8 @@ docs/
 deploy/
 
 # Never let runtime secrets into a build context.
-**/keys/
+identity-provider/keys/
+**/*.pem
 .env
 .env.*
 !.env.example

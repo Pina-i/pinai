@@ -10,5 +10,7 @@ docs/
 !.env.example
 **/docker/.env
 **/docker/.env.*
-keys/
+# Anchored: a bare `keys/` also hid source modules named keys (app/src/keys/).
+/identity-provider/keys/
+*.pem
 deploy/data/
