@@ -115,19 +115,22 @@ impl Application {
         let broker_arc = Arc::new(broker);
 
         // Connects on the first send: the IdP boots even when the relay is not up yet.
-        let mailer: Arc<dyn domain::auth::SignupMailer> = Arc::new(
+        let smtp = Arc::new(
             infrastructure::email::SmtpSignupMailer::new(infrastructure::email::SmtpSettings {
                 host: config.smtp_host.clone(),
                 port: config.smtp_port,
                 username: config.smtp_username.clone(),
                 password: config.smtp_password.clone(),
                 from: config.smtp_from.clone(),
-                starttls: config.smtp_starttls,
+                tls: config.smtp_tls,
                 issuer_host: config.domain.clone(),
             })
             .map_err(|e| anyhow::anyhow!("email sender init failed: {e}"))?,
         );
-        info!(host = %config.smtp_host, port = config.smtp_port, "email sender ready");
+        info!(host = %config.smtp_host, port = config.smtp_port, tls = ?config.smtp_tls, "email sender ready");
+        // A wrong relay would otherwise show only when a sign-up's code never arrives.
+        tasks.spawn(check_mail_relay(smtp.clone(), stop.clone()));
+        let mailer: Arc<dyn domain::auth::SignupMailer> = smtp;
 
         let email_otp_pepper = Arc::new(config.email_otp_pepper.clone());
 
@@ -1080,5 +1083,21 @@ impl Application {
         }
         info!("stopped");
         Ok(())
+    }
+}
+
+async fn check_mail_relay(
+    smtp: Arc<infrastructure::email::SmtpSignupMailer>,
+    stop: CancellationToken,
+) {
+    tokio::select! {
+        checked = smtp.check() => match checked {
+            Ok(()) => info!("SMTP relay reachable"),
+            Err(error) => warn!(
+                error = %format!("{error:#}"),
+                "SMTP relay unusable: sign-up codes can't be mailed"
+            ),
+        },
+        () = stop.cancelled() => {}
     }
 }

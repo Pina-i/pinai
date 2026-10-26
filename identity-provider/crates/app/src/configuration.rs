@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use infrastructure::email::SmtpTls;
+
 /// Deployment environment. Controls scheme selection (http vs https) for the
 /// local issuer URL **and** for outbound calls to peer IdPs (federation
 /// delivery, presence batch poll, presence SSE). Also drives the `Secure`
@@ -85,7 +87,8 @@ pub struct Config {
     pub smtp_password: String,
     /// RFC 5322 `From` header (e.g. `Pīna'i <no-reply@idp.alice.com>`).
     pub smtp_from: String,
-    pub smtp_starttls: bool,
+    /// `SMTP_TLS`: `none`, `starttls` or `tls`; plain in development, STARTTLS in production.
+    pub smtp_tls: SmtpTls,
     /// HMAC pepper for email OTP code hashes. Required — startup fails if unset.
     /// Same value also peppers TOTP recovery codes (one secret to manage).
     pub email_otp_pepper: Vec<u8>,
@@ -195,18 +198,12 @@ impl Config {
             )?),
 
             smtp_host: env_var("SMTP_HOST").unwrap_or_else(|_| "mailpit".into()),
-            smtp_port: env_var("SMTP_PORT")
-                .unwrap_or_else(|_| "1025".into())
-                .parse::<u16>()
-                .map_err(|e| ConfigError::InvalidPort(e.to_string()))?,
+            smtp_port: smtp_port(env_var("SMTP_PORT").ok())?,
             smtp_username: env_var("SMTP_USERNAME").unwrap_or_default(),
             smtp_password: env_var("SMTP_PASSWORD").unwrap_or_default(),
             smtp_from: env_var("SMTP_FROM")
                 .unwrap_or_else(|_| "Pīna'i <no-reply@localhost>".into()),
-            smtp_starttls: env_var("SMTP_STARTTLS")
-                .ok()
-                .map(|v| matches!(v.to_lowercase().as_str(), "true" | "1" | "yes"))
-                .unwrap_or(false),
+            smtp_tls: smtp_tls(environment, env_var("SMTP_TLS").ok())?,
             email_otp_pepper: parse_email_otp_pepper()?,
         })
     }
@@ -276,6 +273,30 @@ fn parse_env_u64(key: &'static str, default: u64) -> Result<u64, ConfigError> {
 }
 
 /// An empty value counts as unset.
+/// Empty counts as unset: a hosted instance's `.env` leaves it so when it has no relay.
+fn smtp_port(raw: Option<String>) -> Result<u16, ConfigError> {
+    match raw.filter(|v| !v.is_empty()) {
+        None => Ok(1025),
+        Some(v) => v
+            .parse()
+            .map_err(|e: std::num::ParseIntError| ConfigError::InvalidPort(e.to_string())),
+    }
+}
+
+fn smtp_tls(environment: Environment, raw: Option<String>) -> Result<SmtpTls, ConfigError> {
+    match raw.map(|v| v.to_lowercase()).as_deref() {
+        None | Some("") if environment.is_dev() => Ok(SmtpTls::None),
+        None | Some("") => Ok(SmtpTls::StartTls),
+        Some("none") => Ok(SmtpTls::None),
+        Some("starttls") => Ok(SmtpTls::StartTls),
+        Some("tls") => Ok(SmtpTls::Tls),
+        Some(other) => Err(ConfigError::InvalidValue(
+            "SMTP_TLS",
+            format!("'{other}' (expected none, starttls or tls)"),
+        )),
+    }
+}
+
 fn session_secret(environment: Environment, raw: Option<String>) -> Result<String, ConfigError> {
     let secret = match raw.filter(|v| !v.is_empty()) {
         Some(secret) => secret,

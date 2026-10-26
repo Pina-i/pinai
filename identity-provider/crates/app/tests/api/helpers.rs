@@ -130,7 +130,7 @@ pub async fn spawn_app() -> TestApp {
         smtp_username: String::new(),
         smtp_password: String::new(),
         smtp_from: "Pīna'i <no-reply@journey.test>".into(),
-        smtp_starttls: false,
+        smtp_tls: infrastructure::email::SmtpTls::None,
         email_otp_pepper: rand::random::<[u8; 32]>().to_vec(),
     };
     let application = Application::build(config, listener)

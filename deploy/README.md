@@ -11,8 +11,8 @@ their address on your instance; there is no client to host.
 - A domain for the instance, its DNS pointing at the server, and ports 80 and 443
   open. The domain is part of every account's address (`alice_xk9mp@your.domain`)
   and cannot change once people have signed up.
-- An SMTP relay that accepts STARTTLS on port 587 (your provider's, Mailgun,
-  SES, a Postfix of your own…): sign-up codes are mailed.
+- An SMTP relay, over STARTTLS (port 587) or TLS (port 465): sign-up codes are
+  mailed. See [Mail relay](#mail-relay).
 
 ## Install
 
@@ -28,6 +28,35 @@ The identity provider migrates the database and logs `listening`. Caddy takes a
 few seconds more for the certificate; then `https://your.domain/.well-known/nodeinfo`
 answers. Settings live in `.env` (see `.env.example`); after changing one,
 `docker compose up -d` applies it.
+
+## Mail relay
+
+The instance mails sign-up codes through a relay rather than delivering them
+itself: mail sent straight from a server's own address mostly lands in spam,
+when the host lets it out at all. A transactional relay handles a small
+instance's mail within its free tier; it asks you to verify the domain of
+`SMTP_FROM` with a few DNS records, which is what gets the codes delivered.
+
+| Relay | `SMTP_HOST` | `SMTP_PORT` / `SMTP_TLS` | `SMTP_USERNAME` / `SMTP_PASSWORD` |
+|---|---|---|---|
+| Amazon SES | `email-smtp.<region>.amazonaws.com` | `587` / `starttls` | SMTP credentials created in the SES console, not IAM keys |
+| Brevo | `smtp-relay.brevo.com` | `587` / `starttls` | the SMTP login and an SMTP key, from its SMTP & API settings |
+| Mailgun | `smtp.mailgun.org` (`smtp.eu.mailgun.org` in the EU) | `587` / `starttls` | the sending domain's SMTP credentials |
+| Postmark | `smtp.postmarkapp.com` | `587` / `starttls` | the server's API token, as both |
+| Resend | `smtp.resend.com` | `465` / `tls` | `resend` / an API key |
+| Gmail | `smtp.gmail.com` | `587` / `starttls` | the address / an app password |
+| Fastmail | `smtp.fastmail.com` | `465` / `tls` | the address / an app password |
+
+A personal mailbox (Gmail, Fastmail…) works for a small instance, within its
+sending limits; `SMTP_FROM` must then be that mailbox's address. The provider's
+own documentation has the current details.
+
+On every start the identity provider connects to the relay, signs in and logs
+`SMTP relay reachable`, or `SMTP relay unusable` with the reason:
+
+```bash
+docker compose logs idp | grep SMTP
+```
 
 ## Upgrade
 

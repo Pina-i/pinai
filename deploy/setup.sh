@@ -86,6 +86,13 @@ domain=$(current DOMAIN)
 
 ask SMTP_HOST "SMTP relay host (empty: no mail, sign-ups can't complete)"
 if [ -n "$(current SMTP_HOST)" ]; then
+  ask SMTP_PORT "SMTP port (587 for STARTTLS, 465 for TLS)" 587
+  if [ -z "$(current SMTP_TLS)" ]; then
+    case "$(current SMTP_PORT)" in
+      465) store SMTP_TLS tls ;;
+      *) store SMTP_TLS starttls ;;
+    esac
+  fi
   ask SMTP_USERNAME "SMTP username (empty: none)"
   if [ -n "$(current SMTP_USERNAME)" ] && [ -z "$(current SMTP_PASSWORD)" ]; then
     password=${SMTP_PASSWORD:-}

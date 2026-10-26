@@ -697,9 +697,11 @@ Every hour — and once at startup — the IdP deletes:
 - **`Alice@example.com` registering after `alice@example.com`** is told the address is
   registered.
 
-### Dev SMTP
+### SMTP
 
-Mailpit ships in `docker/docker-compose.yml` (`MP_SMTP_AUTH_ACCEPT_ANY=true`, `MP_SMTP_AUTH_ALLOW_INSECURE=true`). Web UI on `MAILPIT_UI_PORT` (Alice 8027, Bob 8028) lets a developer click through to the rendered email and copy the code. Production points `SMTP_HOST`/`SMTP_PORT` at a real relay; set `SMTP_STARTTLS=true` for TLS-enabled relays. `POST /dev/send-test-email` (JSON `{ to, display_name? }`) is mounted only when `IDP_ENV=development` and mails a fixed `123456` code to check the SMTP path.
+Codes go out through a relay, `SMTP_HOST`/`SMTP_PORT`, over `SMTP_TLS`: `none` (plain), `starttls` (port 587) or `tls` (port 465). Unset, it is `none` in development and `starttls` in production. The connection is opened on the first send, so the instance starts whether or not the relay is up; an empty `SMTP_HOST` means no relay, and every code then fails to send. In the background of every start, the IdP connects, signs in and quits, logging `SMTP relay reachable` or `SMTP relay unusable` with the reason, so a wrong relay shows before anyone signs up.
+
+Mailpit ships in the root `compose.yaml` (`MP_SMTP_AUTH_ACCEPT_ANY=true`, `MP_SMTP_AUTH_ALLOW_INSECURE=true`). Web UI on `MAILPIT_UI_PORT` (Alice 8025, Bob 8026) lets a developer click through to the rendered email and copy the code. `POST /dev/send-test-email` (JSON `{ to, display_name? }`) is mounted only when `IDP_ENV=development` and mails a fixed `123456` code to check the SMTP path.
 
 ### `/userinfo`
 

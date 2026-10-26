@@ -30,7 +30,7 @@ fn config() -> Config {
         smtp_username: String::new(),
         smtp_password: String::new(),
         smtp_from: "no-reply@alice.com".into(),
-        smtp_starttls: false,
+        smtp_tls: SmtpTls::StartTls,
         email_otp_pepper: vec![0u8; 32],
         e2ee_keypackage_cap_per_device: 100,
         e2ee_keypackage_refill_threshold: 20,
@@ -231,6 +231,66 @@ fn development_accepts_any_session_secret() {
         session_secret(Environment::Development, Some("alice-secret".into())).unwrap(),
         "alice-secret"
     );
+}
+
+// ─── SMTP TLS ────────────────────────────────────────────────────────────────
+
+#[test]
+fn production_mails_over_starttls_unless_told_otherwise() {
+    for raw in [None, Some(String::new())] {
+        assert_eq!(
+            smtp_tls(Environment::Production, raw).unwrap(),
+            SmtpTls::StartTls
+        );
+    }
+}
+
+#[test]
+fn development_mails_in_plain_smtp_unless_told_otherwise() {
+    assert_eq!(
+        smtp_tls(Environment::Development, None).unwrap(),
+        SmtpTls::None
+    );
+}
+
+#[test]
+fn each_tls_mode_is_read_by_its_name_in_any_case() {
+    for (raw, mode) in [
+        ("none", SmtpTls::None),
+        ("starttls", SmtpTls::StartTls),
+        ("tls", SmtpTls::Tls),
+        ("TLS", SmtpTls::Tls),
+    ] {
+        assert_eq!(
+            smtp_tls(Environment::Production, Some(raw.into())).unwrap(),
+            mode,
+            "{raw}"
+        );
+    }
+}
+
+#[test]
+fn an_unset_or_empty_smtp_port_is_mailpits() {
+    for raw in [None, Some(String::new())] {
+        assert_eq!(smtp_port(raw).unwrap(), 1025);
+    }
+}
+
+#[test]
+fn an_smtp_port_is_read_and_a_bad_one_refused() {
+    assert_eq!(smtp_port(Some("465".into())).unwrap(), 465);
+    assert!(matches!(
+        smtp_port(Some("submission".into())),
+        Err(ConfigError::InvalidPort(_))
+    ));
+}
+
+#[test]
+fn an_unknown_tls_mode_is_refused() {
+    assert!(matches!(
+        smtp_tls(Environment::Production, Some("ssl".into())),
+        Err(ConfigError::InvalidValue("SMTP_TLS", _))
+    ));
 }
 
 // ─── Environment reading ─────────────────────────────────────────────────────

@@ -34,7 +34,8 @@ You need:
 - a Linux server, amd64 or arm64, with Docker and its Compose plugin;
 - a domain pointing at the server, with ports 80 and 443 open. It becomes part of
   every account's address (`alice_xk9mp@your.domain`), so it cannot change later;
-- an SMTP relay accepting STARTTLS on port 587: sign-up codes are mailed.
+- an SMTP relay, over STARTTLS (port 587) or TLS (port 465): sign-up codes are
+  mailed. `deploy/README.md` lists some, with their settings.
 
 Then, on the server:
 
