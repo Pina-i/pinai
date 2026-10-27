@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use domain::auth::{OFFICIAL_WEB_APP_ORIGIN, Registrations, WebApp};
-use domain::identity::host_of;
+use domain::identity::{PINAI_SOURCE_URL, SourceUrl, host_of};
 use infrastructure::email::SmtpTls;
 
 /// Deployment environment. Controls scheme selection (http vs https) for the
@@ -44,6 +44,9 @@ pub struct Config {
     pub instance_name: Option<String>,
     /// A line about the instance, shown under its name on the sign-in pages.
     pub instance_description: Option<String>,
+    /// `SOURCE_URL`: where the code this instance runs can be had, linked from NodeInfo and the
+    /// sign-in pages; Pīna'i's own repository when unset.
+    pub source_url: SourceUrl,
 
     // ── Redis (Message Broker) ───────────────────────────────────────────
     /// Redis connection URL for the event broker (Streams + pub-sub).
@@ -203,6 +206,7 @@ impl Config {
             session_secret: session_secret(environment, env_var("SESSION_SECRET")?)?,
             instance_name: env_var("INSTANCE_NAME")?,
             instance_description: env_var("INSTANCE_DESCRIPTION")?,
+            source_url: source_url(env_var("SOURCE_URL")?)?,
             redis_url: env_var("REDIS_URL")?.unwrap_or_else(|| "redis://127.0.0.1:6379".into()),
             storage_endpoint: env_var("STORAGE_ENDPOINT")?,
             storage_access_key: env_var("STORAGE_ACCESS_KEY")?,
@@ -417,6 +421,16 @@ fn web_app(environment: Environment, raw: Option<String>) -> Result<Option<WebAp
         None => OFFICIAL_WEB_APP_ORIGIN,
     };
     Ok(origin.map(|origin| WebApp::parse(origin).expect("a built-in origin")))
+}
+
+/// Unset or empty, Pīna'i's own repository: right for an instance running its code unmodified.
+fn source_url(raw: Option<String>) -> Result<SourceUrl, ConfigError> {
+    match unless_empty(raw) {
+        Some(raw) => SourceUrl::parse(&raw).map_err(|e| {
+            ConfigError::InvalidValue("SOURCE_URL", format!("'{raw}' ({})", e.reason))
+        }),
+        None => Ok(SourceUrl::parse(PINAI_SOURCE_URL).expect("a built-in URL")),
+    }
 }
 
 /// Unset or empty, no-reply at the instance's own host: a `.env` without a relay leaves

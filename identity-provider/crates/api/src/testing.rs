@@ -57,6 +57,7 @@ use domain::identity::testing::{
 };
 use domain::identity::{
     Account, Accounts, ActorUri, InstanceIntro, InstanceOrigin, RemoteActor, RemoteActors,
+    SourceUrl,
 };
 use domain::messaging::AttachmentLimits;
 use domain::messaging::testing::{
@@ -133,6 +134,9 @@ pub struct PeerFakes {
 fn web_app() -> WebApp {
     WebApp::parse("http://localhost:5173").unwrap()
 }
+
+/// Where the instance says its code is: a fork's, so nothing reads Pīna'i's own by mistake.
+pub const SOURCE: &str = "https://codeberg.org/aotearoa/pinai";
 
 /// What the actor documents publish as the instance key.
 pub const PUBLIC_KEY_PEM: &str =
@@ -288,6 +292,7 @@ impl TestApp {
         };
         let describe_instance = Arc::new(DescribeInstance::new(
             InstanceIntro::new(&origin, Some("Aotearoa"), Some("Design and type people.")).unwrap(),
+            SourceUrl::parse(SOURCE).unwrap(),
             registrations,
             accounts.clone(),
         ));

@@ -155,6 +155,7 @@ pub async fn try_spawn_app(configure: impl FnOnce(&mut Config)) -> anyhow::Resul
         session_secret: hex::encode(rand::random::<[u8; 32]>()),
         instance_name: None,
         instance_description: None,
+        source_url: domain::identity::SourceUrl::parse(domain::identity::PINAI_SOURCE_URL).unwrap(),
         redis_url: std::env::var("TEST_REDIS_URL")
             .unwrap_or_else(|_| "redis://localhost:56479".into()),
         storage_endpoint: None,

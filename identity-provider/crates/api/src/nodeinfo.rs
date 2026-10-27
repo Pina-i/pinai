@@ -23,8 +23,8 @@ pub async fn discovery(State(origin): State<InstanceOrigin>) -> Json<Value> {
     }))
 }
 
-/// `GET /nodeinfo/2.1` — the instance: its software, its accounts, whether anyone may sign up,
-/// its name and description.
+/// `GET /nodeinfo/2.1` — the instance: its software and where its code is, its accounts, whether
+/// anyone may sign up, its name and description.
 pub async fn document(State(describe): State<Arc<DescribeInstance>>) -> Result<Response, ApiError> {
     let facts = describe
         .execute(OffsetDateTime::now_utc())
@@ -39,7 +39,7 @@ pub async fn document(State(describe): State<Arc<DescribeInstance>>) -> Result<R
         "software": {
             "name": "pinai",
             "version": env!("CARGO_PKG_VERSION"),
-            "repository": "https://github.com/Pina-i/pinai",
+            "repository": facts.source.as_str(),
         },
         "protocols": ["activitypub"],
         "services": { "inbound": [], "outbound": [] },

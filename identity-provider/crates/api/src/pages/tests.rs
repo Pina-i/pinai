@@ -164,6 +164,21 @@ async fn a_page_links_the_stylesheet_and_the_script_by_their_content() {
     );
 }
 
+/// AGPL-3.0 § 13: whoever uses the instance is offered the source of the code it runs.
+#[tokio::test]
+async fn a_page_links_the_source_the_instance_runs_in_a_window_of_its_own() {
+    let app = TestApp::with([], []);
+
+    let (_, page) = TestApp::html_of(app.respond(get("/signed-out")).await).await;
+
+    assert!(
+        page.contains(
+            r#"<nav class="foot-links"><a href="https://codeberg.org/aotearoa/pinai" target="_blank" rel="noopener">↳ Source</a></nav>"#
+        ),
+        "{page}"
+    );
+}
+
 #[test]
 fn every_motif_and_font_the_stylesheet_names_is_served() {
     let css = std::str::from_utf8(ASSETS[0].2).unwrap();

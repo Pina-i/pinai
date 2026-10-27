@@ -600,6 +600,7 @@ impl Application {
         let (reset_requests, reset_queue) = api::background::reset_requests();
         let describe_instance = Arc::new(application::identity::DescribeInstance::new(
             intro,
+            config.source_url.clone(),
             config.registrations,
             Arc::clone(&accounts),
         ));

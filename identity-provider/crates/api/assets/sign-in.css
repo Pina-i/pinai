@@ -1288,6 +1288,27 @@ button.tlink {
 .tlink:hover {
     color: var(--foreground);
 }
+/* The labs' footer links (reset-lab, `FootLinks`). */
+.foot-links {
+    display: flex;
+    gap: 20px;
+}
+.auth-form > .foot-links {
+    margin-top: 34px;
+}
+.foot-links a {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--muted-foreground);
+    text-decoration: none;
+    transition: color 150ms ease;
+}
+.foot-links a:hover,
+.foot-links a:focus-visible {
+    color: var(--foreground);
+}
 
 /* Below the split, the columns stack: the instance first, as AuthShell does. */
 @media (max-width: 1023px) {

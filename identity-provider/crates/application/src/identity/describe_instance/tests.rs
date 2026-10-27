@@ -1,19 +1,24 @@
-use domain::identity::InstanceOrigin;
 use domain::identity::testing::{InMemoryAccounts, account};
+use domain::identity::{InstanceOrigin, PINAI_SOURCE_URL};
 
 use super::*;
+
+fn pinai() -> SourceUrl {
+    SourceUrl::parse(PINAI_SOURCE_URL).unwrap()
+}
 
 fn now() -> OffsetDateTime {
     OffsetDateTime::from_unix_timestamp(1_790_000_000).unwrap()
 }
 
 #[tokio::test]
-async fn an_instance_is_described_by_its_intro_and_its_accounts() {
+async fn an_instance_is_described_by_its_intro_its_source_and_its_accounts() {
     let origin = InstanceOrigin::parse("http://localhost:8080").unwrap();
     let intro = InstanceIntro::new(&origin, Some("Aotearoa"), Some("Design people.")).unwrap();
+    let source = SourceUrl::parse("https://codeberg.org/aotearoa/pinai").unwrap();
     let accounts = Arc::new(InMemoryAccounts::with([account("alice"), account("bob")]));
 
-    let facts = DescribeInstance::new(intro, Registrations::Open, accounts)
+    let facts = DescribeInstance::new(intro, source.clone(), Registrations::Open, accounts)
         .execute(now())
         .await
         .unwrap();
@@ -25,6 +30,7 @@ async fn an_instance_is_described_by_its_intro_and_its_accounts() {
             description: Some("Design people.".to_owned()),
             people: 2,
             open_registrations: true,
+            source,
         }
     );
 }
@@ -35,6 +41,7 @@ async fn the_accounts_are_counted_again_a_minute_on() {
     let accounts = Arc::new(InMemoryAccounts::with([account("alice")]));
     let describe = DescribeInstance::new(
         InstanceIntro::new(&origin, None, None).unwrap(),
+        pinai(),
         Registrations::Open,
         accounts.clone(),
     );
@@ -59,6 +66,7 @@ async fn an_instance_says_whether_its_registrations_are_open() {
     let described = async |registrations| {
         DescribeInstance::new(
             InstanceIntro::new(&origin, None, None).unwrap(),
+            pinai(),
             registrations,
             Arc::new(InMemoryAccounts::default()),
         )

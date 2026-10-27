@@ -45,7 +45,7 @@ async fn an_instances_nodeinfo_names_it_and_counts_its_accounts() {
             "software": {
                 "name": "pinai",
                 "version": env!("CARGO_PKG_VERSION"),
-                "repository": "https://github.com/Pina-i/pinai",
+                "repository": "https://codeberg.org/aotearoa/pinai",
             },
             "protocols": ["activitypub"],
             "services": { "inbound": [], "outbound": [] },
@@ -53,6 +53,20 @@ async fn an_instances_nodeinfo_names_it_and_counts_its_accounts() {
             "usage": { "users": { "total": 2 } },
             "metadata": { "nodeName": "Aotearoa", "nodeDescription": "Design and type people." },
         })
+    );
+}
+
+/// AGPL-3.0 § 13: an instance running modified code offers that code, not Pīna'i's.
+#[tokio::test]
+async fn an_instances_nodeinfo_names_the_source_it_was_given_as_its_repository() {
+    let app = TestApp::with([], []);
+
+    let (_, document) = app.send(get("/nodeinfo/2.1")).await;
+
+    assert_eq!(document["software"]["repository"], crate::testing::SOURCE);
+    assert_ne!(
+        document["software"]["repository"],
+        domain::identity::PINAI_SOURCE_URL
     );
 }
 

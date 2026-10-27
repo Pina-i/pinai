@@ -91,6 +91,7 @@ async fn an_open_invitation_opens_its_doorway_and_leads_to_its_form() {
         "Design and type people. This link lets one person create an account and expires in 7 days.",
         &format!(r#"href="/i/{}/sign-up""#, token.as_str()),
         "Only the admins of localhost:8080 make invitations",
+        r#"<a href="https://codeberg.org/aotearoa/pinai" target="_blank" rel="noopener">↳ Source</a>"#,
     ] {
         assert!(page.contains(shown), "{shown}: {page}");
     }

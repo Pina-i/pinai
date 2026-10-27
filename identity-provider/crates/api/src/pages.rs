@@ -253,6 +253,8 @@ pub(crate) struct Frame {
     open: bool,
     reset_by_mail: bool,
     version: &'static str,
+    /// Where the code the instance runs can be had: `SOURCE_URL`.
+    source: String,
     theme: &'static str,
     mode: &'static str,
     motif: &'static str,
@@ -278,6 +280,7 @@ impl Frame {
             open: facts.open_registrations,
             reset_by_mail,
             version: env!("CARGO_PKG_VERSION"),
+            source: facts.source.as_str().to_owned(),
             theme: appearance.theme(),
             mode: appearance.mode(),
             motif: appearance.motif(),

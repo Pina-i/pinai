@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use domain::auth::Registrations;
-use domain::identity::{Accounts, AccountsError, InstanceIntro};
+use domain::identity::{Accounts, AccountsError, InstanceIntro, SourceUrl};
 use time::{Duration, OffsetDateTime};
 
 /// What this instance tells a visitor about itself.
@@ -13,12 +13,15 @@ pub struct InstanceFacts {
     pub people: u64,
     /// Anyone may sign up: `REGISTRATIONS=open`.
     pub open_registrations: bool,
+    /// Where the code it runs can be had: `SOURCE_URL`.
+    pub source: SourceUrl,
 }
 
 /// Its sign-in pages and its NodeInfo, which anyone may ask for: the count is kept a minute,
 /// so asking again costs nothing.
 pub struct DescribeInstance {
     intro: InstanceIntro,
+    source: SourceUrl,
     registrations: Registrations,
     accounts: Arc<dyn Accounts>,
     counted: Mutex<Option<(OffsetDateTime, u64)>>,
@@ -29,11 +32,13 @@ impl DescribeInstance {
 
     pub fn new(
         intro: InstanceIntro,
+        source: SourceUrl,
         registrations: Registrations,
         accounts: Arc<dyn Accounts>,
     ) -> Self {
         Self {
             intro,
+            source,
             registrations,
             accounts,
             counted: Mutex::new(None),
@@ -55,6 +60,7 @@ impl DescribeInstance {
             description: self.intro.description().map(str::to_owned),
             people,
             open_registrations: self.registrations.are_open(),
+            source: self.source.clone(),
         })
     }
 }

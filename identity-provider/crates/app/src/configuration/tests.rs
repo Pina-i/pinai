@@ -13,6 +13,7 @@ fn config() -> Config {
         session_secret: "x".repeat(64),
         instance_name: None,
         instance_description: None,
+        source_url: SourceUrl::parse(PINAI_SOURCE_URL).unwrap(),
         redis_url: "redis://127.0.0.1:6379".into(),
         storage_endpoint: None,
         storage_access_key: None,
@@ -361,6 +362,41 @@ fn a_web_app_origin_that_is_not_one_is_refused() {
             ),
             "{raw}"
         );
+    }
+}
+
+// ─── Where the source is ─────────────────────────────────────────────────────
+
+#[test]
+fn an_unset_or_empty_source_url_is_pinais_own_repository() {
+    for raw in [None, Some(String::new())] {
+        assert_eq!(
+            source_url(raw).unwrap().as_str(),
+            "https://github.com/Pina-i/pinai"
+        );
+    }
+}
+
+#[test]
+fn a_source_url_given_stands_in_for_pinais_own() {
+    assert_eq!(
+        source_url(Some("https://codeberg.org/aotearoa/pinai".into()))
+            .unwrap()
+            .as_str(),
+        "https://codeberg.org/aotearoa/pinai"
+    );
+}
+
+#[test]
+fn a_source_url_that_is_no_http_url_is_refused_quoting_it() {
+    for raw in ["codeberg.org/aotearoa/pinai", "ftp://git.example.org/pinai"] {
+        let refused = source_url(Some(raw.into())).unwrap_err();
+
+        assert!(
+            matches!(refused, ConfigError::InvalidValue("SOURCE_URL", _)),
+            "{raw}"
+        );
+        assert!(refused.to_string().contains(raw), "{refused}");
     }
 }
 

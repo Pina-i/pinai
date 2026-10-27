@@ -2,6 +2,7 @@
 name    = "http-signatures"
 version = "0.1.0"
 edition = "2021"
+license.workspace = true
 
 [dependencies]
 thiserror     = { workspace = true }
