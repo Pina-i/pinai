@@ -1,15 +1,19 @@
 use std::sync::Arc;
 
-use domain::auth::testing::{SignInSeeds, SignUpRecords, a_request, contract};
+use domain::auth::testing::{
+    PlainHasher, SignInSeeds, SignUpRecords, a_request, contract, seeded_actor, signed_up,
+};
 use domain::auth::{
-    AuthorizationCodes, INVITATION_TTL, Invitations, LoginTickets, RefreshTokens, Registration,
-    Rotation, SessionKind, Sessions, SignInAccount, SignUps, SignupCodes,
+    AuthorizationCodes, INVITATION_TTL, Invitations, LoginTickets, PasswordChange, PasswordResets,
+    RESET_TTL, RefreshTokens, Registration, Rotation, SessionKind, Sessions, SignInAccount,
+    SignInAccounts, SignUps, SignupCodes,
 };
 use domain::{DeviceId, SessionId, UserId};
 use hmac::{Hmac, Mac};
 use infrastructure::postgres::{
-    PgAuthorizationCodes, PgClientSignIns, PgInvitations, PgLoginTickets, PgRefreshTokens,
-    PgSecondFactors, PgSessions, PgSignInAccounts, PgSignUps, PgSignupCodes,
+    PgAuthorizationCodes, PgClientSignIns, PgInstanceMembers, PgInvitations, PgLoginTickets,
+    PgPasswordResets, PgRefreshTokens, PgSecondFactors, PgSessions, PgSignInAccounts, PgSignUps,
+    PgSignupCodes,
 };
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
@@ -24,9 +28,9 @@ impl SignInSeeds for PgSignInSeeds {
     async fn sign_up(&self, account: &SignInAccount) {
         sqlx::query(
             "INSERT INTO users (id, username, email, password_hash, display_name, \
-                                email_verified_at, admitted_at, is_admin, totp_enabled) \
+                                email_verified_at, admitted_at, is_admin, totp_enabled, actor_uri) \
              VALUES ($1, $2, $3, $4, $5, CASE WHEN $6 THEN now() END, \
-                     CASE WHEN $7 THEN now() END, $8, $9)",
+                     CASE WHEN $7 THEN now() END, $8, $9, $10)",
         )
         .bind(account.id.as_uuid())
         .bind(&account.username)
@@ -37,6 +41,7 @@ impl SignInSeeds for PgSignInSeeds {
         .bind(account.admitted)
         .bind(account.admin)
         .bind(account.totp_enabled)
+        .bind(seeded_actor(account).as_str())
         .execute(&self.0)
         .await
         .expect("seed an account");
@@ -716,6 +721,212 @@ async fn an_invitation_token_is_kept_as_its_hash_and_goes_with_its_creator(pool:
         .await
         .unwrap();
     let left: i64 = sqlx::query_scalar("SELECT count(*) FROM invitations")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+    assert_eq!(token.as_str().len(), 43, "256 bits, base64url");
+    assert_eq!(
+        kept,
+        vec![Sha256::digest(token.as_str().as_bytes()).to_vec()]
+    );
+    assert_eq!(left, 0);
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn issuing_a_link_replaces_the_members_open_one(pool: PgPool) {
+    contract::issuing_a_link_replaces_the_members_open_one(
+        &PgPasswordResets::new(pool.clone()),
+        &PgSignUps::new(pool.clone()),
+        &PgSignInSeeds(pool),
+    )
+    .await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn a_reset_sets_the_password_spends_the_link_and_ends_what_the_old_password_opened(
+    pool: PgPool,
+) {
+    contract::a_reset_sets_the_password_spends_the_link_and_ends_what_the_old_password_opened(
+        &PgPasswordResets::new(pool.clone()),
+        &PgSignInAccounts::new(pool.clone()),
+        &PgSessions::new(pool.clone()),
+        &PgLoginTickets::new(pool.clone()),
+        &PgSignUps::new(pool.clone()),
+        &PgSignInSeeds(pool),
+    )
+    .await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn a_replaced_expired_or_unknown_link_resets_nothing(pool: PgPool) {
+    contract::a_replaced_expired_or_unknown_link_resets_nothing(
+        &PgPasswordResets::new(pool.clone()),
+        &PgSignInAccounts::new(pool.clone()),
+        &PgSessions::new(pool.clone()),
+        &PgSignUps::new(pool.clone()),
+        &PgSignInSeeds(pool),
+    )
+    .await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn reset_links_are_swept_a_while_after_they_ended(pool: PgPool) {
+    contract::reset_links_are_swept_a_while_after_they_ended(
+        &PgPasswordResets::new(pool.clone()),
+        &PgSignUps::new(pool.clone()),
+        &PgSignInSeeds(pool),
+    )
+    .await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn the_members_are_listed_most_recently_active_first(pool: PgPool) {
+    contract::the_members_are_listed_most_recently_active_first(
+        &PgInstanceMembers::new(pool.clone()),
+        &PgSessions::new(pool.clone()),
+        &PgSignUps::new(pool.clone()),
+        &PgSignInSeeds(pool),
+    )
+    .await;
+}
+
+/// The instance's admin and a member, `alice`.
+async fn an_admin_and_alice(pool: &PgPool) -> (UserId, SignInAccount) {
+    let admin = contract::a_new_account("admin");
+    PgSignUps::new(pool.clone())
+        .create_admin(&admin, OffsetDateTime::now_utc())
+        .await
+        .unwrap();
+    let alice = signed_up("alice");
+    PgSignInSeeds(pool.clone()).sign_up(&alice).await;
+    (admin.id, alice)
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn two_submissions_racing_on_one_link_change_the_password_once(pool: PgPool) {
+    let (admin, alice) = an_admin_and_alice(&pool).await;
+    let now = OffsetDateTime::now_utc();
+    let sessions = PgSessions::new(pool.clone());
+    for _ in 0..3 {
+        sessions
+            .open(alice.id, &SessionKind::Browser, now)
+            .await
+            .unwrap();
+    }
+    let resets = Arc::new(PgPasswordResets::new(pool.clone()));
+    let token = resets
+        .issue(alice.id, admin, now, now + RESET_TTL)
+        .await
+        .unwrap();
+
+    let racers: Vec<_> = (0..8)
+        .map(|n| {
+            let (resets, token) = (resets.clone(), token.clone());
+            tokio::spawn(async move {
+                let hash = PlainHasher::hash(&format!("racer-{n}-password"));
+                let outcome = resets.reset(&token, &hash, now).await.unwrap();
+                (hash, outcome)
+            })
+        })
+        .collect();
+    let mut changed = Vec::new();
+    for racer in racers {
+        if let (hash, PasswordChange::Changed { ended, .. }) = racer.await.unwrap() {
+            changed.push((hash, ended.len()));
+        }
+    }
+
+    assert_eq!(changed.len(), 1, "one submission changes the password");
+    let (winner, ended) = &changed[0];
+    assert_eq!(*ended, 3);
+    assert_eq!(
+        &PgSignInAccounts::new(pool.clone())
+            .by_id(alice.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .password_hash,
+        winner
+    );
+    let reset: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM sessions WHERE revoked_reason = 'password_reset'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(reset, 3, "each session ended once, as password_reset");
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn links_issued_at_once_for_one_member_leave_one_open(pool: PgPool) {
+    let (admin, alice) = an_admin_and_alice(&pool).await;
+    let now = OffsetDateTime::now_utc();
+    let resets = Arc::new(PgPasswordResets::new(pool.clone()));
+
+    let issuers: Vec<_> = (0..8)
+        .map(|_| {
+            let resets = resets.clone();
+            tokio::spawn(async move { resets.issue(alice.id, admin, now, now + RESET_TTL).await })
+        })
+        .collect();
+    let mut tokens = Vec::new();
+    for issuer in issuers {
+        tokens.push(issuer.await.unwrap().expect("each issued"));
+    }
+
+    let mut open = 0;
+    for token in &tokens {
+        if resets.find_open(token, now).await.unwrap().is_some() {
+            open += 1;
+        }
+    }
+    assert_eq!(open, 1, "each replaced the one before");
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn the_store_holds_one_link_per_account_neither_used_nor_replaced(pool: PgPool) {
+    let (admin, alice) = an_admin_and_alice(&pool).await;
+    let now = OffsetDateTime::now_utc();
+    PgPasswordResets::new(pool.clone())
+        .issue(alice.id, admin, now, now + RESET_TTL)
+        .await
+        .unwrap();
+
+    let another = sqlx::query(
+        "INSERT INTO password_resets (token_hash, user_id, created_by, created_at, expires_at) \
+         VALUES ($1, $2, $3, now(), now() + interval '1 day')",
+    )
+    .bind(vec![7u8; 32])
+    .bind(alice.id.as_uuid())
+    .bind(admin.as_uuid())
+    .execute(&pool)
+    .await;
+
+    let Err(sqlx::Error::Database(refused)) = another else {
+        panic!("a second open link was kept: {another:?}");
+    };
+    assert_eq!(refused.constraint(), Some("password_resets_one_open"));
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn a_reset_token_is_kept_as_its_hash_and_goes_with_its_member(pool: PgPool) {
+    let (admin, alice) = an_admin_and_alice(&pool).await;
+    let now = OffsetDateTime::now_utc();
+    let token = PgPasswordResets::new(pool.clone())
+        .issue(alice.id, admin, now, now + RESET_TTL)
+        .await
+        .unwrap();
+
+    let kept: Vec<Vec<u8>> = sqlx::query_scalar("SELECT token_hash FROM password_resets")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(alice.id.as_uuid())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let left: i64 = sqlx::query_scalar("SELECT count(*) FROM password_resets")
         .fetch_one(&pool)
         .await
         .unwrap();

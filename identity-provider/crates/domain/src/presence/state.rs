@@ -36,6 +36,12 @@ impl PresenceState {
     pub fn after_idle(self) -> Option<Self> {
         (self == Self::Online).then_some(Self::Away)
     }
+
+    /// Shown as around — online, idle or busy — rather than offline. An account that picked
+    /// Invisible reads `offline` to everyone, its admins included.
+    pub fn is_around(self) -> bool {
+        self != Self::Offline
+    }
 }
 
 impl fmt::Display for PresenceState {

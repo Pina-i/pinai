@@ -3,17 +3,18 @@ use std::sync::Arc;
 use domain::TicketId;
 use domain::auth::{
     AuthError, AuthorizationRequest, Client, Clients, InvitationToken, Invitations, LoginTickets,
-    OpenInvitation,
+    OpenInvitation, OpenReset, PasswordResets, ResetToken,
 };
 use time::OffsetDateTime;
 
 /// What a sign-in page needs before it is shown: a request from a client it may go back to, so
 /// that its cancel link never points anywhere else — or, on an invitation's pages, the
-/// invitation, while it is open.
+/// invitation, and on a reset link's page the link, while it is open.
 pub struct ShowSignIn {
     clients: Arc<dyn Clients>,
     tickets: Arc<dyn LoginTickets>,
     invitations: Arc<dyn Invitations>,
+    resets: Arc<dyn PasswordResets>,
 }
 
 impl ShowSignIn {
@@ -21,11 +22,13 @@ impl ShowSignIn {
         clients: Arc<dyn Clients>,
         tickets: Arc<dyn LoginTickets>,
         invitations: Arc<dyn Invitations>,
+        resets: Arc<dyn PasswordResets>,
     ) -> Self {
         Self {
             clients,
             tickets,
             invitations,
+            resets,
         }
     }
 
@@ -36,6 +39,15 @@ impl ShowSignIn {
         now: OffsetDateTime,
     ) -> Result<Option<OpenInvitation>, AuthError> {
         self.invitations.find_open(token, now).await
+    }
+
+    /// The reset link `token` names, while it is open.
+    pub async fn password_reset(
+        &self,
+        token: &ResetToken,
+        now: OffsetDateTime,
+    ) -> Result<Option<OpenReset>, AuthError> {
+        self.resets.find_open(token, now).await
     }
 
     /// The request's client, if it lists the request's redirect URI.

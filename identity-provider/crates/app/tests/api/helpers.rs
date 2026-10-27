@@ -13,8 +13,8 @@ use ed25519_dalek::pkcs8::EncodePrivateKey;
 use ed25519_dalek::pkcs8::spki::der::pem::LineEnding;
 use serde_json::Value;
 use sqlx::{Connection, Executor, PgConnection};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::TcpListener;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -25,6 +25,8 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 pub const VERIFIER: &str = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
 pub const CHALLENGE: &str = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
 pub const PASSWORD: &str = "journey-password-1";
+/// The first admin's address, as `invite_only_with_admin` and `an_admin` configure it.
+pub const ADMIN: &str = "root@journey.test";
 
 /// `TEST_LOG=1` shows the applications' logs.
 static TRACING: LazyLock<()> = LazyLock::new(|| {
@@ -69,6 +71,37 @@ impl Account {
     /// How accounts on other instances name it.
     pub fn address(&self, on: &TestApp) -> String {
         format!("{}@{}", self.handle, on.domain)
+    }
+}
+
+/// The instance's first admin, created at startup with [`ADMIN`] and [`PASSWORD`].
+pub fn an_admin(config: &mut Config) {
+    config.admin_email = Some(ADMIN.into());
+    config.admin_password = Some(PASSWORD.into());
+}
+
+/// An invite-only instance, and its admin.
+pub fn invite_only_with_admin(config: &mut Config) {
+    config.registrations = domain::auth::Registrations::Invite;
+    an_admin(config);
+}
+
+/// The instance's admin, created at startup, signed in through the web client: their password
+/// typed just now.
+pub async fn admin_of(app: &TestApp) -> Account {
+    let signed_in = app
+        .form("/login", &[("email", ADMIN), ("password", PASSWORD)])
+        .await;
+    let tokens = app
+        .tokens_for(&query_of(&location(&signed_in))["code"])
+        .await;
+    Account {
+        email: ADMIN.into(),
+        handle: String::new(),
+        actor_uri: String::new(),
+        token: tokens["access_token"].as_str().unwrap().to_owned(),
+        refresh_token: tokens["refresh_token"].as_str().unwrap().to_owned(),
+        cookie: String::new(),
     }
 }
 
@@ -377,17 +410,25 @@ impl TestApp {
         )
     }
 
-    /// A count straight from the instance's database, for what no route shows.
-    pub async fn count(&self, query: &str) -> i64 {
+    async fn connection(&self) -> PgConnection {
         let server = test_server();
         let base = &server[..server.rfind('/').unwrap()];
-        let mut connection = PgConnection::connect(&format!("{base}/{}", self.database))
-            .await
-            .unwrap();
-        sqlx::query_scalar(query)
-            .fetch_one(&mut connection)
+        PgConnection::connect(&format!("{base}/{}", self.database))
             .await
             .unwrap()
+    }
+
+    /// A count straight from the instance's database, for what no route shows.
+    pub async fn count(&self, query: &str) -> i64 {
+        sqlx::query_scalar(query)
+            .fetch_one(&mut self.connection().await)
+            .await
+            .unwrap()
+    }
+
+    /// A statement run straight on the instance's database, for what no route changes.
+    pub async fn execute(&self, statement: &str) {
+        self.connection().await.execute(statement).await.unwrap();
     }
 
     /// Stops the application and waits for it, then drops its database.
@@ -404,6 +445,37 @@ async fn drop_database(name: &str) {
         let drop = format!(r#"DROP DATABASE IF EXISTS "{name}" WITH (FORCE)"#);
         let _ = connection.execute(drop.as_str()).await;
     }
+}
+
+/// A WebSocket opened with `token`: the stream past the handshake, or the refusal's status line.
+pub async fn open_socket(app: &TestApp, token: &str) -> Result<TcpStream, String> {
+    let mut socket = TcpStream::connect(app.domain.as_str()).await.unwrap();
+    let upgrade = format!(
+        "GET /ws?token={token} HTTP/1.1\r\nHost: {}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\
+         Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n",
+        app.domain
+    );
+    socket.write_all(upgrade.as_bytes()).await.unwrap();
+    let mut handshake = [0u8; 1024];
+    let read = socket.read(&mut handshake).await.unwrap();
+    let answer = String::from_utf8_lossy(&handshake[..read]).into_owned();
+    if answer.starts_with("HTTP/1.1 101") {
+        Ok(socket)
+    } else {
+        Err(answer.lines().next().unwrap_or_default().to_owned())
+    }
+}
+
+/// Reads the socket to its end: whether the server closed it with 1008.
+pub async fn closed_as_ended(socket: &mut TcpStream) -> bool {
+    let mut frames = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), socket.read_to_end(&mut frames))
+        .await
+        .expect("the socket was closed")
+        .unwrap();
+    frames
+        .windows(4)
+        .any(|w| w[0] == 0x88 && u16::from_be_bytes([w[2], w[3]]) == 1008)
 }
 
 /// Retries `check` for up to 10 s, until it answers `Some`.

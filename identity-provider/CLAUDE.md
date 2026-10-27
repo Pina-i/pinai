@@ -160,6 +160,9 @@ connections ──► (no internal deps)
 | `POST /api/admin/invitations` | An admin's bearer (`401` without one, `403` for a member). No body. `201 { id, link, expires_at }`: `link` = `{issuer}/i/{token}`, open 7 days, the token in this answer only. On an open instance, `409 registrations_open`: people sign up themselves there |
 | `GET /api/admin/invitations` | An admin's bearer. The open invitations, newest first: `id`, `created_at`, `expires_at`, `created_by: { display_name }`; used, expired and revoked ones are not listed. Open instances too, for the links left from before |
 | `DELETE /api/admin/invitations/{id}` | An admin's bearer — a member is `403` whatever the id. Revokes an open invitation: `204`; anything else `404` |
+| `GET /api/admin/members` | An admin's bearer (`401` without one, `403` for a member). Open and invite-only instances alike. The accounts admitted or with their address confirmed — not a sign-up still to confirm —, the most recently active first: `[{ id, display_name, admin, last_active_at, online }]` — the display name only, never a handle or an address; `last_active_at` the latest use of a live session (RFC 3339, `null` when signed out everywhere); `online` the presence board reads it `online`, `away` or `dnd` (`identity-provider/specs/auth.md § 4` "The members list") |
+| `POST /api/admin/members/{id}/password-reset` | An admin's bearer, a recent password (`401 insufficient_user_authentication` otherwise, checked with the token), then `403` for a member whatever the id. No body. `201 { link, expires_at }`: `link` = `{issuer}/r/{token}`, open 24 hours, the token in this answer only; the member's open link replaced. An unknown account, one still to confirm its address, or a malformed id `404`; an admin `409 admin_account` — admins recover through `ADMIN_EMAIL` / `ADMIN_PASSWORD`. Open and invite-only instances alike (`identity-provider/specs/auth.md § 7`) |
+| `GET /r/{token}` · `POST /r/{token}` | A reset link's page, rendered like the sign-in pages (strict CSP, `no-store`, `Referrer-Policy: same-origin` so the form posts its `Origin`; the POST refused 403 from another site): "Set a new password" for {member's display name}, the new password and its confirmation (`autocomplete="new-password"`, `minlength="8"`), "Your password goes to {domain}, never to Pīna'i". The POST, in one transaction: the link spent (guarded `UPDATE … RETURNING`, so two submissions change it once), the password set, every unrevoked session of the member ended (`password_reset`) and their open second-factor tickets closed — then the sessions' sockets closed with `1008`; the second factor stays on. Then "Your password is changed. Sign in again from the Pīna'i app." (`no-referrer`), with a link to `{web app}/?instance={domain}` when the web app is known. A broken rule or a confirmation that differs shows the form again (`400`), nothing typed echoed. A link unknown, used, replaced or expired is one `404` page (`no-referrer`), "This link can no longer be used. Ask an admin of {domain} for a new one." (`identity-provider/specs/auth.md § 7`) |
 | `POST /api/totp/enroll` | Bearer auth, a recent password. Start TOTP enrollment — returns `{ secret_base32, provisioning_url }` |
 | `POST /api/totp/enroll/verify` | Bearer auth. The first code: in one transaction the secret committed, its step recorded, the enrollment forgotten and 10 one-time recovery codes minted and returned |
 | `POST /api/totp/disable` | Bearer auth + a current, unused TOTP code. Clears the secret, its last step, the recovery codes and any enrollment in one transaction |
@@ -231,7 +234,7 @@ file wherever it is read from.
 | File | Contents | Read when working on… |
 |---|---|---|
 | `identity-provider/specs/identity.md` | `users` and `remote_actors` schema, the remote actor cache and how a group's remote members are reached, what peers read of an account (WebFinger, the actor documents), the address and name formats | Accounts, handles and display names, actor URIs and addresses, WebFinger, the actor documents |
-| `identity-provider/specs/auth.md` | OpenID Connect sign-in (clients, `/authorize`, `/login`, the session cookie, `/token`, tokens, logout, discovery), sign-up email verification, TOTP two-factor and recovery codes, admins and admitted accounts (the first admin from `ADMIN_EMAIL` / `ADMIN_PASSWORD`), invitations (the admin API, the `/i/{token}` pages, joining into the official web app), who can join (`REGISTRATIONS`: open or invite-only, what each needs to start, switching) | Signing in, sessions, tokens, sign-up, email codes, the second factor, admins, invitations, open and invite-only instances |
+| `identity-provider/specs/auth.md` | OpenID Connect sign-in (clients, `/authorize`, `/login`, the session cookie, `/token`, tokens, logout, discovery), sign-up email verification, TOTP two-factor and recovery codes, admins and admitted accounts (the first admin from `ADMIN_EMAIL` / `ADMIN_PASSWORD`, the members list), invitations (the admin API, the `/i/{token}` pages, joining into the official web app), who can join (`REGISTRATIONS`: open or invite-only, what each needs to start, switching), password reset links (the admin API, the `/r/{token}` page, the one transaction that sets the password and ends the sessions) | Signing in, sessions, tokens, sign-up, email codes, the second factor, admins, the members list, invitations, open and invite-only instances, password resets |
 | `identity-provider/specs/social.md` | `friendships` and `user_blocks` schema, a friendship's life (request, accept opening the DM, decline, unfriend), who can reach a user (the contact setting, blocks, the rule and where it is enforced) | Friend requests, the friends list, blocking, the contact setting |
 | `identity-provider/specs/profile-and-settings.md` | Profile editing and avatar storage, the profile card (`GET /api/profiles`), `user_settings`, real-time profile propagation (`friend_profile_updated`, `Update{Person}`) | Profile fields, avatars, the profile card, account settings, profile federation |
 | `identity-provider/specs/event-delivery.md` | Redis Streams vs pub-sub, federation delivery semantics (best-effort, each activity's recovery), reconnect and catch-up | The broker, the WebSocket replay, outbound ActivityPub delivery |
@@ -337,7 +340,8 @@ sessions                 — browser and app sessions (user_id, kind: browser | 
                             app's, device_id: the E2EE device it signed in — one live session a
                             device, created_at, last_used_at, authenticated_at: the password last
                             typed on it, revoked_at, revoked_reason: sign_out |
-                            replaced | reuse | device_revoked | signed_out_elsewhere): live until
+                            replaced | reuse | device_revoked | signed_out_elsewhere |
+                            password_reset): live until
                             revoked or 90 days unused; the cookie names a browser one, every code
                             (authorization_codes.session_id), access token (`sid`) and refresh
                             token belongs to one
@@ -350,6 +354,11 @@ recovery_codes           — 10 per user, single-use, peppered HMAC
 invitations              — an admin's single-use links (token_hash: SHA-256 only, created_by,
                             created_at, expires_at = 7 days on, used_at + used_by, revoked_at):
                             open while unused, unrevoked, unexpired; swept 30 days after it ended
+password_resets          — an admin's single-use links setting a member's password (token_hash:
+                            SHA-256 only, user_id, created_by, created_at, expires_at = 24 hours on,
+                            used_at, replaced_at): open while unused, not replaced, unexpired; one
+                            per member neither used nor replaced (a partial unique index); swept
+                            30 days after it ended
 remote_actors            — cache of federated users (inbox_url, display_name, avatar_url, pronouns,
                             bio — as the actor's own `Update{Person}` or document last said, within
                             the profile limits; fetched_at dates the last resolution)
@@ -425,11 +434,17 @@ archive under HAK).
 - A bearer token is good only while its session lives: every authenticated route and the `/ws`
   upgrade go through `application::auth::Authenticate`, never `TokenVerifier` alone
 - A sensitive action — revoking a device, signing out the others, turning TOTP on, clearing the
-  history backup — takes the `RecentlySignedIn` extractor: the token's `auth_time` within
-  `RECENT_SIGN_IN` (10 min), else `401 insufficient_user_authentication` (RFC 9470)
-  (`identity-provider/specs/auth.md § 1` "Sensitive actions")
-- A refresh token is never stored, only its SHA-256; nor is an invitation's token, whose path
-  (`/i/{token}`) the request log writes as `/i/…`
+  history backup, giving a member a password reset link — takes the `RecentlySignedIn`
+  extractor: the token's `auth_time` within `RECENT_SIGN_IN` (10 min), else
+  `401 insufficient_user_authentication` (RFC 9470) (`identity-provider/specs/auth.md § 1`
+  "Sensitive actions")
+- A refresh token is never stored, only its SHA-256; nor is an invitation's token or a password
+  reset link's, whose paths (`/i/{token}`, `/r/{token}`) the request log writes as `/i/…`, `/r/…`
+- Only admins list the members and make password reset links (`AuthError::NotAdmin`, `403`),
+  only for a member and never for an admin (`domain::auth::reset_target`): an admin recovers
+  through `ADMIN_EMAIL`. Making a link takes a recent password — it hands the member's account to
+  whoever holds it — and setting the password with it ends every session of the account and its
+  open second-factor tickets in the same transaction
 - Only admins create, list and revoke invitations: the use cases refuse anyone else
   (`AuthError::NotAdmin`, `403`). Whether someone may sign up uninvited, and whether invitations
   are made, is `domain::auth::Registrations`, asked by the use cases (`Register`,

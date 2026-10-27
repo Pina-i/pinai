@@ -6,14 +6,16 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use domain::auth::{
     AddressHolder, AdminFacts, AuthError, AuthorizationCode, AuthorizationCodes,
     AuthorizationRequest, CODE_ATTEMPTS, ClientId, ClientSignIn, ClientSignIns, CodeAttempt,
-    CodeChallenge, Email, Grant, Invitation, InvitationToken, Invitations, LoginTickets,
-    NewAccount, OpenInvitation, OtpCode, PasswordHash, Presentation, RefreshLink, RefreshToken,
-    RefreshTokens, Registration, RevokedReason, Rotation, SESSION_IDLE, Session, SessionKind,
-    Sessions, SignInAccount, SignInAccounts, SignUps, SignupCodes,
+    CodeChallenge, Email, Grant, InstanceMember, InstanceMembers, Invitation, InvitationToken,
+    Invitations, LoginTickets, NewAccount, OpenInvitation, OpenReset, OtpCode, PasswordChange,
+    PasswordHash, PasswordReset, PasswordResets, Presentation, RefreshLink, RefreshToken,
+    RefreshTokens, Registration, ResetToken, RevokedReason, Rotation, SESSION_IDLE, Session,
+    SessionKind, Sessions, SignInAccount, SignInAccounts, SignUps, SignupCodes,
 };
 use domain::auth::{
     RECOVERY_CODES, SecondFactors, TICKET_ATTEMPTS, Ticket, TicketAttempt, TotpSecret,
 };
+use domain::identity::ActorUri;
 use domain::{DeviceId, InvitationId, SessionId, TicketId, UserId};
 use hmac::{Hmac, Mac};
 use rand::RngCore;
@@ -458,8 +460,9 @@ fn fresh_refresh_token() -> RefreshToken {
     RefreshToken::new(URL_SAFE_NO_PAD.encode(bytes))
 }
 
-fn refresh_hash(token: &RefreshToken) -> Vec<u8> {
-    Sha256::digest(token.as_str().as_bytes()).to_vec()
+/// A token as it is kept — a refresh token, an invitation's, a reset link's: its SHA-256 only.
+fn token_digest(token: &str) -> Vec<u8> {
+    Sha256::digest(token.as_bytes()).to_vec()
 }
 
 #[derive(sqlx::FromRow)]
@@ -483,7 +486,7 @@ impl RefreshTokens for PgRefreshTokens {
     ) -> Result<RefreshToken, AuthError> {
         let token = fresh_refresh_token();
         sqlx::query(INSERT_REFRESH_TOKEN)
-            .bind(refresh_hash(&token))
+            .bind(token_digest(token.as_str()))
             .bind(session.as_uuid())
             .bind(client.as_str())
             .bind(now)
@@ -499,7 +502,7 @@ impl RefreshTokens for PgRefreshTokens {
         client: &ClientId,
         now: OffsetDateTime,
     ) -> Result<Rotation, AuthError> {
-        let hash = refresh_hash(token);
+        let hash = token_digest(token.as_str());
         let mut tx = self.pool.begin().await.context("begin a rotation")?;
         let row: Option<RefreshRow> = sqlx::query_as(
             "SELECT session_id, client_id, rotated_at, successor_hash FROM refresh_tokens \
@@ -547,7 +550,7 @@ impl RefreshTokens for PgRefreshTokens {
             }
         }
         let successor = fresh_refresh_token();
-        let successor_hash = refresh_hash(&successor);
+        let successor_hash = token_digest(successor.as_str());
         sqlx::query(INSERT_REFRESH_TOKEN)
             .bind(&successor_hash)
             .bind(session.as_uuid())
@@ -580,7 +583,7 @@ impl RefreshTokens for PgRefreshTokens {
         let session: Option<uuid::Uuid> = sqlx::query_scalar(
             "SELECT session_id FROM refresh_tokens WHERE token_hash = $1 AND client_id = $2",
         )
-        .bind(refresh_hash(token))
+        .bind(token_digest(token.as_str()))
         .bind(client.as_str())
         .fetch_optional(&self.pool)
         .await
@@ -1107,10 +1110,6 @@ impl PgInvitations {
     }
 }
 
-fn invitation_hash(token: &InvitationToken) -> Vec<u8> {
-    Sha256::digest(token.as_str().as_bytes()).to_vec()
-}
-
 const INVITATION_COLUMNS: &str = "i.id, i.created_by, i.created_at, i.expires_at, i.used_at, \
      i.revoked_at, c.display_name AS inviter";
 
@@ -1162,7 +1161,7 @@ impl Invitations for PgInvitations {
              VALUES ($1, $2, $3, $4, $5)",
         )
         .bind(id.as_uuid())
-        .bind(invitation_hash(&token))
+        .bind(token_digest(token.as_str()))
         .bind(by.as_uuid())
         .bind(now)
         .bind(expires_at)
@@ -1182,7 +1181,7 @@ impl Invitations for PgInvitations {
              FROM invitations i JOIN users c ON c.id = i.created_by \
              WHERE i.token_hash = $1"
         ))
-        .bind(invitation_hash(token))
+        .bind(token_digest(token.as_str()))
         .fetch_optional(&self.pool)
         .await
         .context("find an invitation")?;
@@ -1227,6 +1226,256 @@ impl Invitations for PgInvitations {
         .context("delete the ended invitations")?
         .rows_affected();
         Ok(usize::try_from(deleted).unwrap_or(usize::MAX))
+    }
+}
+
+/// `password_resets`: a token is kept as its SHA-256, like an invitation's; a spend is a guarded
+/// `UPDATE`, so it happens once.
+pub struct PgPasswordResets {
+    pool: PgPool,
+}
+
+impl PgPasswordResets {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+}
+
+/// Locks the member's account until the transaction ends. Issuing and resetting both take it
+/// first, so the two at once queue up instead of deadlocking on each other's rows.
+async fn lock_member(connection: &mut sqlx::PgConnection, member: UserId) -> Result<(), AuthError> {
+    sqlx::query("SELECT 1 FROM users WHERE id = $1 FOR NO KEY UPDATE")
+        .bind(member.as_uuid())
+        .execute(connection)
+        .await
+        .context("lock a member's account")?;
+    Ok(())
+}
+
+#[derive(sqlx::FromRow)]
+struct ResetRow {
+    user_id: uuid::Uuid,
+    created_by: uuid::Uuid,
+    created_at: OffsetDateTime,
+    expires_at: OffsetDateTime,
+    used_at: Option<OffsetDateTime>,
+    replaced_at: Option<OffsetDateTime>,
+    display_name: Option<String>,
+}
+
+impl ResetRow {
+    /// The link, while it is open at `now`.
+    fn open(self, now: OffsetDateTime) -> Option<OpenReset> {
+        let reset = PasswordReset {
+            member: self.user_id.into(),
+            created_by: self.created_by.into(),
+            created_at: self.created_at,
+            expires_at: self.expires_at,
+            used_at: self.used_at,
+            replaced_at: self.replaced_at,
+        };
+        reset.is_open(now).then_some(OpenReset {
+            member: reset.member,
+            display_name: self.display_name,
+            expires_at: reset.expires_at,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl PasswordResets for PgPasswordResets {
+    async fn issue(
+        &self,
+        member: UserId,
+        by: UserId,
+        now: OffsetDateTime,
+        expires_at: OffsetDateTime,
+    ) -> Result<ResetToken, AuthError> {
+        let mut bytes = [0u8; 32];
+        OsRng.fill_bytes(&mut bytes);
+        let token = ResetToken::from_bytes(bytes);
+        let mut tx = self.pool.begin().await.context("begin a reset link")?;
+        lock_member(&mut tx, member).await?;
+        sqlx::query(
+            "UPDATE password_resets SET replaced_at = $2 \
+             WHERE user_id = $1 AND used_at IS NULL AND replaced_at IS NULL",
+        )
+        .bind(member.as_uuid())
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .context("replace a member's open reset link")?;
+        sqlx::query(
+            "INSERT INTO password_resets (token_hash, user_id, created_by, created_at, expires_at) \
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(token_digest(token.as_str()))
+        .bind(member.as_uuid())
+        .bind(by.as_uuid())
+        .bind(now)
+        .bind(expires_at)
+        .execute(&mut *tx)
+        .await
+        .context("create a reset link")?;
+        tx.commit().await.context("commit a reset link")?;
+        Ok(token)
+    }
+
+    async fn find_open(
+        &self,
+        token: &ResetToken,
+        now: OffsetDateTime,
+    ) -> Result<Option<OpenReset>, AuthError> {
+        let row: Option<ResetRow> = sqlx::query_as(
+            "SELECT r.user_id, r.created_by, r.created_at, r.expires_at, r.used_at, r.replaced_at, \
+                    u.display_name \
+             FROM password_resets r JOIN users u ON u.id = r.user_id \
+             WHERE r.token_hash = $1",
+        )
+        .bind(token_digest(token.as_str()))
+        .fetch_optional(&self.pool)
+        .await
+        .context("find a reset link")?;
+        Ok(row.and_then(|row| row.open(now)))
+    }
+
+    async fn reset(
+        &self,
+        token: &ResetToken,
+        hash: &PasswordHash,
+        now: OffsetDateTime,
+    ) -> Result<PasswordChange, AuthError> {
+        let token_hash = token_digest(token.as_str());
+        let mut tx = self.pool.begin().await.context("begin a password reset")?;
+        let named: Option<uuid::Uuid> =
+            sqlx::query_scalar("SELECT user_id FROM password_resets WHERE token_hash = $1")
+                .bind(&token_hash)
+                .fetch_optional(&mut *tx)
+                .await
+                .context("find a reset link's member")?;
+        let Some(named) = named else {
+            return Ok(PasswordChange::LinkUnusable);
+        };
+        lock_member(&mut tx, named.into()).await?;
+        // Spent first: a second submission of the link waits on the account, then finds it used.
+        let spent: Option<uuid::Uuid> = sqlx::query_scalar(
+            "UPDATE password_resets SET used_at = $2 \
+             WHERE token_hash = $1 AND used_at IS NULL AND replaced_at IS NULL AND expires_at > $2 \
+             RETURNING user_id",
+        )
+        .bind(&token_hash)
+        .bind(now)
+        .fetch_optional(&mut *tx)
+        .await
+        .context("spend a reset link")?;
+        let Some(member) = spent.map(UserId::from) else {
+            return Ok(PasswordChange::LinkUnusable);
+        };
+        sqlx::query("UPDATE users SET password_hash = $2, updated_at = now() WHERE id = $1")
+            .bind(member.as_uuid())
+            .bind(hash.as_str())
+            .execute(&mut *tx)
+            .await
+            .context("set a member's new password")?;
+        let ended: Vec<SessionRow> = sqlx::query_as(&format!(
+            "UPDATE sessions SET revoked_at = $2, revoked_reason = 'password_reset' \
+             WHERE user_id = $1 AND revoked_at IS NULL RETURNING {SESSION_COLUMNS}"
+        ))
+        .bind(member.as_uuid())
+        .bind(now)
+        .fetch_all(&mut *tx)
+        .await
+        .context("end a member's sessions on a password reset")?;
+        sqlx::query(
+            "UPDATE pending_totp_logins SET consumed_at = $2 \
+             WHERE user_id = $1 AND consumed_at IS NULL",
+        )
+        .bind(member.as_uuid())
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .context("close a member's second-factor tickets on a password reset")?;
+        tx.commit().await.context("commit a password reset")?;
+        Ok(PasswordChange::Changed {
+            member,
+            ended: sessions(ended)?,
+        })
+    }
+
+    async fn delete_ended(&self, before: OffsetDateTime) -> Result<usize, AuthError> {
+        // `LEAST` skips the NULLs: whichever of used, replaced and expired came first.
+        let deleted = sqlx::query(
+            "DELETE FROM password_resets WHERE LEAST(used_at, replaced_at, expires_at) < $1",
+        )
+        .bind(before)
+        .execute(&self.pool)
+        .await
+        .context("delete the ended reset links")?
+        .rows_affected();
+        Ok(usize::try_from(deleted).unwrap_or(usize::MAX))
+    }
+}
+
+/// `users` with their sessions, as the admins list them.
+pub struct PgInstanceMembers {
+    pool: PgPool,
+}
+
+impl PgInstanceMembers {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct MemberRow {
+    id: uuid::Uuid,
+    actor_uri: Option<String>,
+    display_name: Option<String>,
+    is_admin: bool,
+    last_active_at: Option<OffsetDateTime>,
+}
+
+impl TryFrom<MemberRow> for InstanceMember {
+    type Error = anyhow::Error;
+
+    fn try_from(row: MemberRow) -> Result<Self, Self::Error> {
+        Ok(InstanceMember {
+            id: row.id.into(),
+            actor: row
+                .actor_uri
+                .map(|uri| ActorUri::parse(&uri))
+                .transpose()
+                .context("users.actor_uri")?,
+            display_name: row.display_name,
+            admin: row.is_admin,
+            last_active_at: row.last_active_at,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl InstanceMembers for PgInstanceMembers {
+    async fn list(&self, now: OffsetDateTime) -> Result<Vec<InstanceMember>, AuthError> {
+        // A live session is unrevoked and used within `SESSION_IDLE`, as `Session::is_live` says;
+        // a member is an account that needs no code (`SignInAccount::needs_code`).
+        let rows: Vec<MemberRow> = sqlx::query_as(
+            "SELECT u.id, u.actor_uri, u.display_name, u.is_admin, \
+                    MAX(s.last_used_at) FILTER (WHERE s.revoked_at IS NULL AND s.last_used_at > $1) \
+                        AS last_active_at \
+             FROM users u LEFT JOIN sessions s ON s.user_id = u.id \
+             WHERE u.email_verified_at IS NOT NULL OR u.admitted_at IS NOT NULL \
+             GROUP BY u.id \
+             ORDER BY last_active_at DESC NULLS LAST, u.id",
+        )
+        .bind(now - SESSION_IDLE)
+        .fetch_all(&self.pool)
+        .await
+        .context("list the members")?;
+        Ok(rows
+            .into_iter()
+            .map(InstanceMember::try_from)
+            .collect::<Result<_, _>>()?)
     }
 }
 

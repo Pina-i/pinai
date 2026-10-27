@@ -1,28 +1,12 @@
 use reqwest::Method;
 use serde_json::Value;
 
-use crate::helpers::{Account, PASSWORD, TestApp, location, query_of, spawn_app_with};
+use crate::helpers::{
+    Account, PASSWORD, TestApp, admin_of, invite_only_with_admin, location, query_of,
+    spawn_app_with,
+};
 
-const ADMIN: &str = "root@journey.test";
 const INVITEE: &str = "hoku@journey.test";
-
-/// The instance's admin, created at startup, signed in through the web client.
-async fn admin_of(app: &TestApp) -> Account {
-    let signed_in = app
-        .form("/login", &[("email", ADMIN), ("password", PASSWORD)])
-        .await;
-    let tokens = app
-        .tokens_for(&query_of(&location(&signed_in))["code"])
-        .await;
-    Account {
-        email: ADMIN.into(),
-        handle: String::new(),
-        actor_uri: String::new(),
-        token: tokens["access_token"].as_str().unwrap().to_owned(),
-        refresh_token: tokens["refresh_token"].as_str().unwrap().to_owned(),
-        cookie: String::new(),
-    }
-}
 
 /// An invitation the admin creates: its link's token.
 async fn an_invitation(app: &TestApp) -> String {
@@ -60,16 +44,9 @@ async fn join(app: &TestApp, token: &str, email: &str) -> reqwest::Response {
         .unwrap()
 }
 
-/// An invite-only instance, and its admin.
-fn with_admin(config: &mut app::configuration::Config) {
-    config.registrations = domain::auth::Registrations::Invite;
-    config.admin_email = Some(ADMIN.into());
-    config.admin_password = Some(PASSWORD.into());
-}
-
 #[tokio::test]
 async fn someone_invited_lands_signed_in_in_the_web_app_and_is_never_mailed() {
-    let app = spawn_app_with(with_admin).await;
+    let app = spawn_app_with(invite_only_with_admin).await;
     let token = an_invitation(&app).await;
 
     let (status, invitation) = page(&app, &format!("/i/{token}")).await;
@@ -153,7 +130,7 @@ async fn someone_invited_lands_signed_in_in_the_web_app_and_is_never_mailed() {
 #[tokio::test]
 async fn without_a_web_app_someone_invited_is_told_to_sign_in_and_does_so_without_a_code() {
     let app = spawn_app_with(|config| {
-        with_admin(config);
+        invite_only_with_admin(config);
         config.web_app = None;
     })
     .await;
@@ -180,7 +157,7 @@ async fn without_a_web_app_someone_invited_is_told_to_sign_in_and_does_so_withou
 
 #[tokio::test]
 async fn an_invite_only_instance_refuses_an_uninvited_sign_up_and_says_why() {
-    let app = spawn_app_with(with_admin).await;
+    let app = spawn_app_with(invite_only_with_admin).await;
     let typed = [
         ("display_name", "Hōkū"),
         ("email", INVITEE),

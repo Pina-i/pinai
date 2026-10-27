@@ -75,7 +75,7 @@ pub async fn page(
     Ok(unreferred(render(StatusCode::OK, &page, None)))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct SignUpForm {
     display_name: String,
     email: String,

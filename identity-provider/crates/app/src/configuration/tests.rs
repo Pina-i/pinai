@@ -416,6 +416,17 @@ fn an_smtp_port_is_read_and_a_bad_one_refused() {
 }
 
 #[test]
+fn an_unset_or_empty_smtp_from_is_the_default_sender() {
+    for raw in [None, Some(String::new())] {
+        assert_eq!(smtp_from(raw), "Pīna'i <no-reply@localhost>");
+    }
+    assert_eq!(
+        smtp_from(Some("Aotearoa <no-reply@idp.alice.com>".into())),
+        "Aotearoa <no-reply@idp.alice.com>"
+    );
+}
+
+#[test]
 fn an_unknown_tls_mode_is_refused() {
     assert!(matches!(
         smtp_tls(Environment::Production, Some("ssl".into())),
@@ -454,6 +465,31 @@ fn surrounding_whitespace_is_stripped_from_env_values() {
 #[test]
 fn a_missing_variable_is_still_reported_missing() {
     assert!(env_var("PINAI_TEST_DEFINITELY_UNSET").is_err());
+}
+
+#[test]
+fn a_required_variable_unset_or_left_empty_is_missing() {
+    let key = "PINAI_TEST_REQUIRED_VALUE";
+    let read = |value: Option<&str>| {
+        // SAFETY: no other test reads or writes this variable.
+        unsafe {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+        require_env(key)
+    };
+
+    for missing in [None, Some(""), Some("  \r")] {
+        assert!(
+            matches!(read(missing), Err(ConfigError::MissingVar(k)) if k == key),
+            "{missing:?}"
+        );
+    }
+    assert_eq!(read(Some("journey-key")).unwrap(), "journey-key");
+
+    unsafe { std::env::remove_var(key) };
 }
 
 /// The whole point of trimming: a domain read from a CRLF file must still build

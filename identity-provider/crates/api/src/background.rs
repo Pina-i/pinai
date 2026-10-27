@@ -100,6 +100,7 @@ pub async fn sweep_signups(sweep: Arc<SweepSignups>, stop: CancellationToken) {
                 sessions = swept.sessions,
                 refresh_tokens = swept.refresh_tokens,
                 invitations = swept.invitations,
+                password_resets = swept.password_resets,
                 "signups swept"
             ),
             Err(e) => tracing::warn!(error = ?e, "signup sweep failed"),

@@ -46,6 +46,12 @@ pub enum AuthError {
     InvitationRequired,
     #[error("the instance is open: people sign up themselves")]
     RegistrationsOpen,
+    #[error("an admin recovers through ADMIN_EMAIL, not a reset link")]
+    AdminNotResettable,
+    #[error("no open reset link")]
+    ResetUnusable,
+    #[error("the password and its confirmation differ")]
+    PasswordMismatch,
     #[error("too many codes mailed lately")]
     TooManyCodes,
     #[error("TOTP already enabled — disable it first to re-enroll")]

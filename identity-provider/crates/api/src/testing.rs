@@ -4,9 +4,10 @@ use std::sync::Arc;
 
 use application::auth::{
     Authenticate, Authorize, CompleteSignIn, ConfirmTotpEnrollment, CreateInvitation, DisableTotp,
-    ExchangeCode, LinkDevice, ListInvitations, LogIn, LogOut, PassSecondFactor, Refresh,
-    RegenerateRecoveryCodes, Register, RegisterInvited, ResendCode, RevokeInvitation, RevokeToken,
-    SendTestMail, ShowSignIn, SignOutOthers, StartTotpEnrollment, VerifyEmail,
+    ExchangeCode, IssuePasswordReset, LinkDevice, ListInvitations, ListMembers, LogIn, LogOut,
+    PassSecondFactor, Refresh, RegenerateRecoveryCodes, Register, RegisterInvited, ResendCode,
+    ResetPassword, RevokeInvitation, RevokeToken, SendTestMail, ShowSignIn, SignOutOthers,
+    StartTotpEnrollment, VerifyEmail,
 };
 use application::e2ee::{
     AppendCommit, ArchiveMessages, CatchUpCommits, ClaimKeyPackage, ClaimWelcomes, ClearArchive,
@@ -36,14 +37,14 @@ use application::social::{
 use axum::Router;
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
-use axum::response::IntoResponse;
+use axum::response::{IntoResponse, Response};
 use axum_extra::extract::cookie::Key;
 use domain::UserId;
 use domain::auth::testing::{
-    CountingSuffixes, InMemoryClientSignIns, InMemoryClients, InMemoryCodes, InMemoryRefreshTokens,
-    InMemorySecondFactors, InMemorySessions, InMemorySignInAccounts, InMemorySignupCodes,
-    PlainHasher, RecordingMailer, RecordingSessionNotifier, RecordingTickets, SpelledTokens,
-    StepAuthenticator, web_client,
+    CountingSuffixes, InMemoryClientSignIns, InMemoryClients, InMemoryCodes,
+    InMemoryInstanceMembers, InMemoryPasswordResets, InMemoryRefreshTokens, InMemorySecondFactors,
+    InMemorySessions, InMemorySignInAccounts, InMemorySignupCodes, PlainHasher, RecordingMailer,
+    RecordingSessionNotifier, RecordingTickets, SpelledTokens, StepAuthenticator, web_client,
 };
 use domain::auth::{Registrations, WebApp};
 use domain::e2ee::KeyPackagePolicy;
@@ -82,6 +83,21 @@ use tower::ServiceExt;
 
 use crate::{AppState, Jwks, PublicKeyPem, RateLimiter, SignInPages, router};
 
+/// A sign-in page's headers: never cached, under the strict CSP, and sending its `Referer` as
+/// `referrer_policy` says.
+pub fn assert_page(response: &Response, referrer_policy: &str) {
+    let headers = response.headers();
+    assert_eq!(headers[header::REFERRER_POLICY], referrer_policy);
+    assert_eq!(headers[header::CACHE_CONTROL], "no-store");
+    assert!(
+        headers[header::CONTENT_SECURITY_POLICY]
+            .to_str()
+            .unwrap()
+            .starts_with("default-src 'none'; script-src 'self'"),
+        "{headers:?}"
+    );
+}
+
 /// Behind the sign-in routes, for tests to seed and look at.
 pub struct SignInFakes {
     pub accounts: Arc<InMemorySignInAccounts>,
@@ -94,6 +110,7 @@ pub struct SignInFakes {
     pub sessions: Arc<InMemorySessions>,
     pub ended: Arc<RecordingSessionNotifier>,
     pub refresh_tokens: Arc<InMemoryRefreshTokens>,
+    pub resets: Arc<InMemoryPasswordResets>,
 }
 
 /// Behind the profile routes: accounts' profiles, their friends and avatars.
@@ -130,6 +147,8 @@ pub struct TestApp {
     pub peers: PeerFakes,
     /// Open to every pair until a test says otherwise.
     pub reach: Arc<StubReachability>,
+    /// The presence states the instance has heard.
+    pub board: Arc<PresenceBoard>,
 }
 
 impl TestApp {
@@ -216,18 +235,25 @@ impl TestApp {
             max_lifetime: time::Duration::days(30),
         };
         let sign_in_accounts = Arc::new(InMemorySignInAccounts::default());
+        let sign_in_sessions = Arc::new(InMemorySessions::default());
+        let sign_in_tickets = Arc::new(RecordingTickets::default());
         let authenticator = Arc::new(StepAuthenticator::default());
         let sign_in = SignInFakes {
+            resets: Arc::new(InMemoryPasswordResets::over(
+                sign_in_accounts.clone(),
+                sign_in_sessions.clone(),
+                sign_in_tickets.clone(),
+            )),
             signup_codes: Arc::new(InMemorySignupCodes::confirming(sign_in_accounts.clone())),
             factors: Arc::new(InMemorySecondFactors::for_accounts(
                 sign_in_accounts.clone(),
             )),
             accounts: sign_in_accounts,
             codes: Arc::new(InMemoryCodes::default()),
-            tickets: Arc::new(RecordingTickets::default()),
+            tickets: sign_in_tickets,
             mailer: Arc::new(RecordingMailer::default()),
             sign_ins: Arc::new(InMemoryClientSignIns::default()),
-            sessions: Arc::new(InMemorySessions::default()),
+            sessions: sign_in_sessions,
             ended: Arc::new(RecordingSessionNotifier::default()),
             refresh_tokens: Arc::new(InMemoryRefreshTokens::default()),
         };
@@ -270,6 +296,7 @@ impl TestApp {
                     clients.clone(),
                     sign_in.tickets.clone(),
                     sign_in.accounts.clone(),
+                    sign_in.resets.clone(),
                 )),
                 origin.clone(),
                 false,
@@ -342,7 +369,7 @@ impl TestApp {
             register_invited: Arc::new(RegisterInvited::new(
                 origin.clone(),
                 registrations,
-                web_app,
+                web_app.clone(),
                 sign_in.accounts.clone(),
                 sign_in.accounts.clone(),
                 sign_in.accounts.clone(),
@@ -362,6 +389,25 @@ impl TestApp {
             revoke_invitation: Arc::new(RevokeInvitation::new(
                 sign_in.accounts.clone(),
                 sign_in.accounts.clone(),
+            )),
+            list_members: Arc::new(ListMembers::new(
+                sign_in.accounts.clone(),
+                Arc::new(InMemoryInstanceMembers::over(
+                    sign_in.accounts.clone(),
+                    sign_in.sessions.clone(),
+                )),
+                board.clone(),
+            )),
+            issue_password_reset: Arc::new(IssuePasswordReset::new(
+                sign_in.accounts.clone(),
+                sign_in.resets.clone(),
+            )),
+            reset_password: Arc::new(ResetPassword::new(
+                origin.clone(),
+                web_app,
+                Arc::new(PlainHasher::default()),
+                sign_in.resets.clone(),
+                sign_in.ended.clone(),
             )),
             verify_email: Arc::new(VerifyEmail::new(
                 clients.clone(),
@@ -765,7 +811,7 @@ impl TestApp {
             )),
             open_peer_stream: Arc::new(OpenPeerStream::new(
                 origin.clone(),
-                board,
+                board.clone(),
                 audience,
                 Arc::new(QueuedFeed::held_open()),
             )),
@@ -790,6 +836,7 @@ impl TestApp {
             profile,
             peers,
             reach,
+            board,
         }
     }
 

@@ -120,6 +120,9 @@ refused.
 - `display_name` is the only name shown client-side. The user types it at sign-up — `Hōkū`,
   `Ana Tane` — within the rules of `identity-provider/specs/profile-and-settings.md § 1`
   (trimmed, 1–50 characters). It has no uniqueness constraint and can be changed at any time.
+  It is also the only name the instance's own pages and its admins' API give an account: an
+  invitation's inviter, a reset link's member, the members list
+  (`identity-provider/specs/auth.md` § 4, § 5, § 7).
 - `username` is the unique internal identifier used for federation and ActivityPub addressing,
   derived from the display name at account creation and never changed. It is never shown in the
   UI.

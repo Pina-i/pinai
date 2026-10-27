@@ -118,13 +118,14 @@ password. Then they land in the Pīna'i web app, already signed in. They can ins
 the desktop app later and sign in there with the same email and password.
 
 Invitations belong to invite-only instances: on a public one, people create their
-accounts themselves, and Settings → **Instance** isn't shown.
+accounts themselves. Settings → **Instance**, where invitations and reset links are
+made, is shown on invite-only instances only.
 
 ### A forgotten password
 
-An admin creates a single-use reset link for the member from Settings →
-**Instance**, `https://your.domain/r/<token>`, valid 24 hours, and sends it to
-them. Setting the new password there signs the member out everywhere.
+On an invite-only instance, an admin creates a single-use reset link for the member
+from Settings → **Instance**, `https://your.domain/r/<token>`, valid 24 hours, and
+sends it to them. Setting the new password there signs the member out everywhere.
 
 ### Switching modes
 

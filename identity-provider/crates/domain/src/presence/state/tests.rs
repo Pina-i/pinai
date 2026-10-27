@@ -47,6 +47,18 @@ fn idling_turns_only_an_online_user_away() {
 }
 
 #[test]
+fn an_account_is_around_unless_it_reads_offline() {
+    for around in [
+        PresenceState::Online,
+        PresenceState::Away,
+        PresenceState::Dnd,
+    ] {
+        assert!(around.is_around(), "{around}");
+    }
+    assert!(!PresenceState::Offline.is_around());
+}
+
+#[test]
 fn only_an_active_member_types_in_a_conversation() {
     let (alice, carol) = (
         account("alice").actor_uri,

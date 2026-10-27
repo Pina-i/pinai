@@ -78,7 +78,7 @@ impl SignInPages {
         let page = NoticePage {
             frame: self.frame(appearance).await?,
             title: notice.title,
-            text: notice.text,
+            text: notice.text.into(),
             back: None,
         };
         Ok(render(status, &page, None))
@@ -402,11 +402,31 @@ pub(crate) struct AccountReadyPage {
 }
 
 #[derive(Template)]
+#[template(path = "sign-in/password-reset.html")]
+pub(crate) struct PasswordResetPage {
+    pub frame: Frame,
+    /// The member's display name — never a handle or an address.
+    pub display_name: Option<String>,
+    pub action: String,
+    pub alert: Option<Cow<'static, str>>,
+    /// The field the alert is about, or "".
+    pub bad: &'static str,
+}
+
+#[derive(Template)]
+#[template(path = "sign-in/password-changed.html")]
+pub(crate) struct PasswordChangedPage {
+    pub frame: Frame,
+    /// Where the web app opens on this instance, when one is known.
+    pub web_app: Option<String>,
+}
+
+#[derive(Template)]
 #[template(path = "sign-in/notice.html")]
 pub(crate) struct NoticePage {
     pub frame: Frame,
     pub title: &'static str,
-    pub text: &'static str,
+    pub text: Cow<'static, str>,
     pub back: Option<String>,
 }
 
@@ -463,6 +483,7 @@ pub(crate) fn login_alert(code: &str, host: &str) -> Option<(Cow<'static, str>, 
         "invalid_display_name" => ("Display name: 1–50 characters".into(), "display_name"),
         "invalid_email" => ("Enter a valid email address".into(), "email"),
         "weak_password" => ("Password must be at least 8 characters".into(), "password"),
+        "password_mismatch" => ("The two passwords differ".into(), "confirmation"),
         "email_taken" => ("Email already registered".into(), "email"),
         "signup_expired" => ("This sign-up has expired — register again".into(), ""),
         "invitation_required" => (
@@ -565,8 +586,8 @@ pub(crate) fn render(
     response
 }
 
-/// A page whose URL carries an invitation's token and that holds no form: no `Referer` takes the
-/// token anywhere.
+/// A page whose URL carries a link's token — an invitation's, a reset's — and that holds no form:
+/// no `Referer` takes the token anywhere.
 pub(crate) fn unreferred(mut response: Response) -> Response {
     response.headers_mut().insert(
         header::REFERRER_POLICY,

@@ -5,9 +5,10 @@ use crate::{DeviceId, InvitationId, SessionId, TicketId, UserId};
 
 use super::{
     AdminFacts, AuthError, AuthorizationCode, AuthorizationRequest, Client, ClientId, ClientSignIn,
-    CodeAttempt, Email, Grant, InvitationToken, NewAccount, OpenInvitation, OtpCode, PasswordHash,
-    RefreshToken, Registration, RevokedReason, Rotation, Session, SessionKind, SignInAccount,
-    Ticket, TicketAttempt, TotpSecret,
+    CodeAttempt, Email, Grant, InstanceMember, InvitationToken, NewAccount, OpenInvitation,
+    OpenReset, OtpCode, PasswordChange, PasswordHash, RefreshToken, Registration, ResetToken,
+    RevokedReason, Rotation, Session, SessionKind, SignInAccount, Ticket, TicketAttempt,
+    TotpSecret,
 };
 
 #[async_trait::async_trait]
@@ -275,6 +276,47 @@ pub trait Invitations: Send + Sync {
     async fn revoke(&self, id: InvitationId, now: OffsetDateTime) -> Result<bool, AuthError>;
     /// The invitations that ended — used, revoked or expired — before `before`. How many went.
     async fn delete_ended(&self, before: OffsetDateTime) -> Result<usize, AuthError>;
+}
+
+/// The links admins give members to set a new password: one open link per account, each
+/// single-use. Only a hash of each token is kept.
+#[async_trait::async_trait]
+pub trait PasswordResets: Send + Sync {
+    /// A new link for `member` by `by`, open until `expires_at`, and its token — shown once. The
+    /// link the member had open, if any, is replaced in the same step: only the newest works.
+    async fn issue(
+        &self,
+        member: UserId,
+        by: UserId,
+        now: OffsetDateTime,
+        expires_at: OffsetDateTime,
+    ) -> Result<ResetToken, AuthError>;
+    /// The link `token` names, while it is open at `now`, with its member's display name.
+    async fn find_open(
+        &self,
+        token: &ResetToken,
+        now: OffsetDateTime,
+    ) -> Result<Option<OpenReset>, AuthError>;
+    /// Spends the link, sets its member's password to `hash`, ends every session of theirs not
+    /// revoked yet, idle ones included (`password_reset`) and closes their open second-factor tickets — all or
+    /// nothing, the spend first, so two submissions of one link change the password once. The
+    /// sessions it ended.
+    async fn reset(
+        &self,
+        token: &ResetToken,
+        hash: &PasswordHash,
+        now: OffsetDateTime,
+    ) -> Result<PasswordChange, AuthError>;
+    /// The links that ended — used, replaced or expired — before `before`. How many went.
+    async fn delete_ended(&self, before: OffsetDateTime) -> Result<usize, AuthError>;
+}
+
+/// The instance's members, as its admins list them.
+#[async_trait::async_trait]
+pub trait InstanceMembers: Send + Sync {
+    /// Every account admitted or with its address confirmed, the most recently active at `now`
+    /// first, then those signed out everywhere, by id.
+    async fn list(&self, now: OffsetDateTime) -> Result<Vec<InstanceMember>, AuthError>;
 }
 
 /// The random part appended to a chosen name.

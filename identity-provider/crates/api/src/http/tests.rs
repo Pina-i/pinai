@@ -27,6 +27,16 @@ fn a_logged_uri_never_carries_an_invitations_token() {
     }
 }
 
+#[test]
+fn a_logged_uri_never_carries_a_reset_links_token() {
+    let token = "q7Yp0aZk3mW8xRt2LbN5vHc9JdE4sF6uG1iO0pQ-_wA";
+
+    assert_eq!(
+        logged_uri(&format!("/r/{token}").parse::<Uri>().unwrap()),
+        "/r/…"
+    );
+}
+
 mod logging {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};

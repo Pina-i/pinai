@@ -415,8 +415,10 @@ struct PresenceBoard {
 ```
 
 It is updated from the local bus — local transitions and what peer streams republish — and by
-the polls, and read by `GET /api/presence`, the batch poll and the stream replay. No
-persistence: after a restart every actor reads `offline` until it is heard of again.
+the polls, and read by `GET /api/presence`, the batch poll, the stream replay and the admins'
+members list, where an account reading anything but `offline` is `online`
+(`identity-provider/specs/auth.md § 4` "The members list"). No persistence: after a restart every
+actor reads `offline` until it is heard of again.
 
 ---
 
@@ -431,10 +433,10 @@ same address. A peer's stream ends the same way. What is still open ten seconds 
 ### When its session ends
 
 A WebSocket is opened under the session its token belongs to (`identity-provider/specs/auth.md`
-§ 1 "Sessions"). When that session ends — a sign-out, another account signing in on the browser —
-the account's sockets opened under it close with `1008` ("the session has ended"), the disconnect
-is announced as usual, and a reconnect with that token is refused `401`. Its other sockets, under
-other sessions, stay.
+§ 1 "Sessions"). When that session ends — a sign-out, another account signing in on the browser,
+a password reset — the account's sockets opened under it close with `1008` ("the session has
+ended"), the disconnect is announced as usual, and a reconnect with that token is refused `401`.
+Its other sockets, under other sessions, stay.
 
 ### Initial presence state on connect
 

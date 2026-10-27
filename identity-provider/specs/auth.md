@@ -1,4 +1,4 @@
-# Pina'i — Signing in, sign-up, the second factor, admins, invitations and who can join
+# Pina'i — Signing in, sign-up, the second factor, admins, invitations, who can join and password resets
 
 ## 1. Signing in — OpenID Connect
 
@@ -118,6 +118,7 @@ back-forward cache is ready again. Everything else works without it.
 | `GET /login/totp` | The second factor (§ 3); `?mode=recovery` asks a recovery code instead |
 | `GET /signed-out` | Where `/logout` lands when it may not go back to the client |
 | `GET /i/{token}` · `GET /i/{token}/sign-up` | An invitation's doorway and its sign-up form (§ 5) |
+| `GET /r/{token}` | A reset link's form, setting a member's new password (§ 7) |
 | `GET /assets/{path}` | The stylesheet, the script, the fonts (DM Sans, Instrument Serif, Azeret Mono — latin and latin-ext, OFL), the motifs and the grain, built into the binary; `Cache-Control: public, max-age=86400`. The stylesheet and the script are linked with `?v=<a hash of their content>`, so a release that changes one is fetched anew |
 
 **What a page shows.** On one side the instance: its name, its description, how many people it
@@ -134,8 +135,8 @@ signs in to that app (§ "The session cookie"), so that line is all the consent 
 opened for — the `/authorize` parameters — and the POST it ends in checks it again. A `/login`
 or `/verify-email` link with no request left, or a broken one, shows "This sign-in link has
 expired"; one naming a client that can't be verified shows that page. The second-factor page
-carries its ticket instead (§ 3), which holds the request; an invitation's pages carry their token
-in their path, and no request: no app asked for them (§ 5).
+carries its ticket instead (§ 3), which holds the request; an invitation's pages and a reset link's
+carry their token in their path, and no request: no app asked for them (§ 5, § 7).
 
 **Cancel.** "← Another home" sends the browser back to the client with nothing signed in:
 `redirect_uri?error=access_denied&state=…` (RFC 6749 § 4.1.2.1), to a `redirect_uri` checked
@@ -182,7 +183,8 @@ The address on the code page is shown only if it is one (`Email`).
 
 **Safety.**
 - **Same-origin forms.** Every form POST (`/login`, `/register-and-login`,
-  `/verify-email-and-login`, `/verify-email/resend`, `/login/totp`, `/i/{token}/sign-up`) is refused `403` when the
+  `/verify-email-and-login`, `/verify-email/resend`, `/login/totp`, `/i/{token}/sign-up`,
+  `/r/{token}`) is refused `403` when the
   browser says it was sent from elsewhere: an `Origin` other than the instance's, or else a
   `Sec-Fetch-Site` other than `same-origin`. `Origin: null` alone is refused. A request saying
   neither — a script, a test — is let through: a browser always says. This stops login CSRF.
@@ -195,7 +197,8 @@ The address on the code page is shown only if it is one (`Email`).
   - `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Cache-Control: no-store`.
   - `Referrer-Policy: same-origin`: nothing reaches the client, and the page's own forms keep
     their `Origin` — under `no-referrer`, a browser posts them as `Origin: null`. An invitation's
-    pages without a form, whose URL holds its token, are `no-referrer` (§ 5).
+    or a reset link's pages without a form, whose URL holds its token, are `no-referrer` (§ 5,
+    § 7).
 
 ### `POST /login`
 
@@ -246,7 +249,7 @@ CREATE TABLE sessions (
                                             --   (§ "Sensitive actions")
     revoked_at     TIMESTAMPTZ,
     revoked_reason TEXT                     -- sign_out | replaced | reuse | device_revoked
-                                            --   | signed_out_elsewhere
+                                            --   | signed_out_elsewhere | password_reset
 );
 -- and authorization_codes.session_id: the browser session a code was issued under
 ```
@@ -260,6 +263,7 @@ stateDiagram-v2
     Live --> Ended: a rotated refresh token presented again (reuse)
     Live --> Ended: its device revoked (device_revoked)
     Live --> Ended: the account signs out of every other device (signed_out_elsewhere)
+    Live --> Ended: its account's password set with a reset link (password_reset)
     Live --> Ended: 90 days without use
     Ended --> [*]: swept a month later
 ```
@@ -279,8 +283,9 @@ stateDiagram-v2
   authenticated request and the `/ws` upgrade check that it still lives — one read by primary key
   — so an ended session's tokens stop at once, not an hour later: `401 invalid_token`, "The
   session has ended". A refresh token works while its session lives (§ "Tokens").
-- **Ending one** (`/logout`, a replacement, a reuse, a revoked device, a sign-out elsewhere) also closes the account's WebSockets opened
-  under it, with `1008` ("the session has ended"); a reconnect with its token is refused `401`.
+- **Ending one** (`/logout`, a replacement, a reuse, a revoked device, a sign-out elsewhere, a
+  password reset — § 7) also closes the account's WebSockets opened under it, with `1008` ("the
+  session has ended"); a reconnect with its token is refused `401`.
 - **Swept** by the hourly sign-up sweep (§ 2) a month after it ended: revoked then, or idle past its
   90 days. Its refresh tokens go with it.
 
@@ -365,6 +370,7 @@ taken from it, must not be enough to lock the owner out or erase their history.
 | Sign out every other device | `DELETE /api/sessions?keep=current` |
 | Turn the second factor on | `POST /api/totp/enroll` |
 | Clear the history backup | `DELETE /api/history/messages` |
+| Give a member a password reset link (§ 7) | `POST /api/admin/members/{id}/password-reset` |
 
 Turning the second factor off and replacing the recovery codes take a current authenticator code
 instead (§ 3). Nothing else asks: the profile, the settings, blocking, signing oneself out.
@@ -588,7 +594,8 @@ registered, and the JSON `POST /register` creates accounts, not clients.
   through. Within the next 10 minutes, nothing more is asked.
 - **A laptop left open.** Whoever sits at it can read and write as its owner, but can't revoke
   the owner's other devices, sign them out, turn the second factor on or clear the history
-  backup without the password.
+  backup without the password — nor, on an admin's, make a member's reset link, which hands that
+  account over.
 
 ## 2. Sign-up email verification
 
@@ -690,7 +697,9 @@ Every hour — and once at startup — the IdP deletes:
    refresh tokens with them;
 4. the refresh tokens (§ 1) unused for 90 days — a head since its creation, a rotated one since its
    rotation — so the chains of a session in use, a tab per reload, don't pile up;
-5. the invitations (§ 5) a month after they ended: used, revoked or expired, whichever came first.
+5. the invitations (§ 5) a month after they ended: used, revoked or expired, whichever came first;
+6. the password reset links (§ 7) a month after they ended: used, replaced or expired, whichever
+   came first.
 
 ### Scenarios
 
@@ -787,7 +796,7 @@ sequenceDiagram
 ```
 
 - **A ticket** is opened by the password step (§ 1), carrying the request; opening one closes
-  the account's earlier ones. It lasts 5 minutes. `GET /login/totp?ticket=…` shows its code page
+  the account's earlier ones, and so does a password reset (§ 7). It lasts 5 minutes. `GET /login/totp?ticket=…` shows its code page
   while it is open, and "This sign-in has expired" once it is not.
 - **Five attempts per ticket**, the right one included. Each attempt is reserved on the ticket
   before its code is checked, in one statement, so guesses sent in parallel cannot pass five.
@@ -924,6 +933,28 @@ flowchart TD
 
 An open instance that sets neither variable only warns, at each start, that it has no admin. An
 invite-only one — `REGISTRATIONS` unset is invite-only — doesn't start until it has one.
+
+### The members list
+
+`GET /api/admin/members` lists the instance's members to its admins, on open and invite-only
+instances alike. It takes an admin's bearer token — `401` without one, `403 access_denied` "Only
+an admin may do this" for a member — and no recent password: it changes nothing.
+
+A **member** is an account admitted or with its address confirmed (`SignInAccount::needs_code`
+false): an account still to confirm its address is a sign-up under way, and is not listed. Each
+member is answered as `{ id, display_name, admin, last_active_at, online }`:
+
+| Field | |
+|---|---|
+| `id` | the account, as a reset link names it (§ 7) |
+| `display_name` | its display name, `null` for an account without one — never its handle or its address |
+| `admin` | an admin of the instance |
+| `last_active_at` | the latest use of a live session of it (RFC 3339) — a sign-in, a silent `/authorize`, a refresh —, `null` when it is signed out everywhere |
+| `online` | `true` when the instance's presence board reads it `online`, `away` or `dnd` — idle and busy count as online (`PresenceState::is_around`) —, `false` when it reads `offline`: an account that picked Invisible is offline to its admins as to everyone (`identity-provider/specs/presence.md`) |
+
+The most recently active come first, then those signed out everywhere, by id. One query reads the
+accounts with their sessions (`InstanceMembers`); the presence board, in memory, says who is
+online (`ListMembers`).
 
 ### Scenarios
 
@@ -1149,6 +1180,7 @@ open or invite)"). The setting is `domain::auth::Registrations`, read once as th
 | Mail relay (`SMTP_HOST`) | Required: no start without one | Optional |
 | An admin | Optional: each start without one warns | Required: no start without one |
 | NodeInfo `openRegistrations` | `true` | `false` |
+| Password reset links (§ 7) | Made by admins | Made by admins |
 | The sign-in pages | "open registration"; the Register tab | "invite only"; a disabled "Invite only" tab |
 
 ### The sign-up rule
@@ -1260,3 +1292,174 @@ flowchart TD
   stops at once, saying to set the admin's address and password, or to open sign-up with a relay.
 - **`REGISTRATIONS=open` without `SMTP_HOST`** stops at once, saying to set the relay or to go
   invite-only.
+
+## 7. Password reset links
+
+A member who forgot their password gets back in through an admin: the admin makes a **reset link**
+for them and sends it however they like, and whoever opens it sets a new password for the member on
+this instance's own page. Nothing is mailed. Admins make reset links on open and invite-only
+instances alike, for a member only — an account admitted or with its address confirmed (§ 4 "The
+members list") — and never for an admin, who recovers through `ADMIN_EMAIL` and `ADMIN_PASSWORD`
+(§ 4 "The first admin").
+
+### Data model
+
+```sql
+CREATE TABLE password_resets (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    token_hash  BYTEA NOT NULL UNIQUE,     -- SHA-256 of the link's token, never the token
+    user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,  -- the member
+    created_by  UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,  -- the admin: a link
+                                           --   answers for them, as an invitation does
+    created_at  TIMESTAMPTZ NOT NULL,
+    expires_at  TIMESTAMPTZ NOT NULL,      -- created_at + 24 hours
+    used_at     TIMESTAMPTZ,
+    replaced_at TIMESTAMPTZ                -- a newer link for the same member took its place
+);
+-- At most one link per member neither used nor replaced.
+CREATE UNIQUE INDEX password_resets_one_open ON password_resets (user_id)
+    WHERE used_at IS NULL AND replaced_at IS NULL;
+-- and sessions.revoked_reason: password_reset (§ 1 "Sessions")
+```
+
+### The token
+
+As an invitation's (§ 5): 256 bits from the system's random source, written in URL-safe base64
+without padding, 43 characters (`ResetToken`). Only its SHA-256 is kept, so the table alone sets no
+password. The token is in one answer only — the admin's `POST`, as the link `{issuer}/r/{token}` —
+and in no log: a request's path is logged as `/r/…`, and the token's `Debug` prints
+`ResetToken(..)`. Anything else in the token's place names no link.
+
+### Open, used, replaced, expired
+
+A link is **open** while it is unused, not replaced and unexpired (`PasswordReset::is_open`): it
+expires the second its 24 hours (`RESET_TTL`) are up. A new link for a member **replaces** the one
+they had open, in the transaction that makes it: only the newest works. The store holds at most one
+link per member that is neither used nor replaced — a partial unique index, not a convention — and
+making one locks the member's account row first, so two admins making one at once leave one open.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Open: an admin makes it (24 hours)
+    Open --> Used: a new password set with it
+    Open --> Replaced: an admin makes another for the same member
+    Open --> Expired: its 24 hours are up
+    Used --> [*]: swept 30 days later
+    Replaced --> [*]: swept 30 days later
+    Expired --> [*]: swept 30 days later
+```
+
+### The admin API
+
+| Route | Answer |
+|---|---|
+| `POST /api/admin/members/{id}/password-reset` | No body. `201 { link, expires_at }`: `link` is `{issuer}/r/{token}`, the only answer the token is ever in. The member's open link, if any, stops working. An unknown account, one still to confirm its address, or an id that is none, `404` "Member not found"; an admin `409 admin_account` "An admin recovers their access through ADMIN_EMAIL and ADMIN_PASSWORD, not a reset link" |
+
+It takes an admin's bearer token with a recent password (§ 1 "Sensitive actions"): a link hands the
+member's account to whoever holds it. Without a token, `401`; a password typed more than 10 minutes
+ago on the admin's session, `401 insufficient_user_authentication`, checked with the token, before
+anything else; then a member's token is `403 access_denied` "Only an admin may do this", whatever
+the id (`IssuePasswordReset`, `AuthError::NotAdmin`). Who may get a link is a domain rule,
+`reset_target`: a member who is no admin. An account still to confirm its address is a sign-up
+under way, not a member: it is answered as an unknown one, `404`. The refusal of an admin is `409`,
+not `403`: on this API `403` says the caller is no admin, while here an admin asks and the account
+refuses — as `409 registrations_open` does for an invitation on an open instance (§ 6).
+
+### Setting the new password
+
+```mermaid
+sequenceDiagram
+    participant A as admin (Pīna'i)
+    participant P as the member's browser
+    participant I as IdP
+    participant D as the member's devices
+    A->>I: POST /api/admin/members/{id}/password-reset (a recent password)
+    I-->>A: 201 { link: {issuer}/r/{token}, expires_at }
+    A-->>P: the link, by any means
+    P->>I: GET /r/{token}
+    I-->>P: "Set a new password" for {name}
+    P->>I: POST /r/{token} (password, confirmation)
+    I->>I: one transaction: the link spent, the password set, the sessions and sign-ins under way ended
+    I-->>D: their sockets close (1008); their tokens and refresh tokens refused
+    I-->>P: "Your password is changed. Sign in again from the Pīna'i app."
+```
+
+**The page**, `GET /r/{token}`, is laid out as the sign-in pages are, the instance beside the form.
+In the column: "— {domain}", "Set a new password", "for {member's display name}" — never a handle
+or an address, and left out when they have none —, the new password and its confirmation, each
+with the register form's `autocomplete="new-password"` and `minlength="8"`, **Set the password**,
+and "Your password goes to {domain}, never to Pīna'i".
+
+**Posting it** (`ResetPassword`) first checks the link is open — a made-up link costs no password
+hash —, then the new password: 8 bytes at least, typed the same twice (`NewPassword`). A broken
+rule or two different passwords show the form again, `400`, with its sentence ("Password must be at
+least 8 characters", "The two passwords differ") and nothing that was typed. Then
+`PasswordResets::reset`, in one transaction:
+
+1. the link's member is looked up by the token's hash, without a lock — no link, and nothing
+   happens —, then the member's account row is locked, as making a link locks it, so the two
+   queue up instead of deadlocking;
+2. the link is spent by a guarded `UPDATE … WHERE used_at IS NULL AND replaced_at IS NULL AND
+   expires_at > now RETURNING user_id` — the member whose password is set —, and nothing more
+   happens when it returns none;
+3. the member's password hash is replaced;
+4. every session of theirs not revoked yet ends — those idle past their 90 days included —,
+   `revoked_reason = 'password_reset'`, and is returned;
+5. their open second-factor tickets (§ 3) are closed: a sign-in half done with the old password,
+   waiting for the authenticator's code, can't finish.
+
+After the commit the use case closes the sockets of each session ended, as signing out of the
+other devices does (`SessionNotifier`): they close with `1008`, and the sessions' tokens and
+refresh tokens are refused at once (§ 1 "Sessions"). The answer is the page "Your password is
+changed. Sign in again from the Pīna'i app.", with — when the official web app is known (§ 5 "The
+official web app") — a **Sign in** link to `{web app}/?instance={domain}`. No session is opened:
+the member signs in with the new password as anyone does.
+
+**Left as it was**: the second factor — a member with an authenticator still types its code after
+the new password (§ 3) —, the apps the member signed in to (`client_sign_ins`), and the devices,
+each of which signs in again as itself.
+
+**What goes wrong**: a link unknown, used, replaced or expired — on the page, or spent by another
+submission while the form was filled in — is the one page "This link can no longer be used. Ask
+an admin of {domain} for a new one.", `404`, the same whatever happened.
+
+**Headers.** The pages are the sign-in pages' (§ 1: the strict CSP, `no-store`, the instance's own
+script only). The form's page keeps the sign-in pages' `Referrer-Policy: same-origin`, under which
+the form posts its `Origin`; the "can no longer be used" page and the "changed" page are
+`no-referrer`. The form is refused `403` from another site.
+
+### Racing for one link
+
+Two submissions at once with one link change the password once. Both lock the member's account row:
+the second waits for the first's transaction, then finds the link used and changes nothing — its
+sender gets the "can no longer be used" page, and the password is the first's.
+
+### Sweep
+
+The hourly sign-up sweep (§ 2) deletes a link 30 days after it ended — used, replaced or expired,
+whichever came first (`RESET_RETENTION`). An open one is never swept.
+
+### Scenarios
+
+- **A forgotten password.** The member asks an admin. The admin finds them in the members list,
+  asks for a reset link — typing their own password again when it is older than 10 minutes — and
+  sends it. The member sets a new password on the instance's page; every device of
+  theirs is signed out at once, and each signs in again with the new password.
+- **A link used, or past its 24 hours**: "This link can no longer be used. Ask an admin of
+  {domain} for a new one." — which of the two, it never says.
+- **A link replaced**: the admin made another, the first having gone to the wrong place; the first
+  shows the same "can no longer be used" page, the newest works.
+- **Two submissions racing** — a double click, two tabs —: the password changes once; the second
+  gets the "can no longer be used" page.
+- **A member with an authenticator** signs in with the new password, then the authenticator's
+  code, as before. An authenticator lost too is a recovery code's business (§ 3), not a link's.
+- **A sign-in half done with the old password** — the password typed, the authenticator's code not
+  yet — doesn't finish once the password is reset: its ticket closes with the sessions.
+- **An account still signing up**, its address never confirmed, gets no link: `404`, as an unknown
+  one. It isn't in the members list either.
+- **An admin asking a link for an admin** — another, or themselves — is refused `409`: an admin
+  recovers through `ADMIN_EMAIL` and `ADMIN_PASSWORD` (§ 4 "Admin access lost").
+- **A member's token copied, or a device of theirs lost**: the reset signs it out with every other
+  session of theirs, not only the browser's.
+- **An admin's laptop left open.** Whoever sits at it can't make a member's reset link without the
+  admin's password.

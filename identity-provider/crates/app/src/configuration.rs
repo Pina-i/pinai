@@ -121,6 +121,9 @@ pub const DEV_SESSION_SECRET: &str =
 
 const MIN_SESSION_SECRET_LEN: usize = 32;
 
+/// Who the instance's mail comes from when `SMTP_FROM` doesn't say.
+const DEFAULT_SMTP_FROM: &str = "Pīna'i <no-reply@localhost>";
+
 /// Built-in extension blocklist. Extended (never replaced) by
 /// `ATTACHMENT_BLOCKED_EXTENSIONS`. Stored lowercased; comparison is
 /// lowercase-vs-lowercase.
@@ -141,7 +144,7 @@ const BUILTIN_BLOCKED_MIMES: &[&str] = &[
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
-    #[error("Missing environment variable: {0}")]
+    #[error("Missing or empty environment variable: {0}")]
     MissingVar(&'static str),
     #[error("Invalid port: {0}")]
     InvalidPort(String),
@@ -224,8 +227,7 @@ impl Config {
             smtp_port: smtp_port(env_var("SMTP_PORT").ok())?,
             smtp_username: env_var("SMTP_USERNAME").unwrap_or_default(),
             smtp_password: env_var("SMTP_PASSWORD").unwrap_or_default(),
-            smtp_from: env_var("SMTP_FROM")
-                .unwrap_or_else(|_| "Pīna'i <no-reply@localhost>".into()),
+            smtp_from: smtp_from(env_var("SMTP_FROM").ok()),
             smtp_tls: smtp_tls(environment, env_var("SMTP_TLS").ok())?,
             email_otp_pepper: parse_email_otp_pepper()?,
             registrations: registrations(env_var("REGISTRATIONS").ok())?,
@@ -279,8 +281,9 @@ fn env_var(key: &str) -> Result<String, std::env::VarError> {
     std::env::var(key).map(|v| v.trim().to_string())
 }
 
+/// Empty is missing too: an instance never runs on an empty `DOMAIN` or `JWT_KEY_ID`.
 fn require_env(key: &'static str) -> Result<String, ConfigError> {
-    env_var(key).map_err(|_| ConfigError::MissingVar(key))
+    unless_empty(env_var(key).ok()).ok_or(ConfigError::MissingVar(key))
 }
 
 fn parse_env_usize(key: &'static str, default: usize) -> Result<usize, ConfigError> {
@@ -330,6 +333,11 @@ fn web_app(environment: Environment, raw: Option<String>) -> Result<Option<WebAp
         None => OFFICIAL_WEB_APP_ORIGIN,
     };
     Ok(origin.map(|origin| WebApp::parse(origin).expect("a built-in origin")))
+}
+
+/// Unset or empty, the default sender: a `.env` without a relay leaves `SMTP_FROM=` empty.
+fn smtp_from(raw: Option<String>) -> String {
+    unless_empty(raw).unwrap_or_else(|| DEFAULT_SMTP_FROM.into())
 }
 
 /// Unset or empty, the instance has no relay: never a host it wasn't given.

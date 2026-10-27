@@ -7,7 +7,7 @@ use domain::auth::{
 };
 use time::{Duration, OffsetDateTime};
 
-use crate::testing::TestApp;
+use crate::testing::{TestApp, assert_page};
 
 /// The instance's admin, signed up.
 async fn an_admin(app: &TestApp) -> SignInAccount {
@@ -68,19 +68,6 @@ fn assert_unreferred(response: &Response) {
 /// The form's page: its `Referer` goes nowhere but this instance, so the form posts its `Origin`.
 fn assert_kept_here(response: &Response) {
     assert_page(response, "same-origin");
-}
-
-fn assert_page(response: &Response, referrer_policy: &str) {
-    let headers = response.headers();
-    assert_eq!(headers[header::REFERRER_POLICY], referrer_policy);
-    assert_eq!(headers[header::CACHE_CONTROL], "no-store");
-    assert!(
-        headers[header::CONTENT_SECURITY_POLICY]
-            .to_str()
-            .unwrap()
-            .starts_with("default-src 'none'; script-src 'self'"),
-        "{headers:?}"
-    );
 }
 
 #[tokio::test]

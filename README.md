@@ -48,10 +48,234 @@ cd pinai
 docker compose up -d
 ```
 
+Or write the two files yourself, in an empty directory on the server. This
+`compose.yaml` matches the archive's, with the Caddyfile inline; it needs Docker
+Compose 2.23 or later:
+
+```yaml
+# Needs Docker Compose 2.23 or later, for the Caddyfile inlined at the end.
+# Everything the instance stores is under ./data, beside this file.
+name: pinai
+
+# Docker keeps container logs forever by default.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  # HTTPS in front of the identity provider and RustFS; gets and renews the
+  # certificate. Its ports are the only published ones (443/udp: HTTP/3).
+  caddy:
+    image: caddy:2.11-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN in .env}
+    configs:
+      - source: caddyfile
+        target: /etc/caddy/Caddyfile
+    volumes:
+      - ./data/caddy/data:/data
+      - ./data/caddy/config:/config
+    depends_on:
+      - idp
+    logging: *logging
+
+  # The identity provider: accounts, messages, federation.
+  idp:
+    image: ghcr.io/pina-i/pinai-idp:${PINAI_VERSION:?set PINAI_VERSION in .env}
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      IDP_ENV: production
+      PORT: "8080"
+      DATABASE_URL: postgres://pinai:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/pinai
+      REDIS_URL: redis://redis:6379
+      STORAGE_ENDPOINT: http://rustfs:9000
+      # Avatars are served by RustFS, through Caddy's /avatars/ route.
+      STORAGE_PUBLIC_URL: https://${DOMAIN}
+      JWT_PRIVATE_KEY_PATH: /run/secrets/ed25519.pem
+    volumes:
+      - ./data/keys:/run/secrets:ro
+    depends_on:
+      init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rustfs:
+        condition: service_healthy
+    logging: *logging
+
+  postgres:
+    image: postgres:18
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: pinai
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: pinai
+    volumes:
+      - ./data/postgres:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pinai -d pinai"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    logging: *logging
+
+  # The append-only file keeps the durable event streams (DMs) across restarts.
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - ./data/redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    logging: *logging
+
+  # File storage, S3-compatible: avatars and attachments.
+  rustfs:
+    image: rustfs/rustfs:1.0.3
+    restart: unless-stopped
+    environment:
+      RUSTFS_ACCESS_KEY: ${STORAGE_ACCESS_KEY:?set STORAGE_ACCESS_KEY in .env}
+      RUSTFS_SECRET_KEY: ${STORAGE_SECRET_KEY:?set STORAGE_SECRET_KEY in .env}
+      # Empty: logs to stdout, for `docker compose logs`.
+      RUSTFS_OBS_LOG_DIRECTORY: ""
+    volumes:
+      - ./data/rustfs:/data
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/health"]
+      interval: 5s
+      timeout: 10s
+      retries: 10
+      start_period: 30s
+    logging: *logging
+
+  # Runs before the others at every start. Generates the instance key in
+  # ./data/keys once and never replaces it: it signs tokens, federation requests
+  # and device attestations, and losing it cannot be undone. Then lets the
+  # identity provider (user 65532) read it and gives ./data/rustfs to RustFS (10001).
+  init:
+    image: alpine/openssl:3.5.8
+    restart: "no"
+    entrypoint: ["sh", "-c"]
+    command:
+      - >-
+        if [ -f /keys/ed25519.pem ]; then
+          echo "instance key present, keeping it";
+        else
+          openssl genpkey -algorithm ed25519 -out /keys/ed25519.pem &&
+          chown "$$(stat -c '%u' /keys)" /keys/ed25519.pem &&
+          echo "generated a new instance key";
+        fi &&
+        chgrp 65532 /keys/ed25519.pem &&
+        chmod 640 /keys/ed25519.pem &&
+        chown 10001:10001 /rustfs
+    volumes:
+      - ./data/keys:/keys
+      - ./data/rustfs:/rustfs
+    logging: *logging
+
+# Caddy's configuration. $$ is Compose's escape for $: Caddy reads {$DOMAIN}
+# from its own environment.
+configs:
+  caddyfile:
+    content: |
+      {$$DOMAIN} {
+      	header Strict-Transport-Security "max-age=31536000"
+
+      	# Avatars are public objects in RustFS. Only reads reach it, and without the
+      	# query string, so no S3 sub-resource (?acl, ?policy…) can be named from outside.
+      	@avatar {
+      		method GET HEAD
+      		path /avatars/*
+      	}
+      	handle @avatar {
+      		rewrite * {path}?
+      		reverse_proxy rustfs:9000
+      	}
+
+      	handle {
+      		reverse_proxy idp:8080
+      	}
+      }
+```
+
+`.env` holds the settings. Replace the example values, and put a value holding
+spaces, `#` or `$` in single quotes:
+
+```sh
+# The image's minor version: `docker compose pull` gets its fixes.
+PINAI_VERSION=0.1
+# Without scheme or path. It is part of every account's address: it cannot change.
+DOMAIN=chat.example.org
+
+# invite, the default: only people an admin invited can join, and the first
+# admin below is required. open: anyone can sign up, and the relay is required.
+REGISTRATIONS=invite
+ADMIN_EMAIL=you@example.org
+ADMIN_PASSWORD='at least 8 bytes'
+
+# The mail relay, required for public registration mode: uncomment these lines and fill them in.
+# deploy/README.md lists relays and their settings; SMTP_TLS is starttls for
+# port 587, tls for port 465.
+# SMTP_HOST=
+# SMTP_PORT=587
+# SMTP_TLS=starttls
+# SMTP_USERNAME=
+# SMTP_PASSWORD=
+# SMTP_FROM=no-reply@chat.example.org
+
+# The secrets, from the commands below.
+JWT_KEY_ID=
+SESSION_SECRET=
+EMAIL_OTP_PEPPER=
+POSTGRES_PASSWORD=
+STORAGE_ACCESS_KEY=
+STORAGE_SECRET_KEY=
+```
+
+Generate the secrets once, with these commands, and paste each line they print
+over its empty one in `.env`. Never generate them again, and back them up with
+`./data`, as the warning below says:
+
+```bash
+echo "JWT_KEY_ID=key-$(date +%Y-%m)"
+echo "SESSION_SECRET=$(openssl rand -hex 32)"
+echo "EMAIL_OTP_PEPPER=$(openssl rand -hex 32)"
+echo "POSTGRES_PASSWORD=$(openssl rand -hex 32)"
+echo "STORAGE_ACCESS_KEY=pinai-$(openssl rand -hex 8)"
+echo "STORAGE_SECRET_KEY=$(openssl rand -hex 32)"
+```
+
+Then start the instance, creating `./data` first so that its directories are
+yours rather than root's:
+
+```bash
+chmod 600 .env               # the secrets, readable by you alone
+mkdir -p data/keys data/postgres data/redis data/rustfs data/caddy/data data/caddy/config
+docker compose up -d
+docker compose logs -f idp   # "listening" once the database is migrated
+```
+
 `https://your.domain/.well-known/nodeinfo` answers once the database is migrated
-and Caddy has its certificate. Upgrades, backups and running behind your own
-reverse proxy are in [`deploy/README.md`](deploy/README.md), which the archive
-carries too.
+and Caddy has its certificate. Upgrades, backups, the mail relay and running
+behind your own reverse proxy are in [`deploy/README.md`](deploy/README.md),
+which the archive carries too.
 
 > **Back up `.env` and `data/` together.** The instance key and the secrets in
 > `.env` cannot be regenerated: a new key breaks every device that signed in, a

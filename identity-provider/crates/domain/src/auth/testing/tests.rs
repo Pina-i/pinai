@@ -287,3 +287,62 @@ async fn invitations_are_swept_a_while_after_they_ended() {
     let accounts = InMemorySignInAccounts::default();
     contract::invitations_are_swept_a_while_after_they_ended(&accounts, &accounts).await;
 }
+
+/// Resets and the members read over one set of accounts, sessions and second-factor tickets.
+fn member_stores() -> (
+    Arc<InMemorySignInAccounts>,
+    Arc<InMemorySessions>,
+    Arc<RecordingTickets>,
+    InMemoryPasswordResets,
+    InMemoryInstanceMembers,
+) {
+    let accounts = Arc::new(InMemorySignInAccounts::default());
+    let sessions = Arc::new(InMemorySessions::default());
+    let tickets = Arc::new(RecordingTickets::default());
+    (
+        accounts.clone(),
+        sessions.clone(),
+        tickets.clone(),
+        InMemoryPasswordResets::over(accounts.clone(), sessions.clone(), tickets),
+        InMemoryInstanceMembers::over(accounts, sessions),
+    )
+}
+
+#[tokio::test]
+async fn issuing_a_link_replaces_the_members_open_one() {
+    let (accounts, _, _, resets, _) = member_stores();
+    contract::issuing_a_link_replaces_the_members_open_one(&resets, &*accounts, &*accounts).await;
+}
+
+#[tokio::test]
+async fn a_reset_sets_the_password_spends_the_link_and_ends_what_the_old_password_opened() {
+    let (accounts, sessions, tickets, resets, _) = member_stores();
+    contract::a_reset_sets_the_password_spends_the_link_and_ends_what_the_old_password_opened(
+        &resets, &*accounts, &*sessions, &*tickets, &*accounts, &*accounts,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_replaced_expired_or_unknown_link_resets_nothing() {
+    let (accounts, sessions, _, resets, _) = member_stores();
+    contract::a_replaced_expired_or_unknown_link_resets_nothing(
+        &resets, &*accounts, &*sessions, &*accounts, &*accounts,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn reset_links_are_swept_a_while_after_they_ended() {
+    let (accounts, _, _, resets, _) = member_stores();
+    contract::reset_links_are_swept_a_while_after_they_ended(&resets, &*accounts, &*accounts).await;
+}
+
+#[tokio::test]
+async fn the_members_are_listed_most_recently_active_first() {
+    let (accounts, sessions, _, _, members) = member_stores();
+    contract::the_members_are_listed_most_recently_active_first(
+        &members, &*sessions, &*accounts, &*accounts,
+    )
+    .await;
+}

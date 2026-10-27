@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
 use domain::auth::{
-    AuthError, INVITATION_RETENTION, Invitations, LoginTickets, RefreshTokens, SESSION_IDLE,
-    SESSION_RETENTION, SPENT_RETENTION, Sessions, SignUps, SignupCodes, UNVERIFIED_TTL,
+    AuthError, INVITATION_RETENTION, Invitations, LoginTickets, PasswordResets, RESET_RETENTION,
+    RefreshTokens, SESSION_IDLE, SESSION_RETENTION, SPENT_RETENTION, Sessions, SignUps,
+    SignupCodes, UNVERIFIED_TTL,
 };
 use time::OffsetDateTime;
 
@@ -15,13 +16,14 @@ pub struct Swept {
     pub sessions: usize,
     pub refresh_tokens: usize,
     pub invitations: usize,
+    pub password_resets: usize,
 }
 
 /// Every hour: spent codes and tickets after a day, the accounts never confirmed after a
 /// week — freeing their address and name — the sessions a month after they ended, and the
 /// refresh tokens left unused as long as a session may idle. A session's other tokens stay
-/// while it lives, so a copy presented late is still caught. The invitations go a month after
-/// they were used, revoked or expired.
+/// while it lives, so a copy presented late is still caught. The invitations and the reset links
+/// go a month after they ended.
 pub struct SweepSignups {
     codes: Arc<dyn SignupCodes>,
     tickets: Arc<dyn LoginTickets>,
@@ -29,6 +31,7 @@ pub struct SweepSignups {
     sessions: Arc<dyn Sessions>,
     refresh_tokens: Arc<dyn RefreshTokens>,
     invitations: Arc<dyn Invitations>,
+    resets: Arc<dyn PasswordResets>,
 }
 
 impl SweepSignups {
@@ -39,6 +42,7 @@ impl SweepSignups {
         sessions: Arc<dyn Sessions>,
         refresh_tokens: Arc<dyn RefreshTokens>,
         invitations: Arc<dyn Invitations>,
+        resets: Arc<dyn PasswordResets>,
     ) -> Self {
         Self {
             codes,
@@ -47,6 +51,7 @@ impl SweepSignups {
             sessions,
             refresh_tokens,
             invitations,
+            resets,
         }
     }
 
@@ -70,6 +75,7 @@ impl SweepSignups {
                 .invitations
                 .delete_ended(now - INVITATION_RETENTION)
                 .await?,
+            password_resets: self.resets.delete_ended(now - RESET_RETENTION).await?,
         })
     }
 }

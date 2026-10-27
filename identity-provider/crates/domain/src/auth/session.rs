@@ -73,6 +73,8 @@ pub enum RevokedReason {
     DeviceRevoked,
     /// Its account signed out of every other device.
     SignedOutElsewhere,
+    /// Its account's password was set anew with a reset link.
+    PasswordReset,
 }
 
 impl RevokedReason {
@@ -83,6 +85,7 @@ impl RevokedReason {
             Self::Reuse => "reuse",
             Self::DeviceRevoked => "device_revoked",
             Self::SignedOutElsewhere => "signed_out_elsewhere",
+            Self::PasswordReset => "password_reset",
         }
     }
 }

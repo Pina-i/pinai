@@ -513,6 +513,9 @@ impl Application {
             Arc::new(infrastructure::postgres::PgSignUps::new(pool.clone()));
         let invitations: Arc<dyn domain::auth::Invitations> =
             Arc::new(infrastructure::postgres::PgInvitations::new(pool.clone()));
+        let password_resets: Arc<dyn domain::auth::PasswordResets> = Arc::new(
+            infrastructure::postgres::PgPasswordResets::new(pool.clone()),
+        );
         // Before anything is served: nobody can register the admin's address first.
         let admin = application::auth::EnsureAdmin::new(
             origin.clone(),
@@ -536,6 +539,7 @@ impl Application {
             Arc::clone(&sessions),
             Arc::clone(&refresh_tokens),
             Arc::clone(&invitations),
+            Arc::clone(&password_resets),
         ));
 
         let receive_follow = Arc::new(ReceiveFollow::new(
@@ -592,6 +596,7 @@ impl Application {
                     Arc::clone(&clients),
                     Arc::clone(&login_tickets),
                     Arc::clone(&invitations),
+                    Arc::clone(&password_resets),
                 )),
                 origin.clone(),
                 config.secure_cookies(),
@@ -647,6 +652,24 @@ impl Application {
             revoke_invitation: Arc::new(application::auth::RevokeInvitation::new(
                 Arc::clone(&sign_in_accounts),
                 invitations,
+            )),
+            list_members: Arc::new(application::auth::ListMembers::new(
+                Arc::clone(&sign_in_accounts),
+                Arc::new(infrastructure::postgres::PgInstanceMembers::new(
+                    pool.clone(),
+                )),
+                Arc::clone(&board),
+            )),
+            issue_password_reset: Arc::new(application::auth::IssuePasswordReset::new(
+                Arc::clone(&sign_in_accounts),
+                Arc::clone(&password_resets),
+            )),
+            reset_password: Arc::new(application::auth::ResetPassword::new(
+                origin.clone(),
+                config.web_app.clone(),
+                Arc::clone(&hasher),
+                password_resets,
+                Arc::clone(&session_notifier),
             )),
             verify_email: Arc::new(application::auth::VerifyEmail::new(
                 Arc::clone(&clients),

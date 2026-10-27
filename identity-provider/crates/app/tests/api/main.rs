@@ -7,6 +7,7 @@ mod federation;
 mod groups;
 mod helpers;
 mod invitations;
+mod password_resets;
 mod sessions;
 mod shutdown;
 mod sign_up;

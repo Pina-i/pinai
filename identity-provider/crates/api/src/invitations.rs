@@ -14,7 +14,7 @@ use serde::Serialize;
 use time::OffsetDateTime;
 
 use crate::ApiError;
-use crate::auth::Authenticated;
+use crate::auth::{Authenticated, not_admin};
 use crate::invite::invitation_path;
 
 #[derive(Serialize)]
@@ -57,11 +57,7 @@ impl From<OpenInvitation> for OpenBody {
 
 fn refusal(error: AuthError) -> ApiError {
     match error {
-        AuthError::NotAdmin => ApiError::new(
-            StatusCode::FORBIDDEN,
-            "access_denied",
-            "Only an admin may do this",
-        ),
+        AuthError::NotAdmin => not_admin(),
         AuthError::InvitationUnusable => ApiError::not_found("Invitation not found"),
         AuthError::RegistrationsOpen => ApiError::new(
             StatusCode::CONFLICT,

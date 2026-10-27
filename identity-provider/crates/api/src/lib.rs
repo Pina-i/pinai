@@ -12,6 +12,7 @@ mod inbox;
 mod invitations;
 mod invite;
 mod key_directory;
+mod members;
 mod messaging;
 mod mls;
 mod nodeinfo;
@@ -20,6 +21,7 @@ mod presence;
 mod privacy;
 mod profile;
 pub mod rate_limit;
+mod reset;
 mod second_factor;
 mod sessions;
 mod settings;
@@ -35,9 +37,9 @@ use std::sync::Arc;
 
 use application::auth::{
     Authenticate, Authorize, ConfirmTotpEnrollment, CreateInvitation, DisableTotp, ExchangeCode,
-    LinkDevice, ListInvitations, LogIn, LogOut, PassSecondFactor, Refresh, RegenerateRecoveryCodes,
-    Register, RegisterInvited, ResendCode, RevokeInvitation, RevokeToken, SendTestMail,
-    SignOutOthers, StartTotpEnrollment, VerifyEmail,
+    IssuePasswordReset, LinkDevice, ListInvitations, ListMembers, LogIn, LogOut, PassSecondFactor,
+    Refresh, RegenerateRecoveryCodes, Register, RegisterInvited, ResendCode, ResetPassword,
+    RevokeInvitation, RevokeToken, SendTestMail, SignOutOthers, StartTotpEnrollment, VerifyEmail,
 };
 use application::e2ee::{
     AppendCommit, ArchiveMessages, CatchUpCommits, ClaimKeyPackage, ClaimWelcomes, ClearArchive,
@@ -105,6 +107,10 @@ pub struct AppState {
     pub create_invitation: Arc<CreateInvitation>,
     pub list_invitations: Arc<ListInvitations>,
     pub revoke_invitation: Arc<RevokeInvitation>,
+    pub list_members: Arc<ListMembers>,
+    pub issue_password_reset: Arc<IssuePasswordReset>,
+    /// The form a reset link opens.
+    pub reset_password: Arc<ResetPassword>,
     pub verify_email: Arc<VerifyEmail>,
     pub resend_code: Arc<ResendCode>,
     pub send_test_mail: Arc<SendTestMail>,
@@ -252,6 +258,12 @@ pub fn router(state: AppState) -> Router {
             get(invitations::list).post(invitations::create),
         )
         .route("/api/admin/invitations/{id}", delete(invitations::revoke))
+        .route("/api/admin/members", get(members::list))
+        .route(
+            "/api/admin/members/{id}/password-reset",
+            post(members::issue_reset),
+        )
+        .route("/r/{token}", get(reset::page).post(reset::reset))
         .route(
             "/login/totp",
             get(second_factor::page).post(second_factor::pass),

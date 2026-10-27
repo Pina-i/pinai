@@ -1,7 +1,8 @@
 use domain::auth::SessionKind;
 use domain::auth::testing::{a_request, signed_up};
 use domain::auth::{
-    INVITATION_TTL, Invitations, RefreshTokens, SESSION_IDLE, SIGNUP_CODE_TTL, SignInAccount,
+    INVITATION_TTL, Invitations, PasswordResets, RESET_TTL, RefreshTokens, SESSION_IDLE,
+    SIGNUP_CODE_TTL, SignInAccount,
 };
 use domain::auth::{LoginTickets, SignInAccounts, SignupCodes};
 use time::Duration;
@@ -46,6 +47,7 @@ async fn the_sweep_deletes_what_was_spent_a_day_ago_and_the_accounts_never_confi
             sessions: 0,
             refresh_tokens: 0,
             invitations: 0,
+            password_resets: 0,
         }
     );
     assert_eq!(
@@ -57,6 +59,7 @@ async fn the_sweep_deletes_what_was_spent_a_day_ago_and_the_accounts_never_confi
             sessions: 0,
             refresh_tokens: 0,
             invitations: 0,
+            password_resets: 0,
         }
     );
     assert_eq!(w.accounts.by_id(bob.id).await.unwrap(), None);
@@ -166,4 +169,38 @@ async fn an_invitation_is_swept_a_month_after_it_ended() {
         None,
         "gone"
     );
+}
+
+#[tokio::test]
+async fn a_reset_link_is_swept_a_month_after_it_ended() {
+    let w = world().await;
+    let now = OffsetDateTime::from_unix_timestamp(1_790_000_000).unwrap();
+    let admin = w.an_admin().await;
+    let expiring = w
+        .resets
+        .issue(w.alice.id, admin.id, now, now + RESET_TTL)
+        .await
+        .unwrap();
+    w.resets
+        .issue(w.alice.id, admin.id, now, now + RESET_TTL)
+        .await
+        .unwrap();
+
+    let a_month_on = w
+        .sweep
+        .execute(now + RESET_RETENTION + Duration::minutes(1))
+        .await
+        .unwrap();
+    let after_expiry = w
+        .sweep
+        .execute(now + RESET_TTL + RESET_RETENTION + Duration::minutes(1))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        (a_month_on.password_resets, after_expiry.password_resets),
+        (1, 1),
+        "the replaced one first, the other once it expired"
+    );
+    assert_eq!(w.resets.find_open(&expiring, now).await.unwrap(), None);
 }

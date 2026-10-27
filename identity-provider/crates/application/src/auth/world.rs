@@ -4,21 +4,24 @@ use std::sync::Arc;
 
 use domain::auth::SignInAccount;
 use domain::auth::testing::{
-    CountingSuffixes, InMemoryClientSignIns, InMemoryClients, InMemoryCodes, InMemoryRefreshTokens,
-    InMemorySecondFactors, InMemorySessions, InMemorySignInAccounts, InMemorySignupCodes,
-    PlainHasher, RecordingMailer, RecordingSessionNotifier, RecordingTickets, SignInSeeds,
-    SpelledTokens, StepAuthenticator, signed_up, web_client,
+    CountingSuffixes, InMemoryClientSignIns, InMemoryClients, InMemoryCodes,
+    InMemoryInstanceMembers, InMemoryPasswordResets, InMemoryRefreshTokens, InMemorySecondFactors,
+    InMemorySessions, InMemorySignInAccounts, InMemorySignupCodes, PlainHasher, RecordingMailer,
+    RecordingSessionNotifier, RecordingTickets, SignInSeeds, SpelledTokens, StepAuthenticator,
+    signed_up, web_client,
 };
 use domain::auth::{Client, Registrations, SecondFactors, TotpSecret, WebApp, desktop_client};
 use domain::e2ee::testing::InMemoryKeyDirectory;
 use domain::identity::InstanceOrigin;
+use domain::presence::PresenceBoard;
 use time::OffsetDateTime;
 
 use super::{
     Authorize, CompleteSignIn, ConfirmTotpEnrollment, CreateInvitation, DisableTotp, EnsureAdmin,
-    ExchangeCode, LinkDevice, ListInvitations, LogIn, LogOut, PassSecondFactor, Refresh,
-    RegenerateRecoveryCodes, Register, RegisterInvited, ResendCode, RevokeInvitation, RevokeToken,
-    ShowSignIn, SignOutOthers, StartTotpEnrollment, SweepSignups, VerifyEmail,
+    ExchangeCode, IssuePasswordReset, LinkDevice, ListInvitations, ListMembers, LogIn, LogOut,
+    PassSecondFactor, Refresh, RegenerateRecoveryCodes, Register, RegisterInvited, ResendCode,
+    ResetPassword, RevokeInvitation, RevokeToken, ShowSignIn, SignOutOthers, StartTotpEnrollment,
+    SweepSignups, VerifyEmail,
 };
 
 pub struct World {
@@ -37,6 +40,9 @@ pub struct World {
     pub ended: Arc<RecordingSessionNotifier>,
     pub refresh_tokens: Arc<InMemoryRefreshTokens>,
     pub devices: Arc<InMemoryKeyDirectory>,
+    pub resets: Arc<InMemoryPasswordResets>,
+    /// The presence states this instance has heard.
+    pub board: Arc<PresenceBoard>,
     pub authorize: Authorize,
     pub log_in: LogIn,
     pub exchange: ExchangeCode,
@@ -50,6 +56,9 @@ pub struct World {
     pub create_invitation: CreateInvitation,
     pub list_invitations: ListInvitations,
     pub revoke_invitation: RevokeInvitation,
+    pub issue_reset: IssuePasswordReset,
+    pub reset_password: ResetPassword,
+    pub list_members: ListMembers,
     pub ensure_admin: EnsureAdmin,
     pub verify: VerifyEmail,
     pub resend: ResendCode,
@@ -92,6 +101,12 @@ async fn world_with(registrations: Registrations) -> World {
     let ended = Arc::new(RecordingSessionNotifier::default());
     let refresh_tokens = Arc::new(InMemoryRefreshTokens::default());
     let devices = Arc::new(InMemoryKeyDirectory::default());
+    let resets = Arc::new(InMemoryPasswordResets::over(
+        accounts.clone(),
+        sessions.clone(),
+        tickets.clone(),
+    ));
+    let board = Arc::new(PresenceBoard::default());
     let complete = Arc::new(CompleteSignIn::new(
         sign_ins.clone(),
         codes.clone(),
@@ -181,6 +196,22 @@ async fn world_with(registrations: Registrations) -> World {
         create_invitation: CreateInvitation::new(registrations, accounts.clone(), accounts.clone()),
         list_invitations: ListInvitations::new(accounts.clone(), accounts.clone()),
         revoke_invitation: RevokeInvitation::new(accounts.clone(), accounts.clone()),
+        issue_reset: IssuePasswordReset::new(accounts.clone(), resets.clone()),
+        reset_password: ResetPassword::new(
+            origin.clone(),
+            Some(WebApp::parse("http://localhost:5173").unwrap()),
+            hasher.clone(),
+            resets.clone(),
+            ended.clone(),
+        ),
+        list_members: ListMembers::new(
+            accounts.clone(),
+            Arc::new(InMemoryInstanceMembers::over(
+                accounts.clone(),
+                sessions.clone(),
+            )),
+            board.clone(),
+        ),
         ensure_admin: EnsureAdmin::new(
             origin.clone(),
             accounts.clone(),
@@ -201,8 +232,14 @@ async fn world_with(registrations: Registrations) -> World {
             sessions.clone(),
             refresh_tokens.clone(),
             accounts.clone(),
+            resets.clone(),
         ),
-        show: ShowSignIn::new(clients.clone(), tickets.clone(), accounts.clone()),
+        show: ShowSignIn::new(
+            clients.clone(),
+            tickets.clone(),
+            accounts.clone(),
+            resets.clone(),
+        ),
         alice,
         origin,
         desktop,
@@ -217,6 +254,8 @@ async fn world_with(registrations: Registrations) -> World {
         ended,
         refresh_tokens,
         devices,
+        resets,
+        board,
     }
 }
 

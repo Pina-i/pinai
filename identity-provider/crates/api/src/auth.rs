@@ -82,6 +82,15 @@ where
     }
 }
 
+/// The refusal of anyone but an admin on every admin route (`AuthError::NotAdmin`).
+pub(crate) fn not_admin() -> ApiError {
+    ApiError::new(
+        axum::http::StatusCode::FORBIDDEN,
+        "access_denied",
+        "Only an admin may do this",
+    )
+}
+
 impl From<TokenError> for ApiError {
     fn from(error: TokenError) -> Self {
         match error {

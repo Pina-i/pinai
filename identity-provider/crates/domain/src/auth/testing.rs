@@ -13,12 +13,13 @@ use super::{
     AddressHolder, AdminFacts, AuthError, Authenticator, AuthorizationCode, AuthorizationCodes,
     AuthorizationRequest, CODE_ATTEMPTS, Client, ClientDocument, ClientId, ClientKind,
     ClientPolicy, ClientSignIn, ClientSignIns, Clients, CodeAttempt, CodeChallenge, Email, Grant,
-    HandleSuffixes, INVITATION_TTL, Invitation, InvitationToken, Invitations, LOGIN_TICKET_TTL,
-    LoginTickets, NewAccount, OpenInvitation, OtpCode, PasswordHash, PasswordHasher, Presentation,
-    RECOVERY_CODES, RefreshLink, RefreshToken, RefreshTokens, Registration, RevokedReason,
-    Rotation, SESSION_IDLE, SESSION_RETENTION, SIGNUP_CODE_TTL, SecondFactors, Session,
-    SessionKind, SessionNotifier, Sessions, SignInAccount, SignInAccounts, SignUps, SignupCodes,
-    SignupMailer, TICKET_ATTEMPTS, Ticket, TicketAttempt, TokenIssuer, TotpSecret,
+    HandleSuffixes, INVITATION_TTL, InstanceMember, InstanceMembers, Invitation, InvitationToken,
+    Invitations, LOGIN_TICKET_TTL, LoginTickets, NewAccount, OpenInvitation, OpenReset, OtpCode,
+    PasswordChange, PasswordHash, PasswordHasher, PasswordReset, PasswordResets, Presentation,
+    RECOVERY_CODES, RESET_TTL, RefreshLink, RefreshToken, RefreshTokens, Registration, ResetToken,
+    RevokedReason, Rotation, SESSION_IDLE, SESSION_RETENTION, SIGNUP_CODE_TTL, SecondFactors,
+    Session, SessionKind, SessionNotifier, Sessions, SignInAccount, SignInAccounts, SignUps,
+    SignupCodes, SignupMailer, TICKET_ATTEMPTS, Ticket, TicketAttempt, TokenIssuer, TotpSecret,
 };
 
 pub const CLIENT_ID: &str = "http://localhost:5173/oauth-client.json";
@@ -50,6 +51,12 @@ pub fn a_request() -> AuthorizationRequest {
         challenge: CodeChallenge::parse(CHALLENGE, "S256").unwrap(),
         nonce: Some("the-nonce".to_owned()),
     }
+}
+
+/// The actor URI a seeded account has, on the tests' instance: `http://localhost:8080/users/{handle}`.
+pub fn seeded_actor(account: &SignInAccount) -> ActorUri {
+    ActorUri::parse(&format!("http://localhost:8080/users/{}", account.username))
+        .expect("a seeded account's handle")
 }
 
 /// A verified account without a second factor, whose password is `{name}-password`.
@@ -426,12 +433,20 @@ pub struct InMemorySignInAccounts {
     tokens: AtomicUsize,
     /// Who vouched for each account an invitation let in.
     vouched: Mutex<HashMap<UserId, UserId>>,
+    actors: Mutex<HashMap<UserId, ActorUri>>,
 }
 
 impl InMemorySignInAccounts {
     pub fn with(accounts: impl IntoIterator<Item = SignInAccount>) -> Self {
         let now = OffsetDateTime::now_utc();
+        let accounts: Vec<SignInAccount> = accounts.into_iter().collect();
         Self {
+            actors: Mutex::new(
+                accounts
+                    .iter()
+                    .map(|account| (account.id, seeded_actor(account)))
+                    .collect(),
+            ),
             accounts: Mutex::new(accounts.into_iter().map(|a| (a, now)).collect()),
             ..Self::default()
         }
@@ -453,6 +468,13 @@ impl InMemorySignInAccounts {
         let mut accounts = self.accounts.lock().unwrap();
         if let Some((account, _)) = accounts.iter_mut().find(|(a, _)| a.id == user) {
             account.email_verified = true;
+        }
+    }
+
+    fn set_password(&self, user: UserId, hash: &PasswordHash) {
+        let mut accounts = self.accounts.lock().unwrap();
+        if let Some((account, _)) = accounts.iter_mut().find(|(a, _)| a.id == user) {
+            account.password_hash = hash.clone();
         }
     }
 }
@@ -501,6 +523,10 @@ impl InMemorySignInAccounts {
 
     fn add(&self, accounts: &mut Held, account: &NewAccount, admitted: bool, admin: bool) {
         self.created.lock().unwrap().push(account.clone());
+        self.actors
+            .lock()
+            .unwrap()
+            .insert(account.id, account.actor_uri.clone());
         accounts.push((
             SignInAccount {
                 id: account.id,
@@ -679,6 +705,183 @@ impl Invitations for InMemorySignInAccounts {
         let held = invitations.len();
         invitations.retain(|row| row.invitation.ended_at() >= before);
         Ok(held - invitations.len())
+    }
+}
+
+struct ResetRow {
+    reset: PasswordReset,
+    token: ResetToken,
+}
+
+/// Reset links as `password_resets` keeps them, over the accounts whose password they set and the
+/// sessions and second-factor tickets they end.
+pub struct InMemoryPasswordResets {
+    accounts: std::sync::Arc<InMemorySignInAccounts>,
+    sessions: std::sync::Arc<InMemorySessions>,
+    tickets: std::sync::Arc<RecordingTickets>,
+    rows: Mutex<Vec<ResetRow>>,
+    tokens: AtomicUsize,
+}
+
+impl InMemoryPasswordResets {
+    pub fn over(
+        accounts: std::sync::Arc<InMemorySignInAccounts>,
+        sessions: std::sync::Arc<InMemorySessions>,
+        tickets: std::sync::Arc<RecordingTickets>,
+    ) -> Self {
+        Self {
+            accounts,
+            sessions,
+            tickets,
+            rows: Mutex::default(),
+            tokens: AtomicUsize::default(),
+        }
+    }
+}
+
+/// Tokens of known bytes — a fake's tokens are no secret — kept as they are.
+#[async_trait::async_trait]
+impl PasswordResets for InMemoryPasswordResets {
+    async fn issue(
+        &self,
+        member: UserId,
+        by: UserId,
+        now: OffsetDateTime,
+        expires_at: OffsetDateTime,
+    ) -> Result<ResetToken, AuthError> {
+        let n = self.tokens.fetch_add(1, Ordering::SeqCst) + 1;
+        let mut bytes = [0u8; 32];
+        bytes[..8].copy_from_slice(&u64::try_from(n).unwrap_or(u64::MAX).to_le_bytes());
+        let token = ResetToken::from_bytes(bytes);
+        let mut rows = self.rows.lock().unwrap();
+        for row in rows.iter_mut().filter(|row| {
+            row.reset.member == member
+                && row.reset.used_at.is_none()
+                && row.reset.replaced_at.is_none()
+        }) {
+            row.reset.replaced_at = Some(now);
+        }
+        rows.push(ResetRow {
+            reset: PasswordReset {
+                member,
+                created_by: by,
+                created_at: now,
+                expires_at,
+                used_at: None,
+                replaced_at: None,
+            },
+            token: token.clone(),
+        });
+        Ok(token)
+    }
+
+    async fn find_open(
+        &self,
+        token: &ResetToken,
+        now: OffsetDateTime,
+    ) -> Result<Option<OpenReset>, AuthError> {
+        let rows = self.rows.lock().unwrap();
+        let Some(row) = rows
+            .iter()
+            .find(|row| row.token == *token && row.reset.is_open(now))
+        else {
+            return Ok(None);
+        };
+        let accounts = self.accounts.accounts.lock().unwrap();
+        Ok(accounts
+            .iter()
+            .find(|(account, _)| account.id == row.reset.member)
+            .map(|(account, _)| OpenReset {
+                member: account.id,
+                display_name: account.display_name.clone(),
+                expires_at: row.reset.expires_at,
+            }))
+    }
+
+    async fn reset(
+        &self,
+        token: &ResetToken,
+        hash: &PasswordHash,
+        now: OffsetDateTime,
+    ) -> Result<PasswordChange, AuthError> {
+        let mut rows = self.rows.lock().unwrap();
+        let Some(row) = rows
+            .iter_mut()
+            .find(|row| row.token == *token && row.reset.is_open(now))
+        else {
+            return Ok(PasswordChange::LinkUnusable);
+        };
+        row.reset.used_at = Some(now);
+        let member = row.reset.member;
+        self.accounts.set_password(member, hash);
+        let ended = self.sessions.end(
+            |session| session.user == member,
+            RevokedReason::PasswordReset,
+            now,
+        );
+        for ticket in self
+            .tickets
+            .rows
+            .lock()
+            .unwrap()
+            .iter_mut()
+            .filter(|ticket| ticket.user == member)
+        {
+            ticket.spent = true;
+        }
+        Ok(PasswordChange::Changed { member, ended })
+    }
+
+    async fn delete_ended(&self, before: OffsetDateTime) -> Result<usize, AuthError> {
+        let mut rows = self.rows.lock().unwrap();
+        let held = rows.len();
+        rows.retain(|row| row.reset.ended_at() >= before);
+        Ok(held - rows.len())
+    }
+}
+
+/// The members, read from the accounts and their sessions.
+pub struct InMemoryInstanceMembers {
+    accounts: std::sync::Arc<InMemorySignInAccounts>,
+    sessions: std::sync::Arc<InMemorySessions>,
+}
+
+impl InMemoryInstanceMembers {
+    pub fn over(
+        accounts: std::sync::Arc<InMemorySignInAccounts>,
+        sessions: std::sync::Arc<InMemorySessions>,
+    ) -> Self {
+        Self { accounts, sessions }
+    }
+}
+
+#[async_trait::async_trait]
+impl InstanceMembers for InMemoryInstanceMembers {
+    async fn list(&self, now: OffsetDateTime) -> Result<Vec<InstanceMember>, AuthError> {
+        let sessions = self.sessions.all();
+        let actors = self.accounts.actors.lock().unwrap().clone();
+        let mut members: Vec<InstanceMember> = self
+            .accounts
+            .accounts
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(account, _)| account)
+            .filter(|account| !account.needs_code())
+            .map(|account| InstanceMember {
+                id: account.id,
+                actor: actors.get(&account.id).cloned(),
+                display_name: account.display_name.clone(),
+                admin: account.admin,
+                last_active_at: sessions
+                    .iter()
+                    .filter(|session| session.user == account.id && session.is_live(now))
+                    .map(|session| session.last_used_at)
+                    .max(),
+            })
+            .collect();
+        members.sort_by_key(|member| (std::cmp::Reverse(member.last_active_at), member.id));
+        Ok(members)
     }
 }
 
@@ -1405,6 +1608,10 @@ pub trait ClientSeeds: Send + Sync {
 #[async_trait::async_trait]
 impl SignInSeeds for InMemorySignInAccounts {
     async fn sign_up(&self, account: &SignInAccount) {
+        self.actors
+            .lock()
+            .unwrap()
+            .insert(account.id, seeded_actor(account));
         self.accounts
             .lock()
             .unwrap()
@@ -2864,6 +3071,339 @@ pub mod contract {
                 .await
                 .unwrap()
                 .is_some()
+        );
+    }
+
+    pub async fn issuing_a_link_replaces_the_members_open_one(
+        resets: &dyn PasswordResets,
+        sign_ups: &dyn SignUps,
+        seeds: &dyn SignInSeeds,
+    ) {
+        let now = OffsetDateTime::from_unix_timestamp(1_790_000_000).unwrap();
+        let admin = an_admin(sign_ups, now).await;
+        let (alice, bob) = (signed_up("alice"), signed_up("bob"));
+        seeds.sign_up(&alice).await;
+        seeds.sign_up(&bob).await;
+        let later = now + Duration::minutes(5);
+
+        let first = resets
+            .issue(alice.id, admin.id, now, now + RESET_TTL)
+            .await
+            .unwrap();
+        let bobs = resets
+            .issue(bob.id, admin.id, now, now + RESET_TTL)
+            .await
+            .unwrap();
+        let second = resets
+            .issue(alice.id, admin.id, later, later + RESET_TTL)
+            .await
+            .unwrap();
+
+        assert_ne!(first, second);
+        assert_eq!(
+            resets.find_open(&first, later).await.unwrap(),
+            None,
+            "replaced"
+        );
+        assert_eq!(
+            resets.find_open(&second, later).await.unwrap(),
+            Some(OpenReset {
+                member: alice.id,
+                display_name: Some("alice".to_owned()),
+                expires_at: later + RESET_TTL,
+            })
+        );
+        assert!(
+            resets.find_open(&bobs, later).await.unwrap().is_some(),
+            "another member's stays open"
+        );
+    }
+
+    pub async fn a_reset_sets_the_password_spends_the_link_and_ends_what_the_old_password_opened(
+        resets: &dyn PasswordResets,
+        accounts: &dyn SignInAccounts,
+        sessions: &dyn Sessions,
+        tickets: &dyn LoginTickets,
+        sign_ups: &dyn SignUps,
+        seeds: &dyn SignInSeeds,
+    ) {
+        let now = OffsetDateTime::from_unix_timestamp(1_790_000_000).unwrap();
+        let admin = an_admin(sign_ups, now).await;
+        let (alice, bob) = (signed_up("alice"), signed_up("bob"));
+        seeds.sign_up(&alice).await;
+        seeds.sign_up(&bob).await;
+        let open =
+            async |user: UserId, kind: SessionKind| sessions.open(user, &kind, now).await.unwrap();
+        let browser = open(alice.id, SessionKind::Browser).await;
+        let desktop = open(alice.id, SessionKind::App(web_client().id)).await;
+        let signed_out = open(alice.id, SessionKind::Browser).await;
+        sessions
+            .revoke(signed_out, RevokedReason::SignOut, now)
+            .await
+            .unwrap();
+        let bobs = open(bob.id, SessionKind::Browser).await;
+        let token = resets
+            .issue(alice.id, admin.id, now, now + RESET_TTL)
+            .await
+            .unwrap();
+        let at = now + Duration::hours(1);
+        let ticket_of = async |user: UserId| {
+            tickets
+                .open(user, &a_request(), at + LOGIN_TICKET_TTL)
+                .await
+                .unwrap()
+        };
+        let (alices_ticket, bobs_ticket) = (ticket_of(alice.id).await, ticket_of(bob.id).await);
+        let hash = PlainHasher::hash("a-new-password");
+
+        let changed = resets.reset(&token, &hash, at).await.unwrap();
+        let again = resets
+            .reset(&token, &PlainHasher::hash("yet-another-password"), at)
+            .await
+            .unwrap();
+
+        let PasswordChange::Changed { member, ended } = changed else {
+            panic!("not changed: {changed:?}");
+        };
+        let mut ended_ids = ids(ended.clone());
+        ended_ids.sort();
+        let mut live = vec![browser, desktop];
+        live.sort();
+        assert_eq!(member, alice.id);
+        assert_eq!(ended_ids, live, "the sessions not ended already");
+        assert!(ended.iter().all(|session| session.revoked_at == Some(at)));
+        assert_eq!(again, PasswordChange::LinkUnusable, "spent");
+        assert_eq!(
+            accounts
+                .by_id(alice.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .password_hash,
+            hash
+        );
+        assert_eq!(
+            accounts.by_id(bob.id).await.unwrap().unwrap().password_hash,
+            bob.password_hash
+        );
+        assert_eq!(resets.find_open(&token, at).await.unwrap(), None);
+        for gone in [browser, desktop] {
+            assert!(!sessions.find(gone).await.unwrap().unwrap().is_live(at));
+        }
+        assert_eq!(
+            sessions.find(signed_out).await.unwrap().unwrap().revoked_at,
+            Some(now),
+            "ended once"
+        );
+        assert!(sessions.find(bobs).await.unwrap().unwrap().is_live(at));
+        assert_eq!(
+            tickets.find(alices_ticket, at).await.unwrap(),
+            None,
+            "a sign-in half done with the old password ends too"
+        );
+        assert!(tickets.find(bobs_ticket, at).await.unwrap().is_some());
+    }
+
+    pub async fn a_replaced_expired_or_unknown_link_resets_nothing(
+        resets: &dyn PasswordResets,
+        accounts: &dyn SignInAccounts,
+        sessions: &dyn Sessions,
+        sign_ups: &dyn SignUps,
+        seeds: &dyn SignInSeeds,
+    ) {
+        let now = OffsetDateTime::from_unix_timestamp(1_790_000_000).unwrap();
+        let admin = an_admin(sign_ups, now).await;
+        let (alice, carol) = (signed_up("alice"), signed_up("carol"));
+        seeds.sign_up(&alice).await;
+        seeds.sign_up(&carol).await;
+        let alices = sessions
+            .open(alice.id, &SessionKind::Browser, now)
+            .await
+            .unwrap();
+        let expires_at = now + RESET_TTL;
+        let replaced = resets
+            .issue(alice.id, admin.id, now, expires_at)
+            .await
+            .unwrap();
+        resets
+            .issue(alice.id, admin.id, now, expires_at)
+            .await
+            .unwrap();
+        let expiring = resets
+            .issue(carol.id, admin.id, now, expires_at)
+            .await
+            .unwrap();
+        let hash = PlainHasher::hash("a-new-password");
+
+        let with_replaced = resets.reset(&replaced, &hash, now).await.unwrap();
+        let with_expired = resets.reset(&expiring, &hash, expires_at).await.unwrap();
+        let with_unknown = resets
+            .reset(&ResetToken::from_bytes([9; 32]), &hash, now)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            (with_replaced, with_expired, with_unknown),
+            (
+                PasswordChange::LinkUnusable,
+                PasswordChange::LinkUnusable,
+                PasswordChange::LinkUnusable
+            )
+        );
+        for (account, kept) in [
+            (&alice, &alice.password_hash),
+            (&carol, &carol.password_hash),
+        ] {
+            assert_eq!(
+                &accounts
+                    .by_id(account.id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .password_hash,
+                kept
+            );
+        }
+        assert!(sessions.find(alices).await.unwrap().unwrap().is_live(now));
+        assert!(
+            resets
+                .find_open(&expiring, expires_at - Duration::seconds(1))
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(resets.find_open(&expiring, expires_at).await.unwrap(), None);
+    }
+
+    pub async fn reset_links_are_swept_a_while_after_they_ended(
+        resets: &dyn PasswordResets,
+        sign_ups: &dyn SignUps,
+        seeds: &dyn SignInSeeds,
+    ) {
+        let before = OffsetDateTime::from_unix_timestamp(1_790_000_000).unwrap();
+        let admin = an_admin(sign_ups, before - Duration::days(60)).await;
+        let members = [
+            signed_up("alice"),
+            signed_up("bob"),
+            signed_up("carol"),
+            signed_up("dave"),
+        ];
+        for member in &members {
+            seeds.sign_up(member).await;
+        }
+        let [alice, bob, carol, dave] = members.map(|member| member.id);
+        let issue = async |member: UserId, at: OffsetDateTime| {
+            resets
+                .issue(member, admin.id, at, at + RESET_TTL)
+                .await
+                .unwrap()
+        };
+        let hash = PlainHasher::hash("a-new-password");
+        let used_before = issue(alice, before - Duration::hours(2)).await;
+        resets
+            .reset(&used_before, &hash, before - Duration::hours(1))
+            .await
+            .unwrap();
+        issue(bob, before - Duration::hours(3)).await;
+        let replacing = issue(bob, before - Duration::hours(2)).await;
+        issue(carol, before - RESET_TTL - Duration::hours(1)).await;
+        let used_after = issue(dave, before - Duration::hours(1)).await;
+        resets
+            .reset(&used_after, &hash, before + Duration::hours(1))
+            .await
+            .unwrap();
+
+        let swept = resets.delete_ended(before).await.unwrap();
+        let again = resets.delete_ended(before).await.unwrap();
+        let still_open = resets.find_open(&replacing, before).await.unwrap();
+        let used_later = resets
+            .delete_ended(before + Duration::hours(1) + Duration::minutes(1))
+            .await
+            .unwrap();
+        let expired_later = resets
+            .delete_ended(before + Duration::hours(22) + Duration::minutes(1))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            (swept, again, used_later, expired_later),
+            (3, 0, 1, 1),
+            "each a while after it ended — used, replaced or expired — not before"
+        );
+        assert!(still_open.is_some());
+    }
+
+    pub async fn the_members_are_listed_most_recently_active_first(
+        members: &dyn InstanceMembers,
+        sessions: &dyn Sessions,
+        sign_ups: &dyn SignUps,
+        seeds: &dyn SignInSeeds,
+    ) {
+        let now = OffsetDateTime::from_unix_timestamp(1_790_000_000).unwrap();
+        let admin = an_admin(sign_ups, now - Duration::days(10)).await;
+        let alice = signed_up("alice");
+        let carol = SignInAccount {
+            email_verified: false,
+            admitted: true,
+            ..signed_up("carol")
+        };
+        let dave = SignInAccount {
+            display_name: None,
+            ..signed_up("dave")
+        };
+        for account in [&alice, &carol, &dave] {
+            seeds.sign_up(account).await;
+        }
+        let bob = a_new_account("bob");
+        sign_ups.create(&bob).await.unwrap();
+        let used = async |user: UserId, opened: OffsetDateTime, last_used: OffsetDateTime| {
+            let id = sessions
+                .open(user, &SessionKind::Browser, opened)
+                .await
+                .unwrap();
+            sessions.touch(id, last_used).await.unwrap();
+            id
+        };
+        let a_month_ago = now - Duration::days(30);
+        used(alice.id, a_month_ago, now - Duration::hours(1)).await;
+        let ended = used(alice.id, a_month_ago, now - Duration::minutes(1)).await;
+        sessions
+            .revoke(ended, RevokedReason::SignOut, now - Duration::minutes(1))
+            .await
+            .unwrap();
+        used(admin.id, a_month_ago, now - Duration::hours(2)).await;
+        let idle_since = now - SESSION_IDLE - Duration::days(1);
+        used(carol.id, idle_since, idle_since).await;
+        used(bob.id, now, now).await;
+
+        let listed = members.list(now).await.unwrap();
+
+        let member = |account: &SignInAccount, last_active_at| InstanceMember {
+            id: account.id,
+            actor: Some(seeded_actor(account)),
+            display_name: account.display_name.clone(),
+            admin: false,
+            last_active_at,
+        };
+        let mut signed_out = vec![member(&carol, None), member(&dave, None)];
+        signed_out.sort_by_key(|member| member.id);
+        let expected = [
+            vec![
+                member(&alice, Some(now - Duration::hours(1))),
+                InstanceMember {
+                    id: admin.id,
+                    actor: Some(admin.actor_uri.clone()),
+                    display_name: Some("admin".to_owned()),
+                    admin: true,
+                    last_active_at: Some(now - Duration::hours(2)),
+                },
+            ],
+            signed_out,
+        ]
+        .concat();
+        assert_eq!(
+            listed, expected,
+            "live sessions only; bob, unconfirmed, is no member"
         );
     }
 }

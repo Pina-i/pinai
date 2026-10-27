@@ -63,6 +63,10 @@ async fn a_sensitive_action_takes_a_password_typed_in_the_last_ten_minutes() {
         ),
         (Method::POST, "/api/totp/enroll".to_owned()),
         (Method::DELETE, "/api/history/messages".to_owned()),
+        (
+            Method::POST,
+            format!("/api/admin/members/{}/password-reset", uuid::Uuid::new_v4()),
+        ),
         // Last: done, it ends the session the stale token is from.
         (Method::DELETE, "/api/sessions?keep=current".to_owned()),
     ];

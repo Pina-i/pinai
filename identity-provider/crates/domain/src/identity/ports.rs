@@ -56,7 +56,7 @@ pub struct Bearer {
 }
 
 /// How recent a password a sensitive action takes: revoking a device, signing out the others,
-/// turning the second factor on, clearing the history backup.
+/// turning the second factor on, clearing the history backup, giving a member a reset link.
 pub const RECENT_SIGN_IN: Duration = Duration::minutes(10);
 
 impl Bearer {

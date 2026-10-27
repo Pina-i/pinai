@@ -1,30 +1,11 @@
 use std::time::Duration;
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::io::AsyncReadExt;
 
 use crate::helpers::{
-    Account, CHALLENGE, PASSWORD, TestApp, VERIFIER, location, query_of, spawn_app,
+    Account, CHALLENGE, PASSWORD, TestApp, VERIFIER, closed_as_ended, location, open_socket,
+    query_of, spawn_app,
 };
-
-/// A WebSocket opened with `token`: the stream past the handshake, or the refusal's status line.
-async fn open_socket(app: &TestApp, token: &str) -> Result<TcpStream, String> {
-    let mut socket = TcpStream::connect(app.domain.as_str()).await.unwrap();
-    let upgrade = format!(
-        "GET /ws?token={token} HTTP/1.1\r\nHost: {}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\
-         Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n",
-        app.domain
-    );
-    socket.write_all(upgrade.as_bytes()).await.unwrap();
-    let mut handshake = [0u8; 1024];
-    let read = socket.read(&mut handshake).await.unwrap();
-    let answer = String::from_utf8_lossy(&handshake[..read]).into_owned();
-    if answer.starts_with("HTTP/1.1 101") {
-        Ok(socket)
-    } else {
-        Err(answer.lines().next().unwrap_or_default().to_owned())
-    }
-}
 
 #[tokio::test]
 async fn signing_out_closes_the_sessions_sockets_and_its_tokens_stop_working() {
@@ -85,18 +66,6 @@ async fn a_live_session_signs_its_app_in_again_and_slides() {
     );
     assert!(cookie.contains("Max-Age=7776000"), "{cookie}");
     app.stop().await.unwrap();
-}
-
-/// Reads the socket to its end: whether the server closed it with 1008.
-async fn closed_as_ended(socket: &mut TcpStream) -> bool {
-    let mut frames = Vec::new();
-    tokio::time::timeout(Duration::from_secs(5), socket.read_to_end(&mut frames))
-        .await
-        .expect("the socket was closed")
-        .unwrap();
-    frames
-        .windows(4)
-        .any(|w| w[0] == 0x88 && u16::from_be_bytes([w[2], w[3]]) == 1008)
 }
 
 #[tokio::test]
