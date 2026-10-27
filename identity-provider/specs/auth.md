@@ -115,7 +115,7 @@ password?"), and grades a new password as it is typed. Everything works without 
 
 | Route | Page |
 |---|---|
-| `GET /login` | Sign in, or Register with `?tab=register` — two links, not script tabs. On an invite-only instance (§ 6) the Register tab is no link but a disabled "Invite only", and `?tab=register` shows Sign in. On an open one, the Sign in tab has "Forgot password?" beside the Password label (§ 7) |
+| `GET /login` | Sign in, or Register with `?tab=register` — two links, not script tabs. On an invite-only instance (§ 6) there are no tabs: the page is the sign-in form, and `?tab=register` shows it too. On an open one, the Sign in tab has "Forgot password?" beside the Password label (§ 7) |
 | `GET /forgot-password` | The login page opened on the reset request, as "Forgot password?" folds it (§ 7 "Forgot your password?"); on an invite-only instance, the page "No password reset by mail here", `404` |
 | `GET /verify-email` | The code mailed at sign-up (§ 2), with a form to send another |
 | `GET /login/totp` | The second factor (§ 3); `?mode=recovery` asks a recovery code instead |
@@ -133,6 +133,12 @@ v<version>". On the other "Sign in to <name>" under "— <domain>" and
 the form, ending with "Your password goes to <domain>, never to Pīna'i". A password typed there
 signs in to that app (§ "The session cookie"), so that line is all the consent there is. Below
 1024 px the two sides stack, the instance first.
+
+**The source.** At the foot of every page — under the form, or beside "Only the admins of <domain>
+make invitations" on an invitation's doorway — "↳ Source" links the code the instance runs,
+`SOURCE_URL` (`identity-provider/specs/identity.md § 6`). A plain link, nothing the CSP has to
+allow; it opens a new window, since the desktop app's sign-in window goes nowhere but the app and
+the instance, and hands a new window to the system browser.
 
 **The request each page carries.** Every page, link and form carries the sign-in request it was
 opened for — the `/authorize` parameters — and the POST it ends in checks it again. A `/login`
@@ -1189,7 +1195,7 @@ open or invite)"). The setting is `domain::auth::Registrations`, read once as th
 | An admin | Optional: each start without one warns | Required: no start without one |
 | NodeInfo `openRegistrations` | `true` | `false` |
 | Password reset links (§ 7) | Made by admins, or asked for by mail: "Forgot password?" on the login page | Made by admins only: no "Forgot password?", `/forgot-password` is `404` |
-| The sign-in pages | "open registration"; the Register tab | "invite only"; a disabled "Invite only" tab |
+| The sign-in pages | "open registration"; the Sign in and Register tabs | "invite only"; no tabs |
 
 ### The sign-up rule
 
@@ -1264,10 +1270,10 @@ flowchart TD
 - **NodeInfo**: `openRegistrations` is `true` on an open instance, `false` on an invite-only one
   (`identity-provider/specs/identity.md § 6`).
 - **The sign-in pages** (§ 1): beside the form, "open registration" in the colour of something
-  on, or "invite only" in the idle one. On the login page, an open instance has its Register tab
-  and "Forgot password?" (§ 7); an invite-only one shows in place of the tab a label that is no
-  link, "Invite only", `/login?tab=register` shows the Sign in tab, and there is no "Forgot
-  password?" — whoever forgot theirs asks an admin.
+  on, or "invite only" in the idle one. On the login page, an open instance has its Sign in and
+  Register tabs and "Forgot password?" (§ 7); an invite-only one has no tabs — its login page is
+  the sign-in form, `/login?tab=register` included — and no "Forgot password?": whoever forgot
+  theirs asks an admin.
 - **The invitation pages** (`/i/{token}` and its form, § 5) are the same in both modes. The
   "ready" page that can end joining carries the instance's facts like every sign-in page, so it
   shows "open registration" or "invite only".
@@ -1293,7 +1299,7 @@ flowchart TD
 - **A public instance.** `REGISTRATIONS=open` and a relay: anyone signs up on the register tab and
   confirms with the mailed code. NodeInfo says `openRegistrations: true`.
 - **Someone at an invite-only instance's register tab** — an old link with `?tab=register` — sees
-  the Sign in tab, and "Invite only" beside it, no link. The form posted anyway, or `POST /register`,
+  the sign-in form, no tabs, and "invite only" beside it. The form posted anyway, or `POST /register`,
   is refused "Accounts on {domain} are by invitation only", and no account is created.
 - **An admin of an open instance asking for an invitation** is answered `409`: people sign up
   themselves there.

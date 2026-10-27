@@ -47,6 +47,8 @@ FROM gcr.io/distroless/cc-debian13:nonroot AS runtime
 
 WORKDIR /app
 COPY --from=builder /idp-server /app/idp-server
+# The AGPL travels with every copy of the program.
+COPY LICENSE /usr/share/doc/pinai/LICENSE
 
 USER 65532:65532
 EXPOSE 8080

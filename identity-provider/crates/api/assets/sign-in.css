@@ -732,9 +732,6 @@ input {
     color: var(--accink);
     font-weight: 700;
 }
-.tab--off {
-    cursor: default;
-}
 .stack {
     display: flex;
     flex-direction: column;

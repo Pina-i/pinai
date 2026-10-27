@@ -570,7 +570,7 @@ image for amd64 and arm64 on native runners. What it publishes to
 |---|---|
 | A pull request | nothing |
 | A push to `main` | `edge` and `sha-<short>`, for testing only |
-| A tag `vX.Y.Z` | `X.Y.Z`, `X.Y` and `latest`, then a GitHub release carrying `pinai-deploy.tar.gz`: `deploy/`, its `compose.yaml` running `X.Y` |
+| A tag `vX.Y.Z` | `X.Y.Z`, `X.Y` and `latest`, then a GitHub release carrying `pinai-deploy.tar.gz`: `deploy/` and `LICENSE`, its `compose.yaml` running `X.Y` |
 | A tag `vX.Y.Z-rc.1` | `X.Y.Z-rc.1`, then a pre-release with the bundle pinned to it |
 
 A tag must name the version of `idp-api` (what NodeInfo reports), or a release
@@ -641,6 +641,7 @@ The main groups:
 - **Keys** — `IDP_KEYS_DIR`, `JWT_PRIVATE_KEY_PATH`, `JWT_KEY_ID` (optional: unset, the key's RFC 7638 thumbprint)
 - **Session** — `SESSION_SECRET`
 - **Instance** — `INSTANCE_NAME`, `INSTANCE_DESCRIPTION`: how the sign-in pages and NodeInfo present it
+- **Source code** — `SOURCE_URL`: where the code the instance runs can be had, an http(s) URL, as NodeInfo's `software.repository` and the sign-in pages' "Source" link; `https://github.com/Pina-i/pinai` when unset. An instance running modified code points it at that code (see [License](#license))
 - **Who can join** — `REGISTRATIONS`: `open` (anyone signs up; needs an SMTP relay) or `invite` (only people an admin invited; needs an admin), `invite` when unset
 - **Admin** — `ADMIN_EMAIL`, `ADMIN_PASSWORD`: the first admin account, created at startup when no account has that address, never written over
 - **Web app** — `WEB_APP_ORIGIN`: overrides, in any environment, the built-in address of the official web app, where someone joining by invitation lands signed in and the reset pages' Sign in links go (default `http://localhost:5173` in development)
@@ -659,3 +660,26 @@ The main groups:
 - `specs/06-federation-authentication.md` — Bearer JWT vs HTTP Signatures, server-to-server trust
 - `identity-provider/README.md` — IdP endpoints, OIDC flow, federation
 - `identity-provider/specs/` and `chat-server/CLAUDE.md` — service-level design
+
+---
+
+## License
+
+Copyright (C) 2026 Kilian Tozzini
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU Affero General Public License as published by the Free
+Software Foundation, either version 3 of the License, or (at your option) any
+later version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License along
+with this program, in [`LICENSE`](LICENSE). If not, see
+<https://www.gnu.org/licenses/>.
+
+Anyone who runs a modified version for users over a network must offer those
+users its source code (§ 13): set `SOURCE_URL` to where it is published, and the
+instance links it from its sign-in pages and its NodeInfo.

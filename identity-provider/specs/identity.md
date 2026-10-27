@@ -154,8 +154,16 @@ every fediverse server publishes about itself.
 | Description | `INSTANCE_DESCRIPTION`, trimmed, 280 characters at most; unset or blank, none |
 | People | Every local account, counted at most a minute ago (`Accounts::count`) |
 | Open registration | `REGISTRATIONS`: yes for `open`, no for `invite`, the default (`identity-provider/specs/auth.md § 6`) |
+| Source | `SOURCE_URL`, an `http(s)` URL; unset or blank, Pīna'i's own repository, `https://github.com/Pina-i/pinai` (`PINAI_SOURCE_URL`) |
 
-A name or a description past its limit stops the instance at startup (`InstanceIntro`).
+A name or a description past its limit stops the instance at startup (`InstanceIntro`), and so
+does a `SOURCE_URL` that is no `http(s)` URL with a host (`SourceUrl`).
+
+**The source.** Pīna'i is under the GNU AGPL-3.0-or-later, whose § 13 has whoever runs a modified
+version offer its users, over the network, the source of the version they run. The instance offers
+it in two places: NodeInfo's `software.repository`, for software, and a "↳ Source" link at the foot
+of its sign-in pages, for people. An instance running the code unmodified keeps the default; one
+running a fork points `SOURCE_URL` at the fork, and both places follow.
 
 **NodeInfo 2.1**, answered to any origin:
 - `GET /.well-known/nodeinfo` links to the document:
@@ -166,7 +174,7 @@ A name or a description past its limit stops the instance at startup (`InstanceI
 ```json
 {
   "version": "2.1",
-  "software": { "name": "pinai", "version": "0.1.0", "repository": "https://github.com/Pina-i/pinai" },
+  "software": { "name": "pinai", "version": "0.1.0", "repository": "<SOURCE_URL>" },
   "protocols": ["activitypub"],
   "services": { "inbound": [], "outbound": [] },
   "openRegistrations": true,
@@ -176,6 +184,7 @@ A name or a description past its limit stops the instance at startup (`InstanceI
 ```
 
 `openRegistrations` follows `REGISTRATIONS`: `true` on an open instance, `false` on an invite-only
-one. `nodeDescription` is left out when there is none. The web client's landing reads it while the user
+one. `software.repository` is `SOURCE_URL`, normalised (`https://github.com/Pina-i/pinai` by
+default). `nodeDescription` is left out when there is none. The web client's landing reads it while the user
 types an instance's address, to show `✓ resolved · Aotearoa · 1,204 people` before sending them
 there; a client tells a Pīna'i instance by `software.name`.

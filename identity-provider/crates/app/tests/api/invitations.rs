@@ -183,11 +183,11 @@ async fn an_invite_only_instance_refuses_an_uninvited_sign_up_and_says_why() {
     assert_eq!(status, 200);
     for shown in [
         format!("Accounts on {} are by invitation only", app.domain),
-        "Invite only</span>".to_owned(),
         "invite only</span>".to_owned(),
     ] {
         assert!(login.contains(&shown), "{shown} not in {login}");
     }
+    assert!(!login.contains("class=\"tabs\""), "{login}");
     assert!(!login.contains("Create account"), "{login}");
     assert_eq!(json_status, 403);
     assert_eq!(refusal["error"], "invitation_required");

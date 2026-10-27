@@ -1075,16 +1075,14 @@ async fn an_open_instance_links_its_register_tab() {
 }
 
 #[tokio::test]
-async fn an_invite_only_instance_shows_a_disabled_invite_only_tab_and_says_so_beside_the_form() {
+async fn an_invite_only_instance_shows_no_tabs_and_says_so_beside_the_form() {
     let app = TestApp::invite_only();
 
     let (status, page) = TestApp::html_of(app.respond(login_page(&[])).await).await;
 
     assert_eq!(status, StatusCode::OK);
-    assert!(
-        page.contains("<span class=\"tab tab--off\">Invite only</span>"),
-        "{page}"
-    );
+    assert!(!page.contains("class=\"tabs\""), "{page}");
+    assert!(!page.contains("Invite only"), "{page}");
     assert!(
         page.contains("<span class=\"fact fact--plain invite-only\">invite only</span>"),
         "{page}"
