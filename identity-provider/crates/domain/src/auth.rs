@@ -82,13 +82,15 @@ pub use invitation::{
 };
 pub use members::InstanceMember;
 pub use password_reset::{
-    NewPassword, OpenReset, PasswordChange, PasswordReset, RESET_RETENTION, RESET_TTL, ResetToken,
-    reset_target,
+    NewPassword, OpenReset, PasswordChange, PasswordReset, REQUESTED_RESET_TTL, RESET_PATH_PREFIX,
+    RESET_REQUEST_LIMIT, RESET_REQUEST_WINDOW, RESET_RETENTION, RESET_TTL, ResetBy, ResetMail,
+    ResetToken, may_request_reset, reset_link, reset_path, reset_requester, reset_target,
 };
 pub use ports::{
     Authenticator, AuthorizationCodes, ClientSignIns, Clients, HandleSuffixes, InstanceMembers,
-    Invitations, LoginTickets, PasswordHasher, PasswordResets, RefreshTokens, SecondFactors,
-    SessionNotifier, Sessions, SignInAccounts, SignUps, SignupCodes, SignupMailer, TokenIssuer,
+    Invitations, LoginTickets, PasswordHasher, PasswordResets, RefreshTokens, ResetMailer,
+    SecondFactors, SessionNotifier, Sessions, SignInAccounts, SignUps, SignupCodes, SignupMailer,
+    TokenIssuer,
 };
 pub use refresh::{
     Presentation, REFRESH_GRACE, REFRESH_GRANT_TYPE, RefreshLink, RefreshToken, Rotation,

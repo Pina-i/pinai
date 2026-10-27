@@ -50,6 +50,10 @@ pub enum AuthError {
     AdminNotResettable,
     #[error("no open reset link")]
     ResetUnusable,
+    #[error("the instance is invite-only: its admins give reset links")]
+    NoResetByMail,
+    #[error("the instance's budget of reset mails is spent for now")]
+    MailBudgetSpent,
     #[error("the password and its confirmation differ")]
     PasswordMismatch,
     #[error("too many codes mailed lately")]

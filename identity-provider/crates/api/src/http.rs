@@ -72,7 +72,7 @@ pub fn trace() -> Trace {
 /// which its pages' paths carry.
 fn logged_uri(uri: &Uri) -> String {
     let path = uri.path();
-    for link in ["/i/", "/r/"] {
+    for link in ["/i/", domain::auth::RESET_PATH_PREFIX] {
         if let Some(rest) = path.strip_prefix(link) {
             return match rest.split_once('/') {
                 Some((_, after)) => format!("{link}…/{after}"),

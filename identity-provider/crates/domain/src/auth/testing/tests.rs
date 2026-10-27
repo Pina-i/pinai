@@ -339,6 +339,54 @@ async fn reset_links_are_swept_a_while_after_they_ended() {
 }
 
 #[tokio::test]
+async fn a_link_through_the_mailbox_has_no_maker_and_replaces_the_open_one_an_admins_too() {
+    let (accounts, _, _, resets, _) = member_stores();
+    contract::a_link_through_the_mailbox_has_no_maker_and_replaces_the_open_one_an_admins_too(
+        &resets, &*accounts, &*accounts,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn five_links_asked_for_an_hour_and_the_next_makes_nothing() {
+    let (accounts, _, _, resets, _) = member_stores();
+    contract::five_links_asked_for_an_hour_and_the_next_makes_nothing(
+        &resets, &*accounts, &*accounts,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_link_withdrawn_neither_counts_nor_works() {
+    let (accounts, _, _, resets, _) = member_stores();
+    contract::a_link_withdrawn_neither_counts_nor_works(&resets, &*accounts).await;
+}
+
+#[tokio::test]
+async fn a_link_used_or_an_admins_is_never_withdrawn() {
+    let (accounts, _, _, resets, _) = member_stores();
+    contract::a_link_used_or_an_admins_is_never_withdrawn(&resets, &*accounts, &*accounts).await;
+}
+
+#[tokio::test]
+async fn withdrawing_a_link_gives_back_the_open_one_it_replaced_an_admins_included() {
+    let (accounts, _, _, resets, _) = member_stores();
+    contract::withdrawing_a_link_gives_back_the_open_one_it_replaced_an_admins_included(
+        &resets, &*accounts, &*accounts,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_replaced_link_expired_or_replaced_again_is_not_given_back() {
+    let (accounts, _, _, resets, _) = member_stores();
+    contract::a_replaced_link_expired_or_replaced_again_is_not_given_back(
+        &resets, &*accounts, &*accounts,
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn the_members_are_listed_most_recently_active_first() {
     let (accounts, sessions, _, _, members) = member_stores();
     contract::the_members_are_listed_most_recently_active_first(

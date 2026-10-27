@@ -13,7 +13,7 @@ use axum::extract::{FromRef, FromRequestParts, Path};
 use axum::http::request::Parts;
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Redirect, Response};
-use domain::auth::{AuthError, AuthorizationRequest, ClientId, CodeChallenge};
+use domain::auth::{AuthError, AuthorizationRequest, ClientId, CodeChallenge, Registrations};
 use domain::identity::InstanceOrigin;
 use serde::Deserialize;
 use time::OffsetDateTime;
@@ -27,6 +27,7 @@ pub struct SignInPages {
     describe: Arc<DescribeInstance>,
     pub(crate) show: Arc<ShowSignIn>,
     origin: InstanceOrigin,
+    registrations: Registrations,
     /// `Secure` cookies: production is served over HTTPS only.
     pub secure_cookies: bool,
 }
@@ -36,12 +37,14 @@ impl SignInPages {
         describe: Arc<DescribeInstance>,
         show: Arc<ShowSignIn>,
         origin: InstanceOrigin,
+        registrations: Registrations,
         secure_cookies: bool,
     ) -> Self {
         Self {
             describe,
             show,
             origin,
+            registrations,
             secure_cookies,
         }
     }
@@ -61,7 +64,17 @@ impl SignInPages {
             .execute(OffsetDateTime::now_utc())
             .await
             .map_err(|e| ApiError::internal(anyhow::Error::from(e)))?;
-        Ok(Frame::new(facts, self.host(), appearance))
+        Ok(Frame::new(
+            facts,
+            self.host(),
+            self.reset_by_mail(),
+            appearance,
+        ))
+    }
+
+    /// Someone who forgot their password asks for a reset link by mail here.
+    pub(crate) fn reset_by_mail(&self) -> bool {
+        self.registrations.allow_reset_by_mail().is_ok()
     }
 
     /// A page with no request to carry on: an expired link, a sign-out, an app that can't be
@@ -77,6 +90,7 @@ impl SignInPages {
             title: notice.title,
             text: notice.text.into(),
             back: None,
+            sign_in: None,
         };
         Ok(render(status, &page, None))
     }
@@ -237,6 +251,7 @@ pub(crate) struct Frame {
     described: bool,
     people: String,
     open: bool,
+    reset_by_mail: bool,
     version: &'static str,
     theme: &'static str,
     mode: &'static str,
@@ -246,7 +261,12 @@ pub(crate) struct Frame {
 }
 
 impl Frame {
-    fn new(facts: InstanceFacts, host: String, appearance: Appearance) -> Self {
+    fn new(
+        facts: InstanceFacts,
+        host: String,
+        reset_by_mail: bool,
+        appearance: Appearance,
+    ) -> Self {
         Self {
             name: facts.name,
             host,
@@ -256,6 +276,7 @@ impl Frame {
                 .unwrap_or_else(|| "An identity provider.".to_owned()),
             people: people(facts.people),
             open: facts.open_registrations,
+            reset_by_mail,
             version: env!("CARGO_PKG_VERSION"),
             theme: appearance.theme(),
             mode: appearance.mode(),
@@ -273,6 +294,11 @@ impl Frame {
     /// Anyone may sign up: the login page has its Register tab.
     pub(crate) fn registrations_open(&self) -> bool {
         self.open
+    }
+
+    /// A forgotten password is reset by mail: the login page links "Forgot password?".
+    pub(crate) fn reset_by_mail(&self) -> bool {
+        self.reset_by_mail
     }
 }
 
@@ -327,13 +353,44 @@ pub(crate) struct LoginPage<'a> {
     /// …and where it lives, unless that is this instance (the desktop app's document).
     pub app_host: Option<String>,
     pub register: bool,
+    /// Opened on the reset request: "Forgot password?" folded the sign-in form.
+    pub forgot: bool,
+    /// Where "Forgot password?" goes, on the Sign in tab of an instance that resets by mail.
+    pub forgot_href: Option<String>,
+    /// How many minutes a link asked for by mail works.
+    pub reset_minutes: i64,
     pub sign_in_href: String,
     pub register_href: String,
     pub alert: Option<Cow<'static, str>>,
     pub note: Option<&'static str>,
     /// The field the alert is about, or "".
     pub bad: &'static str,
+    /// What was typed in the address, when the page answers a form.
+    pub email: String,
     pub email_host: String,
+    pub carried: Vec<(&'a str, &'a str)>,
+}
+
+impl LoginPage<'_> {
+    /// The class of what belongs to the state the page opened on — an alert, a note —, which
+    /// folding to the other hides.
+    pub(crate) fn view_class(&self) -> &'static str {
+        if self.forgot {
+            "only-forgot"
+        } else {
+            "only-sign-in"
+        }
+    }
+}
+
+#[derive(Template)]
+#[template(path = "sign-in/forgot-sent.html")]
+pub(crate) struct ForgotSentPage<'a> {
+    pub frame: Frame,
+    /// The address asked about — whosever it is —, in this page and in no URL.
+    pub email: String,
+    pub reset_minutes: i64,
+    pub sign_in_href: String,
     pub carried: Vec<(&'a str, &'a str)>,
 }
 
@@ -411,6 +468,18 @@ pub(crate) struct PasswordResetPage {
 }
 
 #[derive(Template)]
+#[template(path = "sign-in/password-choose.html")]
+pub(crate) struct ChooseNewPasswordPage {
+    pub frame: Frame,
+    /// The address the link was mailed to.
+    pub email: String,
+    pub action: String,
+    pub alert: Option<Cow<'static, str>>,
+    /// The field the alert is about, or "".
+    pub bad: &'static str,
+}
+
+#[derive(Template)]
 #[template(path = "sign-in/password-changed.html")]
 pub(crate) struct PasswordChangedPage {
     pub frame: Frame,
@@ -425,6 +494,8 @@ pub(crate) struct NoticePage {
     pub title: &'static str,
     pub text: Cow<'static, str>,
     pub back: Option<String>,
+    /// Where the web app opens on this instance, when the notice leads there.
+    pub sign_in: Option<String>,
 }
 
 /// A notice's fixed words.

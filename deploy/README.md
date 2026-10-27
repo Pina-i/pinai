@@ -107,6 +107,8 @@ account isn't created and the instance doesn't start.
   start logs a warning while it is there.
 - A public instance needs no admin. It starts without one, and logs a warning at
   each start.
+- An admin's password forgotten on a public instance: **Forgot password?** on the
+  sign-in page, as for anyone.
 - Lost admin access — the password forgotten, the mailbox gone: set `ADMIN_EMAIL`
   to an address no account has, and a new `ADMIN_PASSWORD`, then
   `docker compose up -d`. That creates another admin account beside the first.
@@ -120,7 +122,9 @@ like.
 
 The person who opens it reads "You've been invited by <name> to join <instance>".
 **Continue** leads to the instance's sign-up form: display name, email address,
-password. Then they land in the Pīna'i web app, already signed in. They can install
+password. When the instance knows the address of the Pīna'i web app
+(`WEB_APP_ORIGIN` in `.env`), they then land in it, already signed in; otherwise a
+page says their account is ready, and they sign in from the app. They can install
 the desktop app later and sign in there with the same email and password.
 
 Invitations belong to invite-only instances: on a public one, people create their
@@ -128,6 +132,16 @@ accounts themselves. Settings → **Instance**, where invitations and reset link
 made, is shown on invite-only instances only.
 
 ### A forgotten password
+
+On a public instance, **Forgot password?** on the sign-in page mails a single-use
+link to the account's address, valid 30 minutes. Setting the new password there signs
+the account out everywhere; each device then signs in with the new password, and its
+two-factor code when that is on. The page links to the web app when the instance knows
+its address (`WEB_APP_ORIGIN`).
+
+The instance mails at most 60 of these links at once, then one every 6 seconds, all
+accounts together; an address with no account is never mailed. Limit each client at
+the proxy in front if you need to.
 
 On an invite-only instance, an admin creates a single-use reset link for the member
 from Settings → **Instance**, `https://your.domain/r/<token>`, valid 24 hours, and

@@ -8,9 +8,10 @@ use domain::auth::{
     AuthorizationRequest, CODE_ATTEMPTS, ClientId, ClientSignIn, ClientSignIns, CodeAttempt,
     CodeChallenge, Email, Grant, InstanceMember, InstanceMembers, Invitation, InvitationToken,
     Invitations, LoginTickets, NewAccount, OpenInvitation, OpenReset, OtpCode, PasswordChange,
-    PasswordHash, PasswordReset, PasswordResets, Presentation, RefreshLink, RefreshToken,
-    RefreshTokens, Registration, ResetToken, RevokedReason, Rotation, SESSION_IDLE, Session,
-    SessionKind, Sessions, SignInAccount, SignInAccounts, SignUps, SignupCodes,
+    PasswordHash, PasswordReset, PasswordResets, Presentation, RESET_REQUEST_WINDOW, RefreshLink,
+    RefreshToken, RefreshTokens, Registration, ResetToken, RevokedReason, Rotation, SESSION_IDLE,
+    Session, SessionKind, Sessions, SignInAccount, SignInAccounts, SignUps, SignupCodes,
+    may_request_reset,
 };
 use domain::auth::{
     RECOVERY_CODES, SecondFactors, TICKET_ATTEMPTS, Ticket, TicketAttempt, TotpSecret,
@@ -1230,7 +1231,7 @@ impl Invitations for PgInvitations {
 }
 
 /// `password_resets`: a token is kept as its SHA-256, like an invitation's; a spend is a guarded
-/// `UPDATE`, so it happens once.
+/// `UPDATE`, so it happens once. A link the account asked for by mail has no `created_by`.
 pub struct PgPasswordResets {
     pool: PgPool,
 }
@@ -1252,15 +1253,56 @@ async fn lock_member(connection: &mut sqlx::PgConnection, member: UserId) -> Res
     Ok(())
 }
 
+/// A new link for `member` by `by` — nobody, when the account asked for it —, the one they had
+/// open replaced, within the caller's transaction: it holds the member's lock already. The
+/// replaced link names the new one in `replaced_by`, which `withdraw` finds it by.
+async fn open_link(
+    connection: &mut sqlx::PgConnection,
+    member: UserId,
+    by: Option<UserId>,
+    now: OffsetDateTime,
+    expires_at: OffsetDateTime,
+) -> Result<ResetToken, AuthError> {
+    let mut bytes = [0u8; 32];
+    OsRng.fill_bytes(&mut bytes);
+    let token = ResetToken::from_bytes(bytes);
+    let id = uuid::Uuid::new_v4();
+    sqlx::query(
+        "UPDATE password_resets SET replaced_at = $2, replaced_by = $3 \
+         WHERE user_id = $1 AND used_at IS NULL AND replaced_at IS NULL",
+    )
+    .bind(member.as_uuid())
+    .bind(now)
+    .bind(id)
+    .execute(&mut *connection)
+    .await
+    .context("replace an account's open reset link")?;
+    sqlx::query(
+        "INSERT INTO password_resets (id, token_hash, user_id, created_by, created_at, expires_at) \
+         VALUES ($1, $2, $3, $4, $5, $6)",
+    )
+    .bind(id)
+    .bind(token_digest(token.as_str()))
+    .bind(member.as_uuid())
+    .bind(by.map(|by| by.as_uuid()))
+    .bind(now)
+    .bind(expires_at)
+    .execute(&mut *connection)
+    .await
+    .context("create a reset link")?;
+    Ok(token)
+}
+
 #[derive(sqlx::FromRow)]
 struct ResetRow {
     user_id: uuid::Uuid,
-    created_by: uuid::Uuid,
+    created_by: Option<uuid::Uuid>,
     created_at: OffsetDateTime,
     expires_at: OffsetDateTime,
     used_at: Option<OffsetDateTime>,
     replaced_at: Option<OffsetDateTime>,
     display_name: Option<String>,
+    email: String,
 }
 
 impl ResetRow {
@@ -1268,15 +1310,17 @@ impl ResetRow {
     fn open(self, now: OffsetDateTime) -> Option<OpenReset> {
         let reset = PasswordReset {
             member: self.user_id.into(),
-            created_by: self.created_by.into(),
+            created_by: self.created_by.map(UserId::from),
             created_at: self.created_at,
             expires_at: self.expires_at,
             used_at: self.used_at,
             replaced_at: self.replaced_at,
         };
-        reset.is_open(now).then_some(OpenReset {
+        reset.is_open(now).then(|| OpenReset {
             member: reset.member,
             display_name: self.display_name,
+            email: self.email,
+            by: reset.by(),
             expires_at: reset.expires_at,
         })
     }
@@ -1291,34 +1335,88 @@ impl PasswordResets for PgPasswordResets {
         now: OffsetDateTime,
         expires_at: OffsetDateTime,
     ) -> Result<ResetToken, AuthError> {
-        let mut bytes = [0u8; 32];
-        OsRng.fill_bytes(&mut bytes);
-        let token = ResetToken::from_bytes(bytes);
         let mut tx = self.pool.begin().await.context("begin a reset link")?;
         lock_member(&mut tx, member).await?;
-        sqlx::query(
-            "UPDATE password_resets SET replaced_at = $2 \
-             WHERE user_id = $1 AND used_at IS NULL AND replaced_at IS NULL",
-        )
-        .bind(member.as_uuid())
-        .bind(now)
-        .execute(&mut *tx)
-        .await
-        .context("replace a member's open reset link")?;
-        sqlx::query(
-            "INSERT INTO password_resets (token_hash, user_id, created_by, created_at, expires_at) \
-             VALUES ($1, $2, $3, $4, $5)",
-        )
-        .bind(token_digest(token.as_str()))
-        .bind(member.as_uuid())
-        .bind(by.as_uuid())
-        .bind(now)
-        .bind(expires_at)
-        .execute(&mut *tx)
-        .await
-        .context("create a reset link")?;
+        let token = open_link(&mut tx, member, Some(by), now, expires_at).await?;
         tx.commit().await.context("commit a reset link")?;
         Ok(token)
+    }
+
+    async fn request(
+        &self,
+        member: UserId,
+        now: OffsetDateTime,
+        expires_at: OffsetDateTime,
+    ) -> Result<Option<ResetToken>, AuthError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .context("begin a reset link asked for")?;
+        // Counted under the account's lock: requests at once queue up, and none passes the limit.
+        lock_member(&mut tx, member).await?;
+        let asked: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM password_resets \
+             WHERE user_id = $1 AND created_by IS NULL AND created_at > $2",
+        )
+        .bind(member.as_uuid())
+        .bind(now - RESET_REQUEST_WINDOW)
+        .fetch_one(&mut *tx)
+        .await
+        .context("count the reset links an account asked for")?;
+        if !may_request_reset(usize::try_from(asked).unwrap_or(usize::MAX)) {
+            return Ok(None);
+        }
+        let token = open_link(&mut tx, member, None, now, expires_at).await?;
+        tx.commit().await.context("commit a reset link asked for")?;
+        Ok(Some(token))
+    }
+
+    async fn withdraw(&self, token: &ResetToken, now: OffsetDateTime) -> Result<(), AuthError> {
+        let token_hash = token_digest(token.as_str());
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .context("begin withdrawing a reset link")?;
+        let named: Option<uuid::Uuid> =
+            sqlx::query_scalar("SELECT user_id FROM password_resets WHERE token_hash = $1")
+                .bind(&token_hash)
+                .fetch_optional(&mut *tx)
+                .await
+                .context("find a reset link's account")?;
+        let Some(named) = named else {
+            return Ok(());
+        };
+        lock_member(&mut tx, named.into()).await?;
+        // Deleted first: the link it replaced may then be the one open link again.
+        let withdrawn: Option<(uuid::Uuid, uuid::Uuid, bool)> = sqlx::query_as(
+            "DELETE FROM password_resets \
+             WHERE token_hash = $1 AND used_at IS NULL AND created_by IS NULL \
+             RETURNING id, user_id, replaced_at IS NULL",
+        )
+        .bind(&token_hash)
+        .fetch_optional(&mut *tx)
+        .await
+        .context("withdraw a reset link")?;
+        if let Some((id, member, newest)) = withdrawn
+            && newest
+        {
+            sqlx::query(
+                "UPDATE password_resets SET replaced_at = NULL, replaced_by = NULL \
+                 WHERE user_id = $1 AND replaced_by = $2 AND used_at IS NULL AND expires_at > $3",
+            )
+            .bind(member)
+            .bind(id)
+            .bind(now)
+            .execute(&mut *tx)
+            .await
+            .context("give back the reset link a withdrawn one replaced")?;
+        }
+        tx.commit()
+            .await
+            .context("commit withdrawing a reset link")?;
+        Ok(())
     }
 
     async fn find_open(
@@ -1328,7 +1426,7 @@ impl PasswordResets for PgPasswordResets {
     ) -> Result<Option<OpenReset>, AuthError> {
         let row: Option<ResetRow> = sqlx::query_as(
             "SELECT r.user_id, r.created_by, r.created_at, r.expires_at, r.used_at, r.replaced_at, \
-                    u.display_name \
+                    u.display_name, u.email \
              FROM password_resets r JOIN users u ON u.id = r.user_id \
              WHERE r.token_hash = $1",
         )

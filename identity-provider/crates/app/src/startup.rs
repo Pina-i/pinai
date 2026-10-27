@@ -30,7 +30,8 @@ use tracing::{info, warn};
 use crate::configuration::{Config, DEV_SESSION_SECRET};
 use crate::keys::SessionKeys;
 
-/// How long open connections have to finish once the instance stops.
+/// How long open connections, and the reset links still waiting, have to finish once the
+/// instance stops.
 const DRAIN: Duration = Duration::from_secs(10);
 
 pub struct Application {
@@ -38,6 +39,10 @@ pub struct Application {
     router: Router,
     tasks: JoinSet<()>,
     stop: CancellationToken,
+    /// Cancelled once the server has answered its last request.
+    served: CancellationToken,
+    /// Cancelled `DRAIN` after `stop`: the instance's one deadline to stop by.
+    out_of_time: CancellationToken,
 }
 
 impl Application {
@@ -125,7 +130,7 @@ impl Application {
 
         // Connects on the first send: the IdP boots even when the relay is not up yet.
         let smtp = Arc::new(
-            infrastructure::email::SmtpSignupMailer::new(infrastructure::email::SmtpSettings {
+            infrastructure::email::SmtpMailer::new(infrastructure::email::SmtpSettings {
                 host: config.smtp_host.clone(),
                 port: config.smtp_port,
                 username: config.smtp_username.clone(),
@@ -143,7 +148,9 @@ impl Application {
             // A wrong relay would otherwise show only when a sign-up's code never arrives.
             tasks.spawn(check_mail_relay(smtp.clone(), stop.clone()));
         }
-        let mailer: Arc<dyn domain::auth::SignupMailer> = smtp;
+        let mailer: Arc<dyn domain::auth::SignupMailer> = smtp.clone();
+        let reset_mailer: Arc<dyn domain::auth::ResetMailer> =
+            Arc::new(infrastructure::email::ResetMailBudget::new(smtp));
 
         let email_otp_pepper = Arc::new(config.email_otp_pepper.clone());
 
@@ -582,6 +589,15 @@ impl Application {
             config.instance_description.as_deref(),
         )
         .map_err(|e| anyhow::anyhow!("INSTANCE_NAME or INSTANCE_DESCRIPTION: {e}"))?;
+        let request_password_reset = Arc::new(application::auth::RequestPasswordReset::new(
+            config.registrations,
+            origin.clone(),
+            intro.name().to_owned(),
+            Arc::clone(&sign_in_accounts),
+            Arc::clone(&password_resets),
+            reset_mailer,
+        ));
+        let (reset_requests, reset_queue) = api::background::reset_requests();
         let describe_instance = Arc::new(application::identity::DescribeInstance::new(
             intro,
             config.registrations,
@@ -606,6 +622,7 @@ impl Application {
                     Arc::clone(&password_resets),
                 )),
                 origin.clone(),
+                config.registrations,
                 config.secure_cookies(),
             ),
             jwks: api::Jwks(Arc::new(jwks)),
@@ -671,6 +688,8 @@ impl Application {
                 Arc::clone(&sign_in_accounts),
                 Arc::clone(&password_resets),
             )),
+            request_password_reset: Arc::clone(&request_password_reset),
+            reset_requests,
             reset_password: Arc::new(application::auth::ResetPassword::new(
                 origin.clone(),
                 config.web_app.clone(),
@@ -1102,6 +1121,15 @@ impl Application {
 
         // Spent signup codes and login tickets, and the accounts never confirmed.
         tasks.spawn(api::background::sweep_signups(sweep_signups, stop.clone()));
+        // The reset links asked for, mailed once the request is answered, until the server has
+        // answered its last request.
+        let (served, out_of_time) = (CancellationToken::new(), CancellationToken::new());
+        tasks.spawn(api::background::serve_reset_requests(
+            reset_queue,
+            request_password_reset,
+            served.clone(),
+            out_of_time.clone(),
+        ));
 
         // Reap MLS KeyPackages and Welcomes past their use.
         tasks.spawn(api::background::sweep_key_packages(
@@ -1123,6 +1151,8 @@ impl Application {
             router: api::router(api_state),
             tasks,
             stop,
+            served,
+            out_of_time,
         })
     }
 
@@ -1145,24 +1175,35 @@ impl Application {
             router,
             mut tasks,
             stop,
+            served,
+            out_of_time,
         } = self;
+        tokio::spawn({
+            let (stop, out_of_time) = (stop.clone(), out_of_time.clone());
+            async move {
+                stop.cancelled().await;
+                tokio::time::sleep(DRAIN).await;
+                out_of_time.cancel();
+            }
+        });
         let serving = axum::serve(listener, router)
             .with_graceful_shutdown(stop.clone().cancelled_owned())
             .into_future();
-        let drained = async {
-            stop.cancelled().await;
-            tokio::time::sleep(DRAIN).await;
+        let outcome = tokio::select! {
+            outcome = serving => outcome,
+            () = out_of_time.cancelled() => {
+                warn!("connections still open after the drain, dropped");
+                Ok(())
+            }
         };
-        tokio::select! {
-            served = serving => served?,
-            () = drained => warn!("connections still open after the drain, dropped"),
-        }
         stop.cancel();
+        served.cancel();
         while let Some(task) = tasks.join_next().await {
             if let Err(e) = task {
                 tracing::error!(error = ?e, "a background task failed");
             }
         }
+        outcome?;
         info!("stopped");
         Ok(())
     }
@@ -1226,10 +1267,7 @@ fn report_admin(bootstrap: AdminBootstrap<Email>) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn check_mail_relay(
-    smtp: Arc<infrastructure::email::SmtpSignupMailer>,
-    stop: CancellationToken,
-) {
+async fn check_mail_relay(smtp: Arc<infrastructure::email::SmtpMailer>, stop: CancellationToken) {
     tokio::select! {
         checked = smtp.check() => match checked {
             Ok(()) => info!("SMTP relay reachable"),

@@ -1,7 +1,9 @@
 {% extends "sign-in/base.html" %}
+{% import "sign-in/icons.html" as icon %}
 {% block title %}{{ title }}{% endblock %}
 {% block back %}{% if let Some(back) = back %}<a class="back" href="{{ back }}">← Another home</a>{% endif %}{% endblock %}
 {% block content %}
 <h2 class="auth-title">{{ title }}</h2>
 <p class="lead">{{ text }}</p>
+{% if let Some(sign_in) = sign_in %}<a class="btn btn1 btn--auto" href="{{ sign_in }}">Sign in{% call icon::arrow_right(15) %}{% endcall %}</a>{% endif %}
 {% endblock %}

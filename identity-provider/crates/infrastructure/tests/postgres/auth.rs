@@ -5,8 +5,8 @@ use domain::auth::testing::{
 };
 use domain::auth::{
     AuthorizationCodes, INVITATION_TTL, Invitations, LoginTickets, PasswordChange, PasswordResets,
-    RESET_TTL, RefreshTokens, Registration, Rotation, SessionKind, Sessions, SignInAccount,
-    SignInAccounts, SignUps, SignupCodes,
+    REQUESTED_RESET_TTL, RESET_REQUEST_LIMIT, RESET_TTL, RefreshTokens, Registration, Rotation,
+    SessionKind, Sessions, SignInAccount, SignInAccounts, SignUps, SignupCodes,
 };
 use domain::{DeviceId, SessionId, UserId};
 use hmac::{Hmac, Mac};
@@ -781,6 +781,67 @@ async fn reset_links_are_swept_a_while_after_they_ended(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn a_link_through_the_mailbox_has_no_maker_and_replaces_the_open_one_an_admins_too(
+    pool: PgPool,
+) {
+    contract::a_link_through_the_mailbox_has_no_maker_and_replaces_the_open_one_an_admins_too(
+        &PgPasswordResets::new(pool.clone()),
+        &PgSignUps::new(pool.clone()),
+        &PgSignInSeeds(pool),
+    )
+    .await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn five_links_asked_for_an_hour_and_the_next_makes_nothing(pool: PgPool) {
+    contract::five_links_asked_for_an_hour_and_the_next_makes_nothing(
+        &PgPasswordResets::new(pool.clone()),
+        &PgSignUps::new(pool.clone()),
+        &PgSignInSeeds(pool),
+    )
+    .await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn a_link_withdrawn_neither_counts_nor_works(pool: PgPool) {
+    contract::a_link_withdrawn_neither_counts_nor_works(
+        &PgPasswordResets::new(pool.clone()),
+        &PgSignInSeeds(pool),
+    )
+    .await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn withdrawing_a_link_gives_back_the_open_one_it_replaced_an_admins_included(pool: PgPool) {
+    contract::withdrawing_a_link_gives_back_the_open_one_it_replaced_an_admins_included(
+        &PgPasswordResets::new(pool.clone()),
+        &PgSignUps::new(pool.clone()),
+        &PgSignInSeeds(pool),
+    )
+    .await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn a_replaced_link_expired_or_replaced_again_is_not_given_back(pool: PgPool) {
+    contract::a_replaced_link_expired_or_replaced_again_is_not_given_back(
+        &PgPasswordResets::new(pool.clone()),
+        &PgSignUps::new(pool.clone()),
+        &PgSignInSeeds(pool),
+    )
+    .await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn a_link_used_or_an_admins_is_never_withdrawn(pool: PgPool) {
+    contract::a_link_used_or_an_admins_is_never_withdrawn(
+        &PgPasswordResets::new(pool.clone()),
+        &PgSignUps::new(pool.clone()),
+        &PgSignInSeeds(pool),
+    )
+    .await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
 async fn the_members_are_listed_most_recently_active_first(pool: PgPool) {
     contract::the_members_are_listed_most_recently_active_first(
         &PgInstanceMembers::new(pool.clone()),
@@ -937,4 +998,70 @@ async fn a_reset_token_is_kept_as_its_hash_and_goes_with_its_member(pool: PgPool
         vec![Sha256::digest(token.as_str().as_bytes()).to_vec()]
     );
     assert_eq!(left, 0);
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn a_link_asked_for_by_mail_is_kept_with_no_maker_and_outlives_any_admin(pool: PgPool) {
+    let (admin, alice) = an_admin_and_alice(&pool).await;
+    let now = OffsetDateTime::now_utc();
+    let resets = PgPasswordResets::new(pool.clone());
+    let token = resets
+        .request(alice.id, now, now + REQUESTED_RESET_TTL)
+        .await
+        .unwrap()
+        .expect("within the limit");
+
+    let makers: Vec<Option<uuid::Uuid>> =
+        sqlx::query_scalar("SELECT created_by FROM password_resets")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(admin.as_uuid())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    assert_eq!(makers, vec![None]);
+    assert!(
+        resets.find_open(&token, now).await.unwrap().is_some(),
+        "no admin's link to go with them"
+    );
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn requests_at_once_for_one_account_never_pass_five_an_hour(pool: PgPool) {
+    let (_, alice) = an_admin_and_alice(&pool).await;
+    let now = OffsetDateTime::now_utc();
+    let resets = Arc::new(PgPasswordResets::new(pool.clone()));
+
+    let askers: Vec<_> = (0..12)
+        .map(|_| {
+            let resets = resets.clone();
+            tokio::spawn(async move {
+                resets
+                    .request(alice.id, now, now + REQUESTED_RESET_TTL)
+                    .await
+                    .unwrap()
+            })
+        })
+        .collect();
+    let mut made = Vec::new();
+    for asker in askers {
+        made.extend(asker.await.unwrap());
+    }
+
+    assert_eq!(made.len(), RESET_REQUEST_LIMIT);
+    let mut open = 0;
+    for token in &made {
+        if resets.find_open(token, now).await.unwrap().is_some() {
+            open += 1;
+        }
+    }
+    assert_eq!(open, 1, "each replaced the one before");
+    let kept: i64 = sqlx::query_scalar("SELECT count(*) FROM password_resets")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(usize::try_from(kept).unwrap(), RESET_REQUEST_LIMIT);
 }

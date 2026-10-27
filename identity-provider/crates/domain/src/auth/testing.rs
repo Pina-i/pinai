@@ -16,10 +16,12 @@ use super::{
     HandleSuffixes, INVITATION_TTL, InstanceMember, InstanceMembers, Invitation, InvitationToken,
     Invitations, LOGIN_TICKET_TTL, LoginTickets, NewAccount, OpenInvitation, OpenReset, OtpCode,
     PasswordChange, PasswordHash, PasswordHasher, PasswordReset, PasswordResets, Presentation,
-    RECOVERY_CODES, RESET_TTL, RefreshLink, RefreshToken, RefreshTokens, Registration, ResetToken,
-    RevokedReason, Rotation, SESSION_IDLE, SESSION_RETENTION, SIGNUP_CODE_TTL, SecondFactors,
-    Session, SessionKind, SessionNotifier, Sessions, SignInAccount, SignInAccounts, SignUps,
-    SignupCodes, SignupMailer, TICKET_ATTEMPTS, Ticket, TicketAttempt, TokenIssuer, TotpSecret,
+    RECOVERY_CODES, REQUESTED_RESET_TTL, RESET_REQUEST_LIMIT, RESET_REQUEST_WINDOW, RESET_TTL,
+    RefreshLink, RefreshToken, RefreshTokens, Registration, ResetBy, ResetMail, ResetMailer,
+    ResetToken, RevokedReason, Rotation, SESSION_IDLE, SESSION_RETENTION, SIGNUP_CODE_TTL,
+    SecondFactors, Session, SessionKind, SessionNotifier, Sessions, SignInAccount, SignInAccounts,
+    SignUps, SignupCodes, SignupMailer, TICKET_ATTEMPTS, Ticket, TicketAttempt, TokenIssuer,
+    TotpSecret, may_request_reset,
 };
 
 pub const CLIENT_ID: &str = "http://localhost:5173/oauth-client.json";
@@ -711,6 +713,8 @@ impl Invitations for InMemorySignInAccounts {
 struct ResetRow {
     reset: PasswordReset,
     token: ResetToken,
+    /// The link that replaced it.
+    replaced_by: Option<ResetToken>,
 }
 
 /// Reset links as `password_resets` keeps them, over the accounts whose password they set and the
@@ -739,27 +743,27 @@ impl InMemoryPasswordResets {
     }
 }
 
-/// Tokens of known bytes — a fake's tokens are no secret — kept as they are.
-#[async_trait::async_trait]
-impl PasswordResets for InMemoryPasswordResets {
-    async fn issue(
+impl InMemoryPasswordResets {
+    /// A new link for `member` among `rows`, the one they had open replaced.
+    fn open_link(
         &self,
+        rows: &mut Vec<ResetRow>,
         member: UserId,
-        by: UserId,
+        by: Option<UserId>,
         now: OffsetDateTime,
         expires_at: OffsetDateTime,
-    ) -> Result<ResetToken, AuthError> {
+    ) -> ResetToken {
         let n = self.tokens.fetch_add(1, Ordering::SeqCst) + 1;
         let mut bytes = [0u8; 32];
         bytes[..8].copy_from_slice(&u64::try_from(n).unwrap_or(u64::MAX).to_le_bytes());
         let token = ResetToken::from_bytes(bytes);
-        let mut rows = self.rows.lock().unwrap();
         for row in rows.iter_mut().filter(|row| {
             row.reset.member == member
                 && row.reset.used_at.is_none()
                 && row.reset.replaced_at.is_none()
         }) {
             row.reset.replaced_at = Some(now);
+            row.replaced_by = Some(token.clone());
         }
         rows.push(ResetRow {
             reset: PasswordReset {
@@ -771,8 +775,70 @@ impl PasswordResets for InMemoryPasswordResets {
                 replaced_at: None,
             },
             token: token.clone(),
+            replaced_by: None,
         });
-        Ok(token)
+        token
+    }
+}
+
+/// Tokens of known bytes — a fake's tokens are no secret — kept as they are.
+#[async_trait::async_trait]
+impl PasswordResets for InMemoryPasswordResets {
+    async fn issue(
+        &self,
+        member: UserId,
+        by: UserId,
+        now: OffsetDateTime,
+        expires_at: OffsetDateTime,
+    ) -> Result<ResetToken, AuthError> {
+        let mut rows = self.rows.lock().unwrap();
+        Ok(self.open_link(&mut rows, member, Some(by), now, expires_at))
+    }
+
+    async fn request(
+        &self,
+        member: UserId,
+        now: OffsetDateTime,
+        expires_at: OffsetDateTime,
+    ) -> Result<Option<ResetToken>, AuthError> {
+        let mut rows = self.rows.lock().unwrap();
+        let since = now - RESET_REQUEST_WINDOW;
+        let asked = rows
+            .iter()
+            .filter(|row| {
+                row.reset.member == member
+                    && row.reset.by() == ResetBy::Mailbox
+                    && row.reset.created_at > since
+            })
+            .count();
+        if !may_request_reset(asked) {
+            return Ok(None);
+        }
+        Ok(Some(
+            self.open_link(&mut rows, member, None, now, expires_at),
+        ))
+    }
+
+    async fn withdraw(&self, token: &ResetToken, now: OffsetDateTime) -> Result<(), AuthError> {
+        let mut rows = self.rows.lock().unwrap();
+        let Some(at) = rows.iter().position(|row| {
+            row.token == *token && row.reset.used_at.is_none() && row.reset.by() == ResetBy::Mailbox
+        }) else {
+            return Ok(());
+        };
+        let withdrawn = rows.remove(at);
+        if withdrawn.reset.replaced_at.is_some() {
+            return Ok(());
+        }
+        if let Some(replaced) = rows.iter_mut().find(|row| {
+            row.replaced_by.as_ref() == Some(&withdrawn.token)
+                && row.reset.used_at.is_none()
+                && now < row.reset.expires_at
+        }) {
+            replaced.reset.replaced_at = None;
+            replaced.replaced_by = None;
+        }
+        Ok(())
     }
 
     async fn find_open(
@@ -794,6 +860,8 @@ impl PasswordResets for InMemoryPasswordResets {
             .map(|(account, _)| OpenReset {
                 member: account.id,
                 display_name: account.display_name.clone(),
+                email: account.email.to_lowercase(),
+                by: row.reset.by(),
                 expires_at: row.reset.expires_at,
             }))
     }
@@ -1545,15 +1613,23 @@ pub struct Mail {
     pub code: OtpCode,
 }
 
+/// Both kinds of mail the instance sends, kept as sent: the sign-up codes and the reset links.
 #[derive(Default)]
 pub struct RecordingMailer {
     sent: Mutex<Vec<Mail>>,
+    resets: Mutex<Vec<ResetMail>>,
     down: Mutex<bool>,
 }
 
 impl RecordingMailer {
+    /// The sign-up codes.
     pub fn sent(&self) -> Vec<Mail> {
         self.sent.lock().unwrap().clone()
+    }
+
+    /// The reset links asked for.
+    pub fn reset_mails(&self) -> Vec<ResetMail> {
+        self.resets.lock().unwrap().clone()
     }
 
     /// Every send fails from now on.
@@ -1573,6 +1649,17 @@ impl SignupMailer for RecordingMailer {
             name: name.to_owned(),
             code: code.clone(),
         });
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl ResetMailer for RecordingMailer {
+    async fn send_reset_link(&self, mail: &ResetMail) -> Result<(), AuthError> {
+        if *self.down.lock().unwrap() {
+            return Err(anyhow::anyhow!("the mail server is down").into());
+        }
+        self.resets.lock().unwrap().push(mail.clone());
         Ok(())
     }
 }
@@ -3110,6 +3197,8 @@ pub mod contract {
             Some(OpenReset {
                 member: alice.id,
                 display_name: Some("alice".to_owned()),
+                email: alice.email.clone(),
+                by: ResetBy::Admin,
                 expires_at: later + RESET_TTL,
             })
         );
@@ -3331,6 +3420,344 @@ pub mod contract {
             "each a while after it ended — used, replaced or expired — not before"
         );
         assert!(still_open.is_some());
+    }
+
+    pub async fn a_link_through_the_mailbox_has_no_maker_and_replaces_the_open_one_an_admins_too(
+        resets: &dyn PasswordResets,
+        sign_ups: &dyn SignUps,
+        seeds: &dyn SignInSeeds,
+    ) {
+        let now = OffsetDateTime::from_unix_timestamp(1_790_000_000).unwrap();
+        let admin = an_admin(sign_ups, now).await;
+        let (alice, bob) = (signed_up("alice"), signed_up("bob"));
+        seeds.sign_up(&alice).await;
+        seeds.sign_up(&bob).await;
+        let admins = resets
+            .issue(alice.id, admin.id, now, now + RESET_TTL)
+            .await
+            .unwrap();
+        let bobs = resets
+            .issue(bob.id, admin.id, now, now + RESET_TTL)
+            .await
+            .unwrap();
+        let later = now + Duration::minutes(5);
+
+        let asked = resets
+            .request(alice.id, later, later + REQUESTED_RESET_TTL)
+            .await
+            .unwrap()
+            .expect("within the limit");
+        let asked_again = resets
+            .request(alice.id, later, later + REQUESTED_RESET_TTL)
+            .await
+            .unwrap()
+            .expect("within the limit");
+        let by_an_admin = resets
+            .issue(alice.id, admin.id, later, later + RESET_TTL)
+            .await
+            .unwrap();
+
+        assert_eq!(resets.find_open(&admins, later).await.unwrap(), None);
+        assert_eq!(resets.find_open(&asked, later).await.unwrap(), None);
+        assert!(
+            resets.find_open(&bobs, later).await.unwrap().is_some(),
+            "another account's stays open"
+        );
+        assert!(
+            resets
+                .find_open(&by_an_admin, later)
+                .await
+                .unwrap()
+                .is_some()
+        );
+        let again = resets
+            .request(alice.id, later, later + REQUESTED_RESET_TTL)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            resets.find_open(&again, later).await.unwrap(),
+            Some(OpenReset {
+                member: alice.id,
+                display_name: Some("alice".to_owned()),
+                email: alice.email.clone(),
+                by: ResetBy::Mailbox,
+                expires_at: later + REQUESTED_RESET_TTL,
+            })
+        );
+        assert_eq!(
+            resets.find_open(&by_an_admin, later).await.unwrap(),
+            None,
+            "an admin's replaced by a request"
+        );
+        assert_ne!(asked, asked_again);
+    }
+
+    pub async fn five_links_asked_for_an_hour_and_the_next_makes_nothing(
+        resets: &dyn PasswordResets,
+        sign_ups: &dyn SignUps,
+        seeds: &dyn SignInSeeds,
+    ) {
+        let now = OffsetDateTime::from_unix_timestamp(1_790_000_000).unwrap();
+        let admin = an_admin(sign_ups, now).await;
+        let (alice, bob) = (signed_up("alice"), signed_up("bob"));
+        seeds.sign_up(&alice).await;
+        seeds.sign_up(&bob).await;
+        let request = async |member: UserId, at: OffsetDateTime| {
+            resets
+                .request(member, at, at + REQUESTED_RESET_TTL)
+                .await
+                .unwrap()
+        };
+        let mut asked = Vec::new();
+        for minute in 0..i64::try_from(RESET_REQUEST_LIMIT).unwrap() {
+            asked.push(request(alice.id, now + Duration::minutes(minute)).await);
+        }
+        // An admin's links are no request: they count for nothing.
+        resets
+            .issue(alice.id, admin.id, now, now + RESET_TTL)
+            .await
+            .unwrap();
+        let sixth = request(alice.id, now + Duration::minutes(10)).await;
+
+        let past = request(alice.id, now + Duration::minutes(59)).await;
+        let bobs = request(bob.id, now + Duration::minutes(59)).await;
+        let once_the_first_is_an_hour_old =
+            request(alice.id, now + RESET_REQUEST_WINDOW + Duration::seconds(1)).await;
+
+        assert!(asked[..4].iter().all(Option::is_some), "{asked:?}");
+        assert!(asked[4].is_some());
+        assert_eq!(sixth, None, "five asked for, the admin's not counted");
+        assert_eq!(past, None);
+        let open = asked[4].as_ref().unwrap();
+        assert!(
+            resets
+                .find_open(open, now + Duration::minutes(5))
+                .await
+                .unwrap()
+                .is_none(),
+            "replaced by the admin's"
+        );
+        assert!(bobs.is_some(), "counted per account");
+        assert!(once_the_first_is_an_hour_old.is_some());
+    }
+
+    pub async fn a_link_withdrawn_neither_counts_nor_works(
+        resets: &dyn PasswordResets,
+        seeds: &dyn SignInSeeds,
+    ) {
+        let now = OffsetDateTime::from_unix_timestamp(1_790_000_000).unwrap();
+        let (alice, bob) = (signed_up("alice"), signed_up("bob"));
+        seeds.sign_up(&alice).await;
+        seeds.sign_up(&bob).await;
+        let request = async |member: UserId| {
+            resets
+                .request(member, now, now + REQUESTED_RESET_TTL)
+                .await
+                .unwrap()
+        };
+        let mut asked = Vec::new();
+        for _ in 0..RESET_REQUEST_LIMIT {
+            asked.push(request(alice.id).await.expect("within the limit"));
+        }
+        let bobs = request(bob.id).await.unwrap();
+        let last = asked.last().unwrap();
+
+        resets.withdraw(last, now).await.unwrap();
+        resets
+            .withdraw(&ResetToken::from_bytes([9; 32]), now)
+            .await
+            .unwrap();
+
+        assert_eq!(resets.find_open(last, now).await.unwrap(), None);
+        assert!(
+            resets.find_open(&asked[3], now).await.unwrap().is_some(),
+            "the one it replaced, given back"
+        );
+        for older in &asked[..3] {
+            assert_eq!(
+                resets.find_open(older, now).await.unwrap(),
+                None,
+                "replaced the same instant, by another"
+            );
+        }
+        assert!(
+            resets.find_open(&bobs, now).await.unwrap().is_some(),
+            "another account's stays"
+        );
+        assert!(
+            request(alice.id).await.is_some(),
+            "four asked for: the one withdrawn doesn't count"
+        );
+        assert_eq!(request(alice.id).await, None);
+    }
+
+    pub async fn a_link_used_or_an_admins_is_never_withdrawn(
+        resets: &dyn PasswordResets,
+        sign_ups: &dyn SignUps,
+        seeds: &dyn SignInSeeds,
+    ) {
+        let now = OffsetDateTime::from_unix_timestamp(1_790_000_000).unwrap();
+        let admin = an_admin(sign_ups, now).await;
+        let (alice, bob) = (signed_up("alice"), signed_up("bob"));
+        seeds.sign_up(&alice).await;
+        seeds.sign_up(&bob).await;
+        let admins = resets
+            .issue(bob.id, admin.id, now, now + RESET_TTL)
+            .await
+            .unwrap();
+        let mut asked = Vec::new();
+        for _ in 0..RESET_REQUEST_LIMIT {
+            asked.push(
+                resets
+                    .request(alice.id, now, now + REQUESTED_RESET_TTL)
+                    .await
+                    .unwrap()
+                    .expect("within the limit"),
+            );
+        }
+        let used = asked.last().unwrap();
+        resets
+            .reset(used, &PlainHasher::hash("a-new-password"), now)
+            .await
+            .unwrap();
+
+        resets.withdraw(&admins, now).await.unwrap();
+        resets.withdraw(used, now).await.unwrap();
+
+        assert!(
+            resets.find_open(&admins, now).await.unwrap().is_some(),
+            "an admin's link stays"
+        );
+        assert_eq!(
+            resets
+                .request(alice.id, now, now + REQUESTED_RESET_TTL)
+                .await
+                .unwrap(),
+            None,
+            "the used one still counts"
+        );
+    }
+
+    pub async fn withdrawing_a_link_gives_back_the_open_one_it_replaced_an_admins_included(
+        resets: &dyn PasswordResets,
+        sign_ups: &dyn SignUps,
+        seeds: &dyn SignInSeeds,
+    ) {
+        let now = OffsetDateTime::from_unix_timestamp(1_790_000_000).unwrap();
+        let admin = an_admin(sign_ups, now).await;
+        let (alice, bob) = (signed_up("alice"), signed_up("bob"));
+        seeds.sign_up(&alice).await;
+        seeds.sign_up(&bob).await;
+        let later = now + Duration::minutes(1);
+        let request = async |member: UserId, at: OffsetDateTime| {
+            resets
+                .request(member, at, at + REQUESTED_RESET_TTL)
+                .await
+                .unwrap()
+                .expect("within the limit")
+        };
+        let admins = resets
+            .issue(alice.id, admin.id, now, now + RESET_TTL)
+            .await
+            .unwrap();
+        let instead_of_the_admins = request(alice.id, later).await;
+        let mailed = request(bob.id, now).await;
+        let instead_of_the_mailed = request(bob.id, later).await;
+
+        resets
+            .withdraw(&instead_of_the_admins, later)
+            .await
+            .unwrap();
+        resets
+            .withdraw(&instead_of_the_mailed, later)
+            .await
+            .unwrap();
+
+        for (given_back, withdrawn) in [
+            (&admins, &instead_of_the_admins),
+            (&mailed, &instead_of_the_mailed),
+        ] {
+            assert!(
+                resets.find_open(given_back, later).await.unwrap().is_some(),
+                "given back"
+            );
+            assert_eq!(resets.find_open(withdrawn, later).await.unwrap(), None);
+        }
+        assert_eq!(
+            resets
+                .find_open(&admins, later)
+                .await
+                .unwrap()
+                .map(|open| (open.by, open.expires_at)),
+            Some((ResetBy::Admin, now + RESET_TTL)),
+            "as it was"
+        );
+    }
+
+    pub async fn a_replaced_link_expired_or_replaced_again_is_not_given_back(
+        resets: &dyn PasswordResets,
+        sign_ups: &dyn SignUps,
+        seeds: &dyn SignInSeeds,
+    ) {
+        let now = OffsetDateTime::from_unix_timestamp(1_790_000_000).unwrap();
+        let admin = an_admin(sign_ups, now).await;
+        let (alice, bob) = (signed_up("alice"), signed_up("bob"));
+        seeds.sign_up(&alice).await;
+        seeds.sign_up(&bob).await;
+        let request = async |member: UserId, at: OffsetDateTime| {
+            resets
+                .request(member, at, at + REQUESTED_RESET_TTL)
+                .await
+                .unwrap()
+                .expect("within the limit")
+        };
+        // Alice's first link expires before the one that replaced it is withdrawn.
+        let expiring = request(alice.id, now).await;
+        let replacing = request(alice.id, now + Duration::minutes(1)).await;
+        // Bob's: the withdrawn one was itself replaced by an admin's in between.
+        let first = request(bob.id, now).await;
+        let second = request(bob.id, now + Duration::minutes(1)).await;
+        let admins = resets
+            .issue(
+                bob.id,
+                admin.id,
+                now + Duration::minutes(2),
+                now + RESET_TTL,
+            )
+            .await
+            .unwrap();
+        let after_expiry = now + REQUESTED_RESET_TTL + Duration::minutes(1);
+
+        resets.withdraw(&replacing, after_expiry).await.unwrap();
+        resets
+            .withdraw(&second, now + Duration::minutes(3))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resets
+                .find_open(&expiring, now + Duration::minutes(2))
+                .await
+                .unwrap(),
+            None,
+            "still replaced, even before its expiry"
+        );
+        assert_eq!(
+            resets
+                .find_open(&first, now + Duration::minutes(3))
+                .await
+                .unwrap(),
+            None,
+            "the newest is the admin's"
+        );
+        assert!(
+            resets
+                .find_open(&admins, now + Duration::minutes(3))
+                .await
+                .unwrap()
+                .is_some()
+        );
     }
 
     pub async fn the_members_are_listed_most_recently_active_first(

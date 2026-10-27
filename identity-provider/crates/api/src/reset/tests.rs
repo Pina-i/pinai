@@ -2,7 +2,8 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
 use domain::auth::testing::{PlainHasher, SignInSeeds, signed_up};
 use domain::auth::{
-    PasswordResets, RESET_TTL, ResetToken, RevokedReason, SignInAccount, SignInAccounts,
+    PasswordResets, REQUESTED_RESET_TTL, RESET_TTL, ResetToken, RevokedReason, SecondFactors,
+    SignInAccount, SignInAccounts, TotpSecret,
 };
 use time::{Duration, OffsetDateTime};
 
@@ -149,13 +150,44 @@ async fn a_link_unknown_used_replaced_or_expired_gets_one_answer() {
             assert_eq!(status, StatusCode::NOT_FOUND, "{token}");
             assert!(page.contains("This link can no longer be used"), "{page}");
             assert!(
-                page.contains("Ask an admin of localhost:8080 for a new one."),
+                page.contains(
+                    "Ask for a new one with &#34;Forgot password?&#34; on the sign-in page."
+                ),
+                "{page}"
+            );
+            assert!(
+                page.contains(r#"href="http://localhost:5173/?instance=localhost%3A8080">Sign in"#),
                 "{page}"
             );
             assert!(!page.contains("<form"), "{page}");
         }
     }
     assert_eq!(password_of(&app, &bob).await, bob.password_hash);
+}
+
+#[tokio::test]
+async fn on_an_invite_only_instance_an_unusable_link_says_to_ask_an_admin() {
+    let app = TestApp::invite_only();
+
+    let (status, page) = TestApp::html_of(app.respond(get("/r/not-a-token")).await).await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(
+        page.contains("Ask an admin of localhost:8080 for a new one."),
+        "{page}"
+    );
+    assert!(!page.contains("Forgot password?"), "{page}");
+    assert!(!page.contains("localhost:5173"), "{page}");
+}
+
+#[tokio::test]
+async fn without_a_web_app_an_unusable_link_says_where_to_ask_without_a_link() {
+    let app = TestApp::without_web_app();
+
+    let (_, page) = TestApp::html_of(app.respond(get("/r/not-a-token")).await).await;
+
+    assert!(page.contains("&#34;Forgot password?&#34;"), "{page}");
+    assert!(!page.contains("localhost:5173"), "{page}");
 }
 
 #[tokio::test]
@@ -171,7 +203,7 @@ async fn setting_the_password_signs_the_member_out_everywhere_and_points_to_the_
     assert_eq!(status, StatusCode::OK);
     for shown in [
         "Your password is changed.",
-        "Sign in again from the Pīna'i app.",
+        "Sign in with it.",
         r#"href="http://localhost:5173/?instance=localhost%3A8080""#,
     ] {
         assert!(page.contains(shown), "{shown}: {page}");
@@ -190,7 +222,7 @@ async fn setting_the_password_signs_the_member_out_everywhere_and_points_to_the_
 }
 
 #[tokio::test]
-async fn without_a_web_app_the_page_says_to_sign_in_from_the_app() {
+async fn without_a_web_app_the_changed_page_links_nowhere() {
     let app = TestApp::without_web_app();
     let (_, token) = alices_link(&app).await;
 
@@ -198,10 +230,7 @@ async fn without_a_web_app_the_page_says_to_sign_in_from_the_app() {
 
     let (status, page) = TestApp::html_of(response).await;
     assert_eq!(status, StatusCode::OK);
-    assert!(
-        page.contains("Sign in again from the Pīna'i app."),
-        "{page}"
-    );
+    assert!(page.contains("Sign in with it."), "{page}");
     assert!(!page.contains("localhost:5173"), "{page}");
 }
 
@@ -297,4 +326,135 @@ async fn the_form_posted_from_another_site_is_refused() {
     assert_eq!(cross_site.status(), StatusCode::FORBIDDEN);
     assert_eq!(ours.status(), StatusCode::OK);
     assert_eq!(password_of(&app, &alice).await, PlainHasher::hash(NEW));
+}
+
+/// Alice, signed up, and a link she asked for by mail.
+async fn alices_request(app: &TestApp) -> (SignInAccount, ResetToken) {
+    let alice = signed_up("alice");
+    app.sign_in.accounts.sign_up(&alice).await;
+    let now = OffsetDateTime::now_utc();
+    let token = app
+        .sign_in
+        .resets
+        .request(alice.id, now, now + REQUESTED_RESET_TTL)
+        .await
+        .unwrap()
+        .expect("within the limit");
+    (alice, token)
+}
+
+#[tokio::test]
+async fn a_link_through_the_mailbox_asks_a_new_password_for_its_address() {
+    let app = TestApp::with([], []);
+    let (_, token) = alices_request(&app).await;
+
+    let response = app.respond(get(&format!("/r/{}", token.as_str()))).await;
+
+    assert_page(&response, "same-origin");
+    let (status, page) = TestApp::html_of(response).await;
+    assert_eq!(status, StatusCode::OK);
+    let column = &page[page.find("<main").unwrap()..];
+    for shown in [
+        r#"<h2 class="auth-title">Choose a new password</h2>"#,
+        r#"For <span class="lead-address">alice@idp.test</span>. This link works once.</p>"#,
+        &format!(r#"method="post" action="/r/{}""#, token.as_str()),
+        r#"<label class="eye" for="password">New password</label>"#,
+        r#"placeholder="At least 8 characters" autocomplete="new-password" minlength="8" required autofocus>"#,
+        r#"<div class="meter" data-for="password" aria-hidden="true"><i></i><i></i><i></i><i></i></div>"#,
+        r#"<label class="eye" for="confirmation">Repeat it</label>"#,
+        r#"data-repeats="password">"#,
+        "Set new password",
+        "Every device signed in to localhost:8080 is signed out, and signs in again with it.",
+    ] {
+        assert!(column.contains(shown), "{shown}: {column}");
+    }
+    assert!(!page.contains("signs you in"), "{page}");
+    assert!(page.contains("<title>Choose a new password · Aotearoa</title>"));
+}
+
+#[tokio::test]
+async fn either_links_form_posts_to_this_instance_only() {
+    let app = TestApp::with([], []);
+    let (_, mailed) = alices_request(&app).await;
+    let admin = an_admin(&app).await;
+    let (_, admins) = a_link_for(&app, &admin, "bob", OffsetDateTime::now_utc()).await;
+
+    for token in [mailed, admins] {
+        let response = app.respond(get(&format!("/r/{}", token.as_str()))).await;
+
+        let policy = response.headers()[header::CONTENT_SECURITY_POLICY]
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert!(policy.contains("form-action 'self';"), "{policy}");
+        assert!(!policy.contains("localhost:5173"), "{policy}");
+    }
+}
+
+#[tokio::test]
+async fn a_link_through_the_mailbox_signs_nobody_in_and_says_to_sign_in_with_it() {
+    for second_factor in [false, true] {
+        let app = TestApp::with([], []);
+        let (alice, token) = alices_request(&app).await;
+        if second_factor {
+            app.sign_in
+                .factors
+                .enable(
+                    alice.id,
+                    &TotpSecret::parse(vec![7; TotpSecret::LEN]).unwrap(),
+                    0,
+                )
+                .await
+                .unwrap();
+        }
+        let before = app.sign_in.sessions.live(alice.id);
+
+        let response = app.respond(post(token.as_str(), NEW, NEW)).await;
+
+        assert!(
+            response.headers().get(header::SET_COOKIE).is_none(),
+            "no browser session, second factor {second_factor}"
+        );
+        assert_page(&response, "no-referrer");
+        let (status, page) = TestApp::html_of(response).await;
+        assert_eq!(status, StatusCode::OK);
+        for shown in [
+            "Your password is changed.",
+            "Sign in with it.",
+            r#"href="http://localhost:5173/?instance=localhost%3A8080""#,
+        ] {
+            assert!(page.contains(shown), "{shown}: {page}");
+        }
+        assert_eq!(password_of(&app, &alice).await, PlainHasher::hash(NEW));
+        assert_eq!(
+            app.sign_in.sessions.reason(before),
+            Some(RevokedReason::PasswordReset)
+        );
+        assert!(
+            app.sign_in
+                .sessions
+                .all()
+                .iter()
+                .all(|session| session.revoked_at.is_some()),
+            "no session opened"
+        );
+        assert!(app.sign_in.sign_ins.remembered().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn a_link_through_the_mailbox_refusing_a_short_password_shows_its_own_form_again() {
+    let app = TestApp::with([], []);
+    let (_, token) = alices_request(&app).await;
+
+    let response = app.respond(post(token.as_str(), "short", "short")).await;
+
+    assert_page(&response, "same-origin");
+    let (status, page) = TestApp::html_of(response).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(page.contains("Choose a new password"), "{page}");
+    assert!(
+        page.contains("Password must be at least 8 characters"),
+        "{page}"
+    );
 }

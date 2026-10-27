@@ -1,11 +1,18 @@
 use time::{Duration, OffsetDateTime};
 
 use crate::UserId;
+use crate::identity::InstanceOrigin;
 
 use super::{AuthError, Session, SignInAccount, check_password};
 
-/// How long a reset link lets its member set a new password.
+/// How long a reset link an admin makes lets its member set a new password.
 pub const RESET_TTL: Duration = Duration::hours(24);
+/// How long a reset link asked for by mail works: it only has to cross a mailbox.
+pub const REQUESTED_RESET_TTL: Duration = Duration::minutes(30);
+/// The links an account asked for in this window count towards [`RESET_REQUEST_LIMIT`].
+pub const RESET_REQUEST_WINDOW: Duration = Duration::hours(1);
+/// At most this many links asked for in [`RESET_REQUEST_WINDOW`]: a mailbox is not flooded.
+pub const RESET_REQUEST_LIMIT: usize = 5;
 /// How long a reset link used, replaced or expired is kept before it is swept.
 pub const RESET_RETENTION: Duration = Duration::days(30);
 
@@ -15,13 +22,37 @@ link_token!(
     "reset link"
 );
 
+/// What a reset link's path starts with, its token following.
+pub const RESET_PATH_PREFIX: &str = "/r/";
+
+/// Where a reset link opens on the instance: its page, and what its form posts to.
+pub fn reset_path(token: &ResetToken) -> String {
+    format!("{RESET_PATH_PREFIX}{}", token.as_str())
+}
+
+/// The link itself, `{issuer}/r/{token}`: the one place its token is ever written.
+pub fn reset_link(origin: &InstanceOrigin, token: &ResetToken) -> String {
+    format!("{}{}", origin.base_url(), reset_path(token))
+}
+
+/// Whose hands a reset link went through on its way to the account. Either way, setting the
+/// password with it signs nobody in: a link its owner forwards must not sign anyone into the
+/// owner's account.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResetBy {
+    /// An admin made it, and sent it however they liked.
+    Admin,
+    /// The account asked for it, and it was mailed to the account's own address.
+    Mailbox,
+}
+
 /// A reset link as the store keeps it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PasswordReset {
     /// The account whose password it sets.
     pub member: UserId,
-    /// The admin who made it.
-    pub created_by: UserId,
+    /// The admin who made it; `None` when the account asked for it by mail.
+    pub created_by: Option<UserId>,
     pub created_at: OffsetDateTime,
     pub expires_at: OffsetDateTime,
     pub used_at: Option<OffsetDateTime>,
@@ -42,15 +73,35 @@ impl PasswordReset {
             .flatten()
             .fold(self.expires_at, OffsetDateTime::min)
     }
+
+    pub fn by(&self) -> ResetBy {
+        match self.created_by {
+            Some(_) => ResetBy::Admin,
+            None => ResetBy::Mailbox,
+        }
+    }
 }
 
 /// An open reset link, as its page shows it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct OpenReset {
     pub member: UserId,
     /// The member's display name.
     pub display_name: Option<String>,
+    /// The member's address: a link through the mailbox went there, and its page names it.
+    pub email: String,
+    pub by: ResetBy,
     pub expires_at: OffsetDateTime,
+}
+
+impl std::fmt::Debug for OpenReset {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenReset")
+            .field("member", &self.member)
+            .field("by", &self.by)
+            .field("expires_at", &self.expires_at)
+            .finish_non_exhaustive()
+    }
 }
 
 /// What the store made of a reset link presented with a new password.
@@ -71,6 +122,41 @@ pub fn reset_target(account: Option<SignInAccount>) -> Result<SignInAccount, Aut
         None => Err(AuthError::UnknownUser),
         Some(account) if account.admin => Err(AuthError::AdminNotResettable),
         Some(account) => Ok(account),
+    }
+}
+
+/// Who a link asked for by mail goes to: the account with the address, confirmed or admitted —
+/// admins included, the account and the address being theirs. Not one still to confirm its
+/// address: it finishes signing up instead.
+pub fn reset_requester(account: Option<SignInAccount>) -> Option<SignInAccount> {
+    account.filter(|account| !account.needs_code())
+}
+
+/// Whether an account that asked for `asked` links in the last [`RESET_REQUEST_WINDOW`] gets
+/// another.
+pub fn may_request_reset(asked: usize) -> bool {
+    asked < RESET_REQUEST_LIMIT
+}
+
+/// A reset link asked for by mail, as the mail carries it.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ResetMail {
+    pub to: String,
+    /// What the mail calls the account.
+    pub name: String,
+    /// The instance's name.
+    pub instance: String,
+    /// `{issuer}/r/{token}`.
+    pub link: String,
+    pub valid_for: Duration,
+}
+
+impl std::fmt::Debug for ResetMail {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResetMail")
+            .field("instance", &self.instance)
+            .field("valid_for", &self.valid_for)
+            .finish_non_exhaustive()
     }
 }
 

@@ -540,6 +540,23 @@ impl MailSink {
         .await
     }
 
+    /// The reset link's path in the latest mail to `to`, once one has come.
+    pub async fn reset_path_for(&self, to: &str) -> String {
+        eventually(&format!("a reset link to {to}"), || async {
+            let mails = self.mails.lock().unwrap();
+            let (_, data) = mails.iter().rev().find(|(rcpt, _)| rcpt == to)?;
+            let text = plain_text(data)?;
+            let start = text.find("/r/")?;
+            Some(
+                text[start..]
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || "/-_".contains(*c))
+                    .collect(),
+            )
+        })
+        .await
+    }
+
     pub fn count_for(&self, to: &str) -> usize {
         self.mails
             .lock()
@@ -591,8 +608,16 @@ async fn converse(socket: tokio::net::TcpStream, mails: Arc<Mutex<Vec<(String, S
     }
 }
 
-/// The code in a mail's text part, whatever its transfer encoding.
+/// The code in a mail's text part.
 fn confirmation_code(data: &str) -> Option<String> {
+    let text = plain_text(data)?;
+    let after = text.split("confirmation code is: ").nth(1)?;
+    Some(after.chars().take_while(char::is_ascii_digit).collect())
+        .filter(|code: &String| code.len() == 6)
+}
+
+/// A mail's text part, whatever its transfer encoding.
+fn plain_text(data: &str) -> Option<String> {
     let part_start = data.find("Content-Type: text/plain")?;
     let part = &data[part_start..];
     let (headers, body) = part.split_once("\n\n")?;
@@ -606,9 +631,7 @@ fn confirmation_code(data: &str) -> Option<String> {
         )
         .ok()?
     } else {
-        body.replace("=\n", "")
+        body.replace("=\n", "").replace("=3D", "=")
     };
-    let after = text.split("confirmation code is: ").nth(1)?;
-    Some(after.chars().take_while(char::is_ascii_digit).collect())
-        .filter(|code: &String| code.len() == 6)
+    Some(text)
 }

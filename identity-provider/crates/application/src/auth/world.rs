@@ -19,9 +19,9 @@ use time::OffsetDateTime;
 use super::{
     Authorize, CompleteSignIn, ConfirmTotpEnrollment, CreateInvitation, DisableTotp, EnsureAdmin,
     ExchangeCode, IssuePasswordReset, LinkDevice, ListInvitations, ListMembers, LogIn, LogOut,
-    PassSecondFactor, Refresh, RegenerateRecoveryCodes, Register, RegisterInvited, ResendCode,
-    ResetPassword, RevokeInvitation, RevokeToken, ShowSignIn, SignOutOthers, StartTotpEnrollment,
-    SweepSignups, VerifyEmail,
+    PassSecondFactor, Refresh, RegenerateRecoveryCodes, Register, RegisterInvited,
+    RequestPasswordReset, ResendCode, ResetPassword, RevokeInvitation, RevokeToken, ShowSignIn,
+    SignOutOthers, StartTotpEnrollment, SweepSignups, VerifyEmail,
 };
 
 pub struct World {
@@ -57,6 +57,7 @@ pub struct World {
     pub list_invitations: ListInvitations,
     pub revoke_invitation: RevokeInvitation,
     pub issue_reset: IssuePasswordReset,
+    pub request_reset: RequestPasswordReset,
     pub reset_password: ResetPassword,
     pub list_members: ListMembers,
     pub ensure_admin: EnsureAdmin,
@@ -197,6 +198,14 @@ async fn world_with(registrations: Registrations) -> World {
         list_invitations: ListInvitations::new(accounts.clone(), accounts.clone()),
         revoke_invitation: RevokeInvitation::new(accounts.clone(), accounts.clone()),
         issue_reset: IssuePasswordReset::new(accounts.clone(), resets.clone()),
+        request_reset: RequestPasswordReset::new(
+            registrations,
+            origin.clone(),
+            "Aotearoa".to_owned(),
+            accounts.clone(),
+            resets.clone(),
+            mailer.clone(),
+        ),
         reset_password: ResetPassword::new(
             origin.clone(),
             Some(WebApp::parse("http://localhost:5173").unwrap()),

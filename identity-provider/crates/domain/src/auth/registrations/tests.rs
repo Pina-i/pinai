@@ -34,3 +34,12 @@ fn only_an_open_instance_says_its_registrations_are_open() {
     assert!(Registrations::Open.are_open());
     assert!(!Registrations::Invite.are_open());
 }
+
+#[test]
+fn reset_links_are_asked_for_by_mail_on_an_open_instance_only() {
+    assert!(Registrations::Open.allow_reset_by_mail().is_ok());
+    assert!(matches!(
+        Registrations::Invite.allow_reset_by_mail(),
+        Err(AuthError::NoResetByMail)
+    ));
+}

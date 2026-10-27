@@ -5,9 +5,9 @@ use std::sync::Arc;
 use application::auth::{
     Authenticate, Authorize, CompleteSignIn, ConfirmTotpEnrollment, CreateInvitation, DisableTotp,
     ExchangeCode, IssuePasswordReset, LinkDevice, ListInvitations, ListMembers, LogIn, LogOut,
-    PassSecondFactor, Refresh, RegenerateRecoveryCodes, Register, RegisterInvited, ResendCode,
-    ResetPassword, RevokeInvitation, RevokeToken, SendTestMail, ShowSignIn, SignOutOthers,
-    StartTotpEnrollment, VerifyEmail,
+    PassSecondFactor, Refresh, RegenerateRecoveryCodes, Register, RegisterInvited,
+    RequestPasswordReset, ResendCode, ResetPassword, RevokeInvitation, RevokeToken, SendTestMail,
+    ShowSignIn, SignOutOthers, StartTotpEnrollment, VerifyEmail,
 };
 use application::e2ee::{
     AppendCommit, ArchiveMessages, CatchUpCommits, ClaimKeyPackage, ClaimWelcomes, ClearArchive,
@@ -81,6 +81,7 @@ use http_body_util::BodyExt;
 use serde_json::Value;
 use tower::ServiceExt;
 
+use crate::background::{ResetRequestQueue, reset_requests};
 use crate::{AppState, Jwks, PublicKeyPem, RateLimiter, SignInPages, router};
 
 /// A sign-in page's headers: never cached, under the strict CSP, and sending its `Referer` as
@@ -149,6 +150,9 @@ pub struct TestApp {
     pub reach: Arc<StubReachability>,
     /// The presence states the instance has heard.
     pub board: Arc<PresenceBoard>,
+    /// The reset links asked for, waiting for [`Self::serve_reset_requests`]: the background's work.
+    reset_queue: tokio::sync::Mutex<ResetRequestQueue>,
+    request_reset: Arc<RequestPasswordReset>,
 }
 
 impl TestApp {
@@ -287,6 +291,15 @@ impl TestApp {
             registrations,
             accounts.clone(),
         ));
+        let request_reset = Arc::new(RequestPasswordReset::new(
+            registrations,
+            origin.clone(),
+            "Aotearoa".to_owned(),
+            sign_in.accounts.clone(),
+            sign_in.resets.clone(),
+            sign_in.mailer.clone(),
+        ));
+        let (requests, reset_queue) = reset_requests();
         let state = AppState {
             authenticate: Arc::new(Authenticate::new(tokens.clone(), sign_in.sessions.clone())),
             cookie_key: Key::from(&[7u8; 64]),
@@ -299,6 +312,7 @@ impl TestApp {
                     sign_in.resets.clone(),
                 )),
                 origin.clone(),
+                registrations,
                 false,
             ),
             jwks: Jwks(Arc::new(
@@ -402,6 +416,8 @@ impl TestApp {
                 sign_in.accounts.clone(),
                 sign_in.resets.clone(),
             )),
+            request_password_reset: request_reset.clone(),
+            reset_requests: requests,
             reset_password: Arc::new(ResetPassword::new(
                 origin.clone(),
                 web_app,
@@ -837,7 +853,19 @@ impl TestApp {
             peers,
             reach,
             board,
+            reset_queue: tokio::sync::Mutex::new(reset_queue),
+            request_reset,
         }
+    }
+
+    /// What the background does with the reset links asked for so far: looks each address up,
+    /// and mails a link where one goes.
+    pub async fn serve_reset_requests(&self) {
+        self.reset_queue
+            .lock()
+            .await
+            .drain(&self.request_reset)
+            .await;
     }
 
     /// `caller` signs the request in; `None` sends no Authorization header.

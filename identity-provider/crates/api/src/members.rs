@@ -8,14 +8,13 @@ use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use domain::UserId;
-use domain::auth::AuthError;
+use domain::auth::{AuthError, reset_link};
 use domain::identity::InstanceOrigin;
 use serde::Serialize;
 use time::OffsetDateTime;
 
 use crate::ApiError;
 use crate::auth::{Authenticated, RecentlySignedIn, not_admin};
-use crate::reset::reset_path;
 
 #[derive(Serialize)]
 pub struct MemberBody {
@@ -91,7 +90,7 @@ pub async fn issue_reset(
     Ok((
         StatusCode::CREATED,
         Json(ResetBody {
-            link: format!("{}{}", origin.base_url(), reset_path(&issued.token)),
+            link: reset_link(&origin, &issued.token),
             expires_at: issued.expires_at,
         }),
     ))

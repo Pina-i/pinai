@@ -42,6 +42,15 @@ impl Registrations {
             Self::Open => Err(AuthError::RegistrationsOpen),
         }
     }
+
+    /// Someone who forgot their password asks for a reset link by mail on an open instance, which
+    /// always has a relay; on an invite-only one, its admins give the links.
+    pub fn allow_reset_by_mail(self) -> Result<(), AuthError> {
+        match self {
+            Self::Open => Ok(()),
+            Self::Invite => Err(AuthError::NoResetByMail),
+        }
+    }
 }
 
 #[cfg(test)]

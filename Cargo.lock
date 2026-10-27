@@ -2097,6 +2097,7 @@ dependencies = [
  "activitypub",
  "anyhow",
  "askama",
+ "async-trait",
  "axum",
  "axum-extra",
  "base64 0.22.1",

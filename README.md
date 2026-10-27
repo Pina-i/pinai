@@ -643,7 +643,7 @@ The main groups:
 - **Instance** — `INSTANCE_NAME`, `INSTANCE_DESCRIPTION`: how the sign-in pages and NodeInfo present it
 - **Who can join** — `REGISTRATIONS`: `open` (anyone signs up; needs an SMTP relay) or `invite` (only people an admin invited; needs an admin), `invite` when unset
 - **Admin** — `ADMIN_EMAIL`, `ADMIN_PASSWORD`: the first admin account, created at startup when no account has that address, never written over
-- **Web app** — `WEB_APP_ORIGIN`: overrides, in any environment, the built-in address of the official web app, where someone joining by invitation lands signed in (default `http://localhost:5173` in development)
+- **Web app** — `WEB_APP_ORIGIN`: overrides, in any environment, the built-in address of the official web app, where someone joining by invitation lands signed in and the reset pages' Sign in links go (default `http://localhost:5173` in development)
 - **Redis** — `REDIS_PORT`, from which `REDIS_URL` is built (event streams and presence pub-sub)
 - **Object storage** — `RUSTFS_PORT`, from which `STORAGE_ENDPOINT` is built, `STORAGE_ACCESS_KEY`, `STORAGE_SECRET_KEY`, optional `STORAGE_PUBLIC_URL` and bucket names
 - **Email** — `SMTP_*` (in production, `SMTP_PORT` 587 and `SMTP_TLS` `tls` on port 465, `starttls` on any other, when unset; `SMTP_FROM` no-reply at the domain), `EMAIL_OTP_PEPPER`, `MAILPIT_*` ports

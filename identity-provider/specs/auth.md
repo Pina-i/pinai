@@ -109,16 +109,19 @@ Rendered by the IdP from templates (askama: compiled, every value HTML-escaped),
 script** and no inline style, which allows a strict CSP. The one script is the instance's own
 file, `/assets/sign-in.js`: a form on its way turns its submit button into a spinner and disables
 it, so it can't be sent twice (Enter or a click alike), and a page brought back from the
-back-forward cache is ready again. Everything else works without it.
+back-forward cache is ready again. It also folds the login page's Sign in tab into the reset
+request and back, the address typed kept and the tab's title following (§ 7 "Forgot your
+password?"), and grades a new password as it is typed. Everything works without it.
 
 | Route | Page |
 |---|---|
-| `GET /login` | Sign in, or Register with `?tab=register` — two links, not script tabs. On an invite-only instance (§ 6) the Register tab is no link but a disabled "Invite only", and `?tab=register` shows Sign in |
+| `GET /login` | Sign in, or Register with `?tab=register` — two links, not script tabs. On an invite-only instance (§ 6) the Register tab is no link but a disabled "Invite only", and `?tab=register` shows Sign in. On an open one, the Sign in tab has "Forgot password?" beside the Password label (§ 7) |
+| `GET /forgot-password` | The login page opened on the reset request, as "Forgot password?" folds it (§ 7 "Forgot your password?"); on an invite-only instance, the page "No password reset by mail here", `404` |
 | `GET /verify-email` | The code mailed at sign-up (§ 2), with a form to send another |
 | `GET /login/totp` | The second factor (§ 3); `?mode=recovery` asks a recovery code instead |
 | `GET /signed-out` | Where `/logout` lands when it may not go back to the client |
 | `GET /i/{token}` · `GET /i/{token}/sign-up` | An invitation's doorway and its sign-up form (§ 5) |
-| `GET /r/{token}` | A reset link's form, setting a member's new password (§ 7) |
+| `GET /r/{token}` | A reset link's form, setting the account's new password — an admin's link, or one asked for by mail (§ 7) |
 | `GET /assets/{path}` | The stylesheet, the script, the fonts (DM Sans, Instrument Serif, Azeret Mono — latin and latin-ext, OFL), the motifs and the grain, built into the binary; `Cache-Control: public, max-age=86400`. The stylesheet and the script are linked with `?v=<a hash of their content>`, so a release that changes one is fetched anew |
 
 **What a page shows.** On one side the instance: its name, its description, how many people it
@@ -165,6 +168,7 @@ print words of its choosing.
 | | `invitation_required` | Accounts on <domain> are by invitation only |
 | | `notice=already_verified` | This address is confirmed already — sign in to continue |
 | | `notice=no_code_needed` | This account signs in with its password — sign in to continue |
+| `POST /forgot-password`'s answer | `invalid_email` | Enter a valid email address |
 | `/login`, no request | `ticket_expired` | This sign-in has expired |
 | | `ticket_exhausted` | Too many attempts |
 | `/verify-email` | `code_format` | Enter the 6-digit code |
@@ -183,8 +187,8 @@ The address on the code page is shown only if it is one (`Email`).
 
 **Safety.**
 - **Same-origin forms.** Every form POST (`/login`, `/register-and-login`,
-  `/verify-email-and-login`, `/verify-email/resend`, `/login/totp`, `/i/{token}/sign-up`,
-  `/r/{token}`) is refused `403` when the
+  `/verify-email-and-login`, `/verify-email/resend`, `/login/totp`, `/forgot-password`,
+  `/i/{token}/sign-up`, `/r/{token}`) is refused `403` when the
   browser says it was sent from elsewhere: an `Origin` other than the instance's, or else a
   `Sec-Fetch-Site` other than `same-origin`. `Origin: null` alone is refused. A request saying
   neither — a script, a test — is let through: a browser always says. This stops login CSRF.
@@ -718,7 +722,7 @@ Every hour — and once at startup — the IdP deletes:
 
 ### SMTP
 
-Codes go out through a relay, `SMTP_HOST`/`SMTP_PORT`, over `SMTP_TLS`: `none` (plain), `starttls` (port 587) or `tls` (port 465). Unset or empty, `SMTP_PORT` is 587 in production and 1025, Mailpit's, in development, and `SMTP_TLS` is `none` in development and, in production, `tls` on port 465 and `starttls` on any other. `SMTP_FROM`, unset or empty, is `Pīna'i <no-reply@{host}>`, the host being `DOMAIN` without its port. The connection is opened on the first send, so the instance starts whether or not the relay is up; an unset or empty `SMTP_HOST` means no relay — never a host the instance wasn't given —, and every code then fails to send — only an invite-only instance starts without one (§ 6). In the background of every start, the IdP connects, signs in and quits, logging `SMTP relay reachable` or `SMTP relay unusable` with the reason, so a wrong relay shows before anyone signs up; an invite-only instance with no relay logs `no SMTP relay: mail is off` instead.
+Codes, and the reset links asked for (§ 7), go out through a relay, `SMTP_HOST`/`SMTP_PORT`, over `SMTP_TLS`: `none` (plain), `starttls` (port 587) or `tls` (port 465). Unset or empty, `SMTP_PORT` is 587 in production and 1025, Mailpit's, in development, and `SMTP_TLS` is `none` in development and, in production, `tls` on port 465 and `starttls` on any other. `SMTP_FROM`, unset or empty, is `Pīna'i <no-reply@{host}>`, the host being `DOMAIN` without its port. The connection is opened on the first send, so the instance starts whether or not the relay is up; an unset or empty `SMTP_HOST` means no relay — never a host the instance wasn't given —, and every code then fails to send — only an invite-only instance starts without one (§ 6). In the background of every start, the IdP connects, signs in and quits, logging `SMTP relay reachable` or `SMTP relay unusable` with the reason, so a wrong relay shows before anyone signs up; an invite-only instance with no relay logs `no SMTP relay: mail is off` instead.
 
 Mailpit ships in the root `compose.yaml` (`MP_SMTP_AUTH_ACCEPT_ANY=true`, `MP_SMTP_AUTH_ALLOW_INSECURE=true`). Web UI on `MAILPIT_UI_PORT` (Alice 8025, Bob 8026) lets a developer click through to the rendered email and copy the code. `POST /dev/send-test-email` (JSON `{ to, display_name? }`) is mounted only when `IDP_ENV=development` and mails a fixed `123456` code to check the SMTP path.
 
@@ -969,6 +973,8 @@ online (`ListMembers`).
   says why. Nothing is created until a valid one is set.
 - **A typo** in `ADMIN_EMAIL` that happens to be a member's address: the member stays a member,
   and the log warns.
+- **An admin's password forgotten, on an open instance**: "Forgot password?" on the login page, as
+  for anyone (§ 7).
 - **Admin access lost** — the password forgotten, the mailbox gone: the operator sets
   `ADMIN_EMAIL` to an address no account has, and `ADMIN_PASSWORD`, then restarts. Another admin
   account is created beside the first.
@@ -1182,7 +1188,7 @@ open or invite)"). The setting is `domain::auth::Registrations`, read once as th
 | Mail relay (`SMTP_HOST`) | Required: no start without one | Optional |
 | An admin | Optional: each start without one warns | Required: no start without one |
 | NodeInfo `openRegistrations` | `true` | `false` |
-| Password reset links (§ 7) | Made by admins | Made by admins |
+| Password reset links (§ 7) | Made by admins, or asked for by mail: "Forgot password?" on the login page | Made by admins only: no "Forgot password?", `/forgot-password` is `404` |
 | The sign-in pages | "open registration"; the Register tab | "invite only"; a disabled "Invite only" tab |
 
 ### The sign-up rule
@@ -1258,9 +1264,10 @@ flowchart TD
 - **NodeInfo**: `openRegistrations` is `true` on an open instance, `false` on an invite-only one
   (`identity-provider/specs/identity.md § 6`).
 - **The sign-in pages** (§ 1): beside the form, "open registration" in the colour of something
-  on, or "invite only" in the idle one. On the login page, an open instance has its Register tab;
-  an invite-only one shows in its place a label that is no link, "Invite only", and
-  `/login?tab=register` shows the Sign in tab.
+  on, or "invite only" in the idle one. On the login page, an open instance has its Register tab
+  and "Forgot password?" (§ 7); an invite-only one shows in place of the tab a label that is no
+  link, "Invite only", `/login?tab=register` shows the Sign in tab, and there is no "Forgot
+  password?" — whoever forgot theirs asks an admin.
 - **The invitation pages** (`/i/{token}` and its form, § 5) are the same in both modes. The
   "ready" page that can end joining carries the instance's facts like every sign-in page, so it
   shows "open registration" or "invite only".
@@ -1290,6 +1297,8 @@ flowchart TD
   is refused "Accounts on {domain} are by invitation only", and no account is created.
 - **An admin of an open instance asking for an invitation** is answered `409`: people sign up
   themselves there.
+- **A forgotten password**: on an open instance, "Forgot password?" mails a link; on an
+  invite-only one, an admin makes it (§ 7).
 - **Forgetting the admin.** An instance started with neither `REGISTRATIONS` nor `ADMIN_EMAIL`
   stops at once, saying to set the admin's address and password, or to open sign-up with a relay.
 - **`REGISTRATIONS=open` without `SMTP_HOST`** stops at once, saying to set the relay or to go
@@ -1297,12 +1306,22 @@ flowchart TD
 
 ## 7. Password reset links
 
-A member who forgot their password gets back in through an admin: the admin makes a **reset link**
-for them and sends it however they like, and whoever opens it sets a new password for the member on
-this instance's own page. Nothing is mailed. Admins make reset links on open and invite-only
-instances alike, for a member only — an account admitted or with its address confirmed (§ 4 "The
-members list") — and never for an admin, who recovers through `ADMIN_EMAIL` and `ADMIN_PASSWORD`
-(§ 4 "The first admin").
+Someone who forgot their password gets back in through a **reset link**: a single-use link with
+which whoever opens it sets a new password for the account, on this instance's own page. A link
+comes one of two ways:
+
+- **An admin makes it** for a member and sends it however they like (§ "The admin API"), on open
+  and invite-only instances alike: for a member only — an account admitted or with its address
+  confirmed (§ 4 "The members list") — and never for an admin, who recovers through `ADMIN_EMAIL`
+  and `ADMIN_PASSWORD` (§ 4 "The first admin") or, on an open instance, as anyone does by mail.
+  Nothing is mailed. Open 24 hours.
+- **The account asks for it by mail**, "Forgot password?" on the login page of an open instance
+  (§ "Forgot your password?"): any account with the address, confirmed or admitted, admins
+  included. Open 30 minutes.
+
+Either way, setting the password ends every session of the account and signs nobody in: a link
+forwarded by its owner must not sign anyone into the owner's account. Which way it came
+(`ResetBy`) only changes what its page says.
 
 ### Data model
 
@@ -1311,16 +1330,23 @@ CREATE TABLE password_resets (
     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     token_hash  BYTEA NOT NULL UNIQUE,     -- SHA-256 of the link's token, never the token
     user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,  -- the member
-    created_by  UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,  -- the admin: a link
-                                           --   answers for them, as an invitation does
+    created_by  UUID REFERENCES users(id) ON DELETE CASCADE,  -- the admin: a link answers for
+                                           --   them, as an invitation does; NULL for a link the
+                                           --   account asked for by mail
     created_at  TIMESTAMPTZ NOT NULL,
-    expires_at  TIMESTAMPTZ NOT NULL,      -- created_at + 24 hours
+    expires_at  TIMESTAMPTZ NOT NULL,      -- created_at + 24 hours (an admin's), + 30 minutes
+                                           --   (asked for)
     used_at     TIMESTAMPTZ,
-    replaced_at TIMESTAMPTZ                -- a newer link for the same member took its place
+    replaced_at TIMESTAMPTZ,               -- a newer link for the same member took its place
+    replaced_by UUID                       -- that link: withdrawn because its mail failed, it
+                                           --   gives this one back. No foreign key: it is
+                                           --   deleted first
 );
 -- At most one link per member neither used nor replaced.
 CREATE UNIQUE INDEX password_resets_one_open ON password_resets (user_id)
     WHERE used_at IS NULL AND replaced_at IS NULL;
+-- The links an account asked for in the last hour, counted at each request.
+CREATE INDEX password_resets_by_account ON password_resets (user_id, created_at);
 -- and sessions.revoked_reason: password_reset (§ 1 "Sessions")
 ```
 
@@ -1329,23 +1355,28 @@ CREATE UNIQUE INDEX password_resets_one_open ON password_resets (user_id)
 As an invitation's (§ 5): 256 bits from the system's random source, written in URL-safe base64
 without padding, 43 characters (`ResetToken`). Only its SHA-256 is kept, so the table alone sets no
 password. The token is in one answer only — the admin's `POST`, as the link `{issuer}/r/{token}` —
-and in no log: a request's path is logged as `/r/…`, and the token's `Debug` prints
+or in the one mail that carries that link, and in no log: a request's path is logged as `/r/…`
+(`RESET_PATH_PREFIX`, the prefix the router and the link use too), and the token's `Debug` prints
 `ResetToken(..)`. Anything else in the token's place names no link.
 
 ### Open, used, replaced, expired
 
 A link is **open** while it is unused, not replaced and unexpired (`PasswordReset::is_open`): it
-expires the second its 24 hours (`RESET_TTL`) are up. A new link for a member **replaces** the one
-they had open, in the transaction that makes it: only the newest works. The store holds at most one
-link per member that is neither used nor replaced — a partial unique index, not a convention — and
-making one locks the member's account row first, so two admins making one at once leave one open.
+expires the second its time is up — 24 hours for an admin's (`RESET_TTL`), 30 minutes for one asked
+for by mail (`REQUESTED_RESET_TTL`), which only has to cross a mailbox. A new link for an account
+**replaces** the one it had open, in the transaction that makes it — an admin's replacing one asked
+for, and a request replacing an admin's: only the newest works. The store holds at most one link per
+account that is neither used nor replaced — a partial unique index, not a convention — and making
+one locks the account's row first, so two made at once leave one open.
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Open: an admin makes it (24 hours)
+    [*] --> Open: an admin makes it (24 hours), or the account asks for it (30 minutes)
     Open --> Used: a new password set with it
-    Open --> Replaced: an admin makes another for the same member
-    Open --> Expired: its 24 hours are up
+    Open --> Replaced: another link for the same account, either way
+    Open --> [*]: withdrawn, its mail having failed (asked for)
+    Replaced --> Open: the link that replaced it withdrawn, while unused and unexpired
+    Open --> Expired: its 24 hours (an admin's) or 30 minutes (asked for) are up
     Used --> [*]: swept 30 days later
     Replaced --> [*]: swept 30 days later
     Expired --> [*]: swept 30 days later
@@ -1367,6 +1398,108 @@ under way, not a member: it is answered as an unknown one, `404`. The refusal of
 not `403`: on this API `403` says the caller is no admin, while here an admin asks and the account
 refuses — as `409 registrations_open` does for an invitation on an open instance (§ 6).
 
+### Forgot your password?
+
+On an **open** instance, which always has a mail relay (§ 6), the login page offers a way back that
+needs nobody: `Registrations::allow_reset_by_mail`. An invite-only instance shows no such link,
+and answers `/forgot-password` with the page "No password reset by mail here. Ask an admin of
+{domain} for a reset link.", `404`: its admins make the links.
+
+```mermaid
+sequenceDiagram
+    participant B as browser
+    participant I as IdP
+    participant Q as background (serve_reset_requests)
+    participant M as mailbox
+    B->>I: GET /login?{request}
+    Note over B: "Forgot password?" folds the form in place<br/>(without script: GET /forgot-password?{request})
+    B->>I: POST /forgot-password (email + the request)
+    I->>Q: the address, queued
+    I-->>B: "Check your email" — the same for any address, at once
+    Q->>Q: an account confirmed or admitted? under 5 links this hour?
+    Q->>M: "Reset your password on {instance}": {issuer}/r/{token}, 30 minutes
+    M->>I: GET /r/{token}
+    I-->>B: "Choose a new password", for {email}
+    B->>I: POST /r/{token} (password, confirmation)
+    I->>I: one transaction: link spent, password set,<br/>every session and sign-in under way ended
+    I-->>B: "Your password is changed. Sign in with it." — no session, no cookie
+    Note over B: signs in with the new password,<br/>and the code when the second factor is on
+```
+
+**The login page.** On the Sign in tab, **Forgot password?** sits at the right of the Password
+label. It opens "Reset your password": the app's line, the tabs and the password fold away, the
+address typed stays, the button says **Send reset link →**, "{instance} will email a link to choose
+a new password. It works once, for 30 minutes." appears below the form, "← Sign in" stands in for
+"← Another home", and the line at the foot says "{domain} sends the link. Pīna'i never sees your
+email." The link is `/forgot-password?{the request}`: without script it opens that page, the login
+page in that state, carrying the request, the theme and the motif; with it, `/assets/sign-in.js`
+folds the form in place and back, its `action` turning from `/login` to `/forgot-password`, the
+password disabled so it is neither required nor sent, the URL and the tab's title following. The
+Register tab has no such link.
+
+**The request**, `POST /forgot-password`, a same-origin form (§ 1 "Safety") carrying the request:
+
+- on an invite-only instance, the "No password reset by mail here" page, `404`, before anything
+  else;
+- with no request left, back to `/login`, which says the sign-in expired; for a client that can't
+  be verified, that page (§ 1) — the request is checked as the login form's is;
+- what is no address: the request again, `400`, "Enter a valid email address", the typed text in
+  its field;
+- otherwise "Check your email": "If {email} has an account on {domain}, a reset link is on its
+  way. It works once and expires in 30 minutes.", "Nothing yet? Check spam, or *send it again*.",
+  and "← Back to sign in". *Send it again* posts the address back with `again=1`, which only opens
+  the reset request once more, the address in its field: nothing is sent until it is asked for
+  again. The address is in these pages only, answers to a `POST`: never in a URL.
+
+**The same answer, whatever the address.** No account, an account still to confirm its address, an
+account past the limit, a mail that fails: the words are the same, and so is the timing — the
+handler parses the address, puts it on a queue and answers, before anything is looked up. A
+background task beside the sweeps (`api::background::serve_reset_requests`) takes the requests one
+at a time and runs `RequestPasswordReset` on each — a panic in one leaves it taking the next:
+
+1. the account with the address, whatever its case;
+2. `reset_requester`: confirmed or admitted, admins included — the account and the address are
+   theirs, and an operator's way back stays `ADMIN_EMAIL`. Not an account still to confirm its
+   address: it finishes signing up (§ 2);
+3. `PasswordResets::request`, in one transaction under the account's row lock: the links the
+   account asked for in the last hour are counted from the rows — an admin's don't count — and
+   past 5 (`RESET_REQUEST_LIMIT`, `RESET_REQUEST_WINDOW`, `may_request_reset`) nothing is made, the
+   open link left as it is; otherwise its open link, an admin's included, is replaced by a new one,
+   `created_by` NULL. Requests at once queue on the lock, so none passes the limit;
+4. the mail. Should it fail, the new link is withdrawn (`PasswordResets::withdraw`, which never
+   takes back an admin's link or one used): it neither counts towards the 5 nor works, and the
+   link it replaced — a mailed one or an admin's — works again, if it is still unused and
+   unexpired and the withdrawn one was still the newest. All in one transaction under the
+   account's lock, the withdrawn row deleted first so the account never holds two open links; the
+   link given back is the one whose `replaced_by` names the withdrawn link — never found by a
+   timestamp, which several replacements can share. So a request that can't be mailed — the budget
+   spent, the relay down — never takes away a link someone already holds. A mail whose outcome is
+   unclear — the relay took it, then the connection timed out — withdraws a link that may yet
+   arrive: opened, it shows the "can no longer be used" page, which points to "Forgot
+   password?".
+
+**What gets through.** The mails, not the requests, are budgeted: 60 reset mails, then one every
+6 seconds, for the whole instance (`infrastructure::email::ResetMailBudget`, around the relay).
+Past the budget the send fails (`AuthError::MailBudgetSpent`), and the link is withdrawn as for any
+failed mail; these refusals are warned about by count, at most once a minute. A made-up address
+never mails, so a flood of them spends none of it and never stops a real address's link; a real
+address mails 5 an hour at most. The requests themselves are bound by their queue only: 256 wait at
+most, drained at the database's pace for an address with no account; past that, one is dropped,
+and the drops are warned about at most once a minute, by count — a count left over is written out
+by the task's minute tick, so a burst's last one is told too. The IdP can't tell clients apart
+behind its proxy, so limiting each client is the proxy's job. When the instance stops, the task
+keeps taking requests until the HTTP server has answered its last one, then handles those still
+waiting until the instance's ten seconds to stop are up — the same ten seconds the HTTP server's
+drain has, counted from the stop —, and logs how many were left unsent — waiting, or under way
+when the time ran out —, if any. A request dropped or
+failed mails nothing — the person asks again —, and no log line holds the address: a relay's
+refusal is logged by its SMTP code and whether it is lasting, never by its reply, which often
+repeats the recipient; each step with the relay times out after 15 seconds.
+
+**The mail**, plain text and HTML like the sign-up code's (§ 2 "SMTP"): "Reset your password on
+{instance}", the link `{issuer}/r/{token}`, "It works once, for 30 minutes.", and "If you didn't
+ask for it, ignore this email: your password stays as it is."
+
 ### Setting the new password
 
 ```mermaid
@@ -1383,14 +1516,19 @@ sequenceDiagram
     P->>I: POST /r/{token} (password, confirmation)
     I->>I: one transaction: the link spent, the password set, the sessions and sign-ins under way ended
     I-->>D: their sockets close (1008); their tokens and refresh tokens refused
-    I-->>P: "Your password is changed. Sign in again from the Pīna'i app."
+    I-->>P: "Your password is changed. Sign in with it."
 ```
 
 **The page**, `GET /r/{token}`, is laid out as the sign-in pages are, the instance beside the form.
-In the column: "— {domain}", "Set a new password", "for {member's display name}" — never a handle
-or an address, and left out when they have none —, the new password and its confirmation, each
-with the register form's `autocomplete="new-password"` and `minlength="8"`, **Set the password**,
-and "Your password goes to {domain}, never to Pīna'i".
+For an admin's link, in the column: "— {domain}", "Set a new password", "for {member's display
+name}" — never a handle or an address, and left out when they have none —, the new password and
+its confirmation, each with the register form's `autocomplete="new-password"` and `minlength="8"`,
+**Set the password**, and "Your password goes to {domain}, never to Pīna'i". For a link asked for
+by mail: "Choose a new password", "For {email}. This link works once." — the address the link was
+mailed to —, **New password** with a strength meter under it (four bars the script fills as it is
+typed: a hint, one bar under 8 characters since the instance refuses those), **Repeat it**, marked
+once it matches, **Set new password**, and "Every device signed in to {domain} is signed out, and
+signs in again with it." Either form posts to this instance only (`form-action 'self'`).
 
 **Posting it** (`ResetPassword`) first checks the link is open — a made-up link costs no password
 hash —, then the new password: 8 bytes at least, typed the same twice (`NewPassword`). A broken
@@ -1413,17 +1551,22 @@ least 8 characters", "The two passwords differ") and nothing that was typed. The
 After the commit the use case closes the sockets of each session ended, as signing out of the
 other devices does (`SessionNotifier`): they close with `1008`, and the sessions' tokens and
 refresh tokens are refused at once (§ 1 "Sessions"). The answer is the page "Your password is
-changed. Sign in again from the Pīna'i app.", with — when the official web app is known (§ 5 "The
-official web app") — a **Sign in** link to `{web app}/?instance={domain}`. No session is opened:
-the member signs in with the new password as anyone does.
+changed. Sign in with it.", with — when the official web app is known (§ 5 "The official web
+app") — a **Sign in** link to `{web app}/?instance={domain}`. Whichever the link, no session is
+opened, no cookie set and no app consented to: a link its owner forwards must not sign anyone into
+the owner's account. The account signs in with the new password as anyone does, and with its code
+when the second factor is on.
 
-**Left as it was**: the second factor — a member with an authenticator still types its code after
-the new password (§ 3) —, the apps the member signed in to (`client_sign_ins`), and the devices,
+**Left as it was**: the second factor — an account with an authenticator still types its code after
+the new password (§ 3) —, the apps the account signed in to (`client_sign_ins`), and the devices,
 each of which signs in again as itself.
 
 **What goes wrong**: a link unknown, used, replaced or expired — on the page, or spent by another
-submission while the form was filled in — is the one page "This link can no longer be used. Ask
-an admin of {domain} for a new one.", `404`, the same whatever happened.
+submission while the form was filled in — is the one page "This link can no longer be used.",
+`404`, the same whatever happened and whatever the token. What it says next depends on the instance
+only: on an open one, "Ask for a new one with "Forgot password?" on the sign-in page.", with a
+**Sign in** link to the web app when it is known; on an invite-only one, "Ask an admin of {domain}
+for a new one."
 
 **Headers.** The pages are the sign-in pages' (§ 1: the strict CSP, `no-store`, the instance's own
 script only). The form's page keeps the sign-in pages' `Referrer-Policy: same-origin`, under which
@@ -1443,18 +1586,37 @@ whichever came first (`RESET_RETENTION`). An open one is never swept.
 
 ### Scenarios
 
-- **A forgotten password.** The member asks an admin. The admin finds them in the members list,
-  asks for a reset link — typing their own password again when it is older than 10 minutes — and
-  sends it. The member sets a new password on the instance's page; every device of
-  theirs is signed out at once, and each signs in again with the new password.
-- **A link used, or past its 24 hours**: "This link can no longer be used. Ask an admin of
-  {domain} for a new one." — which of the two, it never says.
+- **Forgot your password, on an open instance.** "Forgot password?" on the login page, the
+  address, **Send reset link**. The mail arrives; its link opens "Choose a new password"; once it
+  is set, every device of the account is signed out, and the page says to sign in with it — from
+  the web app's **Sign in**, or any app.
+- **A link forwarded by its owner** — asked for, then sent to someone else: whoever sets a
+  password with it changes the owner's password, and is signed in nowhere.
+- **An address with no account** — or an account still signing up, or one that asked five times
+  this hour — gets the same "Check your email", as fast; no mail goes out.
+- **A mailbox flooded by someone else's requests** gets 5 links an hour at most, each replacing the
+  one before; ignoring them changes nothing.
+- **An account with an authenticator** sets its password with the mailed link, and is told to sign
+  in with it: the sign-in asks the password, then the code.
+- **The relay refuses the address**: nothing arrives, the link is withdrawn, and the log says the
+  relay refused a reset link — its code —, never to whom.
+- **A request while the mail budget is spent**: no mail, and the link the account already held —
+  mailed earlier, or an admin's — keeps working.
+- **A link expired on an open instance**: "This link can no longer be used. Ask for a new one with
+  "Forgot password?" on the sign-in page."
+- **An admin of an open instance** who forgot their password asks for a link like anyone.
+- **A forgotten password on an invite-only instance.** The member asks an admin. The admin finds
+  them in the members list, asks for a reset link — typing their own password again when it is
+  older than 10 minutes — and sends it. The member sets a new password on the instance's page;
+  every device of theirs is signed out at once, and each signs in again with the new password.
+- **A link used, or past its 24 hours — 30 minutes for one asked for**: "This link can no longer
+  be used." — which of the two, it never says.
 - **A link replaced**: the admin made another, the first having gone to the wrong place; the first
   shows the same "can no longer be used" page, the newest works.
 - **Two submissions racing** — a double click, two tabs —: the password changes once; the second
   gets the "can no longer be used" page.
-- **A member with an authenticator** signs in with the new password, then the authenticator's
-  code, as before. An authenticator lost too is a recovery code's business (§ 3), not a link's.
+- **A member with an authenticator**, after an admin's link, signs in with the new password, then
+  the authenticator's code, as before. An authenticator lost too is a recovery code's business (§ 3), not a link's.
 - **A sign-in half done with the old password** — the password typed, the authenticator's code not
   yet — doesn't finish once the password is reset: its ticket closes with the sessions.
 - **An account still signing up**, its address never confirmed, gets no link: `404`, as an unknown

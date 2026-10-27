@@ -1,5 +1,5 @@
 use domain::auth::testing::{PlainHasher, StepAuthenticator, a_request, signed_up};
-use domain::auth::{RevokedReason, SessionKind, Sessions, SignInAccount};
+use domain::auth::{REQUESTED_RESET_TTL, RevokedReason, SessionKind, Sessions, SignInAccount};
 use time::Duration;
 
 use crate::auth::world::{World, invite_only, now, world};
@@ -8,6 +8,15 @@ use crate::auth::{LoginOutcome, SecondFactorOutcome};
 use super::*;
 
 const NEW: &str = "a-new-password";
+
+/// A link alice asked for by mail.
+async fn alices_request(w: &World) -> ResetToken {
+    w.resets
+        .request(w.alice.id, now(), now() + REQUESTED_RESET_TTL)
+        .await
+        .unwrap()
+        .expect("within the limit")
+}
 
 /// The world, its admin, and a link of theirs for alice.
 async fn a_link_for_alice(w: &World) -> (SignInAccount, IssuedReset) {
@@ -379,4 +388,50 @@ async fn the_web_app_is_where_the_member_signs_in_again() {
         w.reset_password.web_app_entry().as_deref(),
         Some("http://localhost:5173/?instance=localhost%3A8080")
     );
+}
+
+#[tokio::test]
+async fn a_link_through_the_mailbox_ends_every_session_and_signs_nobody_in() {
+    for second_factor in [false, true] {
+        let w = world().await;
+        if second_factor {
+            w.with_authenticator(&w.alice).await;
+        }
+        let browser = w
+            .sessions
+            .open(w.alice.id, &SessionKind::Browser, now())
+            .await
+            .unwrap();
+        let token = alices_request(&w).await;
+
+        let member = w
+            .reset_password
+            .execute(&token, NEW, NEW, now())
+            .await
+            .unwrap();
+
+        assert_eq!(member, w.alice.id);
+        assert_eq!(
+            w.accounts
+                .by_id(w.alice.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .password_hash,
+            PlainHasher::hash(NEW)
+        );
+        assert_eq!(
+            w.sessions.reason(browser),
+            Some(RevokedReason::PasswordReset)
+        );
+        assert_eq!(w.ended.ended(), vec![browser]);
+        assert!(
+            w.sessions
+                .all()
+                .iter()
+                .all(|session| session.revoked_at.is_some()),
+            "no session opened, second factor {second_factor}"
+        );
+        assert!(w.sign_ins.remembered().is_empty(), "no app consented to");
+    }
 }

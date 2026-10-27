@@ -5,6 +5,7 @@ pub mod auth;
 pub mod background;
 mod blocks;
 pub mod error;
+mod forgot;
 mod groups;
 mod history;
 mod http;
@@ -38,8 +39,9 @@ use std::sync::Arc;
 use application::auth::{
     Authenticate, Authorize, ConfirmTotpEnrollment, CreateInvitation, DisableTotp, ExchangeCode,
     IssuePasswordReset, LinkDevice, ListInvitations, ListMembers, LogIn, LogOut, PassSecondFactor,
-    Refresh, RegenerateRecoveryCodes, Register, RegisterInvited, ResendCode, ResetPassword,
-    RevokeInvitation, RevokeToken, SendTestMail, SignOutOthers, StartTotpEnrollment, VerifyEmail,
+    Refresh, RegenerateRecoveryCodes, Register, RegisterInvited, RequestPasswordReset, ResendCode,
+    ResetPassword, RevokeInvitation, RevokeToken, SendTestMail, SignOutOthers, StartTotpEnrollment,
+    VerifyEmail,
 };
 use application::e2ee::{
     AppendCommit, ArchiveMessages, CatchUpCommits, ClaimKeyPackage, ClaimWelcomes, ClearArchive,
@@ -109,6 +111,10 @@ pub struct AppState {
     pub revoke_invitation: Arc<RevokeInvitation>,
     pub list_members: Arc<ListMembers>,
     pub issue_password_reset: Arc<IssuePasswordReset>,
+    /// "Forgot your password?": the address checked before the answer, the link mailed after.
+    pub request_password_reset: Arc<RequestPasswordReset>,
+    /// Where those requests wait for the background to take them.
+    pub reset_requests: background::ResetRequests,
     /// The form a reset link opens.
     pub reset_password: Arc<ResetPassword>,
     pub verify_email: Arc<VerifyEmail>,
@@ -263,7 +269,11 @@ pub fn router(state: AppState) -> Router {
             "/api/admin/members/{id}/password-reset",
             post(members::issue_reset),
         )
-        .route("/r/{token}", get(reset::page).post(reset::reset))
+        .route("/forgot-password", get(forgot::page).post(forgot::request))
+        .route(
+            &format!("{}{{token}}", domain::auth::RESET_PATH_PREFIX),
+            get(reset::page).post(reset::reset),
+        )
         .route(
             "/login/totp",
             get(second_factor::page).post(second_factor::pass),

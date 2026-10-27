@@ -41,6 +41,14 @@ impl SignInAccount {
     pub fn needs_code(&self) -> bool {
         !self.email_verified && !self.admitted
     }
+
+    /// What a mail to the account calls it: its display name, else its handle.
+    pub fn addressed_as(&self) -> &str {
+        self.display_name
+            .as_deref()
+            .filter(|name| !name.is_empty())
+            .unwrap_or(&self.username)
+    }
 }
 
 #[cfg(test)]

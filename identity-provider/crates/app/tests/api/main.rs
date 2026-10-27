@@ -4,6 +4,7 @@
 mod admin;
 mod blocking;
 mod federation;
+mod forgot_password;
 mod groups;
 mod helpers;
 mod invitations;

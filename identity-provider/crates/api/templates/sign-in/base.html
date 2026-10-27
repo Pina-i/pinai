@@ -27,7 +27,7 @@
 <p class="fact fact--plain runs"><span class="mark mark--small">{% include "sign-in/mark.svg.html" %}</span> Runs the Pīna'i identity provider v{{ frame.version }}</p>
 </aside>
 <main class="auth-r">
-<div class="auth-form auth-rise">
+<div class="auth-form auth-rise"{% block view %}{% endblock %}>
 <div class="head"><p class="eye">— {{ frame.host }}</p>{% block back %}{% endblock %}</div>
 {% block content %}{% endblock %}
 </div>

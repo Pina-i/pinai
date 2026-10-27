@@ -6,9 +6,9 @@ use crate::{DeviceId, InvitationId, SessionId, TicketId, UserId};
 use super::{
     AdminFacts, AuthError, AuthorizationCode, AuthorizationRequest, Client, ClientId, ClientSignIn,
     CodeAttempt, Email, Grant, InstanceMember, InvitationToken, NewAccount, OpenInvitation,
-    OpenReset, OtpCode, PasswordChange, PasswordHash, RefreshToken, Registration, ResetToken,
-    RevokedReason, Rotation, Session, SessionKind, SignInAccount, Ticket, TicketAttempt,
-    TotpSecret,
+    OpenReset, OtpCode, PasswordChange, PasswordHash, RefreshToken, Registration, ResetMail,
+    ResetToken, RevokedReason, Rotation, Session, SessionKind, SignInAccount, Ticket,
+    TicketAttempt, TotpSecret,
 };
 
 #[async_trait::async_trait]
@@ -278,8 +278,8 @@ pub trait Invitations: Send + Sync {
     async fn delete_ended(&self, before: OffsetDateTime) -> Result<usize, AuthError>;
 }
 
-/// The links admins give members to set a new password: one open link per account, each
-/// single-use. Only a hash of each token is kept.
+/// The links that set an account's password — an admin's for a member, or one the account asked
+/// for by mail: one open link per account, each single-use. Only a hash of each token is kept.
 #[async_trait::async_trait]
 pub trait PasswordResets: Send + Sync {
     /// A new link for `member` by `by`, open until `expires_at`, and its token — shown once. The
@@ -291,16 +291,34 @@ pub trait PasswordResets: Send + Sync {
         now: OffsetDateTime,
         expires_at: OffsetDateTime,
     ) -> Result<ResetToken, AuthError>;
-    /// The link `token` names, while it is open at `now`, with its member's display name.
+    /// A link `member` asked for by mail, open until `expires_at`, and its token, replacing the
+    /// link they had open — an admin's too —, unless the links they asked for since
+    /// [`RESET_REQUEST_WINDOW`](super::RESET_REQUEST_WINDOW) before `now` are past
+    /// [`may_request_reset`](super::may_request_reset): then `None`, and nothing changes. Counted
+    /// and made in one step, so requests at once never pass the limit.
+    async fn request(
+        &self,
+        member: UserId,
+        now: OffsetDateTime,
+        expires_at: OffsetDateTime,
+    ) -> Result<Option<ResetToken>, AuthError>;
+    /// Takes back a link [`Self::request`] made that never reached its account — its mail
+    /// failed —, so it neither counts towards the limit nor works, and gives back the link it
+    /// replaced — an admin's too — when that one is still unused and unexpired at `now`, and the
+    /// withdrawn one was still the newest. An admin's link, or one used, is never taken back. One
+    /// step under the account's lock.
+    async fn withdraw(&self, token: &ResetToken, now: OffsetDateTime) -> Result<(), AuthError>;
+    /// The link `token` names, while it is open at `now`, with its member's display name and
+    /// address.
     async fn find_open(
         &self,
         token: &ResetToken,
         now: OffsetDateTime,
     ) -> Result<Option<OpenReset>, AuthError>;
     /// Spends the link, sets its member's password to `hash`, ends every session of theirs not
-    /// revoked yet, idle ones included (`password_reset`) and closes their open second-factor tickets — all or
-    /// nothing, the spend first, so two submissions of one link change the password once. The
-    /// sessions it ended.
+    /// revoked yet, idle ones included (`password_reset`) and closes their open second-factor
+    /// tickets — all or nothing, the spend first, so two submissions of one link change the
+    /// password once. The sessions it ended.
     async fn reset(
         &self,
         token: &ResetToken,
@@ -327,6 +345,12 @@ pub trait HandleSuffixes: Send + Sync {
 #[async_trait::async_trait]
 pub trait SignupMailer: Send + Sync {
     async fn send_code(&self, to: &str, name: &str, code: &OtpCode) -> Result<(), AuthError>;
+}
+
+/// Mails the reset link an account asked for.
+#[async_trait::async_trait]
+pub trait ResetMailer: Send + Sync {
+    async fn send_reset_link(&self, mail: &ResetMail) -> Result<(), AuthError>;
 }
 
 /// The time-based one-time passwords of RFC 6238: SHA-1, six digits, 30 s steps, one step of

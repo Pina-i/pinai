@@ -1,0 +1,15 @@
+{% extends "sign-in/base.html" %}
+{% import "sign-in/icons.html" as icon %}
+{% block title %}Check your email{% endblock %}
+{% block back %}<a class="back" href="{{ sign_in_href }}">← Sign in</a>{% endblock %}
+{% block content %}
+<h2 class="auth-title">Check your email</h2>
+<div class="sent" role="status">{% call icon::mail(16) %}{% endcall %}<span>If <b>{{ email }}</b> has an account on {{ frame.host }}, a reset link is on its way. It works once and expires in {{ reset_minutes }} minutes.</span></div>
+<form class="resend" method="post" action="/forgot-password">
+{% include "sign-in/carried.html" %}
+<input type="hidden" name="email" value="{{ email }}">
+<input type="hidden" name="again" value="1">
+<p class="fact fact--plain">Nothing yet? Check spam, or <button class="tlink" type="submit">send it again</button>.</p>
+</form>
+<a class="btn btn2 back-to" href="{{ sign_in_href }}">← Back to sign in</a>
+{% endblock %}

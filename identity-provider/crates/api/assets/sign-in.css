@@ -781,6 +781,10 @@ input {
 .field--err:focus-within {
     border-color: var(--dnd);
 }
+.field--ok,
+.field--ok:focus-within {
+    border-color: var(--acc);
+}
 .field--code {
     font-family: var(--mono);
 }
@@ -879,6 +883,151 @@ input {
     align-items: center;
     gap: 6px;
     margin-top: 18px;
+}
+
+/* "Forgot password?": the Sign in tab folds into the reset request in place (reset-lab,
+   `PropInline`). `data-view` says which shows; the script only flips it. */
+.lfield .lrow {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    margin-bottom: 6px;
+}
+.lfield .lrow label {
+    margin-bottom: 0;
+}
+.forgot {
+    font-size: 11px;
+    color: var(--muted-foreground);
+    text-decoration: underline;
+    text-underline-offset: 3px;
+    text-decoration-color: var(--line2);
+}
+.forgot:hover {
+    color: var(--acc);
+    text-decoration-color: currentColor;
+}
+.btn-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+}
+[data-view="forgot"] .only-sign-in,
+[data-view="sign-in"] .only-forgot {
+    display: none;
+}
+.fold {
+    display: grid;
+    grid-template-rows: 1fr;
+    opacity: 1;
+    transition: grid-template-rows 360ms cubic-bezier(0.2, 0.8, 0.2, 1), opacity 260ms ease,
+        margin 360ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+/* Room for a field's focus ring, which `overflow` would clip. */
+.fold > div {
+    min-height: 0;
+    margin: -3px;
+    padding: 3px;
+    overflow: hidden;
+}
+/* The app's line sits up under the title; inside the fold, its own margin would be clipped. */
+.fold--head {
+    margin-top: -14px;
+}
+.fold--head .for {
+    margin-top: 0;
+}
+[data-view="forgot"] .fold--sign-in,
+[data-view="sign-in"] .fold--forgot {
+    grid-template-rows: 0fr;
+    opacity: 0;
+    pointer-events: none;
+}
+[data-view="forgot"] .fold--sign-in > div,
+[data-view="sign-in"] .fold--forgot > div {
+    visibility: hidden;
+    transition: visibility 0s 360ms;
+}
+[data-view="forgot"] .fold--head {
+    margin-top: 0;
+}
+/* A shut fold in the form leaves no gap of its own. */
+[data-view="forgot"] .stack > .fold--sign-in {
+    margin-top: -14px;
+}
+.explain {
+    margin: 16px 0 0;
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--muted-foreground);
+}
+@media (prefers-reduced-motion: reduce) {
+    .fold,
+    .fold > div,
+    [data-view="forgot"] .fold--sign-in > div,
+    [data-view="sign-in"] .fold--forgot > div {
+        transition: none;
+    }
+}
+
+/* The reset link asked for: on its way, then the page it opens. */
+.sent {
+    display: flex;
+    gap: 12px;
+    padding: 14px 16px;
+    border-radius: 14px;
+    background: var(--accsoft);
+    border: 1px solid var(--accline);
+    color: var(--foreground);
+    font-size: 13px;
+    line-height: 1.5;
+}
+.sent .glyph {
+    margin-top: 2px;
+    color: var(--acc);
+}
+.sent b {
+    font-weight: 500;
+}
+.resend {
+    margin-top: 14px;
+}
+button.tlink {
+    padding: 0;
+    border: none;
+    background: none;
+    font: inherit;
+    cursor: pointer;
+}
+.back-to {
+    margin-top: 22px;
+}
+.lead-address {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--foreground);
+}
+.meter {
+    display: flex;
+    gap: 4px;
+    margin-top: 8px;
+}
+.meter i {
+    flex: 1;
+    height: 3px;
+    border-radius: 999px;
+    background: var(--line2);
+    transition: background 200ms ease;
+}
+.meter[data-score="1"] i:nth-child(1) {
+    background: var(--dnd);
+}
+.meter[data-score="2"] i:nth-child(-n + 2) {
+    background: var(--idle);
+}
+.meter[data-score="3"] i:nth-child(-n + 3),
+.meter[data-score="4"] i {
+    background: var(--on);
 }
 
 /* The code page. */

@@ -15,7 +15,8 @@ use axum_extra::extract::SignedCookieJar;
 use axum_extra::extract::cookie::{Cookie, SameSite};
 use domain::SessionId;
 use domain::auth::{
-    AuthError, AuthorizationRequest, GRANT_TYPE, REFRESH_GRANT_TYPE, SESSION_IDLE, desktop_client,
+    AuthError, AuthorizationRequest, GRANT_TYPE, REFRESH_GRANT_TYPE, REQUESTED_RESET_TTL,
+    SESSION_IDLE, desktop_client,
 };
 use domain::identity::InstanceOrigin;
 use serde::{Deserialize, Serialize};
@@ -220,15 +221,36 @@ pub struct LoginQuery {
     carried: Carried,
 }
 
-/// `GET /login` — Sign in or Register, for the request carried. A link that carries none, or a
+/// What the login page opens on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LoginView {
+    SignIn,
+    Register,
+    /// The reset request "Forgot password?" folds the Sign in tab into.
+    Forgot,
+}
+
+/// What the login page answers with, besides the request it carries.
+#[derive(Default)]
+pub(crate) struct LoginAnswer<'a> {
+    pub error: Option<&'a str>,
+    pub notice: Option<&'a str>,
+    /// What was typed in the address.
+    pub email: &'a str,
+}
+
+/// The login page for `carried`'s request, opened on `view`. A link that carries none, or a
 /// broken one, is told it has expired.
-pub async fn login_page(
-    State(pages): State<SignInPages>,
-    Query(query): Query<LoginQuery>,
+pub(crate) async fn login_view(
+    pages: &SignInPages,
+    status: StatusCode,
+    carried_in: &Carried,
+    view: LoginView,
+    answer: LoginAnswer<'_>,
 ) -> Result<Response, ApiError> {
-    let appearance = query.carried.appearance();
-    let Some(request) = query.carried.request() else {
-        let notice = expired(query.error.as_deref());
+    let appearance = carried_in.appearance();
+    let Some(request) = carried_in.request() else {
+        let notice = expired(answer.error);
         return pages
             .notice(StatusCode::BAD_REQUEST, notice, appearance)
             .await;
@@ -240,12 +262,9 @@ pub async fn login_page(
     let host = pages.host();
     let frame = pages.frame(appearance).await?;
     // An invite-only instance has no Register tab to show, whatever the link asks.
-    let register = query.tab.as_deref() == Some("register") && frame.registrations_open();
-    let (alert, bad) = match query
-        .error
-        .as_deref()
-        .and_then(|code| login_alert(code, &host))
-    {
+    let register = view == LoginView::Register && frame.registrations_open();
+    let forgot = view == LoginView::Forgot && frame.reset_by_mail();
+    let (alert, bad) = match answer.error.and_then(|code| login_alert(code, &host)) {
         Some((alert, field)) => (Some(alert), field),
         None => (None, ""),
     };
@@ -254,20 +273,43 @@ pub async fn login_page(
     on_register.push(("tab", "register"));
     let app_host = client.id.authority();
     let page = LoginPage {
-        frame,
         back: cancel(&request),
         app_name: client.name,
         app_host: (app_host != host).then_some(app_host),
         register,
+        forgot,
+        forgot_href: (frame.reset_by_mail() && !register)
+            .then(|| url_with("/forgot-password", &pairs)),
+        reset_minutes: REQUESTED_RESET_TTL.whole_minutes(),
+        frame,
         sign_in_href: url_with("/login", &pairs),
         register_href: url_with("/login", &on_register),
         alert,
-        note: query.notice.as_deref().and_then(login_note),
+        note: answer.notice.and_then(login_note),
         bad,
+        email: answer.email.to_owned(),
         email_host: pages.email_host(),
         carried: pairs,
     };
-    Ok(render(StatusCode::OK, &page, Some(&request.redirect_uri)))
+    Ok(render(status, &page, Some(&request.redirect_uri)))
+}
+
+/// `GET /login` — Sign in or Register, for the request carried.
+pub async fn login_page(
+    State(pages): State<SignInPages>,
+    Query(query): Query<LoginQuery>,
+) -> Result<Response, ApiError> {
+    let view = if query.tab.as_deref() == Some("register") {
+        LoginView::Register
+    } else {
+        LoginView::SignIn
+    };
+    let answer = LoginAnswer {
+        error: query.error.as_deref(),
+        notice: query.notice.as_deref(),
+        email: "",
+    };
+    login_view(&pages, StatusCode::OK, &query.carried, view, answer).await
 }
 
 #[derive(Debug, Deserialize)]

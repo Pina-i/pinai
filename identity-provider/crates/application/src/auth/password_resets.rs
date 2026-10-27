@@ -58,9 +58,10 @@ impl IssuePasswordReset {
     }
 }
 
-/// `POST /r/{token}`: the member's new password. The link is spent, and every session of theirs
-/// ends — its tokens, refresh tokens and sockets —, so each device signs in again with the new
-/// password. A second factor stays on.
+/// `POST /r/{token}`: the account's new password, with an admin's link or one mailed to it. The
+/// link is spent, and every session of the account ends — its tokens, refresh tokens and sockets
+/// —, so each device signs in again with the new password. A second factor stays on. Nobody is
+/// signed in: a link its owner forwards must not sign anyone into the owner's account.
 pub struct ResetPassword {
     origin: InstanceOrigin,
     web_app: Option<WebApp>,
@@ -86,12 +87,12 @@ impl ResetPassword {
         }
     }
 
-    /// Where the web app opens on this instance, when one is known: the member signs in there.
+    /// Where the web app opens on this instance, when one is known: the account signs in there.
     pub fn web_app_entry(&self) -> Option<String> {
         self.web_app.as_ref().map(|app| app.entry(&self.origin))
     }
 
-    /// The member whose password it set. `ResetUnusable` when the link is not open, or stops
+    /// The account whose password it set. `ResetUnusable` when the link is not open, or stops
     /// being so before the password is set.
     pub async fn execute(
         &self,

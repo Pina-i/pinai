@@ -15,6 +15,7 @@ mod password_resets;
 mod refresh;
 mod register;
 mod register_invited;
+mod request_password_reset;
 mod resend_code;
 mod revoke_token;
 mod send_test_mail;
@@ -41,6 +42,7 @@ pub use password_resets::{IssuePasswordReset, IssuedReset, ResetPassword};
 pub use refresh::{Refresh, RefreshCommand};
 pub use register::{Register, RegisterCommand, Registered};
 pub use register_invited::{Joined, RegisterInvited};
+pub use request_password_reset::RequestPasswordReset;
 pub use resend_code::ResendCode;
 pub use revoke_token::RevokeToken;
 pub use send_test_mail::SendTestMail;
@@ -187,12 +189,9 @@ pub(crate) async fn mail_signup_code(
         return Err(AuthError::TooManyCodes);
     }
     let code = codes.issue(account.id, now + SIGNUP_CODE_TTL).await?;
-    let name = account
-        .display_name
-        .as_deref()
-        .filter(|name| !name.is_empty())
-        .unwrap_or(&account.username);
-    mailer.send_code(&account.email, name, &code).await
+    mailer
+        .send_code(&account.email, account.addressed_as(), &code)
+        .await
 }
 
 /// What a new account is created as.
