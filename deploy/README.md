@@ -7,33 +7,61 @@ their address on your instance; there is no client to host.
 
 ## What you need
 
-- A Linux server with Docker and the Compose plugin, amd64 or arm64.
-- A domain for the instance, its DNS pointing at the server, and ports 80 and 443
-  open. The domain is part of every account's address (`alice_xk9mp@your.domain`)
-  and cannot change once people have signed up.
+- A Linux server with Docker and the Compose plugin, 2.23.1 or later, amd64 or arm64.
+- A domain for the instance, its DNS (A / AAAA records) pointing at the server, and
+  ports 80 and 443 open. The domain is part of every account's address
+  (`alice_xk9mp@your.domain`) and cannot change once people have signed up.
 - For a public instance, an SMTP relay, over STARTTLS (port 587) or TLS (port 465):
   sign-up codes are mailed. See [Mail relay](#mail-relay).
-- For an invite-only instance, the default, its first admin's address and password,
-  set in `.env` before the first start. See [Public or invite-only](#public-or-invite-only).
+- For an invite-only instance, the default, its first admin's address and password.
+  See [Public or invite-only](#public-or-invite-only).
 
 ## Install
 
-After `./setup.sh` and before `docker compose up -d`, add the mode's lines to `.env`:
-the first admin for an invite-only instance, the default, or `REGISTRATIONS=open` for a
-public one. See [Public or invite-only](#public-or-invite-only).
+1. Get the bundle: `compose.yaml`, `.env.example` and this README.
 
-```bash
-curl -L https://github.com/Pina-i/pinai/releases/latest/download/pinai-deploy.tar.gz | tar xz
-cd pinai
-./setup.sh            # asks for the domain and SMTP, generates the secrets
-docker compose up -d
-docker compose logs -f idp
-```
+   ```bash
+   curl -L https://github.com/Pina-i/pinai/releases/latest/download/pinai-deploy.tar.gz | tar xz
+   cd pinai
+   ```
 
-The identity provider migrates the database and logs `listening`. Caddy takes a
-few seconds more for the certificate; then `https://your.domain/.well-known/nodeinfo`
-answers. Settings live in `.env` (see `.env.example`); after changing one,
-`docker compose up -d` applies it.
+2. Write `.env` beside `compose.yaml`; `.env.example` lists every setting. An
+   invite-only instance needs its domain and its first admin:
+
+   ```sh
+   DOMAIN=chat.example.org
+   ADMIN_EMAIL=you@example.org
+   ADMIN_PASSWORD='at least 8 bytes'
+   ```
+
+   A public instance needs its domain and a [mail relay](#mail-relay):
+
+   ```sh
+   DOMAIN=chat.example.org
+   REGISTRATIONS=open
+   SMTP_HOST=smtp.example.com
+   SMTP_USERNAME=…
+   SMTP_PASSWORD=…
+   ```
+
+   A value holding spaces, `#` or `$` goes in single quotes. The file holds
+   passwords: `chmod 600 .env`.
+
+3. Start it:
+
+   ```bash
+   docker compose up -d
+   docker compose logs -f idp
+   ```
+
+At the first start, the `init` service generates the instance's secrets in
+`./data/secrets` (see [Secrets](#secrets)), and Docker creates the rest of `./data`.
+The identity provider migrates the database and logs `listening`. Caddy takes a few
+seconds more for the certificate; then `https://your.domain/.well-known/nodeinfo`
+answers. On an invite-only instance, sign in to the Pīna'i web app with
+`ADMIN_EMAIL` and `ADMIN_PASSWORD`, then remove `ADMIN_PASSWORD` from `.env`.
+
+Settings live in `.env`; after changing one, `docker compose up -d` applies it.
 
 ## Public or invite-only
 
@@ -59,28 +87,6 @@ An instance is public or invite-only, set by `REGISTRATIONS` in `.env`.
 | NodeInfo `openRegistrations` | `true` | `false` |
 | The sign-in page shows | "open registration" | "invite only" |
 
-The lines involved, in `.env`:
-
-```sh
-# Public, with its relay (see Mail relay)
-REGISTRATIONS=open
-SMTP_HOST=smtp.example.com
-SMTP_PORT=587
-SMTP_TLS=starttls
-SMTP_USERNAME=…
-SMTP_PASSWORD=…
-SMTP_FROM="Pīna'i <no-reply@your.domain>"
-
-# Invite-only: the default, so REGISTRATIONS may be left out; its admin may not
-REGISTRATIONS=invite
-ADMIN_EMAIL=you@example.com
-ADMIN_PASSWORD='at least 8 bytes'
-```
-
-`./setup.sh` asks for the `SMTP_*` settings; an invite-only instance can leave them
-empty. The other lines are added to `.env` by hand. A value holding spaces, `#` or
-`$` goes in single quotes.
-
 In both modes, members sign in with their email address. An address that came
 with an invitation or from `ADMIN_EMAIL` is never confirmed by a code. Invite-only
 is about who can join, not federation: members of an invite-only instance still
@@ -97,8 +103,8 @@ account isn't created and the instance doesn't start.
 - The instance never writes over an existing account's password, and never makes
   an existing account admin: the log warns when `ADMIN_EMAIL` names an account that
   isn't one.
-- Once the account exists, `ADMIN_PASSWORD` is no longer used: remove it from
-  `.env`. Each start logs a warning while it is there.
+- Once the account exists, `ADMIN_PASSWORD` is unused: remove it from `.env`. Each
+  start logs a warning while it is there.
 - A public instance needs no admin. It starts without one, and logs a warning at
   each start.
 - Lost admin access — the password forgotten, the mailbox gone: set `ADMIN_EMAIL`
@@ -142,7 +148,7 @@ Change `REGISTRATIONS` in `.env` — unset, it is `invite` —, then `docker com
 ## Mail relay
 
 A public instance needs a relay, and doesn't start without one; for an invite-only
-instance it is optional.
+instance it is optional, and without `SMTP_HOST` the instance sends no mail.
 
 The instance mails sign-up codes through a relay rather than delivering them
 itself: mail sent straight from a server's own address mostly lands in spam,
@@ -161,9 +167,11 @@ the codes delivered.
 | Gmail | `smtp.gmail.com` | `587` / `starttls` | the address / an app password |
 | Fastmail | `smtp.fastmail.com` | `465` / `tls` | the address / an app password |
 
-A personal mailbox (Gmail, Fastmail…) works for a small instance, within its
-sending limits; `SMTP_FROM` must then be that mailbox's address. The provider's
-own documentation has the current details.
+Unset, `SMTP_PORT` is 587, `SMTP_TLS` is `tls` on port 465 and `starttls` on any
+other, and `SMTP_FROM` is `Pīna'i <no-reply@your.domain>`. A personal mailbox (Gmail,
+Fastmail…) works for a small instance, within its sending limits; `SMTP_FROM` must
+then be that mailbox's address. The provider's own documentation has the current
+details.
 
 On every start the identity provider connects to the relay, signs in and logs
 `SMTP relay reachable`, or `SMTP relay unusable` with the reason; an invite-only
@@ -173,10 +181,38 @@ instance without a relay logs `no SMTP relay: mail is off` instead:
 docker compose logs idp | grep SMTP
 ```
 
+## Secrets
+
+At each start, the `init` service generates in `./data/secrets` any secret missing
+or empty there, and never replaces one: the instance key `ed25519.pem`, which signs
+tokens, federation requests and device attestations, and `session_secret`,
+`email_otp_pepper`, `storage_secret_key` and `postgres/password`. Each is written to
+a temporary file, synced, then renamed, so a start cut short, even by a crash,
+never leaves one half-written. A directory in a secret's place stops `init` with
+"… is not a file".
+
+Each container sees only what it needs:
+
+| Container | Runs as | Reads |
+|---|---|---|
+| `idp` | 65532 | every secret, through `./data/secrets` |
+| `rustfs` | 10001 | `storage_secret_key` only: the others are closed to it |
+| `postgres` | root, then 999 | `postgres/password` only: its own directory is all it mounts |
+
+The identity provider reads any variable of its configuration from a file as well,
+`RUST_LOG` and `LOG_FORMAT` aside: `<VAR>_FILE` names the file, as
+`SESSION_SECRET_FILE` does in `compose.yaml`. Setting both `<VAR>` and `<VAR>_FILE`,
+or naming a file that is empty, larger than 64 KiB or unreadable, refuses the
+start. Docker secrets, and the secrets other orchestrators mount as files, plug in
+that way. `DATABASE_PASSWORD` is set on the connection over any password the
+`DATABASE_URL` holds, so the URL stays readable and a password never needs
+escaping. Postgres and RustFS read theirs from `POSTGRES_PASSWORD_FILE` and
+`RUSTFS_SECRET_KEY_FILE`.
+
 ## Upgrade
 
-`PINAI_VERSION` in `.env` pins a minor version. Its fixes, and the other images'
-patch releases:
+`compose.yaml` runs the latest release of its minor version, 0.1 for instance. Its
+fixes, and the other images' patch releases:
 
 ```bash
 docker compose pull && docker compose up -d
@@ -188,19 +224,21 @@ in this directory (v0.2.0 here):
 
 ```bash
 curl -L https://github.com/Pina-i/pinai/releases/download/v0.2.0/pinai-deploy.tar.gz | tar xz --strip-components=1
-./setup.sh            # asks for, or generates, any setting the version adds
+docker compose pull && docker compose up -d
 ```
 
-set `PINAI_VERSION=0.2` in `.env`, and pull and start as above. The archive
-replaces the bundle's own files (`compose.yaml`, `Caddyfile`…), never `.env` or
-`data/`: make again any change you had made to them.
+The archive replaces the bundle's own files (`compose.yaml`, `.env.example`,
+`README.md`), never `.env` or `data/`: make again any change you had made to them,
+Caddy's configuration included, which is the `configs:` block at the end of
+`compose.yaml`. `PINAI_VERSION` in `.env` runs another version than the bundle's.
 
 ## Back up
 
-Everything the instance holds is in `.env` and `./data`, and they go together:
-the instance key in `data/keys` and the secrets in `.env` cannot be regenerated —
-a new key breaks every device that signed in, a new `EMAIL_OTP_PEPPER` every
-recovery code.
+Everything the instance holds is in `./data`: the database, the files, and in
+`data/secrets` the instance key and the secrets, which cannot be regenerated — a
+new key breaks every device that signed in, a new `email_otp_pepper` every recovery
+code, a new `session_secret` every session. `.env` holds only what you typed: keep
+a copy of it too.
 
 ```bash
 docker compose stop
@@ -214,9 +252,10 @@ directory, then `docker compose up -d`.
 
 ## Behind your own reverse proxy
 
-Remove the `caddy` service, publish the identity provider and RustFS on loopback
-(`ports: ["127.0.0.1:8080:8080"]` on `idp`, `["127.0.0.1:9000:9000"]` on `rustfs`),
-and route as `Caddyfile` does:
+Remove the `caddy` service and its `configs:` block, publish the identity provider
+and RustFS on loopback (`ports: ["127.0.0.1:8080:8080"]` on `idp`,
+`["127.0.0.1:9000:9000"]` on `rustfs`), and route as Caddy's configuration in
+`compose.yaml` does:
 
 - `GET` and `HEAD` on `/avatars/*` to RustFS, without the query string;
 - everything else to the identity provider, WebSockets (`/ws`) and server-sent

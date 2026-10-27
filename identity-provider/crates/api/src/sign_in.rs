@@ -264,10 +264,7 @@ pub async fn login_page(
         alert,
         note: query.notice.as_deref().and_then(login_note),
         bad,
-        email_host: host
-            .rsplit_once(':')
-            .map_or(host.as_str(), |(name, _)| name)
-            .to_owned(),
+        email_host: pages.email_host(),
         carried: pairs,
     };
     Ok(render(StatusCode::OK, &page, Some(&request.redirect_uri)))

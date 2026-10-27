@@ -26,7 +26,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component clippy,rustfmt
       # NodeInfo reports idp-api's version: a tag must name it, or a release candidate of it.
-      - name: Check the tag against the crate version
+      - name: Check the tag against the crate version and compose's default image
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
           version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "idp-api") | .version')
@@ -35,6 +35,16 @@ jobs:
             *)
               echo "::error::tag $GITHUB_REF_NAME, but idp-api is at $version"
               exit 1 ;;
+          esac
+          # The README shows deploy/compose.yaml, whose default image is the latest minor's.
+          case "$GITHUB_REF_NAME" in
+            *-*) ;;
+            *)
+              minor=${version%.*}
+              grep -qF "\${PINAI_VERSION:-$minor}" deploy/compose.yaml || {
+                echo "::error::set PINAI_VERSION's default to $minor in deploy/compose.yaml, and copy the file into README.md"
+                exit 1
+              } ;;
           esac
       # Saved from main only: another ref's cache would evict main's, which every run reads.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
@@ -169,9 +179,8 @@ jobs:
           bundle="$RUNNER_TEMP/bundle"
           mkdir -p "$bundle"
           git archive --prefix=pinai/ HEAD:deploy | tar -x -C "$bundle"
-          sed -i "s/^PINAI_VERSION=.*/PINAI_VERSION=$pin/" "$bundle/pinai/.env.example"
-          grep -qx "PINAI_VERSION=$pin" "$bundle/pinai/.env.example"
-          chmod +x "$bundle/pinai/setup.sh"
+          sed -i "s/\${PINAI_VERSION:-[^}]*}/\${PINAI_VERSION:-$pin}/" "$bundle/pinai/compose.yaml"
+          grep -qF "\${PINAI_VERSION:-$pin}" "$bundle/pinai/compose.yaml"
           tar -C "$bundle" -czf pinai-deploy.tar.gz pinai
       - name: Publish the release
         env:

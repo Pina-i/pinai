@@ -6,7 +6,7 @@ use domain::auth::SessionKind;
 use domain::auth::testing::{CLIENT_ID, signed_up};
 use domain::identity::{Bearer, TokenError, TokenVerifier};
 use domain::{SessionId, UserId};
-use jwt_utils::{EdKeyPair, issue_access_token, load_ed_keypair_from_pem};
+use jwt_utils::{EdKeyPair, issue_access_token, load_ed_keypair};
 
 use super::*;
 
@@ -21,7 +21,7 @@ fn keypair() -> Arc<EdKeyPair> {
     let path =
         std::env::temp_dir().join(format!("pinai-token-verifier-{}.pem", uuid::Uuid::new_v4()));
     std::fs::write(&path, TEST_KEY).unwrap();
-    let keypair = load_ed_keypair_from_pem(&path, "test-key").unwrap();
+    let keypair = load_ed_keypair(&path, Some("test-key")).unwrap();
     std::fs::remove_file(&path).unwrap();
     Arc::new(keypair)
 }

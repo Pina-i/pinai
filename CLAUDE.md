@@ -8,7 +8,8 @@ Discord alternative. One Cargo workspace spans every Rust crate here.
 ```
 compose.yaml               # the platform — `docker compose up` from here
 .env.example               # one deployment unit, one env template
-deploy/                    # hosting an instance: the published image behind Caddy, setup.sh
+deploy/                    # hosting an instance: compose.yaml (the published image behind Caddy), .env.example
+scripts/                   # repository checks `make check` runs; not shipped
 specs/                     # platform-wide specs; service specs live in the service
 crates/                    # shared libraries (was the core-libs repo)
   jwt-utils/  http-signatures/  activitypub/  observability/
@@ -105,7 +106,8 @@ Run from the repo root:
 
 | Command | Effect |
 |---|---|
-| `make check` | fmt-check + clippy `-D warnings` (every target, every feature) + tests — no Docker |
+| `make check` | fmt-check + `readme-compose` + clippy `-D warnings` (every target, every feature) + tests — no Docker |
+| `make readme-compose` | the root `README.md` shows `deploy/compose.yaml` verbatim: change the file, then copy it into the README |
 | `make test-integration` | throwaway Postgres and Redis (`compose.test.yml`, ports 55432 and 56479), then every test including the Docker-gated ones |
 | `make check-all` | both — the gate before merging |
 | `make fmt` | rustfmt the workspace |

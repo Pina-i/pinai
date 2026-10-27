@@ -10,7 +10,7 @@ the backend services of the platform in a single Cargo workspace:
 | `crates/` | Shared libraries: `jwt-utils`, `http-signatures`, `activitypub`, `observability`, `federation-transport` |
 | `specs/` | Platform-wide specifications (architecture, federation authentication) |
 | `compose.yaml` | The development stack for Docker Compose |
-| `deploy/` | Hosting an instance: the published image behind Caddy, set up by `deploy/setup.sh` — see `deploy/README.md` |
+| `deploy/` | Hosting an instance: `compose.yaml`, the published image behind Caddy, and `.env.example` — see `deploy/README.md` |
 
 The web and desktop clients live in their own repository,
 [`Pina-i/pinai-client`](https://github.com/Pina-i/pinai-client), and talk to these
@@ -31,30 +31,32 @@ app: there is no client to host.
 
 You need:
 
-- a Linux server, amd64 or arm64, with Docker and its Compose plugin;
-- a domain pointing at the server, with ports 80 and 443 open. It becomes part of
-  every account's address (`alice_xk9mp@your.domain`), so it cannot change later;
+- a Linux server, amd64 or arm64, with Docker and its Compose plugin, 2.23.1 or later;
+- a domain whose DNS (A / AAAA records) points at the server, with ports 80 and 443
+  open. It becomes part of every account's address (`alice_xk9mp@your.domain`), so
+  it cannot change later;
 - for a public instance, an SMTP relay, over STARTTLS (port 587) or TLS (port 465):
-  sign-up codes are mailed. `deploy/README.md` lists some, with their settings;
-- for an invite-only instance, the default, its first admin's address and password,
-  set in `.env` before the first start ([Public or invite-only](#public-or-invite-only)).
+  sign-up codes are mailed. `deploy/README.md` lists some, with their settings.
 
-Then, on the server:
+Then three steps on the server.
+
+**1. `compose.yaml`.** Take it from the release bundle, which also carries
+`.env.example` and a `README.md`, `deploy/README.md` here:
 
 ```bash
 curl -L https://github.com/Pina-i/pinai/releases/latest/download/pinai-deploy.tar.gz | tar xz
 cd pinai
-./setup.sh               # asks for the domain and SMTP, generates the secrets
-docker compose up -d
 ```
 
-Or write the two files yourself, in an empty directory on the server. This
-`compose.yaml` matches the archive's, with the Caddyfile inline; it needs Docker
-Compose 2.23 or later:
+Or save this file as `compose.yaml` in an empty directory. It is the bundle's,
+Caddy's configuration included:
 
+<!-- deploy/compose.yaml -->
 ```yaml
-# Needs Docker Compose 2.23 or later, for the Caddyfile inlined at the end.
-# Everything the instance stores is under ./data, beside this file.
+# A Pīna'i instance from the published image, behind Caddy for HTTPS.
+# Needs Docker Compose 2.23.1 or later, for Caddy's configuration inlined at the end.
+# Its settings are in .env beside it. Everything it stores is under ./data,
+# its secrets in ./data/secrets, generated at the first start.
 name: pinai
 
 # Docker keeps container logs forever by default.
@@ -75,7 +77,7 @@ services:
       - "443:443"
       - "443:443/udp"
     environment:
-      DOMAIN: ${DOMAIN:?set DOMAIN in .env}
+      DOMAIN: ${DOMAIN:?set it in .env}
     configs:
       - source: caddyfile
         target: /etc/caddy/Caddyfile
@@ -87,21 +89,27 @@ services:
     logging: *logging
 
   # The identity provider: accounts, messages, federation.
+  # PINAI_VERSION in .env picks another version than this minor's latest.
   idp:
-    image: ghcr.io/pina-i/pinai-idp:${PINAI_VERSION:?set PINAI_VERSION in .env}
+    image: ghcr.io/pina-i/pinai-idp:${PINAI_VERSION:-0.1}
     restart: unless-stopped
     env_file: .env
     environment:
       IDP_ENV: production
       PORT: "8080"
-      DATABASE_URL: postgres://pinai:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/pinai
+      DATABASE_URL: postgres://pinai@postgres:5432/pinai
+      DATABASE_PASSWORD_FILE: /run/secrets/postgres/password
+      SESSION_SECRET_FILE: /run/secrets/session_secret
+      EMAIL_OTP_PEPPER_FILE: /run/secrets/email_otp_pepper
+      JWT_PRIVATE_KEY_PATH: /run/secrets/ed25519.pem
       REDIS_URL: redis://redis:6379
       STORAGE_ENDPOINT: http://rustfs:9000
+      STORAGE_ACCESS_KEY: pinai
+      STORAGE_SECRET_KEY_FILE: /run/secrets/storage_secret_key
       # Avatars are served by RustFS, through Caddy's /avatars/ route.
       STORAGE_PUBLIC_URL: https://${DOMAIN}
-      JWT_PRIVATE_KEY_PATH: /run/secrets/ed25519.pem
     volumes:
-      - ./data/keys:/run/secrets:ro
+      - ./data/secrets:/run/secrets:ro
     depends_on:
       init:
         condition: service_completed_successfully
@@ -118,10 +126,15 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: pinai
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_PASSWORD_FILE: /run/secrets/password
       POSTGRES_DB: pinai
     volumes:
       - ./data/postgres:/var/lib/postgresql
+      # Its own directory only: the entrypoint reads it as root.
+      - ./data/secrets/postgres:/run/secrets:ro
+    depends_on:
+      init:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U pinai -d pinai"]
       interval: 5s
@@ -148,12 +161,14 @@ services:
     image: rustfs/rustfs:1.0.3
     restart: unless-stopped
     environment:
-      RUSTFS_ACCESS_KEY: ${STORAGE_ACCESS_KEY:?set STORAGE_ACCESS_KEY in .env}
-      RUSTFS_SECRET_KEY: ${STORAGE_SECRET_KEY:?set STORAGE_SECRET_KEY in .env}
+      # Not a secret: the secret key is.
+      RUSTFS_ACCESS_KEY: pinai
+      RUSTFS_SECRET_KEY_FILE: /run/secrets/storage_secret_key
       # Empty: logs to stdout, for `docker compose logs`.
       RUSTFS_OBS_LOG_DIRECTORY: ""
     volumes:
       - ./data/rustfs:/data
+      - ./data/secrets:/run/secrets:ro
     depends_on:
       init:
         condition: service_completed_successfully
@@ -165,28 +180,59 @@ services:
       start_period: 30s
     logging: *logging
 
-  # Runs before the others at every start. Generates the instance key in
-  # ./data/keys once and never replaces it: it signs tokens, federation requests
-  # and device attestations, and losing it cannot be undone. Then lets the
-  # identity provider (user 65532) read it and gives ./data/rustfs to RustFS (10001).
+  # Runs before the others at every start. Generates each secret in ./data/secrets
+  # once and never replaces it: the instance key signs tokens, federation requests
+  # and device attestations, the pepper hashes recovery codes, and losing them
+  # cannot be undone. Each is written to a temporary file, synced, then renamed,
+  # so a start cut short, even by a crash, never leaves one half-written; an empty
+  # one is generated again. Then lets each container read only what it needs: the
+  # identity provider (user 65532) every secret, RustFS (10001) its key, Postgres
+  # only ./data/secrets/postgres; and gives ./data/rustfs to RustFS.
   init:
-    image: alpine/openssl:3.5.8
+    # A community image that generates every secret as root: pinned by digest.
+    image: alpine/openssl:3.5.8@sha256:3f25da71f70eba788067daac3f3df03bd1de7a7c52ed89fa93b94ad2c92d986b
     restart: "no"
     entrypoint: ["sh", "-c"]
     command:
-      - >-
-        if [ -f /keys/ed25519.pem ]; then
-          echo "instance key present, keeping it";
-        else
-          openssl genpkey -algorithm ed25519 -out /keys/ed25519.pem &&
-          chown "$$(stat -c '%u' /keys)" /keys/ed25519.pem &&
-          echo "generated a new instance key";
-        fi &&
-        chgrp 65532 /keys/ed25519.pem &&
-        chmod 640 /keys/ed25519.pem &&
+      - |
+        set -eu
+        cd /secrets
+        umask 077
+        mkdir -p postgres
+        # A directory in a secret's place, as Docker makes for a missing bind
+        # source, would take the secret inside it.
+        missing() {
+          if [ -e "$$1" ] && [ ! -f "$$1" ]; then
+            echo "$$1 is not a file" >&2
+            exit 1
+          fi
+          if [ -s "$$1" ]; then
+            echo "$$1 present, keeping it"
+            return 1
+          fi
+        }
+        for name in session_secret email_otp_pepper postgres/password storage_secret_key; do
+          if missing "$$name"; then
+            value=$$(openssl rand -hex 32)
+            printf '%s' "$$value" > "$$name.tmp"
+            sync
+            mv "$$name.tmp" "$$name"
+            echo "generated $$name"
+          fi
+        done
+        if missing ed25519.pem; then
+          openssl genpkey -algorithm ed25519 -out ed25519.pem.tmp
+          sync
+          mv ed25519.pem.tmp ed25519.pem
+          echo "generated ed25519.pem, the instance key"
+        fi
+        chown 0:65532 session_secret email_otp_pepper postgres/password ed25519.pem
+        chown 10001:65532 storage_secret_key
+        chmod 440 session_secret email_otp_pepper postgres/password storage_secret_key ed25519.pem
+        chmod 711 /secrets /secrets/postgres
         chown 10001:10001 /rustfs
     volumes:
-      - ./data/keys:/keys
+      - ./data/secrets:/secrets
       - ./data/rustfs:/rustfs
     logging: *logging
 
@@ -215,84 +261,65 @@ configs:
       }
 ```
 
-`.env` holds the settings. Replace the example values, and put a value holding
-spaces, `#` or `$` in single quotes:
+**2. `.env`**, beside it, holds what only you decide. An invite-only instance, the
+default, needs its domain and its first admin:
 
 ```sh
-# The image's minor version: `docker compose pull` gets its fixes.
-PINAI_VERSION=0.1
-# Without scheme or path. It is part of every account's address: it cannot change.
 DOMAIN=chat.example.org
-
-# invite, the default: only people an admin invited can join, and the first
-# admin below is required. open: anyone can sign up, and the relay is required.
-REGISTRATIONS=invite
 ADMIN_EMAIL=you@example.org
 ADMIN_PASSWORD='at least 8 bytes'
-
-# The mail relay, required for public registration mode: uncomment these lines and fill them in.
-# deploy/README.md lists relays and their settings; SMTP_TLS is starttls for
-# port 587, tls for port 465.
-# SMTP_HOST=
-# SMTP_PORT=587
-# SMTP_TLS=starttls
-# SMTP_USERNAME=
-# SMTP_PASSWORD=
-# SMTP_FROM=no-reply@chat.example.org
-
-# The secrets, from the commands below.
-JWT_KEY_ID=
-SESSION_SECRET=
-EMAIL_OTP_PEPPER=
-POSTGRES_PASSWORD=
-STORAGE_ACCESS_KEY=
-STORAGE_SECRET_KEY=
 ```
 
-Generate the secrets once, with these commands, and paste each line they print
-over its empty one in `.env`. Never generate them again, and back them up with
-`./data`, as the warning below says:
+A public instance needs its domain and a mail relay:
 
-```bash
-echo "JWT_KEY_ID=key-$(date +%Y-%m)"
-echo "SESSION_SECRET=$(openssl rand -hex 32)"
-echo "EMAIL_OTP_PEPPER=$(openssl rand -hex 32)"
-echo "POSTGRES_PASSWORD=$(openssl rand -hex 32)"
-echo "STORAGE_ACCESS_KEY=pinai-$(openssl rand -hex 8)"
-echo "STORAGE_SECRET_KEY=$(openssl rand -hex 32)"
+```sh
+DOMAIN=chat.example.org
+REGISTRATIONS=open
+SMTP_HOST=smtp.example.com
+SMTP_USERNAME=…
+SMTP_PASSWORD=…
 ```
 
-Then start the instance, creating `./data` first so that its directories are
-yours rather than root's:
+The relay is reached on port 587 over STARTTLS; `SMTP_PORT=465` switches to TLS, and
+`SMTP_TLS` sets it outright. The instance mails as `Pīna'i <no-reply@chat.example.org>`
+unless `SMTP_FROM` says otherwise. Put a value holding spaces, `#` or `$` in single
+quotes. `deploy/.env.example` lists every setting. The file holds passwords, so make
+it yours alone: `chmod 600 .env`.
+
+**3. Start it:**
 
 ```bash
-chmod 600 .env               # the secrets, readable by you alone
-mkdir -p data/keys data/postgres data/redis data/rustfs data/caddy/data data/caddy/config
 docker compose up -d
 docker compose logs -f idp   # "listening" once the database is migrated
 ```
 
-`https://your.domain/.well-known/nodeinfo` answers once the database is migrated
-and Caddy has its certificate. Upgrades, backups, the mail relay and running
-behind your own reverse proxy are in [`deploy/README.md`](deploy/README.md),
-which the archive carries too.
+At the first start, the `init` service generates the instance's secrets in
+`./data/secrets`: its signing key, the session secret, the email pepper, and the
+database and storage passwords. `https://your.domain/.well-known/nodeinfo` answers
+once the database is migrated and Caddy has its certificate. On an invite-only
+instance, sign in to the Pīna'i web app with `ADMIN_EMAIL` and `ADMIN_PASSWORD`,
+then remove `ADMIN_PASSWORD` from `.env`: the instance warns at each start while it
+is there.
 
-> **Back up `.env` and `data/` together.** The instance key and the secrets in
-> `.env` cannot be regenerated: a new key breaks every device that signed in, a
-> new `EMAIL_OTP_PEPPER` every recovery code.
+Upgrades, backups, the mail relay and running behind your own reverse proxy are in
+[`deploy/README.md`](deploy/README.md), which the bundle carries too.
+
+> **Back up `./data`.** It holds everything that cannot be recreated: the database,
+> the files, and in `./data/secrets` the instance key and secrets. A lost key breaks
+> every device that signed in, a lost pepper every recovery code, a lost session
+> secret every session. `.env` holds only what you typed.
 
 ### Public or invite-only
 
 An instance is public or invite-only, set by `REGISTRATIONS` in `.env`:
 
 - **Public** (`REGISTRATIONS=open`): anyone can create an account from the app, and
-  a mailed code confirms their address. Add `REGISTRATIONS=open` to `.env`. It needs
-  the SMTP relay, which `./setup.sh` asks for, and doesn't start without `SMTP_HOST`.
-  Add the DNS records the relay gives you for the sender's domain (SPF, DKIM), or the
-  codes land in spam.
+  a mailed code confirms their address. It needs the SMTP relay, and doesn't start
+  without `SMTP_HOST`. Add the DNS records the relay gives you for the sender's domain
+  (SPF, DKIM), or the codes land in spam.
 - **Invite-only** (`REGISTRATIONS=invite`, the default): only people an admin invited
   can create an account. No code is mailed, so the relay is optional. It needs a
-  first admin: add `ADMIN_EMAIL` and `ADMIN_PASSWORD` to `.env` before
+  first admin, `ADMIN_EMAIL` and `ADMIN_PASSWORD`, in `.env` before the first
   `docker compose up -d`; without an admin, the instance doesn't start.
 
 Invite-only is about who can join, not federation: its members still talk with
@@ -543,12 +570,14 @@ image for amd64 and arm64 on native runners. What it publishes to
 |---|---|
 | A pull request | nothing |
 | A push to `main` | `edge` and `sha-<short>`, for testing only |
-| A tag `vX.Y.Z` | `X.Y.Z`, `X.Y` and `latest`, then a GitHub release carrying `pinai-deploy.tar.gz`: `deploy/` with `PINAI_VERSION` set to `X.Y` |
+| A tag `vX.Y.Z` | `X.Y.Z`, `X.Y` and `latest`, then a GitHub release carrying `pinai-deploy.tar.gz`: `deploy/`, its `compose.yaml` running `X.Y` |
 | A tag `vX.Y.Z-rc.1` | `X.Y.Z-rc.1`, then a pre-release with the bundle pinned to it |
 
 A tag must name the version of `idp-api` (what NodeInfo reports), or a release
-candidate of it: the run checks it first. Tag the commit of `main` whose run
-passed, and push the tag:
+candidate of it: the run checks it first. For a new minor, first set the default of
+`PINAI_VERSION` in `deploy/compose.yaml` (`${PINAI_VERSION:-X.Y}`) to it and copy
+the file into this README: the run refuses a tag `vX.Y.Z` whose minor it doesn't
+name. Tag the commit of `main` whose run passed, and push the tag:
 
 ```bash
 git tag -a v0.1.0 -m "v0.1.0" && git push origin v0.1.0
@@ -583,7 +612,8 @@ All `make` targets are run from the repo root.
 | `make fmt` | `cargo fmt --all` |
 | `make fmt-check` | Check formatting without writing |
 | `make lint` | `cargo clippy --workspace --all-targets --all-features -- -D warnings` |
-| `make check` | `fmt-check` + `lint` + `cargo test --workspace` — no Docker; run before every commit |
+| `make check` | `fmt-check` + `readme-compose` + `lint` + `cargo test --workspace` — no Docker; run before every commit |
+| `make readme-compose` | Check that the `compose.yaml` this README shows is `deploy/compose.yaml`: change the file, then copy it into the README |
 | `make test-integration` | Throwaway Postgres and Redis (`compose.test.yml`), then every test, the Docker-gated ones included |
 | `make check-all` | `check` + `test-integration` — what CI runs, the gate before merging |
 
@@ -601,12 +631,14 @@ All `make` targets are run from the repo root.
 ## Configuration reference
 
 `.env.example` documents every variable of the development env files; a hosted
-instance is configured by `deploy/.env.example`, which `deploy/setup.sh` fills.
+instance's `.env` is written from `deploy/.env.example`. Every variable of the
+identity provider's configuration, `RUST_LOG` and `LOG_FORMAT` aside, can come from
+a file instead: `<VAR>_FILE` names it (Docker secrets), and setting both is refused.
 The main groups:
 
-- **PostgreSQL** — `POSTGRES_*`; `DATABASE_URL` is built from them
+- **PostgreSQL** — `POSTGRES_*`; `DATABASE_URL` is built from them; `DATABASE_PASSWORD`, optional, is set on the connection over any password the URL holds
 - **Server** — `IDP_ENV`, `DOMAIN`, `PORT`
-- **Keys** — `IDP_KEYS_DIR`, `JWT_PRIVATE_KEY_PATH`, `JWT_KEY_ID`
+- **Keys** — `IDP_KEYS_DIR`, `JWT_PRIVATE_KEY_PATH`, `JWT_KEY_ID` (optional: unset, the key's RFC 7638 thumbprint)
 - **Session** — `SESSION_SECRET`
 - **Instance** — `INSTANCE_NAME`, `INSTANCE_DESCRIPTION`: how the sign-in pages and NodeInfo present it
 - **Who can join** — `REGISTRATIONS`: `open` (anyone signs up; needs an SMTP relay) or `invite` (only people an admin invited; needs an admin), `invite` when unset
@@ -614,7 +646,7 @@ The main groups:
 - **Web app** — `WEB_APP_ORIGIN`: overrides, in any environment, the built-in address of the official web app, where someone joining by invitation lands signed in (default `http://localhost:5173` in development)
 - **Redis** — `REDIS_PORT`, from which `REDIS_URL` is built (event streams and presence pub-sub)
 - **Object storage** — `RUSTFS_PORT`, from which `STORAGE_ENDPOINT` is built, `STORAGE_ACCESS_KEY`, `STORAGE_SECRET_KEY`, optional `STORAGE_PUBLIC_URL` and bucket names
-- **Email** — `SMTP_*`, `EMAIL_OTP_PEPPER`, `MAILPIT_*` ports
+- **Email** — `SMTP_*` (in production, `SMTP_PORT` 587 and `SMTP_TLS` `tls` on port 465, `starttls` on any other, when unset; `SMTP_FROM` no-reply at the domain), `EMAIL_OTP_PEPPER`, `MAILPIT_*` ports
 - **Chat server** — `CHAT_PORT`, `CHAT_POSTGRES_DB`, `IDP_ISSUER`
 - **Logging** — `RUST_LOG`, `LOG_FORMAT=json` for structured logs
 

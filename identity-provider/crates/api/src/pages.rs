@@ -52,10 +52,7 @@ impl SignInPages {
 
     /// The host an address on this instance would have: the domain without its port.
     pub(crate) fn email_host(&self) -> String {
-        let host = self.host();
-        host.rsplit_once(':')
-            .map_or(host.as_str(), |(name, _)| name)
-            .to_owned()
+        self.origin.domain().host().to_owned()
     }
 
     pub(crate) async fn frame(&self, appearance: Appearance) -> Result<Frame, ApiError> {

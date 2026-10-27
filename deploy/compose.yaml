@@ -1,6 +1,7 @@
-# A Pīna'i instance from the published image, behind Caddy for TLS.
-# Run ./setup.sh first: it writes .env and creates ./data. See README.md.
-
+# A Pīna'i instance from the published image, behind Caddy for HTTPS.
+# Needs Docker Compose 2.23.1 or later, for Caddy's configuration inlined at the end.
+# Its settings are in .env beside it. Everything it stores is under ./data,
+# its secrets in ./data/secrets, generated at the first start.
 name: pinai
 
 # Docker keeps container logs forever by default.
@@ -11,6 +12,8 @@ x-logging: &logging
     max-file: "3"
 
 services:
+  # HTTPS in front of the identity provider and RustFS; gets and renews the
+  # certificate. Its ports are the only published ones (443/udp: HTTP/3).
   caddy:
     image: caddy:2.11-alpine
     restart: unless-stopped
@@ -19,30 +22,39 @@ services:
       - "443:443"
       - "443:443/udp"
     environment:
-      DOMAIN: ${DOMAIN:?run ./setup.sh first}
+      DOMAIN: ${DOMAIN:?set it in .env}
+    configs:
+      - source: caddyfile
+        target: /etc/caddy/Caddyfile
     volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - ./data/caddy/data:/data
       - ./data/caddy/config:/config
     depends_on:
       - idp
     logging: *logging
 
+  # The identity provider: accounts, messages, federation.
+  # PINAI_VERSION in .env picks another version than this minor's latest.
   idp:
-    image: ghcr.io/pina-i/pinai-idp:${PINAI_VERSION:?set PINAI_VERSION in .env}
+    image: ghcr.io/pina-i/pinai-idp:${PINAI_VERSION:-0.1}
     restart: unless-stopped
     env_file: .env
     environment:
       IDP_ENV: production
       PORT: "8080"
-      DATABASE_URL: postgres://pinai:${POSTGRES_PASSWORD:?run ./setup.sh first}@postgres:5432/pinai
+      DATABASE_URL: postgres://pinai@postgres:5432/pinai
+      DATABASE_PASSWORD_FILE: /run/secrets/postgres/password
+      SESSION_SECRET_FILE: /run/secrets/session_secret
+      EMAIL_OTP_PEPPER_FILE: /run/secrets/email_otp_pepper
+      JWT_PRIVATE_KEY_PATH: /run/secrets/ed25519.pem
       REDIS_URL: redis://redis:6379
       STORAGE_ENDPOINT: http://rustfs:9000
+      STORAGE_ACCESS_KEY: pinai
+      STORAGE_SECRET_KEY_FILE: /run/secrets/storage_secret_key
       # Avatars are served by RustFS, through Caddy's /avatars/ route.
       STORAGE_PUBLIC_URL: https://${DOMAIN}
-      JWT_PRIVATE_KEY_PATH: /run/secrets/ed25519.pem
     volumes:
-      - ./data/keys:/run/secrets:ro
+      - ./data/secrets:/run/secrets:ro
     depends_on:
       init:
         condition: service_completed_successfully
@@ -59,10 +71,15 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: pinai
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?run ./setup.sh first}
+      POSTGRES_PASSWORD_FILE: /run/secrets/password
       POSTGRES_DB: pinai
     volumes:
       - ./data/postgres:/var/lib/postgresql
+      # Its own directory only: the entrypoint reads it as root.
+      - ./data/secrets/postgres:/run/secrets:ro
+    depends_on:
+      init:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U pinai -d pinai"]
       interval: 5s
@@ -84,16 +101,19 @@ services:
       retries: 10
     logging: *logging
 
+  # File storage, S3-compatible: avatars and attachments.
   rustfs:
     image: rustfs/rustfs:1.0.3
     restart: unless-stopped
     environment:
-      RUSTFS_ACCESS_KEY: ${STORAGE_ACCESS_KEY:?run ./setup.sh first}
-      RUSTFS_SECRET_KEY: ${STORAGE_SECRET_KEY:?run ./setup.sh first}
+      # Not a secret: the secret key is.
+      RUSTFS_ACCESS_KEY: pinai
+      RUSTFS_SECRET_KEY_FILE: /run/secrets/storage_secret_key
       # Empty: logs to stdout, for `docker compose logs`.
       RUSTFS_OBS_LOG_DIRECTORY: ""
     volumes:
       - ./data/rustfs:/data
+      - ./data/secrets:/run/secrets:ro
     depends_on:
       init:
         condition: service_completed_successfully
@@ -105,28 +125,82 @@ services:
       start_period: 30s
     logging: *logging
 
-  # Prepares ./data for the services that run as non-root, on every start.
-  # Mints the instance's Ed25519 key once and never touches its content: it signs
-  # JWTs, federation HTTP Signatures and E2EE device attestations, so losing it
-  # cannot be recovered from. The IdP runs as 65532 and reads it through its
-  # group; RustFS runs as 10001 and owns its directory.
+  # Runs before the others at every start. Generates each secret in ./data/secrets
+  # once and never replaces it: the instance key signs tokens, federation requests
+  # and device attestations, the pepper hashes recovery codes, and losing them
+  # cannot be undone. Each is written to a temporary file, synced, then renamed,
+  # so a start cut short, even by a crash, never leaves one half-written; an empty
+  # one is generated again. Then lets each container read only what it needs: the
+  # identity provider (user 65532) every secret, RustFS (10001) its key, Postgres
+  # only ./data/secrets/postgres; and gives ./data/rustfs to RustFS.
   init:
-    image: alpine/openssl:3.5.8
+    # A community image that generates every secret as root: pinned by digest.
+    image: alpine/openssl:3.5.8@sha256:3f25da71f70eba788067daac3f3df03bd1de7a7c52ed89fa93b94ad2c92d986b
     restart: "no"
     entrypoint: ["sh", "-c"]
     command:
-      - >-
-        if [ -f /keys/ed25519.pem ]; then
-          echo "instance key present, keeping it";
-        else
-          openssl genpkey -algorithm ed25519 -out /keys/ed25519.pem &&
-          chown "$$(stat -c '%u' /keys)" /keys/ed25519.pem &&
-          echo "generated a new instance key";
-        fi &&
-        chgrp 65532 /keys/ed25519.pem &&
-        chmod 640 /keys/ed25519.pem &&
+      - |
+        set -eu
+        cd /secrets
+        umask 077
+        mkdir -p postgres
+        # A directory in a secret's place, as Docker makes for a missing bind
+        # source, would take the secret inside it.
+        missing() {
+          if [ -e "$$1" ] && [ ! -f "$$1" ]; then
+            echo "$$1 is not a file" >&2
+            exit 1
+          fi
+          if [ -s "$$1" ]; then
+            echo "$$1 present, keeping it"
+            return 1
+          fi
+        }
+        for name in session_secret email_otp_pepper postgres/password storage_secret_key; do
+          if missing "$$name"; then
+            value=$$(openssl rand -hex 32)
+            printf '%s' "$$value" > "$$name.tmp"
+            sync
+            mv "$$name.tmp" "$$name"
+            echo "generated $$name"
+          fi
+        done
+        if missing ed25519.pem; then
+          openssl genpkey -algorithm ed25519 -out ed25519.pem.tmp
+          sync
+          mv ed25519.pem.tmp ed25519.pem
+          echo "generated ed25519.pem, the instance key"
+        fi
+        chown 0:65532 session_secret email_otp_pepper postgres/password ed25519.pem
+        chown 10001:65532 storage_secret_key
+        chmod 440 session_secret email_otp_pepper postgres/password storage_secret_key ed25519.pem
+        chmod 711 /secrets /secrets/postgres
         chown 10001:10001 /rustfs
     volumes:
-      - ./data/keys:/keys
+      - ./data/secrets:/secrets
       - ./data/rustfs:/rustfs
     logging: *logging
+
+# Caddy's configuration. $$ is Compose's escape for $: Caddy reads {$DOMAIN}
+# from its own environment.
+configs:
+  caddyfile:
+    content: |
+      {$$DOMAIN} {
+      	header Strict-Transport-Security "max-age=31536000"
+
+      	# Avatars are public objects in RustFS. Only reads reach it, and without the
+      	# query string, so no S3 sub-resource (?acl, ?policy…) can be named from outside.
+      	@avatar {
+      		method GET HEAD
+      		path /avatars/*
+      	}
+      	handle @avatar {
+      		rewrite * {path}?
+      		reverse_proxy rustfs:9000
+      	}
+
+      	handle {
+      		reverse_proxy idp:8080
+      	}
+      }

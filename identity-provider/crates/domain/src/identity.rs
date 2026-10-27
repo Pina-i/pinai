@@ -14,7 +14,7 @@ pub mod testing;
 
 pub use account::{Account, RemoteActor};
 pub use actor_uri::ActorUri;
-pub use address::{Domain, FederatedAddress};
+pub use address::{Domain, FederatedAddress, host_of};
 pub use handle::{Handle, HandleSuffix, UsernameChoice};
 pub use intro::InstanceIntro;
 pub use origin::{InstanceOrigin, Recipient};

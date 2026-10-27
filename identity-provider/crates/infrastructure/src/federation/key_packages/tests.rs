@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 
-use jwt_utils::load_ed_keypair_from_pem;
+use jwt_utils::load_ed_keypair;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
@@ -16,7 +16,7 @@ MC4CAQAwBQYDK2VwBCIEIF1VRwFuAo+gfSZtIUeF2VmNnVy0VePE+L7/D1UTTV6/
 fn remote(issuer: &str) -> SignedRemoteKeyPackages {
     let path = std::env::temp_dir().join(format!("pinai-claims-{}.pem", uuid::Uuid::new_v4()));
     std::fs::write(&path, TEST_KEY).unwrap();
-    let keypair = load_ed_keypair_from_pem(&path, "test-key").unwrap();
+    let keypair = load_ed_keypair(&path, Some("test-key")).unwrap();
     std::fs::remove_file(&path).unwrap();
     SignedRemoteKeyPackages::new(Arc::new(keypair), UrlPolicy::from_issuer(issuer))
 }

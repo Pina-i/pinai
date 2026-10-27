@@ -20,8 +20,8 @@ use axum::Router;
 use connections::Hub;
 use domain::auth::{AdminBootstrap, AdminRefusal, Email};
 use federation_transport::{KeyCache, UrlPolicy};
-use jwt_utils::load_ed_keypair_from_pem;
-use sqlx::postgres::PgPoolOptions;
+use jwt_utils::load_ed_keypair;
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use tokio::net::TcpListener;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -53,9 +53,16 @@ impl Application {
         let mut tasks = JoinSet::new();
 
         // Connect to PostgreSQL
+        let mut database: PgConnectOptions = config
+            .database_url
+            .parse()
+            .map_err(|e| anyhow::anyhow!("invalid DATABASE_URL: {e}"))?;
+        if let Some(password) = &config.database_password {
+            database = database.password(password);
+        }
         let pool = PgPoolOptions::new()
             .max_connections(10)
-            .connect(&config.database_url)
+            .connect_with(database)
             .await
             .map_err(|e| anyhow::anyhow!("database connection failed: {e}"))?;
         info!("database connected");
@@ -68,7 +75,7 @@ impl Application {
         info!("migrations applied");
 
         // Load Ed25519 signing keypair
-        let keypair = load_ed_keypair_from_pem(&config.jwt_private_key_path, &config.jwt_key_id)
+        let keypair = load_ed_keypair(&config.jwt_private_key_path, config.jwt_key_id.as_deref())
             .map_err(|e| anyhow::anyhow!("key loading failed: {e}"))?;
         info!(kid = %keypair.kid, "JWT signing key loaded");
 

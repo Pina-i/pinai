@@ -2,6 +2,7 @@ use ed25519_dalek::{SigningKey, VerifyingKey};
 use jsonwebtoken::{DecodingKey, EncodingKey};
 use std::path::Path;
 
+use crate::jwks::ed25519_thumbprint;
 use crate::JwtUtilsError;
 
 /// Holds both the jsonwebtoken encoding/decoding keys and the raw public key
@@ -11,7 +12,7 @@ pub struct EdKeyPair {
     pub decoding_key: DecodingKey,
     /// Raw 32-byte compressed Ed25519 public key for JWK serialization.
     pub verifying_key_bytes: [u8; 32],
-    /// Key ID from config, e.g. "key-2025-01".
+    /// Key ID: from config, e.g. "key-2025-01", or the key's thumbprint.
     pub kid: String,
     /// Raw Ed25519 signing key — used for HTTP Signatures on outgoing AP requests.
     pub signing_key: SigningKey,
@@ -25,11 +26,9 @@ pub struct EdKeyPair {
 /// The PEM file must start with `-----BEGIN PRIVATE KEY-----` (PKCS#8 format).
 /// Generate with: `openssl genpkey -algorithm ed25519 -out keys/ed25519.pem`
 ///
-/// Only one file is needed at runtime — the public key is derived from it.
-pub fn load_ed_keypair_from_pem(
-    pem_path: &Path,
-    kid: impl Into<String>,
-) -> Result<EdKeyPair, JwtUtilsError> {
+/// Only one file is needed at runtime — the public key is derived from it. Without a `kid`, the
+/// key is named by its RFC 7638 thumbprint.
+pub fn load_ed_keypair(pem_path: &Path, kid: Option<&str>) -> Result<EdKeyPair, JwtUtilsError> {
     let pem = std::fs::read(pem_path)
         .map_err(|e| JwtUtilsError::Key(format!("cannot read key file: {e}")))?;
 
@@ -59,7 +58,7 @@ pub fn load_ed_keypair_from_pem(
         encoding_key,
         decoding_key,
         verifying_key_bytes,
-        kid: kid.into(),
+        kid: kid.map_or_else(|| ed25519_thumbprint(&verifying_key_bytes), str::to_owned),
         signing_key,
         public_key_pem: public_pem,
     })

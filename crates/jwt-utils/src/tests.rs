@@ -13,7 +13,7 @@ const SUBJECT: &str = "3f1b8a2c-0000-4000-8000-000000000001";
 const EMAIL: &str = "alice@example.com";
 const USERNAME: &str = "alice-7G4K";
 
-/// A PEM on disk that removes itself, so `load_ed_keypair_from_pem` is
+/// A PEM on disk that removes itself, so `load_ed_keypair` is
 /// exercised through its real interface rather than around it.
 struct TempPem(PathBuf);
 
@@ -41,7 +41,7 @@ fn pkcs8_pem(seed: u8) -> String {
 
 fn keypair(name: &str, seed: u8) -> (EdKeyPair, TempPem) {
     let pem = TempPem::write(name, &pkcs8_pem(seed));
-    let kp = load_ed_keypair_from_pem(&pem.0, "key-2026-01").expect("PEM should load");
+    let kp = load_ed_keypair(&pem.0, Some("key-2026-01")).expect("PEM should load");
     (kp, pem)
 }
 
@@ -78,7 +78,7 @@ fn an_openssl_generated_key_loads() {
     };
 
     let file = TempPem::write("openssl", &pem);
-    let kp = load_ed_keypair_from_pem(&file.0, "openssl-key")
+    let kp = load_ed_keypair(&file.0, Some("openssl-key"))
         .expect("openssl emits PKCS#8 PEM, which the loader must accept");
 
     assert_eq!(kp.verifying_key_bytes.len(), 32);
@@ -100,7 +100,7 @@ fn the_derived_public_key_belongs_to_the_private_key() {
 fn loading_a_missing_file_fails() {
     let missing = std::env::temp_dir().join("pinai-jwt-does-not-exist.pem");
     assert!(matches!(
-        load_ed_keypair_from_pem(&missing, "k"),
+        load_ed_keypair(&missing, Some("k")),
         Err(JwtUtilsError::Key(_))
     ));
 }
@@ -109,7 +109,7 @@ fn loading_a_missing_file_fails() {
 fn loading_something_that_is_not_a_pem_fails() {
     let pem = TempPem::write("garbage", "this is not a PEM file");
     assert!(matches!(
-        load_ed_keypair_from_pem(&pem.0, "k"),
+        load_ed_keypair(&pem.0, Some("k")),
         Err(JwtUtilsError::Key(_))
     ));
 }
@@ -124,7 +124,55 @@ fn loading_a_public_key_where_a_private_key_belongs_fails() {
         .unwrap();
     let pem = TempPem::write("public", &public);
 
-    assert!(load_ed_keypair_from_pem(&pem.0, "k").is_err());
+    assert!(load_ed_keypair(&pem.0, Some("k")).is_err());
+}
+
+// ─── Naming a key by its thumbprint ──────────────────────────────────────────
+
+/// RFC 8037 Appendix A: the private key of A.1, the public key of A.2, the thumbprint of A.3.
+const RFC_8037_D: &str = "nWGxne_9WmC6hEr0kuwsxERJxWl7MmkZcDusAxyuf2A";
+const RFC_8037_X: &str = "11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo";
+const RFC_8037_THUMBPRINT: &str = "kPrK_qmxVWaYVA9wwBF6Iuo3vVzz7TxHCTwXBygrS4k";
+
+fn decode_32(base64url: &str) -> [u8; 32] {
+    use base64ct::{Base64UrlUnpadded, Encoding};
+    Base64UrlUnpadded::decode_vec(base64url)
+        .unwrap()
+        .try_into()
+        .unwrap()
+}
+
+#[test]
+fn an_ed25519_thumbprint_is_rfc_8037s() {
+    assert_eq!(
+        jwks::ed25519_thumbprint(&decode_32(RFC_8037_X)),
+        RFC_8037_THUMBPRINT
+    );
+}
+
+#[test]
+fn a_key_loaded_without_a_kid_is_named_by_its_thumbprint_at_every_load() {
+    let pem = SigningKey::from_bytes(&decode_32(RFC_8037_D))
+        .to_pkcs8_pem(LineEnding::LF)
+        .unwrap();
+    let pem = TempPem::write("thumbprint", &pem);
+
+    for _ in 0..2 {
+        assert_eq!(
+            load_ed_keypair(&pem.0, None).unwrap().kid,
+            RFC_8037_THUMBPRINT
+        );
+    }
+}
+
+#[test]
+fn a_kid_given_names_the_key_rather_than_its_thumbprint() {
+    let pem = TempPem::write("given-kid", &pkcs8_pem(3));
+
+    assert_eq!(
+        load_ed_keypair(&pem.0, Some("key-2025-01")).unwrap().kid,
+        "key-2025-01"
+    );
 }
 
 // ─── Issuing and validating ──────────────────────────────────────────────────
@@ -352,8 +400,8 @@ fn the_jwk_x_value_is_the_unpadded_public_key() {
 fn a_rotated_keyset_publishes_both_keys() {
     let pem_a = TempPem::write("rot-a", &pkcs8_pem(1));
     let pem_b = TempPem::write("rot-b", &pkcs8_pem(2));
-    let old = load_ed_keypair_from_pem(&pem_a.0, "key-2025-01").unwrap();
-    let new = load_ed_keypair_from_pem(&pem_b.0, "key-2026-01").unwrap();
+    let old = load_ed_keypair(&pem_a.0, Some("key-2025-01")).unwrap();
+    let new = load_ed_keypair(&pem_b.0, Some("key-2026-01")).unwrap();
 
     let set = serde_json::to_value(JwkSet::from_keypairs(&[&new, &old])).unwrap();
     let kids: Vec<&str> = set["keys"]

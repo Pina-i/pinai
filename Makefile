@@ -9,7 +9,7 @@ SHELL := bash
         alice-docker-dev bob-docker-dev \
         alice-docker-win bob-docker-win \
         alice-down bob-down alice-down-v bob-down-v \
-        fmt fmt-check lint check \
+        fmt fmt-check lint readme-compose check \
         test-integration test-integration-down check-all
 
 # ── Instance environment ─────────────────────────────────────────────────────
@@ -184,7 +184,12 @@ fmt-check:
 lint:
 	cargo clippy --workspace --all-targets --all-features -- -D warnings
 
-check: fmt-check lint
+# README.md shows deploy/compose.yaml verbatim, for an instance written by hand:
+# change the file, then copy it into the README.
+readme-compose:
+	sh scripts/check-readme-compose.sh
+
+check: fmt-check readme-compose lint
 	cargo test --workspace
 
 # ── Integration tests (Docker) ────────────────────────────────────────────────

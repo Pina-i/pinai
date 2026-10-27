@@ -4,10 +4,11 @@ use super::*;
 fn config() -> Config {
     Config {
         database_url: "postgres://localhost/idp".into(),
+        database_password: None,
         domain: "idp.alice.com".into(),
         environment: Environment::Production,
         jwt_private_key_path: PathBuf::from("./keys/ed25519.pem"),
-        jwt_key_id: "key-2026-01".into(),
+        jwt_key_id: Some("key-2026-01".into()),
         port: 8080,
         session_secret: "x".repeat(64),
         instance_name: None,
@@ -368,19 +369,39 @@ fn a_web_app_origin_that_is_not_one_is_refused() {
 #[test]
 fn production_mails_over_starttls_unless_told_otherwise() {
     for raw in [None, Some(String::new())] {
+        for port in [587, 25, 2525] {
+            assert_eq!(
+                smtp_tls(Environment::Production, port, raw.clone()).unwrap(),
+                SmtpTls::StartTls,
+                "{port}"
+            );
+        }
+    }
+}
+
+/// Port 465 is SMTP submission over TLS from the first byte: STARTTLS there never connects.
+#[test]
+fn production_mails_over_tls_on_port_465_unless_told_otherwise() {
+    for raw in [None, Some(String::new())] {
         assert_eq!(
-            smtp_tls(Environment::Production, raw).unwrap(),
-            SmtpTls::StartTls
+            smtp_tls(Environment::Production, 465, raw).unwrap(),
+            SmtpTls::Tls
         );
     }
+    assert_eq!(
+        smtp_tls(Environment::Production, 465, Some("starttls".into())).unwrap(),
+        SmtpTls::StartTls
+    );
 }
 
 #[test]
 fn development_mails_in_plain_smtp_unless_told_otherwise() {
-    assert_eq!(
-        smtp_tls(Environment::Development, None).unwrap(),
-        SmtpTls::None
-    );
+    for port in [1025, 465] {
+        assert_eq!(
+            smtp_tls(Environment::Development, port, None).unwrap(),
+            SmtpTls::None
+        );
+    }
 }
 
 #[test]
@@ -392,7 +413,7 @@ fn each_tls_mode_is_read_by_its_name_in_any_case() {
         ("TLS", SmtpTls::Tls),
     ] {
         assert_eq!(
-            smtp_tls(Environment::Production, Some(raw.into())).unwrap(),
+            smtp_tls(Environment::Production, 587, Some(raw.into())).unwrap(),
             mode,
             "{raw}"
         );
@@ -400,28 +421,44 @@ fn each_tls_mode_is_read_by_its_name_in_any_case() {
 }
 
 #[test]
-fn an_unset_or_empty_smtp_port_is_mailpits() {
+fn an_unset_or_empty_smtp_port_is_submission_in_production_and_mailpits_in_development() {
     for raw in [None, Some(String::new())] {
-        assert_eq!(smtp_port(raw).unwrap(), 1025);
+        assert_eq!(
+            smtp_port(Environment::Production, raw.clone()).unwrap(),
+            587
+        );
+        assert_eq!(smtp_port(Environment::Development, raw).unwrap(), 1025);
     }
 }
 
 #[test]
 fn an_smtp_port_is_read_and_a_bad_one_refused() {
-    assert_eq!(smtp_port(Some("465".into())).unwrap(), 465);
-    assert!(matches!(
-        smtp_port(Some("submission".into())),
-        Err(ConfigError::InvalidPort(_))
-    ));
+    for environment in [Environment::Production, Environment::Development] {
+        assert_eq!(smtp_port(environment, Some("465".into())).unwrap(), 465);
+        assert!(matches!(
+            smtp_port(environment, Some("submission".into())),
+            Err(ConfigError::InvalidPort(_))
+        ));
+    }
 }
 
 #[test]
-fn an_unset_or_empty_smtp_from_is_the_default_sender() {
+fn an_unset_or_empty_smtp_from_is_no_reply_at_the_instances_host() {
     for raw in [None, Some(String::new())] {
-        assert_eq!(smtp_from(raw), "Pīna'i <no-reply@localhost>");
+        assert_eq!(
+            smtp_from(raw.clone(), "idp.alice.com"),
+            "Pīna'i <no-reply@idp.alice.com>"
+        );
+        assert_eq!(
+            smtp_from(raw, "localhost:8088"),
+            "Pīna'i <no-reply@localhost>"
+        );
     }
     assert_eq!(
-        smtp_from(Some("Aotearoa <no-reply@idp.alice.com>".into())),
+        smtp_from(
+            Some("Aotearoa <no-reply@idp.alice.com>".into()),
+            "idp.bob.com"
+        ),
         "Aotearoa <no-reply@idp.alice.com>"
     );
 }
@@ -429,83 +466,284 @@ fn an_unset_or_empty_smtp_from_is_the_default_sender() {
 #[test]
 fn an_unknown_tls_mode_is_refused() {
     assert!(matches!(
-        smtp_tls(Environment::Production, Some("ssl".into())),
+        smtp_tls(Environment::Production, 587, Some("ssl".into())),
         Err(ConfigError::InvalidValue("SMTP_TLS", _))
     ));
 }
 
-// ─── Environment reading ─────────────────────────────────────────────────────
+// ─── A value or a file holding it ────────────────────────────────────────────
 
-/// A `.env` saved with CRLF endings leaves a trailing `\r` on every value a
-/// shell sources, while Docker Compose strips it. Left in, a `\r` in `DOMAIN`
-/// reaches `issuer()` and is written into `actor_uri`, and remote instances then
-/// resolve a URL the origin's own actor endpoint does not recognise.
+const SECRET_FILE: &str = "/run/secrets/session_secret";
+
+fn no_file(path: &Path) -> std::io::Result<Vec<u8>> {
+    panic!("no file should be read, yet {} was", path.display())
+}
+
+fn holding(content: &'static str) -> impl FnOnce(&Path) -> std::io::Result<Vec<u8>> {
+    move |path| {
+        assert_eq!(path, Path::new(SECRET_FILE));
+        Ok(content.as_bytes().to_vec())
+    }
+}
+
+/// A `.env` saved with CRLF endings leaves a `\r` on every value a shell sources, while Docker
+/// Compose strips it: kept, a `\r` in `DOMAIN` would be written into every `actor_uri`.
 #[test]
-fn a_value_from_a_crlf_env_file_is_read_without_its_carriage_return() {
-    let key = "PINAI_TEST_CRLF_DOMAIN";
-    // SAFETY: no other test reads or writes this variable.
-    unsafe { std::env::set_var(key, "localhost:8081\r") };
-
-    assert_eq!(env_var(key).unwrap(), "localhost:8081");
-
-    unsafe { std::env::remove_var(key) };
+fn a_value_given_is_read_trimmed_and_no_file_is_opened() {
+    for raw in ["localhost:8081\r", "  idp.alice.com \t\n"] {
+        let read = value_or_file("DOMAIN", Some(raw.into()), None, no_file).unwrap();
+        assert_eq!(read.as_deref(), Some(raw.trim()), "{raw:?}");
+    }
 }
 
 #[test]
-fn surrounding_whitespace_is_stripped_from_env_values() {
-    let key = "PINAI_TEST_PADDED_VALUE";
-    // SAFETY: no other test reads or writes this variable.
-    unsafe { std::env::set_var(key, "  idp.alice.com \t\n") };
+fn an_issuer_built_from_a_trimmed_domain_has_no_control_characters() {
+    let domain = value_or_file("DOMAIN", Some("idp.bob.com\r".into()), None, no_file)
+        .unwrap()
+        .unwrap();
+    let cfg = Config { domain, ..config() };
 
-    assert_eq!(env_var(key).unwrap(), "idp.alice.com");
-
-    unsafe { std::env::remove_var(key) };
+    assert_eq!(cfg.issuer(), "https://idp.bob.com");
+    assert!(!cfg.issuer().chars().any(|c| c.is_control()));
 }
 
 #[test]
-fn a_missing_variable_is_still_reported_missing() {
-    assert!(env_var("PINAI_TEST_DEFINITELY_UNSET").is_err());
+fn an_unset_value_without_a_file_is_unset_and_an_empty_one_empty() {
+    assert_eq!(
+        value_or_file("SMTP_FROM", None, None, no_file).unwrap(),
+        None
+    );
+    assert_eq!(
+        value_or_file("SMTP_FROM", Some(String::new()), None, no_file).unwrap(),
+        Some(String::new())
+    );
 }
 
 #[test]
 fn a_required_variable_unset_or_left_empty_is_missing() {
-    let key = "PINAI_TEST_REQUIRED_VALUE";
-    let read = |value: Option<&str>| {
-        // SAFETY: no other test reads or writes this variable.
-        unsafe {
-            match value {
-                Some(value) => std::env::set_var(key, value),
-                None => std::env::remove_var(key),
-            }
-        }
-        require_env(key)
-    };
-
-    for missing in [None, Some(""), Some("  \r")] {
+    for raw in [None, Some(String::new())] {
         assert!(
-            matches!(read(missing), Err(ConfigError::MissingVar(k)) if k == key),
-            "{missing:?}"
+            matches!(
+                required("DOMAIN", raw.clone()),
+                Err(ConfigError::MissingVar("DOMAIN"))
+            ),
+            "{raw:?}"
         );
     }
-    assert_eq!(read(Some("journey-key")).unwrap(), "journey-key");
-
-    unsafe { std::env::remove_var(key) };
+    let blank = value_or_file("DOMAIN", Some("  \r".into()), None, no_file).unwrap();
+    assert!(matches!(
+        required("DOMAIN", blank),
+        Err(ConfigError::MissingVar("DOMAIN"))
+    ));
+    assert_eq!(
+        required("DOMAIN", Some("idp.alice.com".into())).unwrap(),
+        "idp.alice.com"
+    );
 }
 
-/// The whole point of trimming: a domain read from a CRLF file must still build
-/// an issuer a peer can resolve.
 #[test]
-fn an_issuer_built_from_a_trimmed_domain_has_no_control_characters() {
-    let key = "PINAI_TEST_CRLF_ISSUER_DOMAIN";
-    // SAFETY: no other test reads or writes this variable.
-    unsafe { std::env::set_var(key, "idp.bob.com\r") };
+fn without_a_value_the_file_named_by_its_file_twin_is_read_trimmed() {
+    for value in [None, Some(String::new()), Some(" \r".into())] {
+        assert_eq!(
+            value_or_file(
+                "SESSION_SECRET",
+                value.clone(),
+                Some(SECRET_FILE.into()),
+                holding("4f1c9a7e2b6d\n")
+            )
+            .unwrap(),
+            Some("4f1c9a7e2b6d".into()),
+            "{value:?}"
+        );
+    }
+}
 
-    let cfg = Config {
-        domain: env_var(key).unwrap(),
-        ..config()
-    };
-    assert_eq!(cfg.issuer(), "https://idp.bob.com");
-    assert!(!cfg.issuer().chars().any(|c| c.is_control()));
+#[test]
+fn a_value_and_a_file_both_given_are_refused_naming_both() {
+    let refused = value_or_file(
+        "SESSION_SECRET",
+        Some(REAL_SECRET.into()),
+        Some(SECRET_FILE.into()),
+        no_file,
+    )
+    .unwrap_err();
 
-    unsafe { std::env::remove_var(key) };
+    assert!(matches!(
+        refused,
+        ConfigError::ValueAndFile("SESSION_SECRET")
+    ));
+    assert_eq!(
+        refused.to_string(),
+        "SESSION_SECRET and SESSION_SECRET_FILE are both set: keep one"
+    );
+    assert!(!refused.to_string().contains(REAL_SECRET));
+}
+
+#[test]
+fn a_file_that_cannot_be_read_is_refused_naming_the_variable_and_the_path() {
+    let refused = value_or_file("SESSION_SECRET", None, Some(SECRET_FILE.into()), |_| {
+        Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+    })
+    .unwrap_err();
+
+    assert!(matches!(
+        &refused,
+        ConfigError::UnreadableFile { var: "SESSION_SECRET", path, .. } if path == Path::new(SECRET_FILE)
+    ));
+    assert!(
+        refused
+            .to_string()
+            .starts_with("SESSION_SECRET_FILE: cannot read /run/secrets/session_secret: "),
+        "{refused}"
+    );
+}
+
+/// Whoever set `<VAR>_FILE` meant a value; read as unset, an empty file would quietly fall back.
+#[test]
+fn a_file_empty_once_trimmed_is_refused_naming_it() {
+    for content in ["", " \n", "\r\n"] {
+        let refused = value_or_file(
+            "SESSION_SECRET",
+            None,
+            Some(SECRET_FILE.into()),
+            holding(content),
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(
+                &refused,
+                ConfigError::EmptyFile { var: "SESSION_SECRET", path } if path == Path::new(SECRET_FILE)
+            ),
+            "{content:?}"
+        );
+        assert_eq!(
+            refused.to_string(),
+            "SESSION_SECRET_FILE names /run/secrets/session_secret, which is empty"
+        );
+    }
+}
+
+#[test]
+fn a_file_larger_than_64_kib_is_refused_and_one_at_the_limit_read() {
+    let at_limit = "a".repeat(MAX_FILE_LEN as usize);
+    let read = value_or_file("SESSION_SECRET", None, Some(SECRET_FILE.into()), |_| {
+        Ok(at_limit.clone().into_bytes())
+    })
+    .unwrap();
+    assert_eq!(read.map(|v| v.len()), Some(at_limit.len()));
+
+    let refused = value_or_file("SESSION_SECRET", None, Some(SECRET_FILE.into()), |_| {
+        Ok(vec![b'a'; MAX_FILE_LEN as usize + 1])
+    })
+    .unwrap_err();
+    assert!(matches!(
+        refused,
+        ConfigError::FileTooLarge {
+            var: "SESSION_SECRET",
+            ..
+        }
+    ));
+}
+
+#[test]
+fn a_file_that_is_not_utf8_is_refused_without_quoting_it() {
+    let refused = value_or_file("SESSION_SECRET", None, Some(SECRET_FILE.into()), |_| {
+        Ok(vec![0x73, 0x65, 0xff, 0xfe])
+    })
+    .unwrap_err();
+
+    assert!(matches!(refused, ConfigError::UnreadableFile { .. }));
+    assert_eq!(
+        refused.to_string(),
+        "SESSION_SECRET_FILE: cannot read /run/secrets/session_secret: not UTF-8"
+    );
+}
+
+/// The reader behind `env_var`: a device or a FIFO would block or never end.
+#[test]
+fn only_a_regular_file_is_read() {
+    let refused = read_bounded(Path::new("/dev/zero")).unwrap_err();
+
+    assert_eq!(refused.kind(), std::io::ErrorKind::InvalidInput);
+}
+
+/// Docker and Kubernetes hand secrets over as symlinks: the link is followed.
+#[test]
+fn a_regular_file_reached_through_a_symlink_is_read() {
+    let dir = std::env::temp_dir().join(format!("idp-config-symlink-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let target = dir.join("secret");
+    let link = dir.join("link");
+    std::fs::write(&target, "s3cret").unwrap();
+    let _ = std::fs::remove_file(&link);
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+
+    let read = read_bounded(&link);
+    std::fs::remove_dir_all(&dir).unwrap();
+
+    assert_eq!(read.unwrap(), b"s3cret");
+}
+
+#[test]
+fn an_empty_file_twin_counts_as_unset() {
+    for file in [Some(String::new()), Some("  ".into())] {
+        assert_eq!(
+            value_or_file(
+                "SMTP_HOST",
+                Some("smtp.example.com".into()),
+                file.clone(),
+                no_file
+            )
+            .unwrap(),
+            Some("smtp.example.com".into())
+        );
+        assert_eq!(
+            value_or_file("SMTP_HOST", None, file, no_file).unwrap(),
+            None
+        );
+    }
+}
+
+#[test]
+fn a_missing_variable_names_its_file_twin_too() {
+    assert_eq!(
+        ConfigError::MissingVar("DOMAIN").to_string(),
+        "Missing or empty environment variable: DOMAIN (or DOMAIN_FILE, a file holding it)"
+    );
+}
+
+// ─── The email pepper ────────────────────────────────────────────────────────
+
+#[test]
+fn a_pepper_that_is_not_hex_is_refused_without_quoting_it() {
+    let pepper = format!("{}zq", "ab".repeat(32));
+    let refused = email_otp_pepper(Some(pepper)).unwrap_err();
+
+    assert!(matches!(
+        refused,
+        ConfigError::InvalidValue("EMAIL_OTP_PEPPER", _)
+    ));
+    assert!(!refused.to_string().contains('z'), "{refused}");
+}
+
+#[test]
+fn a_generated_pepper_is_read_as_its_bytes() {
+    assert_eq!(
+        email_otp_pepper(Some("ab".repeat(32))).unwrap(),
+        vec![0xab; 32]
+    );
+}
+
+#[test]
+fn an_unset_or_empty_pepper_is_missing() {
+    for raw in [None, Some(String::new())] {
+        assert!(
+            matches!(
+                email_otp_pepper(raw.clone()),
+                Err(ConfigError::MissingVar("EMAIL_OTP_PEPPER"))
+            ),
+            "{raw:?}"
+        );
+    }
 }

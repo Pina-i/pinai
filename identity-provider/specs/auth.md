@@ -536,7 +536,9 @@ else goes to the instance's own `/signed-out` page: the endpoint is never an ope
 `token_endpoint_auth_methods_supported: ["none"]` and
 `client_id_metadata_document_supported: true`. It names no `registration_endpoint`: clients aren't
 registered, and the JSON `POST /register` creates accounts, not clients.
-`GET /.well-known/jwks.json` serves the public key.
+`GET /.well-known/jwks.json` serves the public key. Its `kid` is `JWT_KEY_ID`, or, unset, the key's
+RFC 7638 thumbprint (SHA-256 over `{"crv":"Ed25519","kty":"OKP","x":"…"}`, base64url): the
+same at every start for as long as the key lives, and another one for another key.
 
 ### Scenarios
 
@@ -716,7 +718,7 @@ Every hour — and once at startup — the IdP deletes:
 
 ### SMTP
 
-Codes go out through a relay, `SMTP_HOST`/`SMTP_PORT`, over `SMTP_TLS`: `none` (plain), `starttls` (port 587) or `tls` (port 465). Unset, it is `none` in development and `starttls` in production. The connection is opened on the first send, so the instance starts whether or not the relay is up; an unset or empty `SMTP_HOST` means no relay — never a host the instance wasn't given —, and every code then fails to send — only an invite-only instance starts without one (§ 6). In the background of every start, the IdP connects, signs in and quits, logging `SMTP relay reachable` or `SMTP relay unusable` with the reason, so a wrong relay shows before anyone signs up; an invite-only instance with no relay logs `no SMTP relay: mail is off` instead.
+Codes go out through a relay, `SMTP_HOST`/`SMTP_PORT`, over `SMTP_TLS`: `none` (plain), `starttls` (port 587) or `tls` (port 465). Unset or empty, `SMTP_PORT` is 587 in production and 1025, Mailpit's, in development, and `SMTP_TLS` is `none` in development and, in production, `tls` on port 465 and `starttls` on any other. `SMTP_FROM`, unset or empty, is `Pīna'i <no-reply@{host}>`, the host being `DOMAIN` without its port. The connection is opened on the first send, so the instance starts whether or not the relay is up; an unset or empty `SMTP_HOST` means no relay — never a host the instance wasn't given —, and every code then fails to send — only an invite-only instance starts without one (§ 6). In the background of every start, the IdP connects, signs in and quits, logging `SMTP relay reachable` or `SMTP relay unusable` with the reason, so a wrong relay shows before anyone signs up; an invite-only instance with no relay logs `no SMTP relay: mail is off` instead.
 
 Mailpit ships in the root `compose.yaml` (`MP_SMTP_AUTH_ACCEPT_ANY=true`, `MP_SMTP_AUTH_ALLOW_INSECURE=true`). Web UI on `MAILPIT_UI_PORT` (Alice 8025, Bob 8026) lets a developer click through to the rendered email and copy the code. `POST /dev/send-test-email` (JSON `{ to, display_name? }`) is mounted only when `IDP_ENV=development` and mails a fixed `123456` code to check the SMTP path.
 

@@ -1,7 +1,9 @@
-use std::path::PathBuf;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use domain::auth::{OFFICIAL_WEB_APP_ORIGIN, Registrations, WebApp};
+use domain::identity::host_of;
 use infrastructure::email::SmtpTls;
 
 /// Deployment environment. Controls scheme selection (http vs https) for the
@@ -26,11 +28,14 @@ impl Environment {
 #[derive(Debug, Clone)]
 pub struct Config {
     pub database_url: String,
+    /// `DATABASE_PASSWORD`: set on the connection over any password `database_url` holds.
+    pub database_password: Option<String>,
     /// The domain this IdP is hosted on, e.g. "localhost:8080" or "idp.alice.com".
     pub domain: String,
     pub environment: Environment,
     pub jwt_private_key_path: PathBuf,
-    pub jwt_key_id: String,
+    /// `JWT_KEY_ID`; unset, the key is named by its RFC 7638 thumbprint.
+    pub jwt_key_id: Option<String>,
     pub port: u16,
     /// What the session-cookie and attachment-link keys are derived from. Falls back
     /// to [`DEV_SESSION_SECRET`] in development; production requires a real one.
@@ -89,7 +94,8 @@ pub struct Config {
     pub smtp_password: String,
     /// RFC 5322 `From` header (e.g. `Pīna'i <no-reply@idp.alice.com>`).
     pub smtp_from: String,
-    /// `SMTP_TLS`: `none`, `starttls` or `tls`; plain in development, STARTTLS in production.
+    /// `SMTP_TLS`: `none`, `starttls` or `tls`; plain in development, in production TLS on
+    /// port 465 and STARTTLS otherwise.
     pub smtp_tls: SmtpTls,
     /// HMAC pepper for email OTP code hashes. Required — startup fails if unset.
     /// Same value also peppers TOTP recovery codes (one secret to manage).
@@ -121,8 +127,8 @@ pub const DEV_SESSION_SECRET: &str =
 
 const MIN_SESSION_SECRET_LEN: usize = 32;
 
-/// Who the instance's mail comes from when `SMTP_FROM` doesn't say.
-const DEFAULT_SMTP_FROM: &str = "Pīna'i <no-reply@localhost>";
+/// The most a `_FILE` is read: a secret is a line, and a device such as /dev/zero never ends.
+const MAX_FILE_LEN: u64 = 64 * 1024;
 
 /// Built-in extension blocklist. Extended (never replaced) by
 /// `ATTACHMENT_BLOCKED_EXTENSIONS`. Stored lowercased; comparison is
@@ -144,8 +150,21 @@ const BUILTIN_BLOCKED_MIMES: &[&str] = &[
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
-    #[error("Missing or empty environment variable: {0}")]
+    #[error("Missing or empty environment variable: {0} (or {0}_FILE, a file holding it)")]
     MissingVar(&'static str),
+    #[error("{0} and {0}_FILE are both set: keep one")]
+    ValueAndFile(&'static str),
+    #[error("{var}_FILE: cannot read {}: {source}", path.display())]
+    UnreadableFile {
+        var: &'static str,
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("{var}_FILE names {}, which is empty", path.display())]
+    EmptyFile { var: &'static str, path: PathBuf },
+    #[error("{var}_FILE names {}, which is larger than {kib} KiB", path.display(), kib = MAX_FILE_LEN / 1024)]
+    FileTooLarge { var: &'static str, path: PathBuf },
     #[error("Invalid port: {0}")]
     InvalidPort(String),
     #[error("Invalid IDP_ENV value '{0}' (expected 'development' or 'production')")]
@@ -162,34 +181,37 @@ impl Config {
     /// Load configuration from environment variables.
     /// Call `dotenvy::dotenv().ok()` before this in main.rs.
     pub fn from_env() -> Result<Self, ConfigError> {
-        let environment = match env_var("IDP_ENV").as_deref() {
-            Ok("development") | Ok("dev") => Environment::Development,
-            Ok("production") | Ok("prod") | Err(_) => Environment::Production,
-            Ok(other) => return Err(ConfigError::InvalidEnvironment(other.to_string())),
+        let environment = match env_var("IDP_ENV")?.as_deref() {
+            Some("development") | Some("dev") => Environment::Development,
+            Some("production") | Some("prod") | None => Environment::Production,
+            Some(other) => return Err(ConfigError::InvalidEnvironment(other.to_string())),
         };
+        let database_url = require_env("DATABASE_URL")?;
+        let domain = require_env("DOMAIN")?;
+        let smtp_port = smtp_port(environment, env_var("SMTP_PORT")?)?;
 
         let config = Self {
-            database_url: require_env("DATABASE_URL")?,
-            domain: require_env("DOMAIN")?,
+            database_password: unless_empty(env_var("DATABASE_PASSWORD")?),
+            database_url,
             environment,
             jwt_private_key_path: PathBuf::from(require_env("JWT_PRIVATE_KEY_PATH")?),
-            jwt_key_id: require_env("JWT_KEY_ID")?,
-            port: env_var("PORT")
-                .unwrap_or_else(|_| "8080".into())
+            jwt_key_id: unless_empty(env_var("JWT_KEY_ID")?),
+            port: env_var("PORT")?
+                .unwrap_or_else(|| "8080".into())
                 .parse::<u16>()
                 .map_err(|e| ConfigError::InvalidPort(e.to_string()))?,
-            session_secret: session_secret(environment, env_var("SESSION_SECRET").ok())?,
-            instance_name: env_var("INSTANCE_NAME").ok(),
-            instance_description: env_var("INSTANCE_DESCRIPTION").ok(),
-            redis_url: env_var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".into()),
-            storage_endpoint: env_var("STORAGE_ENDPOINT").ok(),
-            storage_access_key: env_var("STORAGE_ACCESS_KEY").ok(),
-            storage_secret_key: env_var("STORAGE_SECRET_KEY").ok(),
-            storage_bucket_avatars: env_var("STORAGE_BUCKET_AVATARS")
-                .unwrap_or_else(|_| "avatars".into()),
-            storage_bucket_attachments: env_var("STORAGE_BUCKET_ATTACHMENTS")
-                .unwrap_or_else(|_| "attachments".into()),
-            storage_public_url: env_var("STORAGE_PUBLIC_URL").ok(),
+            session_secret: session_secret(environment, env_var("SESSION_SECRET")?)?,
+            instance_name: env_var("INSTANCE_NAME")?,
+            instance_description: env_var("INSTANCE_DESCRIPTION")?,
+            redis_url: env_var("REDIS_URL")?.unwrap_or_else(|| "redis://127.0.0.1:6379".into()),
+            storage_endpoint: env_var("STORAGE_ENDPOINT")?,
+            storage_access_key: env_var("STORAGE_ACCESS_KEY")?,
+            storage_secret_key: env_var("STORAGE_SECRET_KEY")?,
+            storage_bucket_avatars: env_var("STORAGE_BUCKET_AVATARS")?
+                .unwrap_or_else(|| "avatars".into()),
+            storage_bucket_attachments: env_var("STORAGE_BUCKET_ATTACHMENTS")?
+                .unwrap_or_else(|| "attachments".into()),
+            storage_public_url: env_var("STORAGE_PUBLIC_URL")?,
 
             attachment_max_files_per_message: parse_env_usize(
                 "ATTACHMENT_MAX_FILES_PER_MESSAGE",
@@ -206,11 +228,11 @@ impl Config {
             )?),
             attachment_blocked_extensions: merge_blocklist(
                 BUILTIN_BLOCKED_EXTENSIONS,
-                env_var("ATTACHMENT_BLOCKED_EXTENSIONS").ok().as_deref(),
+                env_var("ATTACHMENT_BLOCKED_EXTENSIONS")?.as_deref(),
             ),
             attachment_blocked_mimes: merge_blocklist(
                 BUILTIN_BLOCKED_MIMES,
-                env_var("ATTACHMENT_BLOCKED_MIMES").ok().as_deref(),
+                env_var("ATTACHMENT_BLOCKED_MIMES")?.as_deref(),
             ),
 
             e2ee_keypackage_cap_per_device: parse_env_usize("E2EE_KEYPACKAGE_CAP_PER_DEVICE", 100)?,
@@ -223,17 +245,18 @@ impl Config {
                 30 * 24 * 60 * 60,
             )?),
 
-            smtp_host: smtp_host(env_var("SMTP_HOST").ok()),
-            smtp_port: smtp_port(env_var("SMTP_PORT").ok())?,
-            smtp_username: env_var("SMTP_USERNAME").unwrap_or_default(),
-            smtp_password: env_var("SMTP_PASSWORD").unwrap_or_default(),
-            smtp_from: smtp_from(env_var("SMTP_FROM").ok()),
-            smtp_tls: smtp_tls(environment, env_var("SMTP_TLS").ok())?,
-            email_otp_pepper: parse_email_otp_pepper()?,
-            registrations: registrations(env_var("REGISTRATIONS").ok())?,
-            admin_email: unless_empty(env_var("ADMIN_EMAIL").ok()),
-            admin_password: unless_empty(env_var("ADMIN_PASSWORD").ok()),
-            web_app: web_app(environment, env_var("WEB_APP_ORIGIN").ok())?,
+            smtp_host: smtp_host(env_var("SMTP_HOST")?),
+            smtp_port,
+            smtp_username: env_var("SMTP_USERNAME")?.unwrap_or_default(),
+            smtp_password: env_var("SMTP_PASSWORD")?.unwrap_or_default(),
+            smtp_from: smtp_from(env_var("SMTP_FROM")?, &domain),
+            smtp_tls: smtp_tls(environment, smtp_port, env_var("SMTP_TLS")?)?,
+            email_otp_pepper: email_otp_pepper(env_var("EMAIL_OTP_PEPPER")?)?,
+            registrations: registrations(env_var("REGISTRATIONS")?)?,
+            admin_email: unless_empty(env_var("ADMIN_EMAIL")?),
+            admin_password: unless_empty(env_var("ADMIN_PASSWORD")?),
+            web_app: web_app(environment, env_var("WEB_APP_ORIGIN")?)?,
+            domain,
         };
         require_relay(config.registrations, &config.smtp_host)?;
         Ok(config)
@@ -277,38 +300,99 @@ impl Config {
 /// different values depending on how the process was started. Unnoticed, a `\r`
 /// in `DOMAIN` reaches `issuer()` and is baked into `actor_uri`, where remote
 /// instances resolve a URL the origin no longer recognises.
-fn env_var(key: &str) -> Result<String, std::env::VarError> {
-    std::env::var(key).map(|v| v.trim().to_string())
+fn env_var(key: &'static str) -> Result<Option<String>, ConfigError> {
+    value_or_file(
+        key,
+        std::env::var(key).ok(),
+        std::env::var(format!("{key}_FILE")).ok(),
+        read_bounded,
+    )
 }
 
-/// Empty is missing too: an instance never runs on an empty `DOMAIN` or `JWT_KEY_ID`.
+/// A regular file only, read a byte past the limit at most: a FIFO or a device would block, or
+/// never end.
+fn read_bounded(path: &Path) -> std::io::Result<Vec<u8>> {
+    if !std::fs::metadata(path)?.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "not a regular file",
+        ));
+    }
+    let mut content = Vec::new();
+    std::fs::File::open(path)?
+        .take(MAX_FILE_LEN + 1)
+        .read_to_end(&mut content)?;
+    Ok(content)
+}
+
+/// The variable's value, or else the content of the file its `_FILE` twin names, as Docker
+/// secrets hand them over. The content is never put in an error.
+fn value_or_file(
+    key: &'static str,
+    value: Option<String>,
+    file: Option<String>,
+    read: impl FnOnce(&Path) -> std::io::Result<Vec<u8>>,
+) -> Result<Option<String>, ConfigError> {
+    let value = value.map(|v| v.trim().to_string());
+    let path = match (value, unless_empty(file.map(|f| f.trim().to_string()))) {
+        (Some(value), Some(_)) if !value.is_empty() => return Err(ConfigError::ValueAndFile(key)),
+        (_, Some(path)) => PathBuf::from(path),
+        (value, None) => return Ok(value),
+    };
+    let unreadable = |source| ConfigError::UnreadableFile {
+        var: key,
+        path: path.clone(),
+        source,
+    };
+    let content = read(&path).map_err(unreadable)?;
+    if content.len() as u64 > MAX_FILE_LEN {
+        return Err(ConfigError::FileTooLarge { var: key, path });
+    }
+    let content = String::from_utf8(content).map_err(|_| {
+        unreadable(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "not UTF-8",
+        ))
+    })?;
+    // Whoever named a file meant a value: an empty one is a mistake, not an unset variable.
+    match content.trim() {
+        "" => Err(ConfigError::EmptyFile { var: key, path }),
+        content => Ok(Some(content.to_owned())),
+    }
+}
+
 fn require_env(key: &'static str) -> Result<String, ConfigError> {
-    unless_empty(env_var(key).ok()).ok_or(ConfigError::MissingVar(key))
+    required(key, env_var(key)?)
+}
+
+/// Empty is missing too: an instance never runs on an empty `DOMAIN` or `DATABASE_URL`.
+fn required(key: &'static str, raw: Option<String>) -> Result<String, ConfigError> {
+    unless_empty(raw).ok_or(ConfigError::MissingVar(key))
 }
 
 fn parse_env_usize(key: &'static str, default: usize) -> Result<usize, ConfigError> {
-    match env_var(key) {
-        Err(_) => Ok(default),
-        Ok(raw) => raw
+    match env_var(key)? {
+        None => Ok(default),
+        Some(raw) => raw
             .parse()
             .map_err(|_| ConfigError::InvalidAttachmentValue(key, raw)),
     }
 }
 
 fn parse_env_u64(key: &'static str, default: u64) -> Result<u64, ConfigError> {
-    match env_var(key) {
-        Err(_) => Ok(default),
-        Ok(raw) => raw
+    match env_var(key)? {
+        None => Ok(default),
+        Some(raw) => raw
             .parse()
             .map_err(|_| ConfigError::InvalidAttachmentValue(key, raw)),
     }
 }
 
-/// An empty value counts as unset.
-/// Empty counts as unset: a hosted instance's `.env` leaves it so when it has no relay.
-fn smtp_port(raw: Option<String>) -> Result<u16, ConfigError> {
-    match raw.filter(|v| !v.is_empty()) {
-        None => Ok(1025),
+/// Empty counts as unset: the submission port in production, Mailpit's in development.
+fn smtp_port(environment: Environment, raw: Option<String>) -> Result<u16, ConfigError> {
+    match unless_empty(raw) {
+        None if environment.is_dev() => Ok(1025),
+        None => Ok(587),
         Some(v) => v
             .parse()
             .map_err(|e: std::num::ParseIntError| ConfigError::InvalidPort(e.to_string())),
@@ -335,9 +419,10 @@ fn web_app(environment: Environment, raw: Option<String>) -> Result<Option<WebAp
     Ok(origin.map(|origin| WebApp::parse(origin).expect("a built-in origin")))
 }
 
-/// Unset or empty, the default sender: a `.env` without a relay leaves `SMTP_FROM=` empty.
-fn smtp_from(raw: Option<String>) -> String {
-    unless_empty(raw).unwrap_or_else(|| DEFAULT_SMTP_FROM.into())
+/// Unset or empty, no-reply at the instance's own host: a `.env` without a relay leaves
+/// `SMTP_FROM=` empty.
+fn smtp_from(raw: Option<String>, domain: &str) -> String {
+    unless_empty(raw).unwrap_or_else(|| format!("Pīna'i <no-reply@{}>", host_of(domain)))
 }
 
 /// Unset or empty, the instance has no relay: never a host it wasn't given.
@@ -366,9 +451,14 @@ fn require_relay(registrations: Registrations, smtp_host: &str) -> Result<(), Co
     Ok(())
 }
 
-fn smtp_tls(environment: Environment, raw: Option<String>) -> Result<SmtpTls, ConfigError> {
+fn smtp_tls(
+    environment: Environment,
+    port: u16,
+    raw: Option<String>,
+) -> Result<SmtpTls, ConfigError> {
     match raw.map(|v| v.to_lowercase()).as_deref() {
         None | Some("") if environment.is_dev() => Ok(SmtpTls::None),
+        None | Some("") if port == 465 => Ok(SmtpTls::Tls),
         None | Some("") => Ok(SmtpTls::StartTls),
         Some("none") => Ok(SmtpTls::None),
         Some("starttls") => Ok(SmtpTls::StartTls),
@@ -410,11 +500,15 @@ fn session_secret(environment: Environment, raw: Option<String>) -> Result<Strin
 
 /// Hex-decoded ≥ 32-byte HMAC pepper. Required at startup so an operator can't
 /// silently run with a missing or weak value.
-fn parse_email_otp_pepper() -> Result<Vec<u8>, ConfigError> {
-    let raw =
-        env_var("EMAIL_OTP_PEPPER").map_err(|_| ConfigError::MissingVar("EMAIL_OTP_PEPPER"))?;
-    let bytes = hex::decode(raw.trim())
-        .map_err(|e| ConfigError::InvalidValue("EMAIL_OTP_PEPPER", e.to_string()))?;
+fn email_otp_pepper(raw: Option<String>) -> Result<Vec<u8>, ConfigError> {
+    let raw = unless_empty(raw).ok_or(ConfigError::MissingVar("EMAIL_OTP_PEPPER"))?;
+    // hex's error quotes the offending character: a secret's, here.
+    let bytes = hex::decode(raw).map_err(|_| {
+        ConfigError::InvalidValue(
+            "EMAIL_OTP_PEPPER",
+            "must be hex, as `openssl rand -hex 32` makes it".into(),
+        )
+    })?;
     if bytes.len() < 32 {
         return Err(ConfigError::InvalidValue(
             "EMAIL_OTP_PEPPER",

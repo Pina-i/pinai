@@ -1,5 +1,6 @@
 use base64ct::{Base64UrlUnpadded, Encoding};
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 use crate::EdKeyPair;
 
@@ -40,4 +41,12 @@ impl JwkSet {
             .collect();
         Self { keys }
     }
+}
+
+/// The RFC 7638 thumbprint of an Ed25519 public key: base64url, unpadded, of the SHA-256 of its
+/// required members in lexicographic order. The key's own name, for as long as the key lives.
+pub(crate) fn ed25519_thumbprint(public_key: &[u8; 32]) -> String {
+    let x = Base64UrlUnpadded::encode_string(public_key);
+    let members = format!(r#"{{"crv":"Ed25519","kty":"OKP","x":"{x}"}}"#);
+    Base64UrlUnpadded::encode_string(&Sha256::digest(members.as_bytes()))
 }

@@ -476,8 +476,16 @@ task finish its run under way, and drops what is still open ten seconds on
 ## Environment variables
 
 `.env.example` at the repo root documents every variable the service reads, and the root
-`README.md` groups them; `app::configuration` is where they are read. `ADMIN_PASSWORD` is only
-ever read to create the first admin, never logged and never written over the account's password.
+`README.md` groups them; `app::configuration` is where they are read, every one through `env_var`
+(`RUST_LOG` and `LOG_FORMAT` are the observability crate's). A variable unset or empty is read from
+the file its `<VAR>_FILE` names, trimmed (Docker secrets): a regular file of at most 64 KiB. Both
+set, or a file empty once trimmed, too large or unreadable, refuses the start; no error quotes a
+secret, while a non-secret value that doesn't parse is quoted. `DATABASE_PASSWORD` is set on the
+connection over any password `DATABASE_URL` holds. `JWT_KEY_ID` unset names the key by its RFC 7638
+thumbprint (`jwt_utils::load_ed_keypair`), the same for as long as the key lives. Unset in
+production, `SMTP_PORT` is 587, `SMTP_TLS` `tls` on port 465 and `starttls` otherwise; `SMTP_FROM`
+is no-reply at `DOMAIN`'s host (`domain::identity::host_of`). `ADMIN_PASSWORD` is only ever read
+to create the first admin, never logged and never written over the account's password.
 `REGISTRATIONS` is `open` (anyone signs up) or `invite` (only the invited), and unset or empty
 means `invite`: an open instance refuses to start without an SMTP relay (`SMTP_HOST` unset or
 empty), an invite-only one without an admin (`identity-provider/specs/auth.md § 6`).

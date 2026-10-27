@@ -123,6 +123,7 @@ pub async fn try_spawn_app(configure: impl FnOnce(&mut Config)) -> anyhow::Resul
     let port = listener.local_addr().unwrap().port();
     let domain = format!("127.0.0.1:{port}");
     let (database_url, database) = fresh_database().await;
+    let (database_url, database_password) = password_apart(&database_url);
     let mail = MailSink::start().await;
     let client = MockServer::start().await;
     let (client_id, redirect_uri) = (
@@ -145,10 +146,11 @@ pub async fn try_spawn_app(configure: impl FnOnce(&mut Config)) -> anyhow::Resul
     std::fs::write(&key, pem.as_bytes()).unwrap();
     let mut config = Config {
         database_url,
+        database_password,
         domain: domain.clone(),
         environment: Environment::Development,
         jwt_private_key_path: key.clone(),
-        jwt_key_id: format!("journey-{port}"),
+        jwt_key_id: Some(format!("journey-{port}")),
         port,
         session_secret: hex::encode(rand::random::<[u8; 32]>()),
         instance_name: None,
@@ -231,6 +233,18 @@ async fn fresh_database() -> (String, String) {
         .unwrap();
     let base = &server[..server.rfind('/').unwrap()];
     (format!("{base}/{name}"), name)
+}
+
+/// As the deploy bundle connects: the password beside the URL, not in it.
+fn password_apart(database_url: &str) -> (String, Option<String>) {
+    let mut url = url::Url::parse(database_url).unwrap();
+    let password = url.password().map(str::to_owned);
+    assert!(
+        !password.as_deref().unwrap_or_default().contains('%'),
+        "the test server's password is taken as written, without percent-decoding"
+    );
+    url.set_password(None).unwrap();
+    (url.to_string(), password)
 }
 
 /// The query of a `Location`: absolute when it goes to the client, relative within this

@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use domain::messaging::testing::collect;
 use federation_transport::UrlPolicy;
-use jwt_utils::{EdKeyPair, load_ed_keypair_from_pem};
+use jwt_utils::{EdKeyPair, load_ed_keypair};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -21,7 +21,7 @@ fn keypair() -> Arc<EdKeyPair> {
     let path =
         std::env::temp_dir().join(format!("pinai-remote-files-{}.pem", uuid::Uuid::new_v4()));
     std::fs::write(&path, TEST_KEY).unwrap();
-    let keypair = load_ed_keypair_from_pem(&path, "test-key").unwrap();
+    let keypair = load_ed_keypair(&path, Some("test-key")).unwrap();
     std::fs::remove_file(&path).unwrap();
     Arc::new(keypair)
 }

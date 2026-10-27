@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 
 use federation_transport::UrlPolicy;
 use http_signatures::{SignParams, http_date_now, sha256_digest, sign_request};
-use jwt_utils::load_ed_keypair_from_pem;
+use jwt_utils::load_ed_keypair;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
@@ -54,7 +54,7 @@ async fn an_unsigned_or_garbled_request_is_malformed() {
 async fn a_peer_signing(signed_body: &[u8]) -> (SignedRequest, ActorUri) {
     let path = std::env::temp_dir().join(format!("pinai-signatures-{}.pem", uuid::Uuid::new_v4()));
     std::fs::write(&path, TEST_KEY).unwrap();
-    let keypair = load_ed_keypair_from_pem(&path, "test-key").unwrap();
+    let keypair = load_ed_keypair(&path, Some("test-key")).unwrap();
     std::fs::remove_file(&path).unwrap();
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

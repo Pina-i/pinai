@@ -1,5 +1,5 @@
 use ed25519_dalek::{Signature, Verifier};
-use jwt_utils::load_ed_keypair_from_pem;
+use jwt_utils::load_ed_keypair;
 
 use super::*;
 
@@ -12,7 +12,7 @@ MC4CAQAwBQYDK2VwBCIEIF1VRwFuAo+gfSZtIUeF2VmNnVy0VePE+L7/D1UTTV6/
 fn attester() -> Ed25519DeviceAttester {
     let path = std::env::temp_dir().join(format!("pinai-attester-{}.pem", uuid::Uuid::new_v4()));
     std::fs::write(&path, TEST_KEY).unwrap();
-    let keypair = load_ed_keypair_from_pem(&path, "key-2026-01").unwrap();
+    let keypair = load_ed_keypair(&path, Some("key-2026-01")).unwrap();
     std::fs::remove_file(&path).unwrap();
     Ed25519DeviceAttester::new(Arc::new(keypair))
 }

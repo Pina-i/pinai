@@ -33,6 +33,34 @@ impl Domain {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// Without its port: the host an address on this instance is mailed at.
+    pub fn host(&self) -> &str {
+        host_of(&self.0)
+    }
+}
+
+/// An authority's host, `host[:port]` or `[v6][:port]`, without a numeric port.
+pub fn host_of(authority: &str) -> &str {
+    let split = if authority.starts_with('[') {
+        authority.find(']').map(|end| authority.split_at(end + 1))
+    } else {
+        authority
+            .rfind(':')
+            .filter(|&colon| !authority[..colon].contains(':'))
+            .map(|colon| authority.split_at(colon))
+    };
+    match split {
+        Some((host, port)) if port.is_empty() || is_numeric_port(port) => host,
+        _ => authority,
+    }
+}
+
+/// `:` and one digit or more.
+fn is_numeric_port(suffix: &str) -> bool {
+    suffix
+        .strip_prefix(':')
+        .is_some_and(|port| !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()))
 }
 
 impl fmt::Display for Domain {

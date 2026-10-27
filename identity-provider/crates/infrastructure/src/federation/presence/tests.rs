@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use domain::presence::{PresenceEvent, TypingEvent};
 use federation_transport::UrlPolicy;
 use futures_util::StreamExt;
-use jwt_utils::load_ed_keypair_from_pem;
+use jwt_utils::load_ed_keypair;
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -21,7 +21,7 @@ MC4CAQAwBQYDK2VwBCIEIF1VRwFuAo+gfSZtIUeF2VmNnVy0VePE+L7/D1UTTV6/
 fn keypair() -> Arc<EdKeyPair> {
     let path = std::env::temp_dir().join(format!("pinai-presence-{}.pem", uuid::Uuid::new_v4()));
     std::fs::write(&path, TEST_KEY).unwrap();
-    let keypair = load_ed_keypair_from_pem(&path, "test-key").unwrap();
+    let keypair = load_ed_keypair(&path, Some("test-key")).unwrap();
     std::fs::remove_file(&path).unwrap();
     Arc::new(keypair)
 }
