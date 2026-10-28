@@ -26,8 +26,11 @@ internal architecture.
 
 An instance is the identity provider with its Postgres, Redis and RustFS (file
 storage), and Caddy in front of them for HTTPS, all from the published image
-`ghcr.io/pina-i/pinai-idp`. Its users sign in with the official web or desktop
-app: there is no client to host.
+`ghcr.io/pina-i/pinai-idp`. Its users sign in with the Pīna'i web or desktop app,
+which reach any instance. The web app can be hosted too, beside the instance or on
+a server of its own, from the published image `ghcr.io/pina-i/pinai-web`:
+[Host the web app](https://github.com/Pina-i/pinai-client#host-the-web-app) has its
+`compose.yaml`. Then set `WEB_APP_ORIGIN` in the instance's `.env` to its address.
 
 You need:
 

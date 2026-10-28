@@ -2,8 +2,12 @@
 
 This directory runs one instance from the published image: the identity provider,
 Postgres, Redis, RustFS for files, and Caddy in front, which gets and renews the
-TLS certificate. People use the official web or desktop app and sign in with
-their address on your instance; there is no client to host.
+TLS certificate. People use the Pīna'i web or desktop app and sign in with
+their address on your instance. The web app can be hosted too, beside the
+instance or on a server of its own, from the published image
+`ghcr.io/pina-i/pinai-web`: see
+[Host the web app](https://github.com/Pina-i/pinai-client#host-the-web-app), then
+set `WEB_APP_ORIGIN` in `.env` to its address.
 
 ## What you need
 
