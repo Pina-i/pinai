@@ -139,6 +139,12 @@ const MOTIFS: [&str; 7] = [
 ];
 
 impl Appearance {
+    /// An invitation's pages, which no client opens: Tapa 2, as the invitation's design has it.
+    pub(crate) const INVITATION: Self = Self {
+        theme: None,
+        motif: Some("tapa2"),
+    };
+
     pub(crate) fn parse(theme: Option<&str>, motif: Option<&str>) -> Self {
         let known = |list: &[&'static str], given: Option<&str>| {
             given.and_then(|given| list.iter().find(|known| **known == given).copied())

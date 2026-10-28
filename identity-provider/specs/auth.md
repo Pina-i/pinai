@@ -155,7 +155,8 @@ before the page was shown.
 `theme=<family>-<mode>` (`pearl`, `lagoon`, `jungle`, `sand` × `dark`, `light`) and
 `motif=<key>` (`kowhaiwhai`, `raranga`, `puhoro`, `tapa1`–`tapa4`). A client sends what it is
 painted in, so the pages match it; the web client does once someone has signed in on the device.
-A value the IdP doesn't know is dropped; without them, a page is Black Pearl dark with Tapa 1.
+A value the IdP doesn't know is dropped; without them, a page is Black Pearl dark with Tapa 1 —
+an invitation's pages (§ 5), which no client opens, with Tapa 2.
 
 **Errors are codes.** A page is sent `error=<code>` (or `notice=<code>`) and shows the fixed
 sentence it maps to; any other value shows nothing. So no link can make the instance's own page
@@ -1082,7 +1083,7 @@ sequenceDiagram
     end
 ```
 
-**The doorway**, `GET /i/{token}`, takes the whole page: the instance's motif as a field and its
+**The doorway**, `GET /i/{token}`, takes the whole page: Tapa 2 as a field and the instance's
 initial set large behind; a top bar with the Pīna'i mark and "Self-hosted · Federated ·
 Open-source"; "— {domain}"; "You've been invited by *{inviter}* to join *{instance name}*." — the
 inviter by their display name only, never a handle or an address, and left out when they have

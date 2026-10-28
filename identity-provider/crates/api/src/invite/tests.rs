@@ -187,6 +187,31 @@ async fn an_invitation_unknown_used_revoked_or_expired_gets_one_answer() {
 }
 
 #[tokio::test]
+async fn every_page_of_an_invitation_wears_tapa_2() {
+    let app = TestApp::without_web_app();
+    let token = invited(&app).await;
+    let unknown = InvitationToken::from_bytes([5; 32]);
+
+    let pages = [
+        app.respond(get(&format!("/i/{}", token.as_str()), None))
+            .await,
+        app.respond(get(&format!("/i/{}/sign-up", token.as_str()), None))
+            .await,
+        app.respond(hoku(&token)).await,
+        app.respond(get(&format!("/i/{}", unknown.as_str()), None))
+            .await,
+    ];
+
+    for response in pages {
+        let (_, page) = TestApp::html_of(response).await;
+        assert!(
+            page.contains(r#"data-theme="pearl-dark" data-motif="tapa2""#),
+            "{page}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn the_form_page_shows_the_instance_who_invited_and_where_to_sign_in_instead() {
     let app = TestApp::with([], []);
     let token = invited(&app).await;

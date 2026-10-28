@@ -35,7 +35,7 @@ async fn unusable(pages: &SignInPages) -> Result<Response, ApiError> {
             .notice(
                 StatusCode::NOT_FOUND,
                 INVITATION_UNUSABLE,
-                Appearance::default(),
+                Appearance::INVITATION,
             )
             .await?,
     ))
@@ -67,7 +67,7 @@ pub async fn page(
         return unusable(&pages).await;
     };
     let page = InvitationPage {
-        frame: pages.frame(Appearance::default()).await?,
+        frame: pages.frame(Appearance::INVITATION).await?,
         inviter: invitation.inviter,
         expires_in: time_left(invitation.expires_at - OffsetDateTime::now_utc()),
         sign_up_href: sign_up_path(&token),
@@ -106,7 +106,7 @@ async fn form_page(
     };
     let web_app = register.web_app_entry();
     let page = InvitedSignUpPage {
-        frame: pages.frame(Appearance::default()).await?,
+        frame: pages.frame(Appearance::INVITATION).await?,
         inviter_initial: invitation
             .inviter
             .as_deref()
@@ -178,7 +178,7 @@ pub async fn sign_up(
         }
         Ok(Joined::Ready(registered)) => {
             let page = AccountReadyPage {
-                frame: pages.frame(Appearance::default()).await?,
+                frame: pages.frame(Appearance::INVITATION).await?,
                 email: registered.email,
             };
             return Ok(unreferred(render(StatusCode::OK, &page, None)));
