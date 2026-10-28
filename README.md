@@ -285,9 +285,21 @@ SMTP_PASSWORD=…
 
 The relay is reached on port 587 over STARTTLS; `SMTP_PORT=465` switches to TLS, and
 `SMTP_TLS` sets it outright. The instance mails as `Pīna'i <no-reply@chat.example.org>`
-unless `SMTP_FROM` says otherwise. Put a value holding spaces, `#` or `$` in single
-quotes. `deploy/.env.example` lists every setting. The file holds passwords, so make
-it yours alone: `chmod 600 .env`.
+unless `SMTP_FROM` says otherwise.
+
+Either kind can also be given a name and a description, both optional. The sign-in
+pages and NodeInfo show them; without them, the domain and "An identity provider.".
+An admin can change them later in the web app's Settings → Instance, which then takes
+over from `.env`:
+
+```sh
+INSTANCE_NAME=Aotearoa
+INSTANCE_DESCRIPTION='Design and type people, mostly around Wellington.'
+```
+
+The name holds 40 characters at most, the description 90. Put a value holding spaces,
+`#` or `$` in single quotes. `deploy/.env.example` lists every setting. The file holds
+passwords, so make it yours alone: `chmod 600 .env`.
 
 **3. Start it:**
 
