@@ -7,6 +7,8 @@ use domain::auth::{
 use domain::identity::InstanceOrigin;
 use time::OffsetDateTime;
 
+use crate::identity::IntroInForce;
+
 /// `POST /forgot-password` on an open instance: a single-use link, open for
 /// [`REQUESTED_RESET_TTL`], mailed to the account with the address, replacing the link it had
 /// open. The asker is told the same whatever the address, so the outcome here is the same too:
@@ -14,8 +16,8 @@ use time::OffsetDateTime;
 pub struct RequestPasswordReset {
     registrations: Registrations,
     origin: InstanceOrigin,
-    /// The instance's name, as its pages show it.
-    instance: String,
+    /// The instance's name as its pages show it when the mail is made.
+    intro: Arc<IntroInForce>,
     accounts: Arc<dyn SignInAccounts>,
     resets: Arc<dyn PasswordResets>,
     mailer: Arc<dyn ResetMailer>,
@@ -25,7 +27,7 @@ impl RequestPasswordReset {
     pub fn new(
         registrations: Registrations,
         origin: InstanceOrigin,
-        instance: String,
+        intro: Arc<IntroInForce>,
         accounts: Arc<dyn SignInAccounts>,
         resets: Arc<dyn PasswordResets>,
         mailer: Arc<dyn ResetMailer>,
@@ -33,7 +35,7 @@ impl RequestPasswordReset {
         Self {
             registrations,
             origin,
-            instance,
+            intro,
             accounts,
             resets,
             mailer,
@@ -65,7 +67,7 @@ impl RequestPasswordReset {
         let mail = ResetMail {
             to: account.email.clone(),
             name: account.addressed_as().to_owned(),
-            instance: self.instance.clone(),
+            instance: self.intro.shown().name().to_owned(),
             link: reset_link(&self.origin, &token),
             valid_for: REQUESTED_RESET_TTL,
         };

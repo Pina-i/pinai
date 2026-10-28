@@ -270,7 +270,7 @@ async fn a_withdrawal_that_fails_leaves_the_mails_failure_to_report() {
     let request = RequestPasswordReset::new(
         Registrations::Open,
         w.origin.clone(),
-        "Aotearoa".to_owned(),
+        w.intro.clone(),
         w.accounts.clone(),
         std::sync::Arc::new(Unwithdrawable(w.resets.clone())),
         w.mailer.clone(),
@@ -307,7 +307,7 @@ async fn while_the_mail_budget_is_spent_an_accounts_open_link_keeps_working() {
     let spent = RequestPasswordReset::new(
         Registrations::Open,
         w.origin.clone(),
-        "Aotearoa".to_owned(),
+        w.intro.clone(),
         w.accounts.clone(),
         w.resets.clone(),
         std::sync::Arc::new(Spent),

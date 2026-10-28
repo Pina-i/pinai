@@ -1,10 +1,18 @@
 use domain::identity::testing::{InMemoryAccounts, account};
-use domain::identity::{InstanceOrigin, PINAI_SOURCE_URL};
+use domain::identity::{InstanceOrigin, IntroText, PINAI_SOURCE_URL};
 
 use super::*;
 
 fn pinai() -> SourceUrl {
     SourceUrl::parse(PINAI_SOURCE_URL).unwrap()
+}
+
+fn intro(name: Option<&str>, description: Option<&str>) -> Arc<IntroInForce> {
+    let origin = InstanceOrigin::parse("http://localhost:8080").unwrap();
+    Arc::new(IntroInForce::new(
+        origin,
+        IntroText::parse(name, description).unwrap(),
+    ))
 }
 
 fn now() -> OffsetDateTime {
@@ -13,8 +21,7 @@ fn now() -> OffsetDateTime {
 
 #[tokio::test]
 async fn an_instance_is_described_by_its_intro_its_source_and_its_accounts() {
-    let origin = InstanceOrigin::parse("http://localhost:8080").unwrap();
-    let intro = InstanceIntro::new(&origin, Some("Aotearoa"), Some("Design people.")).unwrap();
+    let intro = intro(Some("Aotearoa"), Some("Design people."));
     let source = SourceUrl::parse("https://codeberg.org/aotearoa/pinai").unwrap();
     let accounts = Arc::new(InMemoryAccounts::with([account("alice"), account("bob")]));
 
@@ -37,10 +44,9 @@ async fn an_instance_is_described_by_its_intro_its_source_and_its_accounts() {
 
 #[tokio::test]
 async fn the_accounts_are_counted_again_a_minute_on() {
-    let origin = InstanceOrigin::parse("http://localhost:8080").unwrap();
     let accounts = Arc::new(InMemoryAccounts::with([account("alice")]));
     let describe = DescribeInstance::new(
-        InstanceIntro::new(&origin, None, None).unwrap(),
+        intro(None, None),
         pinai(),
         Registrations::Open,
         accounts.clone(),
@@ -62,10 +68,9 @@ async fn the_accounts_are_counted_again_a_minute_on() {
 
 #[tokio::test]
 async fn an_instance_says_whether_its_registrations_are_open() {
-    let origin = InstanceOrigin::parse("http://localhost:8080").unwrap();
     let described = async |registrations| {
         DescribeInstance::new(
-            InstanceIntro::new(&origin, None, None).unwrap(),
+            intro(None, None),
             pinai(),
             registrations,
             Arc::new(InMemoryAccounts::default()),

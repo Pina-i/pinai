@@ -22,7 +22,7 @@ pub use auth::{
 };
 pub use delivery::{PgCommitLog, PgWelcomes};
 pub use group_events::PgGroupEvents;
-pub use identity::PgAccounts;
+pub use identity::{PgAccounts, PgSavedIntro};
 pub use key_directory::{PgDevices, PgKeyPackages};
 pub use messaging::{PgConversations, PgMessages};
 pub use presence::PgPresenceAudience;

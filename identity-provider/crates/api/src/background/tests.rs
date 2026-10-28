@@ -1,11 +1,12 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use application::identity::IntroInForce;
 use domain::auth::testing::{
     InMemoryPasswordResets, InMemorySessions, InMemorySignInAccounts, RecordingMailer,
     RecordingTickets, signed_up,
 };
 use domain::auth::{AuthError, Registrations, ResetMail, ResetMailer};
-use domain::identity::InstanceOrigin;
+use domain::identity::{InstanceOrigin, IntroText};
 
 use super::*;
 
@@ -74,10 +75,12 @@ fn requesting_through(names: &[&str], mailer: Arc<dyn ResetMailer>) -> Arc<Reque
         Arc::new(InMemorySessions::default()),
         Arc::new(RecordingTickets::default()),
     ));
+    let origin = InstanceOrigin::parse("http://localhost:8080").unwrap();
+    let intro = IntroText::parse(Some("Aotearoa"), None).unwrap();
     Arc::new(RequestPasswordReset::new(
         Registrations::Open,
-        InstanceOrigin::parse("http://localhost:8080").unwrap(),
-        "Aotearoa".to_owned(),
+        origin.clone(),
+        Arc::new(IntroInForce::new(origin, intro)),
         accounts,
         resets,
         mailer,

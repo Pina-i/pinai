@@ -3,12 +3,14 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+use time::OffsetDateTime;
+
 use crate::{SessionId, UserId};
 
 use super::{
-    Account, Accounts, AccountsError, ActorUri, Bearer, FederatedAddress, Handle, RemoteActor,
-    RemoteActors, RemoteActorsError, SignatureError, SignatureVerifier, SignedRequest, TokenError,
-    TokenVerifier,
+    Account, Accounts, AccountsError, ActorUri, Bearer, FederatedAddress, Handle, IntroText,
+    RemoteActor, RemoteActors, RemoteActorsError, SavedIntro, SavedIntroError, SignatureError,
+    SignatureVerifier, SignedRequest, TokenError, TokenVerifier,
 };
 
 /// A local account on `http://localhost:8080` whose handle starts with `name`.
@@ -89,6 +91,44 @@ impl Accounts for InMemoryAccounts {
 
     async fn count(&self) -> Result<u64, AccountsError> {
         Ok(self.accounts.lock().unwrap().len() as u64)
+    }
+}
+
+#[derive(Default)]
+pub struct InMemorySavedIntro {
+    saved: Mutex<Option<(IntroText, UserId, OffsetDateTime)>>,
+    broken: Mutex<bool>,
+}
+
+impl InMemorySavedIntro {
+    /// Every save fails from now on.
+    pub fn break_down(&self) {
+        *self.broken.lock().unwrap() = true;
+    }
+
+    /// The text last saved, by whom and when.
+    pub fn saved(&self) -> Option<(IntroText, UserId, OffsetDateTime)> {
+        self.saved.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl SavedIntro for InMemorySavedIntro {
+    async fn get(&self) -> Result<Option<IntroText>, SavedIntroError> {
+        Ok(self.saved().map(|(text, _, _)| text))
+    }
+
+    async fn save(
+        &self,
+        text: &IntroText,
+        by: UserId,
+        at: OffsetDateTime,
+    ) -> Result<(), SavedIntroError> {
+        if *self.broken.lock().unwrap() {
+            return Err(anyhow::anyhow!("the database is down").into());
+        }
+        *self.saved.lock().unwrap() = Some((text.clone(), by, at));
+        Ok(())
     }
 }
 
@@ -298,10 +338,33 @@ impl SignatureVerifier for TrustedSignatures {
     }
 }
 
-/// What every `Accounts` store must do. Each check takes accounts already in the store — the
-/// Postgres ones are real `users` rows.
+/// What every `Accounts` and `SavedIntro` store must do. Each check takes accounts already in the
+/// store — the Postgres ones are real `users` rows.
 pub mod contract {
-    use crate::identity::{Account, Accounts};
+    use time::OffsetDateTime;
+
+    use crate::UserId;
+    use crate::identity::{Account, Accounts, IntroText, SavedIntro};
+
+    /// Takes a store nobody saved to.
+    pub async fn nothing_is_saved_until_an_admin_saves(intro: &dyn SavedIntro) {
+        assert_eq!(intro.get().await.unwrap(), None);
+    }
+
+    pub async fn the_last_text_saved_is_read_back(intro: &dyn SavedIntro, admin: UserId) {
+        let at = OffsetDateTime::from_unix_timestamp(1_790_000_000).unwrap();
+        let first = IntroText::parse(Some("Aotearoa"), Some("Design people.")).unwrap();
+        let second = IntroText::parse(None, Some("Weavers.")).unwrap();
+
+        intro.save(&first, admin, at).await.unwrap();
+        assert_eq!(intro.get().await.unwrap(), Some(first));
+        intro.save(&second, admin, at).await.unwrap();
+        assert_eq!(
+            intro.get().await.unwrap(),
+            Some(second),
+            "the name left out"
+        );
+    }
 
     /// `alice` and `bob` are named so: `lic` is in the first handle only.
     pub async fn a_search_finds_the_handles_holding_the_query(

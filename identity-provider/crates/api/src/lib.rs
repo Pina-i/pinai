@@ -10,6 +10,7 @@ mod groups;
 mod history;
 mod http;
 mod inbox;
+mod intro;
 mod invitations;
 mod invite;
 mod key_directory;
@@ -48,7 +49,9 @@ use application::e2ee::{
     KeyPackageStatus, ListDevices, LoadArchiveSalt, ReadArchive, ReceiveCommit, ReceiveWelcome,
     RegisterDevice, RevokeDevice, SendWelcome, SetArchiveSalt, UploadKeyPackages,
 };
-use application::identity::{DescribeInstance, FindAccount, SearchAccounts, WebFinger};
+use application::identity::{
+    DescribeInstance, EditIntro, FindAccount, SearchAccounts, ShowIntro, WebFinger,
+};
 use application::messaging::{
     AddGroupMember, CreateGroup, DeliverDirectMessage, DismissGroup, EditMessage,
     ListConversations, ListGroupMembers, LoadHistory, MarkRead, OpenAttachment, ReadBlob,
@@ -111,6 +114,9 @@ pub struct AppState {
     pub revoke_invitation: Arc<RevokeInvitation>,
     pub list_members: Arc<ListMembers>,
     pub issue_password_reset: Arc<IssuePasswordReset>,
+    /// How the instance introduces itself, as Settings → Instance edits it.
+    pub show_intro: Arc<ShowIntro>,
+    pub edit_intro: Arc<EditIntro>,
     /// "Forgot your password?": the address checked before the answer, the link mailed after.
     pub request_password_reset: Arc<RequestPasswordReset>,
     /// Where those requests wait for the background to take them.
@@ -269,6 +275,7 @@ pub fn router(state: AppState) -> Router {
             "/api/admin/members/{id}/password-reset",
             post(members::issue_reset),
         )
+        .route("/api/admin/intro", get(intro::show).put(intro::edit))
         .route("/forgot-password", get(forgot::page).post(forgot::request))
         .route(
             &format!("{}{{token}}", domain::auth::RESET_PATH_PREFIX),

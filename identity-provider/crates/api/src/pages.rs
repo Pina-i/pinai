@@ -253,7 +253,7 @@ pub(crate) struct Frame {
     name: String,
     host: String,
     description: String,
-    /// The instance said something of itself: `INSTANCE_DESCRIPTION`.
+    /// The instance has a description.
     described: bool,
     people: String,
     open: bool,

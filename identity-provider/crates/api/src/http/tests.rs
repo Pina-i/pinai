@@ -66,6 +66,11 @@ mod logging {
     #[tokio::test]
     async fn a_server_error_is_logged_once() {
         let errors = Errors::default();
+        // tracing-core's callsite registry: with one dispatcher alone, a callsite another test
+        // thread registers first is asked of that thread's default and cached as never enabled;
+        // with two, of every dispatcher.
+        let _second_dispatcher =
+            tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
         let _guard =
             tracing::subscriber::set_default(tracing_subscriber::registry().with(errors.clone()));
         let app = Router::new()

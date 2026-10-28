@@ -1,8 +1,10 @@
 use std::sync::{Arc, Mutex};
 
 use domain::auth::Registrations;
-use domain::identity::{Accounts, AccountsError, InstanceIntro, SourceUrl};
+use domain::identity::{Accounts, AccountsError, SourceUrl};
 use time::{Duration, OffsetDateTime};
+
+use super::IntroInForce;
 
 /// What this instance tells a visitor about itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20,7 +22,7 @@ pub struct InstanceFacts {
 /// Its sign-in pages and its NodeInfo, which anyone may ask for: the count is kept a minute,
 /// so asking again costs nothing.
 pub struct DescribeInstance {
-    intro: InstanceIntro,
+    intro: Arc<IntroInForce>,
     source: SourceUrl,
     registrations: Registrations,
     accounts: Arc<dyn Accounts>,
@@ -31,7 +33,7 @@ impl DescribeInstance {
     pub const COUNT_KEPT: Duration = Duration::minutes(1);
 
     pub fn new(
-        intro: InstanceIntro,
+        intro: Arc<IntroInForce>,
         source: SourceUrl,
         registrations: Registrations,
         accounts: Arc<dyn Accounts>,
@@ -55,9 +57,10 @@ impl DescribeInstance {
                 people
             }
         };
+        let intro = self.intro.shown();
         Ok(InstanceFacts {
-            name: self.intro.name().to_owned(),
-            description: self.intro.description().map(str::to_owned),
+            name: intro.name().to_owned(),
+            description: intro.description().map(str::to_owned),
             people,
             open_registrations: self.registrations.are_open(),
             source: self.source.clone(),

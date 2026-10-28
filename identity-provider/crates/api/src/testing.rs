@@ -14,7 +14,9 @@ use application::e2ee::{
     KeyPackageStatus, ListDevices, LoadArchiveSalt, ReadArchive, ReceiveCommit, ReceiveWelcome,
     RegisterDevice, RevokeDevice, SendWelcome, SetArchiveSalt, UploadKeyPackages,
 };
-use application::identity::{DescribeInstance, FindAccount, SearchAccounts, WebFinger};
+use application::identity::{
+    DescribeInstance, EditIntro, FindAccount, IntroInForce, SearchAccounts, ShowIntro, WebFinger,
+};
 use application::messaging::{
     AddGroupMember, CreateGroup, DeliverDirectMessage, DismissGroup, EditMessage,
     ListConversations, ListGroupMembers, LoadHistory, MarkRead, OpenAttachment, ReadBlob,
@@ -53,11 +55,10 @@ use domain::e2ee::testing::{
     PlainAttester, RecordingDeviceNotifier, RecordingMlsFederation, RecordingMlsNotifier,
 };
 use domain::identity::testing::{
-    InMemoryAccounts, InMemoryRemoteActors, InMemoryTokens, TrustedSignatures,
+    InMemoryAccounts, InMemoryRemoteActors, InMemorySavedIntro, InMemoryTokens, TrustedSignatures,
 };
 use domain::identity::{
-    Account, Accounts, ActorUri, InstanceIntro, InstanceOrigin, RemoteActor, RemoteActors,
-    SourceUrl,
+    Account, Accounts, ActorUri, InstanceOrigin, IntroText, RemoteActor, RemoteActors, SourceUrl,
 };
 use domain::messaging::AttachmentLimits;
 use domain::messaging::testing::{
@@ -290,8 +291,12 @@ impl TestApp {
             federation: Arc::new(RecordingProfileFederation::default()),
             refresh: Arc::new(RecordingProfileRefresh::default()),
         };
+        let intro = Arc::new(IntroInForce::new(
+            origin.clone(),
+            IntroText::parse(Some("Aotearoa"), Some("Design and type people.")).unwrap(),
+        ));
         let describe_instance = Arc::new(DescribeInstance::new(
-            InstanceIntro::new(&origin, Some("Aotearoa"), Some("Design and type people.")).unwrap(),
+            intro.clone(),
             SourceUrl::parse(SOURCE).unwrap(),
             registrations,
             accounts.clone(),
@@ -299,7 +304,7 @@ impl TestApp {
         let request_reset = Arc::new(RequestPasswordReset::new(
             registrations,
             origin.clone(),
-            "Aotearoa".to_owned(),
+            intro.clone(),
             sign_in.accounts.clone(),
             sign_in.resets.clone(),
             sign_in.mailer.clone(),
@@ -420,6 +425,12 @@ impl TestApp {
             issue_password_reset: Arc::new(IssuePasswordReset::new(
                 sign_in.accounts.clone(),
                 sign_in.resets.clone(),
+            )),
+            show_intro: Arc::new(ShowIntro::new(sign_in.accounts.clone(), intro.clone())),
+            edit_intro: Arc::new(EditIntro::new(
+                sign_in.accounts.clone(),
+                Arc::new(InMemorySavedIntro::default()),
+                intro,
             )),
             request_password_reset: request_reset.clone(),
             reset_requests: requests,

@@ -61,6 +61,15 @@ CREATE TABLE remote_actors (
                                                      -- older than 24 h discovers the actor again
   updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- How the instance introduces itself, as an admin saved it (§ 6): one row, none until the first save
+CREATE TABLE instance_intro (
+  only_row      BOOLEAN PRIMARY KEY DEFAULT true CHECK (only_row),
+  name          TEXT,                       -- NULL: the instance's domain
+  description   TEXT,                       -- NULL: none
+  updated_by    UUID REFERENCES users (id) ON DELETE SET NULL,
+  updated_at    TIMESTAMPTZ NOT NULL        -- these two for whoever reads the database
+);
 ```
 
 ## 2. Remote actor cache
@@ -150,14 +159,81 @@ every fediverse server publishes about itself.
 
 | What | From |
 |---|---|
-| Name | `INSTANCE_NAME`, trimmed, 60 characters at most; unset or blank, the instance's domain |
-| Description | `INSTANCE_DESCRIPTION`, trimmed, 280 characters at most; unset or blank, none |
+| Name | What an admin saved in Settings → Instance; otherwise `INSTANCE_NAME`. Trimmed, 40 characters at most; blank or unset, the instance's domain |
+| Description | What an admin saved in Settings → Instance; otherwise `INSTANCE_DESCRIPTION`. Trimmed, 90 characters at most; blank or unset, none |
 | People | Every local account, counted at most a minute ago (`Accounts::count`) |
 | Open registration | `REGISTRATIONS`: yes for `open`, no for `invite`, the default (`identity-provider/specs/auth.md § 6`) |
 | Source | `SOURCE_URL`, an `http(s)` URL; unset or blank, Pīna'i's own repository, `https://github.com/Pina-i/pinai` (`PINAI_SOURCE_URL`) |
 
-A name or a description past its limit stops the instance at startup (`InstanceIntro`), and so
-does a `SOURCE_URL` that is no `http(s)` URL with a host (`SourceUrl`).
+A `SOURCE_URL` that is no `http(s)` URL with a host stops the instance at startup (`SourceUrl`).
+
+**The name and the description** are one text, written either in `.env` by whoever sets the
+instance up, or in Settings → Instance by an admin (`GET` / `PUT /api/admin/intro`,
+`identity-provider/specs/auth.md § 4`). Both go through one rule, `IntroText::parse`: each field
+trimmed, a blank one the default — the domain for the name, no description, which the pages read
+"An identity provider." —, the name 40 characters at most and the description 90, counted in
+characters (the description is set as the pages' headline). What is in force:
+
+1. the text an admin saved, whole, once one has saved (`intro_in_force`): `.env` is no longer read
+   for either field;
+2. otherwise `INSTANCE_NAME` and `INSTANCE_DESCRIPTION`, as read at the start: a changed value
+   takes effect at the next restart;
+3. otherwise the defaults.
+
+An admin saves the name and the description together; the text is kept in `instance_intro`'s one
+row (§ 1), which doesn't exist until the first save. There is no "use `.env` again": an admin who
+wants its values back types them in the form.
+
+```mermaid
+flowchart TD
+    S[The instance starts] --> E{INSTANCE_NAME and INSTANCE_DESCRIPTION within the rule?}
+    E -- no --> X[refuse to start, naming the rule broken]
+    E -- yes --> R{a row in instance_intro?}
+    R -- no --> C[".env's text in force, the defaults for what it leaves unset"]
+    R -- yes --> V{the row within the rule?}
+    V -- no --> X2[refuse to start, naming instance_intro]
+    V -- yes --> W["the saved text in force; a warning for each .env field it overrides"]
+    C --> M[held in memory]
+    W --> M
+    M -- an admin saves --> M
+```
+
+- **`.env` is checked whatever is in force**: a value past its limit stops the start even when a
+  saved text overrides it. So does a row that breaks the rule — edited by hand —, the error naming
+  the table.
+- **An overridden variable is reported at each start**, field by field, while it is set and
+  differs from the saved field (`overridden_settings`): `INSTANCE_NAME is not used: an admin
+  changed the name in Settings → Instance. Change it there, or remove INSTANCE_NAME from .env`. A
+  variable unset, or equal to what was saved, is not reported.
+- **The text in force is held in memory** (`IntroInForce`): loaded at the start, replaced by each
+  save once the row is written, so a refused or failed save leaves it as it was. No request from a
+  visitor reads the database for it. This assumes one process per instance, as the presence board
+  and the reset mail budget already do. Two admins saving at the same moment are taken one after
+  the other (`EditIntro`), so the row and memory end on the same text.
+
+A change shows:
+
+| Where | When |
+|---|---|
+| Sign-in, invitation, reset and forgot pages | The next page load (they are `no-store`) |
+| NodeInfo | At once; a browser or a client may keep the last answer for up to 60 s (`max-age=60`) |
+| A reset link asked for by mail | The next mail: its subject and text name the instance |
+| The client's landing and Settings | At their next NodeInfo read, within a minute; Settings → Instance shows the saved text at once, from the `PUT`'s answer |
+
+The instance's `Application` actor (whose `name` is its base URL), the mail sender (`SMTP_FROM`)
+and the sign-up code mail, which doesn't name the instance, don't take it.
+
+Scenarios:
+
+- **Setting up an instance.** The operator sets `INSTANCE_NAME` and `INSTANCE_DESCRIPTION` in
+  `.env`: the instance introduces itself so from its first start, rather than by its domain.
+- **An admin changes it.** They save a new name in Settings → Instance; the next sign-in page and
+  NodeInfo show it. At each start after, while `.env` still sets another name, the log says
+  `INSTANCE_NAME` is not used.
+- **The operator edits `.env` after an admin saved.** The change has no effect, and the warning
+  says where to change the name instead.
+- **A name left blank in the form.** It is saved as the default: the pages show the domain, and the
+  form shows the domain as its placeholder, not as a value.
 
 **The source.** Pīna'i is under the GNU AGPL-3.0-or-later, whose § 13 has whoever runs a modified
 version offer its users, over the network, the source of the version they run. The instance offers

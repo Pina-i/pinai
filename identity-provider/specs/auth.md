@@ -969,6 +969,21 @@ The most recently active come first, then those signed out everywhere, by id. On
 accounts with their sessions (`InstanceMembers`); the presence board, in memory, says who is
 online (`ListMembers`).
 
+### The instance's name and description
+
+Admins change how the instance introduces itself — its name and its description, on its pages and
+in its NodeInfo — from Settings → Instance, on open and invite-only instances alike. What they save
+takes over from `INSTANCE_NAME` and `INSTANCE_DESCRIPTION`; the rule, what is in force and where a
+change shows are `identity-provider/specs/identity.md § 6`.
+
+| Route | |
+|---|---|
+| `GET /api/admin/intro` | An admin's bearer — `401` without one, `403 access_denied` "Only an admin may do this" for a member. `200 { name, description }`: the text in force as written, each `null` for the default (the domain, no description), so the form shows the domain as a placeholder rather than a value |
+| `PUT /api/admin/intro` | An admin's bearer, no recent password: the text gives nobody an account. `403` for a member whatever the body. Body `{ name, description }`, both keys required, each a string or `null`, saved together. `200` with the text saved, as the `GET` answers it — trimmed, a blank field `null`. `400 invalid_request`, nothing saved, names the rule broken (`instance name: 40 characters at most`), or, for a body that is no such object — not JSON, without its `Content-Type`, a key missing —, what it must be (`instance intro: a name and a description, each a string or null`). Each save is logged, `changed the instance's intro`, with the admin's id |
+
+A member is refused whatever the body: the admin check comes before the draft is judged. A key is
+never left out to mean the default, so a body missing one resets nothing.
+
 ### Scenarios
 
 - **Setting up an instance.** The operator sets `ADMIN_EMAIL` and `ADMIN_PASSWORD` in `.env`
@@ -1087,7 +1102,7 @@ sequenceDiagram
 initial set large behind; a top bar with the Pīna'i mark and "Self-hosted · Federated ·
 Open-source"; "— {domain}"; "You've been invited by *{inviter}* to join *{instance name}*." — the
 inviter by their display name only, never a handle or an address, and left out when they have
-none —; the instance's description, when `INSTANCE_DESCRIPTION` is set, then "This link lets one
+none —; the instance's description, when the instance has one, then "This link lets one
 person create an account and expires in {N days, or hours under a day}."; **Continue**; and at
 the foot "Only the admins of {domain} make invitations".
 

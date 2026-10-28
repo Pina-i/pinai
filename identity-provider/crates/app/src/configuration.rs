@@ -40,9 +40,10 @@ pub struct Config {
     /// What the session-cookie and attachment-link keys are derived from. Falls back
     /// to [`DEV_SESSION_SECRET`] in development; production requires a real one.
     pub session_secret: String,
-    /// The name the sign-in pages and NodeInfo give the instance; its domain when unset.
+    /// The name the sign-in pages and NodeInfo give the instance until an admin saves one in
+    /// Settings → Instance; its domain when unset.
     pub instance_name: Option<String>,
-    /// A line about the instance, shown under its name on the sign-in pages.
+    /// A line about the instance, shown under its name on the sign-in pages, likewise.
     pub instance_description: Option<String>,
     /// `SOURCE_URL`: where the code this instance runs can be had, linked from NodeInfo and the
     /// sign-in pages; Pīna'i's own repository when unset.

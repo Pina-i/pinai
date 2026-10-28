@@ -1,7 +1,10 @@
 use anyhow::Context;
 use domain::UserId;
-use domain::identity::{Account, Accounts, AccountsError, ActorUri, Handle};
+use domain::identity::{
+    Account, Accounts, AccountsError, ActorUri, Handle, IntroText, SavedIntro, SavedIntroError,
+};
 use sqlx::PgPool;
+use time::OffsetDateTime;
 
 /// Local accounts, from `users`.
 pub struct PgAccounts {
@@ -97,6 +100,57 @@ impl Accounts for PgAccounts {
                 .await
                 .context("count the accounts")?;
         Ok(u64::try_from(count).unwrap_or(0))
+    }
+}
+
+/// The intro an admin saved, from `instance_intro`'s one row.
+pub struct PgSavedIntro {
+    pool: PgPool,
+}
+
+impl PgSavedIntro {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+}
+
+#[async_trait::async_trait]
+impl SavedIntro for PgSavedIntro {
+    async fn get(&self) -> Result<Option<IntroText>, SavedIntroError> {
+        let row: Option<(Option<String>, Option<String>)> =
+            sqlx::query_as("SELECT name, description FROM instance_intro")
+                .fetch_optional(&self.pool)
+                .await
+                .context("read the saved intro")?;
+        let Some((name, description)) = row else {
+            return Ok(None);
+        };
+        let text = IntroText::parse(name.as_deref(), description.as_deref())
+            .context("instance_intro breaks the intro's rule")?;
+        Ok(Some(text))
+    }
+
+    async fn save(
+        &self,
+        text: &IntroText,
+        by: UserId,
+        at: OffsetDateTime,
+    ) -> Result<(), SavedIntroError> {
+        sqlx::query(
+            "INSERT INTO instance_intro (name, description, updated_by, updated_at) \
+             VALUES ($1, $2, $3, $4) \
+             ON CONFLICT (only_row) DO UPDATE SET name = EXCLUDED.name, \
+             description = EXCLUDED.description, updated_by = EXCLUDED.updated_by, \
+             updated_at = EXCLUDED.updated_at",
+        )
+        .bind(text.name())
+        .bind(text.description())
+        .bind(by.as_uuid())
+        .bind(at)
+        .execute(&self.pool)
+        .await
+        .context("save the intro")?;
+        Ok(())
     }
 }
 

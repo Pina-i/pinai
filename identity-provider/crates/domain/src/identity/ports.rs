@@ -2,7 +2,7 @@ use time::{Duration, OffsetDateTime};
 
 use crate::{SessionId, UserId};
 
-use super::{Account, ActorUri, FederatedAddress, Handle, RemoteActor};
+use super::{Account, ActorUri, FederatedAddress, Handle, IntroText, RemoteActor};
 
 /// The local accounts other contexts address.
 #[async_trait::async_trait]
@@ -18,6 +18,25 @@ pub trait Accounts: Send + Sync {
 
 #[derive(Debug, thiserror::Error)]
 pub enum AccountsError {
+    #[error(transparent)]
+    Unexpected(#[from] anyhow::Error),
+}
+
+/// How the instance introduces itself, as an admin last saved it.
+#[async_trait::async_trait]
+pub trait SavedIntro: Send + Sync {
+    /// `None` until an admin first saves.
+    async fn get(&self) -> Result<Option<IntroText>, SavedIntroError>;
+    async fn save(
+        &self,
+        text: &IntroText,
+        by: UserId,
+        at: OffsetDateTime,
+    ) -> Result<(), SavedIntroError>;
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SavedIntroError {
     #[error(transparent)]
     Unexpected(#[from] anyhow::Error),
 }

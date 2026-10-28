@@ -640,7 +640,7 @@ The main groups:
 - **Server** — `IDP_ENV`, `DOMAIN`, `PORT`
 - **Keys** — `IDP_KEYS_DIR`, `JWT_PRIVATE_KEY_PATH`, `JWT_KEY_ID` (optional: unset, the key's RFC 7638 thumbprint)
 - **Session** — `SESSION_SECRET`
-- **Instance** — `INSTANCE_NAME`, `INSTANCE_DESCRIPTION`: how the sign-in pages and NodeInfo present it
+- **Instance** — `INSTANCE_NAME`, `INSTANCE_DESCRIPTION`: how the sign-in pages and NodeInfo present it, until an admin changes them in Settings → Instance; at most 40 and 90 characters
 - **Source code** — `SOURCE_URL`: where the code the instance runs can be had, an http(s) URL, as NodeInfo's `software.repository` and the sign-in pages' "Source" link; `https://github.com/Pina-i/pinai` when unset. An instance running modified code points it at that code (see [License](#license))
 - **Who can join** — `REGISTRATIONS`: `open` (anyone signs up; needs an SMTP relay) or `invite` (only people an admin invited; needs an admin), `invite` when unset
 - **Admin** — `ADMIN_EMAIL`, `ADMIN_PASSWORD`: the first admin account, created at startup when no account has that address, never written over

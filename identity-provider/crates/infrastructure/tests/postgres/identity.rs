@@ -1,9 +1,11 @@
 use std::net::SocketAddr;
 
-use domain::identity::{Accounts, ActorUri, Handle, RemoteActors, RemoteActorsError};
+use domain::identity::{
+    Accounts, ActorUri, Handle, IntroText, RemoteActors, RemoteActorsError, SavedIntro,
+};
 use federation_transport::UrlPolicy;
 use infrastructure::federation::FederatedRemoteActors;
-use infrastructure::postgres::PgAccounts;
+use infrastructure::postgres::{PgAccounts, PgSavedIntro};
 use sqlx::PgPool;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -71,6 +73,70 @@ async fn an_account_without_an_actor_uri_is_not_addressable(pool: PgPool) {
     let id = super::a_user(&pool).await;
 
     assert!(PgAccounts::new(pool).find(id).await.is_err());
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn nothing_is_saved_until_an_admin_saves(pool: PgPool) {
+    domain::identity::testing::contract::nothing_is_saved_until_an_admin_saves(&PgSavedIntro::new(
+        pool,
+    ))
+    .await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn the_last_text_saved_is_read_back(pool: PgPool) {
+    let admin = super::a_user(&pool).await;
+
+    domain::identity::testing::contract::the_last_text_saved_is_read_back(
+        &PgSavedIntro::new(pool),
+        admin,
+    )
+    .await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn two_saves_leave_one_row(pool: PgPool) {
+    let (first, second) = (super::a_user(&pool).await, super::a_user(&pool).await);
+    let intro = PgSavedIntro::new(pool.clone());
+    let at = time::OffsetDateTime::from_unix_timestamp(1_790_000_000).unwrap();
+
+    intro
+        .save(
+            &IntroText::parse(Some("Aotearoa"), None).unwrap(),
+            first,
+            at,
+        )
+        .await
+        .unwrap();
+    intro
+        .save(&IntroText::parse(Some("Kāinga"), None).unwrap(), second, at)
+        .await
+        .unwrap();
+
+    let rows: Vec<(Option<String>, uuid::Uuid)> =
+        sqlx::query_as("SELECT name, updated_by FROM instance_intro")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(rows, vec![(Some("Kāinga".to_owned()), second.as_uuid())]);
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn a_row_past_a_limit_is_an_error_naming_the_table(pool: PgPool) {
+    sqlx::query("INSERT INTO instance_intro (name, updated_at) VALUES ($1, now())")
+        .bind("ō".repeat(41))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let read = PgSavedIntro::new(pool).get().await;
+
+    let told = format!("{:#}", anyhow::Error::from(read.unwrap_err()));
+    assert!(told.contains("instance_intro"), "{told}");
+    assert!(
+        told.contains("instance name: 40 characters at most"),
+        "{told}"
+    );
 }
 
 // Port 9 (discard) refuses connections: the peer is unreachable, as a down instance is.

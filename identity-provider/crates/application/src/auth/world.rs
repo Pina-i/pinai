@@ -12,9 +12,11 @@ use domain::auth::testing::{
 };
 use domain::auth::{Client, Registrations, SecondFactors, TotpSecret, WebApp, desktop_client};
 use domain::e2ee::testing::InMemoryKeyDirectory;
-use domain::identity::InstanceOrigin;
+use domain::identity::{InstanceOrigin, IntroText};
 use domain::presence::PresenceBoard;
 use time::OffsetDateTime;
+
+use crate::identity::IntroInForce;
 
 use super::{
     Authorize, CompleteSignIn, ConfirmTotpEnrollment, CreateInvitation, DisableTotp, EnsureAdmin,
@@ -41,6 +43,8 @@ pub struct World {
     pub refresh_tokens: Arc<InMemoryRefreshTokens>,
     pub devices: Arc<InMemoryKeyDirectory>,
     pub resets: Arc<InMemoryPasswordResets>,
+    /// Named Aotearoa.
+    pub intro: Arc<IntroInForce>,
     /// The presence states this instance has heard.
     pub board: Arc<PresenceBoard>,
     pub authorize: Authorize,
@@ -106,6 +110,10 @@ async fn world_with(registrations: Registrations) -> World {
         accounts.clone(),
         sessions.clone(),
         tickets.clone(),
+    ));
+    let intro = Arc::new(IntroInForce::new(
+        origin.clone(),
+        IntroText::parse(Some("Aotearoa"), None).unwrap(),
     ));
     let board = Arc::new(PresenceBoard::default());
     let complete = Arc::new(CompleteSignIn::new(
@@ -201,7 +209,7 @@ async fn world_with(registrations: Registrations) -> World {
         request_reset: RequestPasswordReset::new(
             registrations,
             origin.clone(),
-            "Aotearoa".to_owned(),
+            intro.clone(),
             accounts.clone(),
             resets.clone(),
             mailer.clone(),
@@ -264,6 +272,7 @@ async fn world_with(registrations: Registrations) -> World {
         refresh_tokens,
         devices,
         resets,
+        intro,
         board,
     }
 }

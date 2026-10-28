@@ -119,11 +119,23 @@ pub async fn spawn_app_with(configure: impl FnOnce(&mut Config)) -> TestApp {
 /// The application as `configure` changes its configuration, or why it would not start.
 pub async fn try_spawn_app(configure: impl FnOnce(&mut Config)) -> anyhow::Result<TestApp> {
     LazyLock::force(&TRACING);
+    let database = fresh_database().await;
+    let built = build_on(database.clone(), configure).await;
+    if built.is_err() {
+        drop_database(&database).await;
+    }
+    built
+}
+
+/// The application over `database`, which it migrates.
+async fn build_on(
+    database: String,
+    configure: impl FnOnce(&mut Config),
+) -> anyhow::Result<TestApp> {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let domain = format!("127.0.0.1:{port}");
-    let (database_url, database) = fresh_database().await;
-    let (database_url, database_password) = password_apart(&database_url);
+    let (database_url, database_password) = password_apart(&database_url(&database));
     let mail = MailSink::start().await;
     let client = MockServer::start().await;
     let (client_id, redirect_uri) = (
@@ -190,13 +202,7 @@ pub async fn try_spawn_app(configure: impl FnOnce(&mut Config)) -> anyhow::Resul
     configure(&mut config);
     let built = Application::build(config, listener).await;
     std::fs::remove_file(&key).unwrap();
-    let application = match built {
-        Ok(application) => application,
-        Err(refused) => {
-            drop_database(&database).await;
-            return Err(refused);
-        }
-    };
+    let application = built?;
     let stop = application.stop_token();
     let running = tokio::spawn(application.run_until_stopped());
     Ok(TestApp {
@@ -222,18 +228,23 @@ fn test_server() -> String {
 }
 
 /// A database of its own, on the server `DATABASE_URL` names; the application migrates it.
-async fn fresh_database() -> (String, String) {
-    let server = test_server();
+async fn fresh_database() -> String {
     let name = format!("journey_{}", Uuid::new_v4().simple());
-    let mut connection = PgConnection::connect(&server)
+    let mut connection = PgConnection::connect(&test_server())
         .await
         .expect("the test Postgres — `make test-integration` starts it");
     connection
         .execute(format!(r#"CREATE DATABASE "{name}""#).as_str())
         .await
         .unwrap();
+    name
+}
+
+/// The URL of the database `name` on the test server.
+fn database_url(name: &str) -> String {
+    let server = test_server();
     let base = &server[..server.rfind('/').unwrap()];
-    (format!("{base}/{name}"), name)
+    format!("{base}/{name}")
 }
 
 /// As the deploy bundle connects: the password beside the URL, not in it.
@@ -426,9 +437,7 @@ impl TestApp {
     }
 
     async fn connection(&self) -> PgConnection {
-        let server = test_server();
-        let base = &server[..server.rfind('/').unwrap()];
-        PgConnection::connect(&format!("{base}/{}", self.database))
+        PgConnection::connect(&database_url(&self.database))
             .await
             .unwrap()
     }
@@ -444,6 +453,20 @@ impl TestApp {
     /// A statement run straight on the instance's database, for what no route changes.
     pub async fn execute(&self, statement: &str) {
         self.connection().await.execute(statement).await.unwrap();
+    }
+
+    /// Stops the application, then starts another over its database, `configure` changing its
+    /// configuration — an operator's restart, on a new port.
+    pub async fn restart_with(self, configure: impl FnOnce(&mut Config)) -> TestApp {
+        self.stop.cancel();
+        self.running.await.unwrap().unwrap();
+        match build_on(self.database.clone(), configure).await {
+            Ok(restarted) => restarted,
+            Err(refused) => {
+                drop_database(&self.database).await;
+                panic!("the application builds again: {refused:#}");
+            }
+        }
     }
 
     /// Stops the application and waits for it, then drops its database.

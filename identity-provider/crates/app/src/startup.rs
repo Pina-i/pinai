@@ -583,23 +583,35 @@ impl Application {
             Arc::clone(&friend_presence),
         ));
 
-        let intro = domain::identity::InstanceIntro::new(
-            &origin,
+        let configured = domain::identity::IntroText::parse(
             config.instance_name.as_deref(),
             config.instance_description.as_deref(),
         )
         .map_err(|e| anyhow::anyhow!("INSTANCE_NAME or INSTANCE_DESCRIPTION: {e}"))?;
+        let saved_intro: Arc<dyn domain::identity::SavedIntro> =
+            Arc::new(infrastructure::postgres::PgSavedIntro::new(pool.clone()));
+        let saved = saved_intro
+            .get()
+            .await
+            .map_err(|e| anyhow::Error::new(e).context("reading the instance's intro"))?;
+        if let Some(saved) = &saved {
+            report_overridden(saved, &configured);
+        }
+        let intro = Arc::new(application::identity::IntroInForce::new(
+            origin.clone(),
+            domain::identity::intro_in_force(saved, configured),
+        ));
         let request_password_reset = Arc::new(application::auth::RequestPasswordReset::new(
             config.registrations,
             origin.clone(),
-            intro.name().to_owned(),
+            Arc::clone(&intro),
             Arc::clone(&sign_in_accounts),
             Arc::clone(&password_resets),
             reset_mailer,
         ));
         let (reset_requests, reset_queue) = api::background::reset_requests();
         let describe_instance = Arc::new(application::identity::DescribeInstance::new(
-            intro,
+            Arc::clone(&intro),
             config.source_url.clone(),
             config.registrations,
             Arc::clone(&accounts),
@@ -688,6 +700,15 @@ impl Application {
             issue_password_reset: Arc::new(application::auth::IssuePasswordReset::new(
                 Arc::clone(&sign_in_accounts),
                 Arc::clone(&password_resets),
+            )),
+            show_intro: Arc::new(application::identity::ShowIntro::new(
+                Arc::clone(&sign_in_accounts),
+                Arc::clone(&intro),
+            )),
+            edit_intro: Arc::new(application::identity::EditIntro::new(
+                Arc::clone(&sign_in_accounts),
+                saved_intro,
+                intro,
             )),
             request_password_reset: Arc::clone(&request_password_reset),
             reset_requests,
@@ -1266,6 +1287,20 @@ fn report_admin(bootstrap: AdminBootstrap<Email>) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Names each `.env` field the intro an admin saved overrides with something else.
+fn report_overridden(
+    saved: &domain::identity::IntroText,
+    configured: &domain::identity::IntroText,
+) {
+    for field in domain::identity::overridden_settings(saved, configured) {
+        let (variable, noun) = (field.env_var(), field.noun());
+        warn!(
+            "{variable} is not used: an admin changed the {noun} in Settings → Instance. Change \
+             it there, or remove {variable} from .env"
+        );
+    }
 }
 
 async fn check_mail_relay(smtp: Arc<infrastructure::email::SmtpMailer>, stop: CancellationToken) {

@@ -17,11 +17,14 @@ pub use account::{Account, RemoteActor};
 pub use actor_uri::ActorUri;
 pub use address::{Domain, FederatedAddress, host_of};
 pub use handle::{Handle, HandleSuffix, UsernameChoice};
-pub use intro::InstanceIntro;
+pub use intro::{
+    InstanceIntro, IntroError, IntroField, IntroText, intro_in_force, overridden_settings,
+};
 pub use origin::{InstanceOrigin, Recipient};
 pub use ports::{
     Accounts, AccountsError, Bearer, RECENT_SIGN_IN, RemoteActors, RemoteActorsError, Requester,
-    SignatureError, SignatureVerifier, SignedRequest, TokenError, TokenVerifier,
+    SavedIntro, SavedIntroError, SignatureError, SignatureVerifier, SignedRequest, TokenError,
+    TokenVerifier,
 };
 pub use search::SearchQuery;
 pub use source::{PINAI_SOURCE_URL, SourceUrl};
