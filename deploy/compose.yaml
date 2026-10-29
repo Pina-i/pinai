@@ -15,7 +15,7 @@ services:
   # The identity provider: accounts, messages, federation, avatars.
   # PINAI_VERSION in .env picks another version than this minor's latest.
   idp:
-    image: ghcr.io/pina-i/pinai-idp:${PINAI_VERSION:-0.1}
+    image: ghcr.io/pina-i/pinai-idp:${PINAI_VERSION:-0.2}
     restart: unless-stopped
     env_file: .env
     # The only published port. PORT in .env is the port it listens on and is

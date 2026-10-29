@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "activitypub"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1420,7 +1420,7 @@ checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 
 [[package]]
 name = "federation-transport"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "activitypub",
  "ed25519-dalek",
@@ -1856,7 +1856,7 @@ dependencies = [
 
 [[package]]
 name = "http-signatures"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64ct",
  "ed25519-dalek",
@@ -2092,7 +2092,7 @@ dependencies = [
 
 [[package]]
 name = "idp-api"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "activitypub",
  "anyhow",
@@ -2122,7 +2122,7 @@ dependencies = [
 
 [[package]]
 name = "idp-app"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2159,7 +2159,7 @@ dependencies = [
 
 [[package]]
 name = "idp-application"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2175,7 +2175,7 @@ dependencies = [
 
 [[package]]
 name = "idp-connections"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "dashmap",
  "tokio",
@@ -2185,7 +2185,7 @@ dependencies = [
 
 [[package]]
 name = "idp-domain"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2206,7 +2206,7 @@ dependencies = [
 
 [[package]]
 name = "idp-infrastructure"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "activitypub",
  "anyhow",
@@ -2315,7 +2315,7 @@ dependencies = [
 
 [[package]]
 name = "jwt-utils"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64ct",
  "ed25519-dalek",
@@ -2654,7 +2654,7 @@ dependencies = [
 
 [[package]]
 name = "observability"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "tracing",
  "tracing-subscriber",
