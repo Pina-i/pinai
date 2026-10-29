@@ -58,3 +58,7 @@ observability   = { path = "crates/observability" }
 activitypub     = { path = "crates/activitypub" }
 http-signatures = { path = "crates/http-signatures" }
 federation-transport = { path = "crates/federation-transport" }
+
+[profile.release]
+# 13 MiB of symbols off the image; a panic still reports its message and location.
+strip = true
