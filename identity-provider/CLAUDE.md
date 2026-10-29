@@ -149,8 +149,9 @@ connections ──► (no internal deps)
 | `GET /userinfo` | The account (handle, `address`, `actor_uri`, name, avatar, pronouns, bio, `email_verified` — `false` for an admitted account too —, `totp_enabled`, `admin`), its `settings` document, and `privacy: { contact_policy }`. A token outliving its account is `401 invalid_token` |
 | `PATCH /api/profile` | Bearer-auth. Every field on every save: `display_name` trimmed 1–50, `pronouns` ∈ {he, she, non-binary} or empty, `bio` ≤ 190 or empty; `400` names the rule broken. Answers the new userinfo; the friends are told (`friend_profile_updated` here, `Update{Person}` elsewhere) |
 | `PATCH /api/settings` | Bearer-auth. Replace the account-settings sections the body names (`{ appearance: {…} }`), keep the others; returns the merged document and pushes it to the user's sessions as `settings_updated`. Read back on `GET /userinfo` (`settings`). Device-scoped settings never reach the IdP — see `identity-provider/specs/profile-and-settings.md § 2` |
-| `PUT /api/avatar` | Replace the avatar (raw image bytes; 1 byte–2 MiB; jpeg/png/webp/gif): stored, shown, then the other types removed; URL cache-busted with `?v=<unix_secs>`; the friends are told |
+| `PUT /api/avatar` | Replace the avatar (raw image bytes; 1 byte–2 MiB; jpeg/png/webp/gif): stored, shown, then the other types removed; its URL `{issuer}/avatars/{user_id}.{ext}`, cache-busted with `?v=<unix_secs>`; the friends are told |
 | `DELETE /api/avatar` | Clear the avatar, then remove its images; the friends are told |
+| `GET /avatars/{file}` | An avatar, `{user_id}.{ext}`, to anyone — no cookie, no bearer —, streamed from the private avatars bucket; the query (`?v=`) ignored. `Content-Type` from the extension, `Cache-Control: public, max-age=86400`, `nosniff`, `Cross-Origin-Resource-Policy: cross-origin`. A name no avatar has (`domain::profile::AvatarFile`), or no such image, `404` (`identity-provider/specs/profile-and-settings.md § 1` "Avatar storage") |
 | `GET /api/profiles?actor=<actor URI>` | Bearer-auth. The profile card: `actor_uri`, `display_name`, `avatar_url`, `pronouns`, `bio`, `friends_since` (RFC 3339 or null). An account here for anyone here; one elsewhere, from `remote_actors`, only for an accepted friend or an active co-member — any other is `404 User not found`, cached or not. A cache over 24 h old is answered and rediscovered in the background |
 | `POST /register` | JSON self-registration `{ display_name, email, password }`: `201` with the account, its handle derived from the display name, a code mailed, no session. `400` names the rule broken (a 1–50 character name, an address, 8-byte passwords) or `Email already registered` — whatever its case, races included. On an invite-only instance, `403 invitation_required` before anything else: nothing created, nothing mailed (`identity-provider/specs/auth.md § 6`) |
 | `POST /register-and-login` | The register tab's form (403 from another site): the same, carrying the OIDC request on to `/verify-email`; a broken rule goes back to `/login?tab=register&error=<code>`; on an invite-only instance, to `/login?error=invitation_required`, nothing created |
@@ -522,6 +523,10 @@ start; unset or empty, `domain::identity::PINAI_SOURCE_URL`.
 ## Deployment notes
 
 - TLS must be terminated by a reverse proxy (Caddy or Nginx) in production
+- In production (`IDP_ENV=production`) every answer carries `Strict-Transport-Security:
+  max-age=31536000`, unless its handler set one (`api::http::strict_transport_security`);
+  development, plain HTTP on loopback, sends none, which would pin `localhost`
+- Both buckets are private: browsers and peers get avatars and attachments through the IdP only
 - JWT private keys are mounted as a file secret — never stored in env vars or the database
 - Generate keys locally: `openssl genpkey -algorithm ed25519`
 - The `keys/` directory is gitignored

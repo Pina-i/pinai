@@ -1,5 +1,6 @@
 use crate::UserId;
 use crate::identity::{Account, ActorUri, RemoteActor};
+use crate::messaging::ByteStream;
 
 use super::{
     AvatarImage, CardFacts, ImageKind, OwnProfile, ProfileEdit, ProfileError, PublicProfile,
@@ -52,11 +53,14 @@ pub trait ProfileAudience: Send + Sync {
     async fn friends_elsewhere(&self, user: UserId) -> Result<Vec<RemoteActor>, ProfileError>;
 }
 
-/// Where avatars are served from.
+/// Where avatars are kept, on the private network: browsers have them through this instance.
 #[async_trait::async_trait]
 pub trait AvatarStore: Send + Sync {
-    /// Stores the account's image and answers the URL it is served at.
-    async fn put(&self, user: UserId, image: &AvatarImage) -> Result<String, ProfileError>;
+    /// Stores the account's image of its kind, replacing the one held.
+    async fn put(&self, user: UserId, image: &AvatarImage) -> Result<(), ProfileError>;
+    /// The account's image of `kind`; `None` when there is none.
+    async fn open(&self, user: UserId, kind: ImageKind)
+    -> Result<Option<ByteStream>, ProfileError>;
     /// Removes the account's images, but for the one of `keep`'s kind.
     async fn remove(&self, user: UserId, keep: Option<ImageKind>) -> Result<(), ProfileError>;
 }

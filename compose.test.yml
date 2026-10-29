@@ -1,6 +1,6 @@
-# Throwaway services for the Docker-gated tests — never an instance's database or Redis.
-# `make test-integration` starts them under the `pinai-test` project; data lives in RAM.
-# The default port stays clear of Alice's (5432) and Bob's (5433) dev Postgres.
+# Throwaway services for the Docker-gated tests — never an instance's database, Redis or
+# object store. `make test-integration` starts them under the `pinai-test` project; data lives
+# in RAM. The default ports stay clear of Alice's and Bob's dev services.
 services:
   postgres-test:
     image: postgres:18
@@ -23,6 +23,21 @@ services:
     ports: ["${TEST_REDIS_PORT:-56479}:6379"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+
+  # The version the deploy bundle runs. RustFS runs as user 10001, which must own its tmpfs.
+  rustfs-test:
+    image: rustfs/rustfs:1.0.3
+    environment:
+      RUSTFS_ACCESS_KEY: test
+      RUSTFS_SECRET_KEY: test-secret
+      RUSTFS_OBS_LOG_DIRECTORY: ""
+    ports: ["${TEST_RUSTFS_PORT:-59000}:9000"]
+    tmpfs: ["/data:uid=10001,gid=10001"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/health"]
       interval: 1s
       timeout: 3s
       retries: 30

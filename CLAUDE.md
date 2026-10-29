@@ -8,7 +8,7 @@ Discord alternative. One Cargo workspace spans every Rust crate here.
 ```
 compose.yaml               # the platform — `docker compose up` from here
 .env.example               # one deployment unit, one env template
-deploy/                    # hosting an instance: compose.yaml (the published image behind Caddy), .env.example
+deploy/                    # hosting an instance: compose.yaml (the published image, for the hoster's proxy), .env.example
 scripts/                   # repository checks `make check` runs; not shipped
 specs/                     # platform-wide specs; service specs live in the service
 crates/                    # shared libraries (was the core-libs repo)
@@ -93,11 +93,11 @@ src/verify/tests.rs  # starts with `use super::*;`
 A crate root (`lib.rs`, `mod.rs`) puts its tests beside it at `src/tests.rs`.
 Integration tests that drive a crate from outside still belong in `tests/`.
 
-A test that needs Docker (Postgres, Redis) sits in a `[[test]]` target with
+A test that needs Docker (Postgres, Redis, RustFS) sits in a `[[test]]` target with
 `required-features = ["integration"]`, so `make check` never needs Docker; `make
-test-integration` runs it against the throwaway Postgres and Redis of `compose.test.yml`. The
-identity provider's end-to-end journeys — whole applications spawned on loopback ports — are
-`identity-provider/crates/app/tests/api`.
+test-integration` runs it against the throwaway Postgres, Redis and RustFS of
+`compose.test.yml`. The identity provider's end-to-end journeys — whole applications spawned
+on loopback ports — are `identity-provider/crates/app/tests/api`.
 The test tiers and how to write each are in `.claude/skills/rust-backend-architecture`.
 
 ## Commands
@@ -108,7 +108,7 @@ Run from the repo root:
 |---|---|
 | `make check` | fmt-check + `readme-compose` + clippy `-D warnings` (every target, every feature) + tests — no Docker |
 | `make readme-compose` | the root `README.md` shows `deploy/compose.yaml` verbatim: change the file, then copy it into the README |
-| `make test-integration` | throwaway Postgres and Redis (`compose.test.yml`, ports 55432 and 56479), then every test including the Docker-gated ones |
+| `make test-integration` | throwaway Postgres, Redis and RustFS (`compose.test.yml`, ports 55432, 56479 and 59000), then every test including the Docker-gated ones |
 | `make check-all` | both — the gate before merging |
 | `make fmt` | rustfmt the workspace |
 | `make alice` / `make bob` | run a full dev instance |

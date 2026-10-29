@@ -63,7 +63,8 @@ use application::presence::{
     StartTyping, WatchConversation,
 };
 use application::profile::{
-    ClearAvatar, EditProfile, ReadProfile, ReadUserinfo, ReceiveProfileUpdate, SetAvatar,
+    ClearAvatar, EditProfile, ReadProfile, ReadUserinfo, ReceiveProfileUpdate, ServeAvatar,
+    SetAvatar,
 };
 use application::settings::UpdateSettings;
 use application::social::{
@@ -72,6 +73,7 @@ use application::social::{
     SendFriendRequest, SetContactPolicy, Unblock, Unfriend,
 };
 use axum::extract::{DefaultBodyLimit, FromRef};
+use axum::middleware;
 use axum::routing::{delete, get, patch, post, put};
 use axum::{Json, Router};
 use axum_extra::extract::cookie::Key;
@@ -134,6 +136,9 @@ pub struct AppState {
     /// Mounts `/dev/*`: a development instance only.
     #[from_ref(skip)]
     pub dev_routes: bool,
+    /// Sends `Strict-Transport-Security` on every answer: production, served over HTTPS only.
+    #[from_ref(skip)]
+    pub hsts: bool,
     pub signatures: Arc<dyn SignatureVerifier>,
     pub origin: InstanceOrigin,
     /// What the instance says of itself, to NodeInfo and on the sign-in pages.
@@ -161,6 +166,7 @@ pub struct AppState {
     pub edit_profile: Arc<EditProfile>,
     pub set_avatar: Arc<SetAvatar>,
     pub clear_avatar: Arc<ClearAvatar>,
+    pub serve_avatar: Arc<ServeAvatar>,
     pub send_friend_request: Arc<SendFriendRequest>,
     pub list_incoming_requests: Arc<ListIncomingRequests>,
     pub accept_friend_request: Arc<AcceptFriendRequest>,
@@ -227,11 +233,12 @@ pub struct AppState {
 
 pub fn router(state: AppState) -> Router {
     let dev_routes = state.dev_routes;
+    let hsts = state.hsts;
     // Every file of an upload at its largest, plus headroom for the multipart framing.
     let upload_limit = state.attachment_limits.max_files
         * usize::try_from(state.attachment_limits.max_bytes).unwrap_or(usize::MAX)
         + 1024 * 1024;
-    Router::new()
+    let router = Router::new()
         .route("/health", get(|| async { Json(json!({ "ok": true })) }))
         .route("/.well-known/webfinger", get(actors::web_finger))
         .route("/actor", get(actors::instance_actor))
@@ -346,6 +353,10 @@ pub fn router(state: AppState) -> Router {
             "/api/avatar",
             put(profile::put_avatar).delete(profile::delete_avatar),
         )
+        .route(
+            &format!("{}{{file}}", domain::profile::AVATARS_PATH_PREFIX),
+            get(profile::avatar),
+        )
         .route("/ws", get(ws::upgrade))
         .route("/api/friends", get(social::friends))
         .route("/api/friends/request", post(social::send_request))
@@ -394,5 +405,10 @@ pub fn router(state: AppState) -> Router {
         })
         .with_state(state)
         .layer(http::cors())
-        .layer(http::trace())
+        .layer(http::trace());
+    if hsts {
+        router.layer(middleware::map_response(http::strict_transport_security))
+    } else {
+        router
+    }
 }

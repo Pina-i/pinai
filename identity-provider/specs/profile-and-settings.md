@@ -3,7 +3,8 @@
 ## 1. Profile editing API
 
 An account edits its name, pronouns, bio and avatar through three Bearer-auth endpoints, and reads
-them back on `/userinfo`; it reads another account's on `/api/profiles` (§ 1, Profile card):
+them back on `/userinfo`; it reads another account's on `/api/profiles` (§ 1, Profile card); and
+anyone loads an avatar at `/avatars/{user_id}.{ext}` (§ 1, Avatar storage):
 
 | Endpoint | Body | Answer |
 |---|---|---|
@@ -11,6 +12,7 @@ them back on `/userinfo`; it reads another account's on `/api/profiles` (§ 1, P
 | `PATCH /api/profile` | `{ display_name, pronouns?, bio? }` | The new `/userinfo` document. |
 | `PUT /api/avatar` | the raw image, typed by its `Content-Type`: `image/jpeg`, `image/png`, `image/webp` or `image/gif` | `{ avatar_url }` |
 | `DELETE /api/avatar` | — | `204` |
+| `GET /avatars/{user_id}.{ext}` | — | The image, to anyone, without a credential (Avatar storage). |
 | `GET /api/profiles?actor={actor URI}` | — | The card: `{ actor_uri, display_name, avatar_url, pronouns, bio, friends_since }`. |
 
 ### Profile rules
@@ -52,17 +54,47 @@ more than 24 h old is answered as cached, and the account is discovered again in
 
 ### Avatar storage
 
-The avatars bucket is **public-read** (`s3:GetObject` for `Principal: *`), unlike the attachments
-bucket. The IdP keeps one object per account and type, `{user_id}.{ext}`, and stores its public
-URL on `users.avatar_url`, versioned by the upload time:
+The IdP keeps one object per account and type in the avatars bucket, named `{user_id}.{ext}`
+(`jpg`, `png`, `webp` or `gif`), and serves it itself. The bucket is **private**, as the
+attachments one is: no browser or peer reaches the object store, and at startup the IdP removes
+any policy the bucket has. An avatar's URL is the IdP's own, versioned by the upload time, and is
+stored on `users.avatar_url`:
 
 ```
-{STORAGE_PUBLIC_URL}/avatars/{user_id}.{ext}?v={unix_secs}
+{issuer}/avatars/{user_id}.{ext}?v={unix_secs}
 ```
 
 The key is stable, so without `?v` a browser keeps the old bytes after a re-upload; the version
 travels verbatim through `Update{Person}` to peers' `remote_actors.avatar_url` and
 `friendships.friend_avatar_url`.
+
+```mermaid
+sequenceDiagram
+    participant A as Alice's app
+    participant IdP as idp.alice.com
+    participant S3 as RustFS (private)
+    participant F as A friend's app, any instance
+    A->>IdP: PUT /api/avatar (Bearer)
+    IdP->>S3: put {user_id}.png
+    IdP-->>A: avatar_url = https://idp.alice.com/avatars/{user_id}.png?v=…
+    F->>IdP: GET /avatars/{user_id}.png?v=… (no credential)
+    IdP->>S3: get {user_id}.png
+    IdP-->>F: 200, the bytes streamed
+```
+
+`GET /avatars/{user_id}.{ext}` — and `HEAD` — answers anyone, with no cookie and no bearer token:
+browsers here and on other instances load it in an `<img>`. The query is ignored, so `?v=` of any
+value names the image stored. The name must be an account id as the IdP writes it (lowercase,
+hyphenated) and one of the four extensions; any other name, or an image not stored, is `404`. The
+image is streamed through the IdP with:
+
+| Header | Value |
+|---|---|
+| `Content-Type` | the image's type, from its extension |
+| `Content-Length` | the size, when the store gives it |
+| `Cache-Control` | `public, max-age=86400` |
+| `X-Content-Type-Options` | `nosniff` |
+| `Cross-Origin-Resource-Policy` | `cross-origin`, since other instances' web apps show it |
 
 The account never points at a removed image. An upload is stored, then shown on
 `users.avatar_url`, and only then are the account's images of the other types removed; a delete
@@ -195,7 +227,7 @@ nobody.
     "id": "https://idp.bob.com/users/bob_k2m9x",
     "preferredUsername": "bob_k2m9x",
     "name": "New Bob",
-    "icon": { "type": "Image", "url": "https://s3.bob.com/avatars/<id>.webp?v=1790762965" },
+    "icon": { "type": "Image", "url": "https://idp.bob.com/avatars/<id>.webp?v=1790762965" },
     "summary": "Kia ora &lt;3<br>Wellington",
     "pronouns": "he"
   }
@@ -235,7 +267,7 @@ An `Update{Person}` at `POST /users/:username/inbox`, past the three inbound che
   "data": {
     "actorUri": "https://idp.bob.com/users/bob_k2m9x",
     "displayName": "New Bob",
-    "avatarUrl": "https://s3.bob.com/avatars/<id>.webp?v=1790762965"
+    "avatarUrl": "https://idp.bob.com/avatars/<id>.webp?v=1790762965"
   }
 }
 ```

@@ -59,7 +59,7 @@ uuid     = { workspace = true }
 wiremock = { workspace = true }
 
 [features]
-# Tests that need Docker (Postgres); run by `make test-integration`.
+# Tests that need Docker (Postgres, RustFS); run by `make test-integration`.
 integration = []
 
 # Client documents, served by wiremock: no Docker.
@@ -70,4 +70,9 @@ path = "tests/clients/main.rs"
 [[test]]
 name              = "postgres"
 path              = "tests/postgres/main.rs"
+required-features = ["integration"]
+
+[[test]]
+name              = "storage"
+path              = "tests/storage/main.rs"
 required-features = ["integration"]

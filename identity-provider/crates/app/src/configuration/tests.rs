@@ -20,7 +20,6 @@ fn config() -> Config {
         storage_secret_key: None,
         storage_bucket_avatars: "avatars".into(),
         storage_bucket_attachments: "attachments".into(),
-        storage_public_url: None,
         attachment_max_files_per_message: 4,
         attachment_max_byte_size: 10 * 1024 * 1024,
         attachment_url_ttl: Duration::from_secs(300),

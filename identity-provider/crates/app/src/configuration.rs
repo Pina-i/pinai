@@ -60,8 +60,6 @@ pub struct Config {
     pub storage_secret_key: Option<String>,
     pub storage_bucket_avatars: String,
     pub storage_bucket_attachments: String,
-    /// Externally-reachable base URL for building public avatar URLs.
-    pub storage_public_url: Option<String>,
 
     // ── DM attachments ────────────────────────────────────────────────────
     /// Maximum number of attachments allowed in a single message.
@@ -216,7 +214,6 @@ impl Config {
                 .unwrap_or_else(|| "avatars".into()),
             storage_bucket_attachments: env_var("STORAGE_BUCKET_ATTACHMENTS")?
                 .unwrap_or_else(|| "attachments".into()),
-            storage_public_url: env_var("STORAGE_PUBLIC_URL")?,
 
             attachment_max_files_per_message: parse_env_usize(
                 "ATTACHMENT_MAX_FILES_PER_MESSAGE",

@@ -13,8 +13,8 @@ CREATE TABLE users (
                                             -- hoku_xk9mp@idp.alice.com (identity-provider/specs/auth.md § 2)
   display_name  TEXT NOT NULL,              -- typed at sign-up, e.g. "Hōkū"
                                             -- freeform, no uniqueness constraint, shown in UI
-  avatar_url    TEXT,                       -- public RustFS URL with `?v=<unix_secs>` cache-bust
-                                            -- (avatars bucket is public-read; see identity-provider/specs/profile-and-settings.md § 1)
+  avatar_url    TEXT,                       -- `{issuer}/avatars/{id}.{ext}?v=<unix_secs>`: served by
+                                            -- the IdP from its private bucket (identity-provider/specs/profile-and-settings.md § 1)
   pronouns      TEXT,                       -- closed enum, see CHECK below
   bio           TEXT,                       -- ≤ 190 chars, freeform; enforced server-side
     email         TEXT NOT NULL UNIQUE,       -- used by OIDC; kept lowercase, and unique

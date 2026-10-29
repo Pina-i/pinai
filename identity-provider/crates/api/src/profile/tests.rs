@@ -5,6 +5,7 @@ use domain::identity::ActorUri;
 use domain::identity::testing::remote_actor;
 use domain::profile::testing::{ProfileSeeds, own_profile};
 use domain::profile::{ImageKind, OwnProfile, Profiles, Pronouns};
+use http_body_util::BodyExt;
 use serde_json::json;
 use time::format_description::well_known::Rfc3339;
 
@@ -22,7 +23,7 @@ fn upload(app: &TestApp, user: UserId, content_type: &str) -> Request<Body> {
         .uri("/api/avatar")
         .header(header::AUTHORIZATION, format!("Bearer {}", app.token(user)))
         .header(header::CONTENT_TYPE, content_type)
-        .body(Body::from(&b"\x89PNG\r\n"[..]))
+        .body(Body::from(PNG))
         .unwrap()
 }
 
@@ -179,7 +180,10 @@ async fn an_uploaded_avatar_is_answered_with_its_url() {
     assert_eq!(status, StatusCode::OK, "{body}");
     let url = body["avatar_url"].as_str().unwrap();
     assert!(
-        url.starts_with(&format!("http://s3.test/avatars/{}.webp?v=", alice.id)),
+        url.starts_with(&format!(
+            "http://localhost:8080/avatars/{}.webp?v=",
+            alice.id
+        )),
         "{url}"
     );
     assert_eq!(app.profile.avatars.stored(alice.id), vec![ImageKind::Webp]);
@@ -213,6 +217,100 @@ async fn a_deleted_avatar_is_no_longer_shown() {
     assert_eq!(status, StatusCode::NO_CONTENT);
     let shown = app.profile.profiles.find(alice.id).await.unwrap().unwrap();
     assert_eq!(shown.avatar_url, None);
+}
+
+const PNG: &[u8] = b"\x89PNG\r\n";
+
+/// The path and query of the avatar `/userinfo` shows, as a browser would ask for it.
+async fn shown_avatar(app: &TestApp, user: UserId) -> String {
+    let (_, userinfo) = app.call(Method::GET, "/userinfo", Some(user), None).await;
+    let url = userinfo["avatar_url"].as_str().expect("an avatar shown");
+    url.strip_prefix("http://localhost:8080")
+        .expect("served by the instance")
+        .to_owned()
+}
+
+fn anonymous(method: Method, uri: &str) -> Request<Body> {
+    Request::builder()
+        .method(method)
+        .uri(uri)
+        .body(Body::empty())
+        .unwrap()
+}
+
+#[tokio::test]
+async fn an_uploaded_avatar_is_served_at_the_url_userinfo_gives() {
+    let alice = own_profile("alice");
+    let app = app_with(&alice).await;
+    app.send(upload(&app, alice.id, "image/png")).await;
+    let url = shown_avatar(&app, alice.id).await;
+
+    let got = app.respond(anonymous(Method::GET, &url)).await;
+    let head = app.respond(anonymous(Method::HEAD, &url)).await;
+
+    for response in [&got, &head] {
+        assert_eq!(response.status(), StatusCode::OK);
+        let headers = response.headers();
+        assert_eq!(headers[header::CONTENT_TYPE], "image/png");
+        assert_eq!(headers[header::CONTENT_LENGTH], PNG.len().to_string());
+        assert_eq!(headers[header::CACHE_CONTROL], "public, max-age=86400");
+        assert_eq!(headers[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
+        assert_eq!(headers["cross-origin-resource-policy"], "cross-origin");
+        assert!(!headers.contains_key(header::SET_COOKIE));
+    }
+    assert_eq!(got.into_body().collect().await.unwrap().to_bytes(), PNG);
+    assert!(
+        head.into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn any_version_of_an_avatars_url_names_the_same_image() {
+    let alice = own_profile("alice");
+    let app = app_with(&alice).await;
+    app.send(upload(&app, alice.id, "image/png")).await;
+    let path = format!("/avatars/{}.png", alice.id);
+
+    for uri in [
+        path.clone(),
+        format!("{path}?v=1"),
+        format!("{path}?v=9999999999"),
+        format!("{path}?v=old&size=large"),
+    ] {
+        let response = app.respond(anonymous(Method::GET, &uri)).await;
+
+        assert_eq!(response.status(), StatusCode::OK, "{uri}");
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(bytes, PNG, "{uri}");
+    }
+}
+
+#[tokio::test]
+async fn a_removed_avatar_and_a_name_no_avatar_has_are_not_found() {
+    let alice = own_profile("alice");
+    let app = app_with(&alice).await;
+    app.send(upload(&app, alice.id, "image/png")).await;
+    let removed = shown_avatar(&app, alice.id).await;
+    app.call(Method::DELETE, "/api/avatar", Some(alice.id), None)
+        .await;
+
+    for uri in [
+        removed,
+        format!("/avatars/{}.svg", alice.id),
+        format!("/avatars/{}", alice.id),
+        "/avatars/alice.png".to_owned(),
+        "/avatars/%FF.png".to_owned(),
+    ] {
+        let (status, body) = app.send(anonymous(Method::GET, &uri)).await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND, "{uri}");
+        assert_eq!(body["error_description"], "Avatar not found", "{uri}");
+    }
 }
 
 fn card_of(actor: &ActorUri) -> String {

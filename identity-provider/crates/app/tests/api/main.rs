@@ -2,6 +2,7 @@
 //! `make test-integration`.
 
 mod admin;
+mod avatars;
 mod blocking;
 mod federation;
 mod forgot_password;

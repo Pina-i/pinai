@@ -8,7 +8,7 @@ pub use error::StorageError;
 
 use anyhow::Context;
 use domain::messaging::{ByteStream, ObjectStore, ObjectStoreError};
-use domain::profile::{AvatarImage, AvatarStore, ImageKind, ProfileError};
+use domain::profile::{AvatarFile, AvatarImage, AvatarStore, ImageKind, ProfileError};
 use domain::{AttachmentId, UserId};
 
 /// `None` when no object storage is configured: every call then fails, as uploads cannot work.
@@ -45,15 +45,11 @@ impl ObjectStore for S3ObjectStore {
     }
 
     async fn get(&self, id: AttachmentId) -> Result<ByteStream, ObjectStoreError> {
-        let (chunks, length) = self
+        Ok(self
             .client()?
             .fetch_attachment_stream(&id.to_string())
             .await
-            .context("read an attachment's bytes")?;
-        Ok(ByteStream {
-            length: length.and_then(|n| u64::try_from(n).ok()),
-            chunks: Box::pin(chunks),
-        })
+            .context("read an attachment's bytes")?)
     }
 
     async fn delete(&self, id: AttachmentId) -> Result<(), ObjectStoreError> {
@@ -65,7 +61,7 @@ impl ObjectStore for S3ObjectStore {
     }
 }
 
-/// Avatars, in the public-read bucket browsers load them from.
+/// Avatars, one object per account and kind, keyed by its file name.
 pub struct S3AvatarStore {
     storage: Option<StorageClient>,
 }
@@ -85,20 +81,42 @@ impl S3AvatarStore {
 
 #[async_trait::async_trait]
 impl AvatarStore for S3AvatarStore {
-    async fn put(&self, user: UserId, image: &AvatarImage) -> Result<String, ProfileError> {
-        let url = self
-            .client()?
-            .upload_avatar(user.as_uuid(), image.bytes().to_vec(), image.kind().mime())
+    async fn put(&self, user: UserId, image: &AvatarImage) -> Result<(), ProfileError> {
+        let kind = image.kind();
+        self.client()?
+            .upload_avatar(
+                &AvatarFile { user, kind }.to_string(),
+                image.bytes().to_vec(),
+                kind.mime(),
+            )
             .await
             .context("store an avatar")?;
-        Ok(url)
+        Ok(())
+    }
+
+    async fn open(
+        &self,
+        user: UserId,
+        kind: ImageKind,
+    ) -> Result<Option<ByteStream>, ProfileError> {
+        Ok(self
+            .client()?
+            .fetch_avatar_stream(&AvatarFile { user, kind }.to_string())
+            .await
+            .context("read an avatar")?)
     }
 
     async fn remove(&self, user: UserId, keep: Option<ImageKind>) -> Result<(), ProfileError> {
-        self.client()?
-            .delete_avatar(user.as_uuid(), keep.map(ImageKind::mime))
-            .await
-            .context("remove an account's avatars")?;
+        let client = self.client()?;
+        for kind in ImageKind::ALL
+            .into_iter()
+            .filter(|kind| Some(*kind) != keep)
+        {
+            client
+                .delete_avatar(&AvatarFile { user, kind }.to_string())
+                .await
+                .context("remove an account's avatars")?;
+        }
         Ok(())
     }
 }

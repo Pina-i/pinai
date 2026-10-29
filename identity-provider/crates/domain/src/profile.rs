@@ -11,7 +11,9 @@ mod ports;
 pub mod testing;
 mod views;
 
-pub use avatar::{AvatarImage, ImageKind, published_url};
+pub use avatar::{
+    AVATARS_PATH_PREFIX, AvatarFile, AvatarImage, ImageKind, avatar_url, published_url,
+};
 pub use card::{CardFacts, ProfileCard};
 pub use edit::{Bio, DisplayName, ProfileEdit, Pronouns};
 pub use error::ProfileError;

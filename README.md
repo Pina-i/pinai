@@ -10,7 +10,7 @@ the backend services of the platform in a single Cargo workspace:
 | `crates/` | Shared libraries: `jwt-utils`, `http-signatures`, `activitypub`, `observability`, `federation-transport` |
 | `specs/` | Platform-wide specifications (architecture, federation authentication) |
 | `compose.yaml` | The development stack for Docker Compose |
-| `deploy/` | Hosting an instance: `compose.yaml`, the published image behind Caddy, and `.env.example` — see `deploy/README.md` |
+| `deploy/` | Hosting an instance: `compose.yaml`, the published image on one port for your reverse proxy, and `.env.example` — see `deploy/README.md` |
 
 The web and desktop clients live in their own repository,
 [`Pina-i/pinai-client`](https://github.com/Pina-i/pinai-client), and talk to these
@@ -24,9 +24,10 @@ internal architecture.
 
 ## Install your own instance
 
-An instance is the identity provider with its Postgres, Redis and RustFS (file
-storage), and Caddy in front of them for HTTPS, all from the published image
-`ghcr.io/pina-i/pinai-idp`. Its users sign in with the Pīna'i web or desktop app,
+An instance is the identity provider, from the published image
+`ghcr.io/pina-i/pinai-idp`, with its Postgres, Redis and RustFS (file storage). It
+answers in plain HTTP on one port of the server, and your reverse proxy serves it
+over HTTPS at its domain. Its users sign in with the Pīna'i web or desktop app,
 which reach any instance. The web app can be hosted too, beside the instance or on
 a server of its own, from the published image `ghcr.io/pina-i/pinai-web`:
 [Host the web app](https://github.com/Pina-i/pinai-client#host-the-web-app) has its
@@ -34,14 +35,16 @@ a server of its own, from the published image `ghcr.io/pina-i/pinai-web`:
 
 You need:
 
-- a Linux server, amd64 or arm64, with Docker and its Compose plugin, 2.23.1 or later;
-- a domain whose DNS (A / AAAA records) points at the server, with ports 80 and 443
-  open. It becomes part of every account's address (`alice_xk9mp@your.domain`), so
-  it cannot change later;
+- a Linux server, amd64 or arm64, with Docker and its Compose plugin;
+- a domain whose DNS (A / AAAA records) points at your reverse proxy. It becomes
+  part of every account's address (`alice_xk9mp@your.domain`), so it cannot change
+  later;
+- a reverse proxy that serves the domain over HTTPS, with its certificate: Caddy,
+  nginx, Traefik…;
 - for a public instance, an SMTP relay, over STARTTLS (port 587) or TLS (port 465):
   sign-up codes are mailed. `deploy/README.md` lists some, with their settings.
 
-Then three steps on the server.
+Then four steps.
 
 **1. `compose.yaml`.** Take it from the release bundle, which also carries
 `.env.example` and a `README.md`, `deploy/README.md` here:
@@ -51,13 +54,12 @@ curl -L https://github.com/Pina-i/pinai/releases/latest/download/pinai-deploy.ta
 cd pinai
 ```
 
-Or save this file as `compose.yaml` in an empty directory. It is the bundle's,
-Caddy's configuration included:
+Or save this file as `compose.yaml` in an empty directory. It is the bundle's:
 
 <!-- deploy/compose.yaml -->
 ```yaml
-# A Pīna'i instance from the published image, behind Caddy for HTTPS.
-# Needs Docker Compose 2.23.1 or later, for Caddy's configuration inlined at the end.
+# A Pīna'i instance from the published image, in plain HTTP on one port: your
+# reverse proxy serves it over HTTPS at DOMAIN.
 # Its settings are in .env beside it. Everything it stores is under ./data,
 # its secrets in ./data/secrets, generated at the first start.
 name: pinai
@@ -70,36 +72,21 @@ x-logging: &logging
     max-file: "3"
 
 services:
-  # HTTPS in front of the identity provider and RustFS; gets and renews the
-  # certificate. Its ports are the only published ones (443/udp: HTTP/3).
-  caddy:
-    image: caddy:2.11-alpine
-    restart: unless-stopped
-    ports:
-      - "80:80"
-      - "443:443"
-      - "443:443/udp"
-    environment:
-      DOMAIN: ${DOMAIN:?set it in .env}
-    configs:
-      - source: caddyfile
-        target: /etc/caddy/Caddyfile
-    volumes:
-      - ./data/caddy/data:/data
-      - ./data/caddy/config:/config
-    depends_on:
-      - idp
-    logging: *logging
-
-  # The identity provider: accounts, messages, federation.
+  # The identity provider: accounts, messages, federation, avatars.
   # PINAI_VERSION in .env picks another version than this minor's latest.
   idp:
     image: ghcr.io/pina-i/pinai-idp:${PINAI_VERSION:-0.1}
     restart: unless-stopped
     env_file: .env
+    # The only published port. PORT in .env is the port it listens on and is
+    # published on, on loopback unless BIND_ADDRESS says otherwise: ports Docker
+    # publishes skip the host's firewall.
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${PORT:-8080}:${PORT:-8080}"
     environment:
       IDP_ENV: production
-      PORT: "8080"
+      PORT: ${PORT:-8080}
+      DOMAIN: ${DOMAIN:?set it in .env}
       DATABASE_URL: postgres://pinai@postgres:5432/pinai
       DATABASE_PASSWORD_FILE: /run/secrets/postgres/password
       SESSION_SECRET_FILE: /run/secrets/session_secret
@@ -109,8 +96,6 @@ services:
       STORAGE_ENDPOINT: http://rustfs:9000
       STORAGE_ACCESS_KEY: pinai
       STORAGE_SECRET_KEY_FILE: /run/secrets/storage_secret_key
-      # Avatars are served by RustFS, through Caddy's /avatars/ route.
-      STORAGE_PUBLIC_URL: https://${DOMAIN}
     volumes:
       - ./data/secrets:/run/secrets:ro
     depends_on:
@@ -238,30 +223,6 @@ services:
       - ./data/secrets:/secrets
       - ./data/rustfs:/rustfs
     logging: *logging
-
-# Caddy's configuration. $$ is Compose's escape for $: Caddy reads {$DOMAIN}
-# from its own environment.
-configs:
-  caddyfile:
-    content: |
-      {$$DOMAIN} {
-      	header Strict-Transport-Security "max-age=31536000"
-
-      	# Avatars are public objects in RustFS. Only reads reach it, and without the
-      	# query string, so no S3 sub-resource (?acl, ?policy…) can be named from outside.
-      	@avatar {
-      		method GET HEAD
-      		path /avatars/*
-      	}
-      	handle @avatar {
-      		rewrite * {path}?
-      		reverse_proxy rustfs:9000
-      	}
-
-      	handle {
-      		reverse_proxy idp:8080
-      	}
-      }
 ```
 
 **2. `.env`**, beside it, holds what only you decide. An invite-only instance, the
@@ -305,19 +266,27 @@ passwords, so make it yours alone: `chmod 600 .env`.
 
 ```bash
 docker compose up -d
-docker compose logs -f idp   # "listening" once the database is migrated
+docker compose logs -f idp
 ```
 
 At the first start, the `init` service generates the instance's secrets in
 `./data/secrets`: its signing key, the session secret, the email pepper, and the
-database and storage passwords. `https://your.domain/.well-known/nodeinfo` answers
-once the database is migrated and Caddy has its certificate. On an invite-only
-instance, sign in to the Pīna'i web app with `ADMIN_EMAIL` and `ADMIN_PASSWORD`,
-then remove `ADMIN_PASSWORD` from `.env`: the instance warns at each start while it
-is there.
+database and storage passwords. The identity provider logs `listening`, then
+migrates the database; once that is done, `curl http://127.0.0.1:8080/.well-known/nodeinfo`
+answers (at your `BIND_ADDRESS` and `PORT`, if set).
 
-Upgrades, backups, the mail relay and running behind your own reverse proxy are in
-[`deploy/README.md`](deploy/README.md), which the bundle carries too.
+**4. Put your proxy in front.** It serves your domain over HTTPS and sends every
+request to `127.0.0.1:8080`, keeping its `Host` header; `PORT` in `.env` changes the
+port. [`deploy/README.md`](deploy/README.md#put-your-proxy-in-front) says what else it
+must do, with Caddy and nginx examples. Then `https://your.domain/.well-known/nodeinfo`
+answers.
+
+On an invite-only instance, sign in to the Pīna'i web app with `ADMIN_EMAIL` and
+`ADMIN_PASSWORD`, then remove `ADMIN_PASSWORD` from `.env`: the instance warns at
+each start while it is there.
+
+Upgrades, backups and the mail relay are in [`deploy/README.md`](deploy/README.md),
+which the bundle carries too.
 
 > **Back up `./data`.** It holds everything that cannot be recreated: the database,
 > the files, and in `./data/secrets` the instance key and secrets. A lost key breaks
@@ -629,7 +598,7 @@ All `make` targets are run from the repo root.
 | `make lint` | `cargo clippy --workspace --all-targets --all-features -- -D warnings` |
 | `make check` | `fmt-check` + `readme-compose` + `lint` + `cargo test --workspace` — no Docker; run before every commit |
 | `make readme-compose` | Check that the `compose.yaml` this README shows is `deploy/compose.yaml`: change the file, then copy it into the README |
-| `make test-integration` | Throwaway Postgres and Redis (`compose.test.yml`), then every test, the Docker-gated ones included |
+| `make test-integration` | Throwaway Postgres, Redis and RustFS (`compose.test.yml`), then every test, the Docker-gated ones included |
 | `make check-all` | `check` + `test-integration` — what CI runs, the gate before merging |
 
 ### Cargo
@@ -661,7 +630,7 @@ The main groups:
 - **Admin** — `ADMIN_EMAIL`, `ADMIN_PASSWORD`: the first admin account, created at startup when no account has that address, never written over
 - **Web app** — `WEB_APP_ORIGIN`: overrides, in any environment, the built-in address of the official web app, where someone joining by invitation lands signed in and the reset pages' Sign in links go (default `http://localhost:5173` in development)
 - **Redis** — `REDIS_PORT`, from which `REDIS_URL` is built (event streams and presence pub-sub)
-- **Object storage** — `RUSTFS_PORT`, from which `STORAGE_ENDPOINT` is built, `STORAGE_ACCESS_KEY`, `STORAGE_SECRET_KEY`, optional `STORAGE_PUBLIC_URL` and bucket names
+- **Object storage** — `RUSTFS_PORT`, from which `STORAGE_ENDPOINT` is built, `STORAGE_ACCESS_KEY`, `STORAGE_SECRET_KEY`, optional bucket names
 - **Email** — `SMTP_*` (in production, `SMTP_PORT` 587 and `SMTP_TLS` `tls` on port 465, `starttls` on any other, when unset; `SMTP_FROM` no-reply at the domain), `EMAIL_OTP_PEPPER`, `MAILPIT_*` ports
 - **Chat server** — `CHAT_PORT`, `CHAT_POSTGRES_DB`, `IDP_ISSUER`
 - **Logging** — `RUST_LOG`, `LOG_FORMAT=json` for structured logs

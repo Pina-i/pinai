@@ -80,6 +80,17 @@ pub fn an_admin(config: &mut Config) {
     config.admin_password = Some(PASSWORD.into());
 }
 
+/// Object storage on the test RustFS, in buckets of the instance's own.
+pub fn with_storage(config: &mut Config) {
+    let suffix = Uuid::new_v4().simple();
+    config.storage_endpoint =
+        Some(std::env::var("TEST_STORAGE_URL").unwrap_or_else(|_| "http://localhost:59000".into()));
+    config.storage_access_key = Some("test".into());
+    config.storage_secret_key = Some("test-secret".into());
+    config.storage_bucket_avatars = format!("avatars-{suffix}");
+    config.storage_bucket_attachments = format!("attachments-{suffix}");
+}
+
 /// An invite-only instance, and its admin.
 pub fn invite_only_with_admin(config: &mut Config) {
     config.registrations = domain::auth::Registrations::Invite;
@@ -175,7 +186,6 @@ async fn build_on(
         storage_secret_key: None,
         storage_bucket_avatars: "avatars".into(),
         storage_bucket_attachments: "attachments".into(),
-        storage_public_url: None,
         attachment_max_files_per_message: 5,
         attachment_max_byte_size: 10 * 1024 * 1024,
         attachment_url_ttl: Duration::from_secs(3600),

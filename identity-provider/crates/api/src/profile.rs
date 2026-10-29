@@ -4,21 +4,23 @@
 use std::sync::Arc;
 
 use application::profile::{
-    ClearAvatar, EditProfile, ReadProfile, ReadUserinfo, SetAvatar, Userinfo,
+    ClearAvatar, EditProfile, ReadProfile, ReadUserinfo, ServeAvatar, SetAvatar, Userinfo,
 };
 use axum::Json;
 use axum::body::Bytes;
-use axum::extract::{Query, State};
+use axum::extract::rejection::PathRejection;
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
+use axum::response::Response;
 use domain::identity::ActorUri;
 use domain::profile::{AvatarImage, ProfileCard, ProfileEdit, ProfileError};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use time::OffsetDateTime;
 
-use crate::ApiError;
 use crate::auth::Authenticated;
 use crate::privacy::Privacy;
+use crate::{ApiError, http};
 
 #[derive(Debug, Serialize)]
 pub struct UserinfoResponse {
@@ -126,6 +128,28 @@ pub async fn delete_avatar(
     clear.execute(user).await?;
     tracing::info!(user_id = %user, "avatar deleted");
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `GET /avatars/{file}`: anyone's, without a credential, as browsers here and on other
+/// instances load it. The query — `?v=` — names nothing: every version is the image stored. A
+/// name that isn't even UTF-8 names no avatar either.
+pub async fn avatar(
+    State(serve): State<Arc<ServeAvatar>>,
+    file: Result<Path<String>, PathRejection>,
+) -> Result<Response, ApiError> {
+    let not_found = || ApiError::not_found("Avatar not found");
+    let Ok(Path(file)) = file else {
+        return Err(not_found());
+    };
+    let (kind, bytes) = serve.execute(&file).await?.ok_or_else(not_found)?;
+    let response = Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, kind.mime())
+        .header(header::CACHE_CONTROL, "public, max-age=86400")
+        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+        // Other instances' web apps show it.
+        .header("cross-origin-resource-policy", "cross-origin");
+    http::streamed(response, bytes)
 }
 
 #[derive(Debug, Deserialize)]

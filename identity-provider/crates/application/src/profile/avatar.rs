@@ -1,9 +1,11 @@
 use std::sync::Arc;
 
 use domain::UserId;
+use domain::identity::InstanceOrigin;
+use domain::messaging::ByteStream;
 use domain::profile::{
-    AvatarImage, AvatarStore, ImageKind, ProfileAudience, ProfileError, ProfileFederation,
-    ProfileNotifier, Profiles, published_url,
+    AvatarFile, AvatarImage, AvatarStore, ImageKind, ProfileAudience, ProfileError,
+    ProfileFederation, ProfileNotifier, Profiles, avatar_url, published_url,
 };
 use time::OffsetDateTime;
 
@@ -12,12 +14,14 @@ use super::Friends;
 /// `PUT /api/avatar`: store the image, show it, tell the friends; answers the published URL.
 /// The old image goes only once the new one is shown: the account never points at a removed one.
 pub struct SetAvatar {
+    origin: InstanceOrigin,
     avatars: Arc<dyn AvatarStore>,
     friends: Friends,
 }
 
 impl SetAvatar {
     pub fn new(
+        origin: InstanceOrigin,
         profiles: Arc<dyn Profiles>,
         avatars: Arc<dyn AvatarStore>,
         audience: Arc<dyn ProfileAudience>,
@@ -25,6 +29,7 @@ impl SetAvatar {
         federation: Arc<dyn ProfileFederation>,
     ) -> Self {
         Self {
+            origin,
             avatars,
             friends: Friends {
                 profiles,
@@ -41,8 +46,8 @@ impl SetAvatar {
         image: AvatarImage,
         now: OffsetDateTime,
     ) -> Result<String, ProfileError> {
-        let stored = self.avatars.put(user, &image).await?;
-        let url = published_url(&stored, now);
+        self.avatars.put(user, &image).await?;
+        let url = published_url(&avatar_url(&self.origin, user, image.kind()), now);
         self.friends.profiles.set_avatar(user, Some(&url)).await?;
         leave_only(self.avatars.as_ref(), user, Some(image.kind())).await;
         self.friends.tell(user).await;
@@ -80,6 +85,30 @@ impl ClearAvatar {
         leave_only(self.avatars.as_ref(), user, None).await;
         self.friends.tell(user).await;
         Ok(())
+    }
+}
+
+/// `GET /avatars/{file}`: an avatar's image, for anyone who asks — every profile that shows it
+/// gives its URL.
+pub struct ServeAvatar {
+    avatars: Arc<dyn AvatarStore>,
+}
+
+impl ServeAvatar {
+    pub fn new(avatars: Arc<dyn AvatarStore>) -> Self {
+        Self { avatars }
+    }
+
+    /// `None` for a name no avatar has, or an image not stored.
+    pub async fn execute(
+        &self,
+        name: &str,
+    ) -> Result<Option<(ImageKind, ByteStream)>, ProfileError> {
+        let Some(file) = AvatarFile::parse(name) else {
+            return Ok(None);
+        };
+        let opened = self.avatars.open(file.user, file.kind).await?;
+        Ok(opened.map(|bytes| (file.kind, bytes)))
     }
 }
 

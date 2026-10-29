@@ -885,7 +885,7 @@ pub mod contract {
         bob: &Account,
     ) {
         let bob = Account {
-            avatar_url: Some("http://s3.test/avatars/bob.png?v=1".to_owned()),
+            avatar_url: Some(format!("http://localhost:8080/avatars/{}.png?v=1", bob.id)),
             ..bob.clone()
         };
         edits.save(&bob).await;
@@ -909,7 +909,7 @@ pub mod contract {
 
         let renamed = Account {
             display_name: Some("Bob R.".to_owned()),
-            avatar_url: Some("http://s3.test/avatars/bob.webp?v=2".to_owned()),
+            avatar_url: Some(format!("http://localhost:8080/avatars/{}.webp?v=2", bob.id)),
             ..bob
         };
         edits.save(&renamed).await;

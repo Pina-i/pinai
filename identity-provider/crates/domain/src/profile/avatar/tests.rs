@@ -41,7 +41,60 @@ fn an_avatar_is_published_under_its_upload_time() {
     let at = OffsetDateTime::from_unix_timestamp(1_790_000_000).unwrap();
 
     assert_eq!(
-        published_url("http://s3.test/avatars/u.png", at),
-        "http://s3.test/avatars/u.png?v=1790000000"
+        published_url("https://bob.com/avatars/u.png", at),
+        "https://bob.com/avatars/u.png?v=1790000000"
+    );
+}
+
+const ID: &str = "550e8400-e29b-41d4-a716-446655440000";
+
+#[test]
+fn an_avatar_file_is_named_by_its_account_and_its_kind() {
+    for (kind, extension) in [
+        (ImageKind::Jpeg, "jpg"),
+        (ImageKind::Png, "png"),
+        (ImageKind::Webp, "webp"),
+        (ImageKind::Gif, "gif"),
+    ] {
+        let name = format!("{ID}.{extension}");
+
+        let file = AvatarFile::parse(&name).unwrap();
+
+        assert_eq!(file.user.to_string(), ID);
+        assert_eq!(file.kind, kind);
+        assert_eq!(file.to_string(), name);
+    }
+}
+
+#[test]
+fn a_name_no_avatar_has_is_refused() {
+    for name in [
+        format!("{ID}.svg"),
+        format!("{ID}.jpeg"),
+        format!("{ID}.PNG"),
+        ID.to_owned(),
+        format!("{ID}."),
+        format!("../{ID}.png"),
+        format!("avatars/{ID}.png"),
+        format!("{ID}.png/x"),
+        "not-a-uuid.png".to_owned(),
+        format!("{}.png", ID.replace('-', "")),
+        format!("{}.png", ID.to_uppercase()),
+        format!("{{{ID}}}.png"),
+        format!("{ID}.png?v=1790000000"),
+        String::new(),
+    ] {
+        assert_eq!(AvatarFile::parse(&name), None, "{name}");
+    }
+}
+
+#[test]
+fn an_avatar_is_served_by_its_own_instance() {
+    let origin = InstanceOrigin::parse("https://bob.com").unwrap();
+    let user = UserId::from(uuid::Uuid::parse_str(ID).unwrap());
+
+    assert_eq!(
+        avatar_url(&origin, user, ImageKind::Webp),
+        format!("https://bob.com/avatars/{ID}.webp")
     );
 }

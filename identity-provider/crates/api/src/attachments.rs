@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 use application::messaging::{Blob, OpenAttachment, ReadBlob, ServePeerContent, UploadAttachments};
 use axum::Json;
-use axum::body::Body;
 use axum::extract::{Multipart, Path, Query, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
@@ -15,8 +14,8 @@ use serde::{Deserialize, Serialize};
 use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
 
-use crate::ApiError;
 use crate::auth::{Authenticated, SignedPeer};
+use crate::{ApiError, http};
 
 #[derive(Serialize)]
 pub struct AttachmentBody {
@@ -201,17 +200,12 @@ pub fn blob_response(blob: Blob) -> Result<Response, ApiError> {
         r#"attachment; filename="{}""#,
         blob.original_filename.replace('"', "")
     );
-    let mut builder = Response::builder()
+    let response = Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, &blob.mime_type)
         .header(header::CONTENT_DISPOSITION, disposition)
         .header("x-content-type-options", "nosniff");
-    if let Some(length) = blob.bytes.length {
-        builder = builder.header(header::CONTENT_LENGTH, length);
-    }
-    builder
-        .body(Body::from_stream(blob.bytes.chunks))
-        .map_err(|e| ApiError::internal(e.into()))
+    http::streamed(response, blob.bytes)
 }
 
 impl From<AttachmentError> for ApiError {

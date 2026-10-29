@@ -13,7 +13,10 @@ use domain::settings::testing::InMemorySettingsStore;
 use domain::social::testing::InMemoryContactPolicies;
 use time::OffsetDateTime;
 
-use super::{ClearAvatar, EditProfile, ReadProfile, ReadUserinfo, ReceiveProfileUpdate, SetAvatar};
+use super::{
+    ClearAvatar, EditProfile, ReadProfile, ReadUserinfo, ReceiveProfileUpdate, ServeAvatar,
+    SetAvatar,
+};
 
 pub struct World {
     /// A local account with a friend here, `bob`, and one elsewhere, `carol`.
@@ -90,6 +93,7 @@ impl World {
 
     pub fn set_avatar(&self) -> SetAvatar {
         SetAvatar::new(
+            self.origin.clone(),
             self.profiles.clone(),
             self.avatars.clone(),
             self.profiles.clone(),
@@ -106,6 +110,10 @@ impl World {
             self.notifier.clone(),
             self.federation.clone(),
         )
+    }
+
+    pub fn serve_avatar(&self) -> ServeAvatar {
+        ServeAvatar::new(self.avatars.clone())
     }
 
     pub fn read_profile(&self) -> ReadProfile {

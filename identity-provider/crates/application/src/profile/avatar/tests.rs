@@ -1,4 +1,5 @@
 use bytes::Bytes;
+use domain::messaging::testing::collect;
 use domain::profile::{ImageKind, Profiles};
 
 use super::*;
@@ -20,7 +21,10 @@ async fn an_avatar_is_stored_shown_under_its_upload_time_and_told_to_the_friends
 
     assert_eq!(
         url,
-        format!("http://s3.test/avatars/{}.png?v=1790000000", w.alice.id)
+        format!(
+            "http://localhost:8080/avatars/{}.png?v=1790000000",
+            w.alice.id
+        )
     );
     let shown = w.profiles.find(w.alice.id).await.unwrap().unwrap();
     assert_eq!(shown.avatar_url.as_deref(), Some(url.as_str()));
@@ -141,4 +145,58 @@ async fn an_old_image_left_behind_fails_nothing() {
     assert!(webp.contains(".webp?v="), "{webp}");
     assert_eq!(shown(&w).await, None);
     assert_eq!(w.notifier.notified().len(), 3);
+}
+
+#[tokio::test]
+async fn an_avatar_is_served_by_its_file_name() {
+    let w = world().await;
+    showing_a_png(&w).await;
+
+    let served = w
+        .serve_avatar()
+        .execute(&format!("{}.png", w.alice.id))
+        .await
+        .unwrap();
+
+    let (kind, bytes) = served.expect("the image shown");
+    assert_eq!(kind, ImageKind::Png);
+    assert_eq!(collect(bytes).await.unwrap(), b"\x89PNG");
+}
+
+#[tokio::test]
+async fn a_name_no_avatar_has_is_none_before_the_store_is_asked() {
+    let w = world().await;
+    showing_a_png(&w).await;
+    w.avatars.refuse_reads();
+
+    for name in [
+        format!("{}.svg", w.alice.id),
+        format!("{}.png?v=1", w.alice.id),
+        "alice.png".to_owned(),
+    ] {
+        let served = w.serve_avatar().execute(&name).await.unwrap();
+
+        assert!(served.is_none(), "{name}");
+    }
+}
+
+#[tokio::test]
+async fn an_image_not_stored_is_none() {
+    let w = world().await;
+    showing_a_png(&w).await;
+
+    let other_kind = w
+        .serve_avatar()
+        .execute(&format!("{}.webp", w.alice.id))
+        .await
+        .unwrap();
+    w.clear_avatar().execute(w.alice.id).await.unwrap();
+    let cleared = w
+        .serve_avatar()
+        .execute(&format!("{}.png", w.alice.id))
+        .await
+        .unwrap();
+
+    assert!(other_kind.is_none());
+    assert!(cleared.is_none());
 }

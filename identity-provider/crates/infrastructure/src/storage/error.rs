@@ -6,9 +6,6 @@ pub enum StorageError {
     #[error("Bucket initialization failed: {0}")]
     BucketInit(String),
 
-    #[error("Invalid content type: {0}")]
-    InvalidContentType(String),
-
     #[error("Upload failed: {0}")]
     UploadFailed(String),
 

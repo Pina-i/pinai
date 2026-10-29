@@ -1,7 +1,10 @@
+use std::fmt;
+
 use bytes::Bytes;
 use time::OffsetDateTime;
 
-use crate::ValidationError;
+use crate::identity::InstanceOrigin;
+use crate::{UserId, ValidationError};
 
 /// The image formats an avatar may be in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -25,6 +28,16 @@ impl ImageKind {
             Self::Png => "image/png",
             Self::Webp => "image/webp",
             Self::Gif => "image/gif",
+        }
+    }
+
+    /// What its file name ends with.
+    pub fn extension(self) -> &'static str {
+        match self {
+            Self::Jpeg => "jpg",
+            Self::Png => "png",
+            Self::Webp => "webp",
+            Self::Gif => "gif",
         }
     }
 }
@@ -64,11 +77,51 @@ impl AvatarImage {
     }
 }
 
-/// The URL an upload is published at: where it is stored, versioned by the upload time. The
-/// store keeps one object per account, so under an unchanged URL a browser — here or on a peer
-/// — would keep showing the old image.
-pub fn published_url(stored: &str, uploaded_at: OffsetDateTime) -> String {
-    format!("{stored}?v={}", uploaded_at.unix_timestamp())
+/// What an avatar's URL path starts with, its file name following.
+pub const AVATARS_PATH_PREFIX: &str = "/avatars/";
+
+/// An avatar's file name, `{user_id}.{ext}`: the last segment of its URL, and its key in the
+/// store, one per account and kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AvatarFile {
+    pub user: UserId,
+    pub kind: ImageKind,
+}
+
+impl AvatarFile {
+    /// Only the name it is written as — the id lowercase and hyphenated — so that one image
+    /// has one URL.
+    pub fn parse(name: &str) -> Option<Self> {
+        let (id, extension) = name.rsplit_once('.')?;
+        let kind = ImageKind::ALL
+            .into_iter()
+            .find(|kind| kind.extension() == extension)?;
+        let user = UserId::from(uuid::Uuid::parse_str(id).ok()?);
+        let file = Self { user, kind };
+        (file.to_string() == name).then_some(file)
+    }
+}
+
+impl fmt::Display for AvatarFile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}.{}", self.user, self.kind.extension())
+    }
+}
+
+/// Where this instance serves an account's image of `kind`.
+pub fn avatar_url(origin: &InstanceOrigin, user: UserId, kind: ImageKind) -> String {
+    format!(
+        "{}{AVATARS_PATH_PREFIX}{}",
+        origin.base_url(),
+        AvatarFile { user, kind }
+    )
+}
+
+/// The URL an upload is published at: where it is served, versioned by the upload time. The
+/// store keeps one object per account and kind, so under an unchanged URL a browser — here or on
+/// a peer — would keep showing the old image.
+pub fn published_url(served: &str, uploaded_at: OffsetDateTime) -> String {
+    format!("{served}?v={}", uploaded_at.unix_timestamp())
 }
 
 #[cfg(test)]

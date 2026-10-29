@@ -182,7 +182,8 @@ pub fn peer_may_fetch(members: &[Member], peer: &ActorUri) -> bool {
         .any(|m| m.actor_uri.scheme() == peer.scheme() && m.actor_uri.domain() == peer.domain())
 }
 
-/// An attachment's bytes as they arrive, with the length the source announced.
+/// A file's bytes — an attachment's, an avatar's — as they arrive, with the length the source
+/// announced.
 pub struct ByteStream {
     pub length: Option<u64>,
     pub chunks: BoxStream<'static, std::io::Result<Bytes>>,

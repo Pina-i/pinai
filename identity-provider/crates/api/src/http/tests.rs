@@ -156,3 +156,88 @@ mod cors {
         assert!(!headers.contains_key(header::ACCESS_CONTROL_ALLOW_CREDENTIALS));
     }
 }
+
+mod hsts {
+    use axum::Router;
+    use axum::body::Body;
+    use axum::http::{Method, Request, header};
+    use axum::middleware::map_response;
+    use axum::routing::get;
+    use tower::ServiceExt;
+
+    use crate::http::strict_transport_security;
+    use crate::testing::TestApp;
+
+    /// A page, an API answer, a refusal, a route unknown, an avatar not found, a CORS preflight.
+    fn requests() -> Vec<Request<Body>> {
+        let get = |uri: &str| Request::get(uri).body(Body::empty()).unwrap();
+        vec![
+            get("/health"),
+            get("/login"),
+            get("/userinfo"),
+            get("/nowhere"),
+            get("/avatars/alice.png"),
+            Request::builder()
+                .method(Method::OPTIONS)
+                .uri("/api/profile")
+                .header(header::ORIGIN, "https://app.example")
+                .header(header::ACCESS_CONTROL_REQUEST_METHOD, "PATCH")
+                .body(Body::empty())
+                .unwrap(),
+        ]
+    }
+
+    #[tokio::test]
+    async fn production_sends_hsts_on_every_answer() {
+        let app = TestApp::in_production();
+
+        for request in requests() {
+            let uri = request.uri().clone();
+            let response = app.respond(request).await;
+
+            assert_eq!(
+                response.headers()[header::STRICT_TRANSPORT_SECURITY],
+                "max-age=31536000",
+                "{uri} ({})",
+                response.status()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn development_sends_no_hsts() {
+        let app = TestApp::with([], []);
+
+        for request in requests() {
+            let uri = request.uri().clone();
+            let response = app.respond(request).await;
+
+            assert!(
+                !response
+                    .headers()
+                    .contains_key(header::STRICT_TRANSPORT_SECURITY),
+                "{uri}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_handlers_own_hsts_is_kept() {
+        let router = Router::new()
+            .route(
+                "/",
+                get(|| async { ([(header::STRICT_TRANSPORT_SECURITY, "max-age=60")], "") }),
+            )
+            .layer(map_response(strict_transport_security));
+
+        let response = router
+            .oneshot(Request::get("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.headers()[header::STRICT_TRANSPORT_SECURITY],
+            "max-age=60"
+        );
+    }
+}

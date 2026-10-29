@@ -1,9 +1,9 @@
 use aws_credential_types::Credentials;
-use aws_sdk_s3::{Client, config::Region, primitives::ByteStream};
-use bytes::Bytes;
-use futures_util::stream::Stream;
+use aws_sdk_s3::error::{DisplayErrorContext, ProvideErrorMetadata};
+use aws_sdk_s3::operation::get_object::GetObjectOutput;
+use aws_sdk_s3::{Client, config::Region, primitives::ByteStream as S3Body};
+use domain::messaging::ByteStream;
 use tokio_util::io::ReaderStream;
-use uuid::Uuid;
 
 use super::StorageError;
 
@@ -14,17 +14,15 @@ pub struct StorageConfig {
     pub secret_key: String,
     pub bucket_avatars: String,
     pub bucket_attachments: String,
-    /// The publicly-reachable base URL of the S3 server (used to build avatar URLs).
-    pub public_url: String,
 }
 
-/// Thin wrapper around an S3 client scoped to the IdP's buckets.
+/// Thin wrapper around an S3 client scoped to the IdP's buckets, both private: every byte a
+/// browser or a peer sees goes through the IdP.
 #[derive(Clone)]
 pub struct StorageClient {
     client: Client,
     bucket_avatars: String,
     bucket_attachments: String,
-    public_url: String,
 }
 
 impl StorageClient {
@@ -52,68 +50,65 @@ impl StorageClient {
             client,
             bucket_avatars: cfg.bucket_avatars.clone(),
             bucket_attachments: cfg.bucket_attachments.clone(),
-            public_url: cfg.public_url.trim_end_matches('/').to_string(),
         })
     }
 
-    /// Ensure both buckets exist. Call once at startup.
+    /// Ensure both buckets exist, both private: any policy on the avatars one is removed. Call
+    /// once at startup.
     pub async fn ensure_buckets(&self) -> Result<(), StorageError> {
         self.ensure_bucket(&self.bucket_avatars).await?;
-        self.set_bucket_public_read(&self.bucket_avatars).await?;
+        self.remove_bucket_policy(&self.bucket_avatars).await?;
         self.ensure_bucket(&self.bucket_attachments).await?;
         Ok(())
     }
 
-    /// Upload an avatar image. Returns the public URL.
-    ///
-    /// Object key: `{user_id}.{ext}` (e.g. `550e8400-…-007f.jpg`).
+    /// Upload an avatar image under `key`, its file name.
     pub async fn upload_avatar(
         &self,
-        user_id: Uuid,
+        key: &str,
         data: Vec<u8>,
         content_type: &str,
-    ) -> Result<String, StorageError> {
-        let ext = extension_from_content_type(content_type)?;
-        let key = format!("{user_id}.{ext}");
-
+    ) -> Result<(), StorageError> {
         self.client
             .put_object()
             .bucket(&self.bucket_avatars)
-            .key(&key)
-            .body(ByteStream::from(data))
+            .key(key)
+            .body(S3Body::from(data))
             .content_type(content_type)
             .send()
             .await
-            .map_err(|e| StorageError::UploadFailed(e.to_string()))?;
+            .map_err(|e| StorageError::UploadFailed(DisplayErrorContext(&e).to_string()))?;
 
-        tracing::info!(user_id = %user_id, key = %key, "avatar uploaded");
-
-        let url = format!("{}/{}/{}", self.public_url, self.bucket_avatars, key);
-        Ok(url)
+        tracing::info!(key = %key, "avatar uploaded");
+        Ok(())
     }
 
-    /// Delete a user's avatars, but for the one of the `keep` content type. Tries all known
-    /// extensions (idempotent).
-    pub async fn delete_avatar(
-        &self,
-        user_id: Uuid,
-        keep: Option<&str>,
-    ) -> Result<(), StorageError> {
-        let kept = keep.map(extension_from_content_type).transpose()?;
-        for ext in ["jpg", "png", "webp", "gif"]
-            .into_iter()
-            .filter(|ext| Some(*ext) != kept)
-        {
-            let key = format!("{user_id}.{ext}");
-            let _ = self
-                .client
-                .delete_object()
-                .bucket(&self.bucket_avatars)
-                .key(&key)
-                .send()
-                .await;
+    /// Stream an avatar's bytes, as [`Self::fetch_attachment_stream`] does; `None` when no
+    /// object has that key.
+    pub async fn fetch_avatar_stream(&self, key: &str) -> Result<Option<ByteStream>, StorageError> {
+        let resp = self
+            .client
+            .get_object()
+            .bucket(&self.bucket_avatars)
+            .key(key)
+            .send()
+            .await;
+        match resp {
+            Ok(resp) => Ok(Some(streamed(resp))),
+            Err(e) if e.as_service_error().is_some_and(|e| e.is_no_such_key()) => Ok(None),
+            Err(e) => Err(StorageError::S3(DisplayErrorContext(&e).to_string())),
         }
-        tracing::info!(user_id = %user_id, "avatar deleted");
+    }
+
+    /// Delete an avatar object. Idempotent: S3 answers a missing key as deleted.
+    pub async fn delete_avatar(&self, key: &str) -> Result<(), StorageError> {
+        self.client
+            .delete_object()
+            .bucket(&self.bucket_avatars)
+            .key(key)
+            .send()
+            .await
+            .map_err(|e| StorageError::DeleteFailed(DisplayErrorContext(&e).to_string()))?;
         Ok(())
     }
 
@@ -133,11 +128,11 @@ impl StorageClient {
             .put_object()
             .bucket(&self.bucket_attachments)
             .key(storage_key)
-            .body(ByteStream::from(data))
+            .body(S3Body::from(data))
             .content_type(content_type)
             .send()
             .await
-            .map_err(|e| StorageError::UploadFailed(e.to_string()))?;
+            .map_err(|e| StorageError::UploadFailed(DisplayErrorContext(&e).to_string()))?;
 
         tracing::info!(key = %storage_key, "attachment uploaded");
         Ok(())
@@ -165,13 +160,7 @@ impl StorageClient {
     pub async fn fetch_attachment_stream(
         &self,
         storage_key: &str,
-    ) -> Result<
-        (
-            impl Stream<Item = std::io::Result<Bytes>> + Send + 'static,
-            Option<i64>,
-        ),
-        StorageError,
-    > {
+    ) -> Result<ByteStream, StorageError> {
         let resp = self
             .client
             .get_object()
@@ -179,13 +168,9 @@ impl StorageClient {
             .key(storage_key)
             .send()
             .await
-            .map_err(|e| StorageError::S3(e.to_string()))?;
+            .map_err(|e| StorageError::S3(DisplayErrorContext(&e).to_string()))?;
 
-        let content_length = resp.content_length();
-        // ByteStream → AsyncRead → Stream<Result<Bytes>> so axum can adopt it
-        // as a response body without buffering the full payload in RAM.
-        let reader = resp.body.into_async_read();
-        Ok((ReaderStream::new(reader), content_length))
+        Ok(streamed(resp))
     }
 
     // ── Internal helpers ────────────────────────────────────────────────
@@ -200,47 +185,38 @@ impl StorageClient {
                 .bucket(name)
                 .send()
                 .await
-                .map_err(|e| StorageError::BucketInit(format!("{name}: {e}")))?;
+                .map_err(|e| {
+                    StorageError::BucketInit(format!("{name}: {}", DisplayErrorContext(&e)))
+                })?;
         }
         Ok(())
     }
 
-    async fn set_bucket_public_read(&self, bucket: &str) -> Result<(), StorageError> {
-        let policy = serde_json::json!({
-            "Version": "2012-10-17",
-            "Statement": [{
-                "Sid": "PublicRead",
-                "Effect": "Allow",
-                "Principal": "*",
-                "Action": ["s3:GetObject"],
-                "Resource": [format!("arn:aws:s3:::{bucket}/*")]
-            }]
-        });
-
-        self.client
-            .put_bucket_policy()
+    /// A bucket without a policy is no error: RustFS and S3 answer it as removed, another store
+    /// may say `NoSuchBucketPolicy`.
+    async fn remove_bucket_policy(&self, bucket: &str) -> Result<(), StorageError> {
+        match self
+            .client
+            .delete_bucket_policy()
             .bucket(bucket)
-            .policy(policy.to_string())
             .send()
             .await
-            .map_err(|e| {
-                StorageError::BucketInit(format!(
-                    "failed to set public-read policy on {bucket}: {e}"
-                ))
-            })?;
-
-        Ok(())
+        {
+            Ok(_) => Ok(()),
+            Err(e) if e.code() == Some("NoSuchBucketPolicy") => Ok(()),
+            Err(e) => Err(StorageError::BucketInit(format!(
+                "failed to remove the policy of {bucket}: {}",
+                DisplayErrorContext(&e)
+            ))),
+        }
     }
 }
 
-fn extension_from_content_type(ct: &str) -> Result<&'static str, StorageError> {
-    match ct {
-        "image/jpeg" => Ok("jpg"),
-        "image/png" => Ok("png"),
-        "image/webp" => Ok("webp"),
-        "image/gif" => Ok("gif"),
-        _ => Err(StorageError::InvalidContentType(format!(
-            "unsupported: {ct}; expected image/jpeg, image/png, image/webp, or image/gif"
-        ))),
+/// S3 body → AsyncRead → a stream of chunks, so axum can adopt it as a response body without
+/// buffering the full payload in RAM.
+fn streamed(resp: GetObjectOutput) -> ByteStream {
+    ByteStream {
+        length: resp.content_length().and_then(|n| u64::try_from(n).ok()),
+        chunks: Box::pin(ReaderStream::new(resp.body.into_async_read())),
     }
 }

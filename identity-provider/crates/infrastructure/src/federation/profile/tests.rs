@@ -11,7 +11,10 @@ fn shown(alice: &Account) -> PublicProfile {
     PublicProfile {
         actor: alice.actor_uri.clone(),
         display_name: Some("alice".to_owned()),
-        avatar_url: Some("http://s3.test/avatars/alice.png?v=1".to_owned()),
+        avatar_url: Some(format!(
+            "http://localhost:8080/avatars/{}.png?v=1",
+            alice.id
+        )),
         pronouns: Some(Pronouns::NonBinary),
         bio: Some("kia ora".to_owned()),
     }
@@ -32,7 +35,7 @@ fn an_update_carries_the_whole_shown_profile_as_its_person() {
     assert_eq!(person["name"], "alice");
     assert_eq!(
         person["icon"]["url"],
-        "http://s3.test/avatars/alice.png?v=1"
+        format!("http://localhost:8080/avatars/{}.png?v=1", alice.id)
     );
     assert_eq!(person["pronouns"], "non-binary");
     assert_eq!(person["summary"], "kia ora");

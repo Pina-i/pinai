@@ -1,20 +1,22 @@
 # Hosting a Pīna'i instance
 
 This directory runs one instance from the published image: the identity provider,
-Postgres, Redis, RustFS for files, and Caddy in front, which gets and renews the
-TLS certificate. People use the Pīna'i web or desktop app and sign in with
-their address on your instance. The web app can be hosted too, beside the
-instance or on a server of its own, from the published image
-`ghcr.io/pina-i/pinai-web`: see
+Postgres, Redis and RustFS for files. The identity provider answers in plain HTTP on
+one port of the server, and your reverse proxy serves it over HTTPS at its domain.
+People use the Pīna'i web or desktop app and sign in with their address on your
+instance. The web app can be hosted too, beside the instance or on a server of its
+own, from the published image `ghcr.io/pina-i/pinai-web`: see
 [Host the web app](https://github.com/Pina-i/pinai-client#host-the-web-app), then
 set `WEB_APP_ORIGIN` in `.env` to its address.
 
 ## What you need
 
-- A Linux server with Docker and the Compose plugin, 2.23.1 or later, amd64 or arm64.
-- A domain for the instance, its DNS (A / AAAA records) pointing at the server, and
-  ports 80 and 443 open. The domain is part of every account's address
-  (`alice_xk9mp@your.domain`) and cannot change once people have signed up.
+- A Linux server with Docker and the Compose plugin, amd64 or arm64.
+- A domain for the instance, its DNS (A / AAAA records) pointing at your reverse
+  proxy. The domain is part of every account's address (`alice_xk9mp@your.domain`)
+  and cannot change once people have signed up.
+- A reverse proxy that serves the domain over HTTPS, with its certificate: Caddy,
+  nginx, Traefik… See [Put your proxy in front](#put-your-proxy-in-front).
 - For a public instance, an SMTP relay, over STARTTLS (port 587) or TLS (port 465):
   sign-up codes are mailed. See [Mail relay](#mail-relay).
 - For an invite-only instance, the default, its first admin's address and password.
@@ -58,14 +60,96 @@ set `WEB_APP_ORIGIN` in `.env` to its address.
    docker compose logs -f idp
    ```
 
-At the first start, the `init` service generates the instance's secrets in
-`./data/secrets` (see [Secrets](#secrets)), and Docker creates the rest of `./data`.
-The identity provider migrates the database and logs `listening`. Caddy takes a few
-seconds more for the certificate; then `https://your.domain/.well-known/nodeinfo`
-answers. On an invite-only instance, sign in to the Pīna'i web app with
-`ADMIN_EMAIL` and `ADMIN_PASSWORD`, then remove `ADMIN_PASSWORD` from `.env`.
+   At the first start, the `init` service generates the instance's secrets in
+   `./data/secrets` (see [Secrets](#secrets)), and Docker creates the rest of
+   `./data`. The identity provider logs `listening`, then migrates the database; once
+   that is done, `curl http://127.0.0.1:8080/.well-known/nodeinfo` answers (at your
+   `BIND_ADDRESS` and `PORT`, if set).
+
+4. [Put your proxy in front](#put-your-proxy-in-front). Then
+   `https://your.domain/.well-known/nodeinfo` answers.
+
+On an invite-only instance, sign in to the Pīna'i web app with `ADMIN_EMAIL` and
+`ADMIN_PASSWORD`, then remove `ADMIN_PASSWORD` from `.env`.
 
 Settings live in `.env`; after changing one, `docker compose up -d` applies it.
+
+### Put your proxy in front
+
+The instance listens on `127.0.0.1:8080`, in plain HTTP, for a reverse proxy on the
+same machine; `PORT` in `.env` changes the port. The proxy must:
+
+- serve the domain over HTTPS, redirect `http://` to it, and send every request to
+  `127.0.0.1:8080`. The instance speaks only HTTPS to other instances, and its
+  cookies are `Secure`;
+- keep the request's `Host` header: other instances sign it, so a rewritten one fails
+  every federated request;
+- pass WebSockets (`/ws`) and server-sent events (`/api/presence/stream`)
+  unbuffered, with no short idle timeout: both stay open as long as people are
+  connected;
+- take request bodies up to 251 MiB: a message's attachments,
+  `ATTACHMENT_MAX_FILES_PER_MESSAGE` × `ATTACHMENT_MAX_BYTE_SIZE` (5 × 50 MiB), plus
+  1 MiB. Raise it with them;
+- limit each client's request rate, if you need to: the instance leaves that to the
+  proxy.
+
+The instance sends its own `Strict-Transport-Security`. With Caddy, which gets the
+certificate, redirects `http://`, keeps `Host` and passes WebSockets and server-sent
+events by itself:
+
+```
+chat.example.org {
+	reverse_proxy 127.0.0.1:8080
+}
+```
+
+With nginx:
+
+```nginx
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name chat.example.org;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    server_name chat.example.org;
+    ssl_certificate     /etc/letsencrypt/live/chat.example.org/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/chat.example.org/privkey.pem;
+
+    client_max_body_size 251m;
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+        proxy_buffering off;
+        proxy_read_timeout 1h;
+    }
+}
+```
+
+For a proxy on another machine, set `BIND_ADDRESS` in `.env` to an address of this
+server on a private network the two share, and send to that address and `PORT`. Let
+the network keep everything but the proxy off the port: ports Docker publishes skip
+the host's firewall (ufw, firewalld), so `0.0.0.0` would serve the instance in plain
+HTTP to anyone. A proxy that runs in a container of its own doesn't see this server's
+`127.0.0.1`: run it with `network_mode: host`, or set `BIND_ADDRESS` as for another
+machine.
+
+The web app, hosted beside the instance, is a second site in the same proxy, sent to
+`127.0.0.1:8081`, its bundle's default: see
+[Host the web app](https://github.com/Pina-i/pinai-client#host-the-web-app).
 
 ## Public or invite-only
 
@@ -246,9 +330,8 @@ docker compose pull && docker compose up -d
 ```
 
 The archive replaces the bundle's own files (`compose.yaml`, `.env.example`,
-`README.md`), never `.env` or `data/`: make again any change you had made to them,
-Caddy's configuration included, which is the `configs:` block at the end of
-`compose.yaml`. `PINAI_VERSION` in `.env` runs another version than the bundle's.
+`README.md`), never `.env` or `data/`: make again any change you had made to them.
+`PINAI_VERSION` in `.env` runs another version than the bundle's.
 
 ## Back up
 
@@ -267,18 +350,3 @@ docker compose start
 `sudo`, because the services own their directories under `data/`. To restore,
 unpack the archive with `sudo tar --numeric-owner -xzpf` into a copy of this
 directory, then `docker compose up -d`.
-
-## Behind your own reverse proxy
-
-Remove the `caddy` service and its `configs:` block, publish the identity provider
-and RustFS on loopback (`ports: ["127.0.0.1:8080:8080"]` on `idp`,
-`["127.0.0.1:9000:9000"]` on `rustfs`), and route as Caddy's configuration in
-`compose.yaml` does:
-
-- `GET` and `HEAD` on `/avatars/*` to RustFS, without the query string;
-- everything else to the identity provider, WebSockets (`/ws`) and server-sent
-  events included, keeping the request's `Host` header: other instances sign it,
-  so a rewritten one fails every federated request.
-
-The proxy must terminate TLS for the domain: the instance only speaks HTTPS to
-other instances, and its cookies are `Secure`.

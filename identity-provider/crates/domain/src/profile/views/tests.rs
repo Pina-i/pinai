@@ -70,8 +70,9 @@ fn a_peers_bio_within_the_bio_rules_is_kept_and_any_other_dropped() {
 
 #[test]
 fn an_account_shows_others_its_name_avatar_pronouns_and_bio() {
+    let id = crate::UserId::generate();
     let own = OwnProfile {
-        id: crate::UserId::generate(),
+        id,
         username: "aroha_x1y2z".to_owned(),
         email: "aroha@idp.test".to_owned(),
         email_verified: true,
@@ -79,7 +80,7 @@ fn an_account_shows_others_its_name_avatar_pronouns_and_bio() {
         admin: false,
         actor_uri: Some(remote_actor("aroha_x1y2z@idp.test").actor_uri),
         display_name: Some("Aroha".to_owned()),
-        avatar_url: Some("http://s3.test/avatars/aroha.png?v=1".to_owned()),
+        avatar_url: Some(format!("https://idp.test/avatars/{id}.png?v=1")),
         pronouns: Some(Pronouns::She),
         bio: Some("kia ora".to_owned()),
     };

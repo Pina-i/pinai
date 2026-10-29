@@ -28,7 +28,7 @@ use application::presence::{
     StartTyping, WatchConversation,
 };
 use application::profile::{
-    ClearAvatar, EditProfile, ReadUserinfo, ReceiveProfileUpdate, SetAvatar,
+    ClearAvatar, EditProfile, ReadUserinfo, ReceiveProfileUpdate, ServeAvatar, SetAvatar,
 };
 use application::settings::UpdateSettings;
 use application::social::{
@@ -179,6 +179,7 @@ impl TestApp {
             remote_actors,
             Some(web_app()),
             Registrations::Open,
+            false,
         )
     }
 
@@ -189,6 +190,7 @@ impl TestApp {
             InMemoryRemoteActors::default(),
             None,
             Registrations::Open,
+            false,
         )
     }
 
@@ -199,6 +201,18 @@ impl TestApp {
             InMemoryRemoteActors::default(),
             Some(web_app()),
             Registrations::Invite,
+            false,
+        )
+    }
+
+    /// A production instance: no `/dev/*` routes, and HSTS.
+    pub fn in_production() -> Self {
+        Self::built(
+            [],
+            InMemoryRemoteActors::default(),
+            Some(web_app()),
+            Registrations::Open,
+            true,
         )
     }
 
@@ -207,6 +221,7 @@ impl TestApp {
         remote_actors: InMemoryRemoteActors,
         web_app: Option<WebApp>,
         registrations: Registrations,
+        production: bool,
     ) -> Self {
         let accounts: Arc<dyn Accounts> = Arc::new(InMemoryAccounts::with(accounts));
         let remote_actors: Arc<dyn RemoteActors> = Arc::new(remote_actors);
@@ -453,7 +468,8 @@ impl TestApp {
                 sign_in.mailer.clone(),
             )),
             send_test_mail: Arc::new(SendTestMail::new(sign_in.mailer.clone())),
-            dev_routes: true,
+            dev_routes: !production,
+            hsts: production,
             pass_second_factor: Arc::new(PassSecondFactor::new(
                 sign_in.tickets.clone(),
                 sign_in.factors.clone(),
@@ -590,6 +606,7 @@ impl TestApp {
                 profile.federation.clone(),
             )),
             set_avatar: Arc::new(SetAvatar::new(
+                origin.clone(),
                 profile.profiles.clone(),
                 profile.avatars.clone(),
                 profile.profiles.clone(),
@@ -603,6 +620,7 @@ impl TestApp {
                 profile.notifier.clone(),
                 profile.federation.clone(),
             )),
+            serve_avatar: Arc::new(ServeAvatar::new(profile.avatars.clone())),
             send_friend_request: Arc::new(SendFriendRequest::new(
                 accounts.clone(),
                 remote_actors.clone(),

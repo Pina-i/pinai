@@ -193,18 +193,21 @@ check: fmt-check readme-compose lint
 	cargo test --workspace
 
 # ── Integration tests (Docker) ────────────────────────────────────────────────
-# Tests behind the `integration` feature need Postgres, and the end-to-end journeys Redis too:
-# throwaway ones from compose.test.yml. DATABASE_URL is exported explicitly because sqlx::test
-# would otherwise read the repo-root .env — Alice's development database.
+# Tests behind the `integration` feature need Postgres, the end-to-end journeys Redis too, and
+# the object-store tests and the avatar journey RustFS: throwaway ones from compose.test.yml.
+# DATABASE_URL is exported explicitly because sqlx::test would otherwise read the repo-root
+# .env — Alice's development database.
 
 TEST_PG_PORT ?= 55432
 TEST_REDIS_PORT ?= 56479
+TEST_RUSTFS_PORT ?= 59000
 TEST_DATABASE_URL := postgres://test:test@localhost:$(TEST_PG_PORT)/test
 TEST_REDIS_URL := redis://localhost:$(TEST_REDIS_PORT)
+TEST_STORAGE_URL := http://localhost:$(TEST_RUSTFS_PORT)
 
 test-integration:
-	TEST_PG_PORT=$(TEST_PG_PORT) TEST_REDIS_PORT=$(TEST_REDIS_PORT) docker compose -f compose.test.yml --project-name pinai-test up -d --wait
-	DATABASE_URL=$(TEST_DATABASE_URL) TEST_REDIS_URL=$(TEST_REDIS_URL) cargo test --workspace --all-features
+	TEST_PG_PORT=$(TEST_PG_PORT) TEST_REDIS_PORT=$(TEST_REDIS_PORT) TEST_RUSTFS_PORT=$(TEST_RUSTFS_PORT) docker compose -f compose.test.yml --project-name pinai-test up -d --wait
+	DATABASE_URL=$(TEST_DATABASE_URL) TEST_REDIS_URL=$(TEST_REDIS_URL) TEST_STORAGE_URL=$(TEST_STORAGE_URL) cargo test --workspace --all-features
 
 test-integration-down:
 	docker compose -f compose.test.yml --project-name pinai-test down

@@ -59,3 +59,18 @@ async fn no_card_for_an_account_this_instance_does_not_hold() {
     let profiles = InMemoryProfiles::default();
     contract::no_card_for_an_account_this_instance_does_not_hold(&profiles, &profiles).await;
 }
+
+#[tokio::test]
+async fn a_stored_avatar_opens_with_its_bytes() {
+    contract::a_stored_avatar_opens_with_its_bytes(&InMemoryAvatars::default()).await;
+}
+
+#[tokio::test]
+async fn an_image_never_stored_does_not_open() {
+    contract::an_image_never_stored_does_not_open(&InMemoryAvatars::default()).await;
+}
+
+#[tokio::test]
+async fn a_removed_image_no_longer_opens() {
+    contract::a_removed_image_no_longer_opens(&InMemoryAvatars::default()).await;
+}

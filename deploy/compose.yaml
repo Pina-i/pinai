@@ -1,5 +1,5 @@
-# A Pīna'i instance from the published image, behind Caddy for HTTPS.
-# Needs Docker Compose 2.23.1 or later, for Caddy's configuration inlined at the end.
+# A Pīna'i instance from the published image, in plain HTTP on one port: your
+# reverse proxy serves it over HTTPS at DOMAIN.
 # Its settings are in .env beside it. Everything it stores is under ./data,
 # its secrets in ./data/secrets, generated at the first start.
 name: pinai
@@ -12,36 +12,21 @@ x-logging: &logging
     max-file: "3"
 
 services:
-  # HTTPS in front of the identity provider and RustFS; gets and renews the
-  # certificate. Its ports are the only published ones (443/udp: HTTP/3).
-  caddy:
-    image: caddy:2.11-alpine
-    restart: unless-stopped
-    ports:
-      - "80:80"
-      - "443:443"
-      - "443:443/udp"
-    environment:
-      DOMAIN: ${DOMAIN:?set it in .env}
-    configs:
-      - source: caddyfile
-        target: /etc/caddy/Caddyfile
-    volumes:
-      - ./data/caddy/data:/data
-      - ./data/caddy/config:/config
-    depends_on:
-      - idp
-    logging: *logging
-
-  # The identity provider: accounts, messages, federation.
+  # The identity provider: accounts, messages, federation, avatars.
   # PINAI_VERSION in .env picks another version than this minor's latest.
   idp:
     image: ghcr.io/pina-i/pinai-idp:${PINAI_VERSION:-0.1}
     restart: unless-stopped
     env_file: .env
+    # The only published port. PORT in .env is the port it listens on and is
+    # published on, on loopback unless BIND_ADDRESS says otherwise: ports Docker
+    # publishes skip the host's firewall.
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${PORT:-8080}:${PORT:-8080}"
     environment:
       IDP_ENV: production
-      PORT: "8080"
+      PORT: ${PORT:-8080}
+      DOMAIN: ${DOMAIN:?set it in .env}
       DATABASE_URL: postgres://pinai@postgres:5432/pinai
       DATABASE_PASSWORD_FILE: /run/secrets/postgres/password
       SESSION_SECRET_FILE: /run/secrets/session_secret
@@ -51,8 +36,6 @@ services:
       STORAGE_ENDPOINT: http://rustfs:9000
       STORAGE_ACCESS_KEY: pinai
       STORAGE_SECRET_KEY_FILE: /run/secrets/storage_secret_key
-      # Avatars are served by RustFS, through Caddy's /avatars/ route.
-      STORAGE_PUBLIC_URL: https://${DOMAIN}
     volumes:
       - ./data/secrets:/run/secrets:ro
     depends_on:
@@ -180,27 +163,3 @@ services:
       - ./data/secrets:/secrets
       - ./data/rustfs:/rustfs
     logging: *logging
-
-# Caddy's configuration. $$ is Compose's escape for $: Caddy reads {$DOMAIN}
-# from its own environment.
-configs:
-  caddyfile:
-    content: |
-      {$$DOMAIN} {
-      	header Strict-Transport-Security "max-age=31536000"
-
-      	# Avatars are public objects in RustFS. Only reads reach it, and without the
-      	# query string, so no S3 sub-resource (?acl, ?policy…) can be named from outside.
-      	@avatar {
-      		method GET HEAD
-      		path /avatars/*
-      	}
-      	handle @avatar {
-      		rewrite * {path}?
-      		reverse_proxy rustfs:9000
-      	}
-
-      	handle {
-      		reverse_proxy idp:8080
-      	}
-      }

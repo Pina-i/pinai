@@ -1,13 +1,18 @@
-//! The layers every route goes through: CORS for any client, and one span per request.
+//! The layers every route goes through: CORS for any client, one span per request, and HSTS in
+//! production; and the streamed answer the routes that relay a file share.
 
 use axum::body::Body;
-use axum::http::{HeaderName, Method, Request, Uri, header};
+use axum::http::{HeaderName, HeaderValue, Method, Request, Uri, header, response};
+use axum::response::Response;
+use domain::messaging::ByteStream;
 use tower_http::classify::{ServerErrorsAsFailures, SharedClassifier};
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::{
     DefaultOnBodyChunk, DefaultOnEos, DefaultOnRequest, DefaultOnResponse, MakeSpan, TraceLayer,
 };
 use tracing::{Level, Span};
+
+use crate::ApiError;
 
 pub fn cors() -> CorsLayer {
     CorsLayer::new()
@@ -65,6 +70,27 @@ pub fn trace() -> Trace {
         .make_span_with(RequestSpan)
         .on_response(DefaultOnResponse::new().level(Level::INFO))
         .on_failure(())
+}
+
+/// Browsers keep to HTTPS for a year, unless the handler said otherwise. Production only: in
+/// development, plain HTTP on loopback, it would pin `localhost`.
+pub async fn strict_transport_security(mut response: Response) -> Response {
+    response
+        .headers_mut()
+        .entry(header::STRICT_TRANSPORT_SECURITY)
+        .or_insert(HeaderValue::from_static("max-age=31536000"));
+    response
+}
+
+/// The bytes as they come from their source, with `Content-Length` when it told it.
+pub fn streamed(response: response::Builder, bytes: ByteStream) -> Result<Response, ApiError> {
+    let response = match bytes.length {
+        Some(length) => response.header(header::CONTENT_LENGTH, length),
+        None => response,
+    };
+    response
+        .body(Body::from_stream(bytes.chunks))
+        .map_err(|e| ApiError::internal(e.into()))
 }
 
 /// A request's URI as logged: the path only — a query can carry a credential (`/ws?token=`, a

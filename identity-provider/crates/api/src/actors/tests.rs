@@ -77,19 +77,18 @@ async fn an_accounts_person_publishes_its_name_inbox_and_the_instance_key() {
 
 #[tokio::test]
 async fn an_accounts_person_carries_its_avatar_and_none_without_one() {
+    let alice = account("alice");
+    let avatar = format!("http://localhost:8080/avatars/{}.png?v=1", alice.id);
     let alice = domain::identity::Account {
-        avatar_url: Some("http://s3.test/avatars/alice.png?v=1".to_owned()),
-        ..account("alice")
+        avatar_url: Some(avatar.clone()),
+        ..alice
     };
     let app = TestApp::with([alice, account("bob")], []);
 
     let (_, _, with) = get(&app, "/users/alice_t3st0").await;
     let (_, _, without) = get(&app, "/users/bob_t3st0").await;
 
-    assert_eq!(
-        with["icon"],
-        json!({ "type": "Image", "url": "http://s3.test/avatars/alice.png?v=1" })
-    );
+    assert_eq!(with["icon"], json!({ "type": "Image", "url": avatar }));
     assert!(without.get("icon").is_none(), "{without}");
 }
 

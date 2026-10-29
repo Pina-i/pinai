@@ -129,7 +129,8 @@ flowchart TD
 > **Note on attachment delivery.** The browser and remote peer IdPs never
 > talk to RustFS directly. `GET /api/attachments/{id}/blob` (browser, HMAC
 > token) and `GET /api/attachments/{id}/content` (peer, HTTP Signature)
-> stream bytes through the IdP from the private object store.
+> stream bytes through the IdP from the private object store. Avatars too:
+> `GET /avatars/{user_id}.{ext}` serves them through the IdP, never from RustFS.
 
 ---
 

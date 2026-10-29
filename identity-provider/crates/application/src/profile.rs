@@ -10,7 +10,7 @@ mod show_person;
 #[cfg(test)]
 mod world;
 
-pub use avatar::{ClearAvatar, SetAvatar};
+pub use avatar::{ClearAvatar, ServeAvatar, SetAvatar};
 pub use edit_profile::EditProfile;
 pub use read_profile::ReadProfile;
 pub use read_userinfo::ReadUserinfo;

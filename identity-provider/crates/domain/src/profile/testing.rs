@@ -3,10 +3,13 @@
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use bytes::Bytes;
 use time::OffsetDateTime;
 
 use crate::identity::testing::account;
 use crate::identity::{Account, ActorUri, RemoteActor};
+use crate::messaging::ByteStream;
+use crate::messaging::testing::{byte_stream, collect};
 use crate::{ConversationId, UserId};
 
 use super::{
@@ -330,11 +333,12 @@ impl ProfileCards for InMemoryProfiles {
     }
 }
 
-/// Serves each account's images by kind from `http://s3.test/avatars/`.
+/// Keeps each account's images by kind.
 #[derive(Default)]
 pub struct InMemoryAvatars {
-    stored: Mutex<Vec<(UserId, ImageKind)>>,
+    stored: Mutex<Vec<(UserId, ImageKind, Bytes)>>,
     refusing_uploads: AtomicBool,
+    refusing_reads: AtomicBool,
     refusing_removals: AtomicBool,
 }
 
@@ -342,6 +346,11 @@ impl InMemoryAvatars {
     /// Every upload fails from now on.
     pub fn refuse_uploads(&self) {
         self.refusing_uploads.store(true, Ordering::SeqCst);
+    }
+
+    /// Every read fails from now on.
+    pub fn refuse_reads(&self) {
+        self.refusing_reads.store(true, Ordering::SeqCst);
     }
 
     /// Every removal fails from now on.
@@ -353,23 +362,34 @@ impl InMemoryAvatars {
         let stored = self.stored.lock().unwrap();
         stored
             .iter()
-            .filter(|(owner, _)| *owner == user)
-            .map(|(_, kind)| *kind)
+            .filter(|(owner, _, _)| *owner == user)
+            .map(|(_, kind, _)| *kind)
             .collect()
     }
 }
 
 #[async_trait::async_trait]
 impl AvatarStore for InMemoryAvatars {
-    async fn put(&self, user: UserId, image: &AvatarImage) -> Result<String, ProfileError> {
+    async fn put(&self, user: UserId, image: &AvatarImage) -> Result<(), ProfileError> {
         refused_if(&self.refusing_uploads, "the avatar store refuses uploads")?;
         let kind = image.kind();
         let mut stored = self.stored.lock().unwrap();
-        if !stored.contains(&(user, kind)) {
-            stored.push((user, kind));
-        }
-        let extension = kind.mime().trim_start_matches("image/");
-        Ok(format!("http://s3.test/avatars/{user}.{extension}"))
+        stored.retain(|(owner, held, _)| (*owner, *held) != (user, kind));
+        stored.push((user, kind, image.bytes().clone()));
+        Ok(())
+    }
+
+    async fn open(
+        &self,
+        user: UserId,
+        kind: ImageKind,
+    ) -> Result<Option<ByteStream>, ProfileError> {
+        refused_if(&self.refusing_reads, "the avatar store refuses reads")?;
+        let stored = self.stored.lock().unwrap();
+        Ok(stored
+            .iter()
+            .find(|(owner, held, _)| (*owner, *held) == (user, kind))
+            .map(|(_, _, bytes)| byte_stream(bytes.to_vec())))
     }
 
     async fn remove(&self, user: UserId, keep: Option<ImageKind>) -> Result<(), ProfileError> {
@@ -377,7 +397,7 @@ impl AvatarStore for InMemoryAvatars {
         self.stored
             .lock()
             .unwrap()
-            .retain(|(owner, kind)| *owner != user || Some(*kind) == keep);
+            .retain(|(owner, kind, _)| *owner != user || Some(*kind) == keep);
         Ok(())
     }
 }
@@ -452,13 +472,17 @@ pub mod contract {
         profiles: &dyn Profiles,
         seeds: &dyn ProfileSeeds,
     ) {
+        let alice = own_profile("alice");
         let alice = OwnProfile {
-            avatar_url: Some("http://s3.test/avatars/alice.png?v=1".to_owned()),
+            avatar_url: Some(format!(
+                "http://localhost:8080/avatars/{}.png?v=1",
+                alice.id
+            )),
             pronouns: Some(Pronouns::NonBinary),
             bio: Some("kia ora".to_owned()),
             totp_enabled: true,
             admin: true,
-            ..own_profile("alice")
+            ..alice
         };
         let bob = OwnProfile {
             email_verified: false,
@@ -507,14 +531,14 @@ pub mod contract {
     ) {
         let alice = own_profile("alice");
         seeds.sign_up(&alice).await;
-        let url = "http://s3.test/avatars/alice.webp?v=2";
+        let url = format!("http://localhost:8080/avatars/{}.webp?v=2", alice.id);
 
-        profiles.set_avatar(alice.id, Some(url)).await.unwrap();
+        profiles.set_avatar(alice.id, Some(&url)).await.unwrap();
         let shown = profiles.find(alice.id).await.unwrap().unwrap();
         profiles.set_avatar(alice.id, None).await.unwrap();
         let cleared = profiles.find(alice.id).await.unwrap().unwrap();
 
-        assert_eq!(shown.avatar_url.as_deref(), Some(url));
+        assert_eq!(shown.avatar_url, Some(url));
         assert_eq!(cleared.avatar_url, None);
     }
 
@@ -713,6 +737,68 @@ pub mod contract {
 
         assert_eq!(reached, vec![carol]);
         assert!(audience.friends_elsewhere(bob.id).await.unwrap().is_empty());
+    }
+
+    fn image(kind: ImageKind, bytes: &'static [u8]) -> AvatarImage {
+        AvatarImage::parse(Some(kind.mime()), Bytes::from_static(bytes)).unwrap()
+    }
+
+    pub async fn a_stored_avatar_opens_with_its_bytes(avatars: &dyn AvatarStore) {
+        let user = UserId::generate();
+        let latest: &'static [u8] = b"RIFF\x20WEBPVP8";
+        avatars
+            .put(user, &image(ImageKind::Webp, b"RIFF\x10WEBP"))
+            .await
+            .unwrap();
+        avatars
+            .put(user, &image(ImageKind::Webp, latest))
+            .await
+            .unwrap();
+
+        let opened = avatars.open(user, ImageKind::Webp).await.unwrap();
+
+        let opened = opened.expect("the image stored");
+        assert_eq!(opened.length, Some(latest.len() as u64));
+        assert_eq!(collect(opened).await.unwrap(), latest);
+    }
+
+    pub async fn an_image_never_stored_does_not_open(avatars: &dyn AvatarStore) {
+        let user = UserId::generate();
+        avatars
+            .put(user, &image(ImageKind::Png, b"\x89PNG"))
+            .await
+            .unwrap();
+
+        let other_kind = avatars.open(user, ImageKind::Gif).await.unwrap();
+        let other_account = avatars
+            .open(UserId::generate(), ImageKind::Png)
+            .await
+            .unwrap();
+
+        assert!(other_kind.is_none());
+        assert!(other_account.is_none());
+    }
+
+    pub async fn a_removed_image_no_longer_opens(avatars: &dyn AvatarStore) {
+        let user = UserId::generate();
+        avatars
+            .put(user, &image(ImageKind::Png, b"\x89PNG"))
+            .await
+            .unwrap();
+        avatars
+            .put(user, &image(ImageKind::Gif, b"GIF89a"))
+            .await
+            .unwrap();
+
+        avatars.remove(user, Some(ImageKind::Gif)).await.unwrap();
+        let png = avatars.open(user, ImageKind::Png).await.unwrap();
+        let gif = avatars.open(user, ImageKind::Gif).await.unwrap();
+        avatars.remove(user, None).await.unwrap();
+        let cleared = avatars.open(user, ImageKind::Gif).await.unwrap();
+
+        assert!(png.is_none());
+        assert!(gif.is_some());
+        assert!(cleared.is_none());
     }
 }
 

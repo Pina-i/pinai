@@ -4,6 +4,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::Context;
 use application::messaging::{
     AddGroupMember, CreateGroup, DeliverDirectMessage, DismissGroup, EditMessage,
     ListConversations, ListGroupMembers, LoadHistory, MarkRead, OpenAttachment, ReadBlob,
@@ -97,10 +98,6 @@ impl Application {
                 secret_key: config.storage_secret_key.clone().unwrap(),
                 bucket_avatars: config.storage_bucket_avatars.clone(),
                 bucket_attachments: config.storage_bucket_attachments.clone(),
-                public_url: config
-                    .storage_public_url
-                    .clone()
-                    .unwrap_or_else(|| config.storage_endpoint.clone().unwrap()),
             };
 
             let client = StorageClient::new(&scfg)
@@ -109,7 +106,7 @@ impl Application {
             client
                 .ensure_buckets()
                 .await
-                .map_err(|e| anyhow::anyhow!("bucket init failed: {e}"))?;
+                .context("object storage buckets")?;
             info!("object storage connected");
             Some(client)
         } else {
@@ -732,6 +729,7 @@ impl Application {
             )),
             send_test_mail: Arc::new(application::auth::SendTestMail::new(Arc::clone(&mailer))),
             dev_routes: config.environment.is_dev(),
+            hsts: !config.environment.is_dev(),
             pass_second_factor: Arc::new(application::auth::PassSecondFactor::new(
                 Arc::clone(&login_tickets),
                 Arc::clone(&second_factors),
@@ -846,6 +844,7 @@ impl Application {
                 Arc::clone(&profile_federation),
             )),
             set_avatar: Arc::new(application::profile::SetAvatar::new(
+                origin.clone(),
                 Arc::clone(&profiles),
                 Arc::clone(&avatars),
                 Arc::clone(&profile_audience),
@@ -854,11 +853,12 @@ impl Application {
             )),
             clear_avatar: Arc::new(application::profile::ClearAvatar::new(
                 Arc::clone(&profiles),
-                avatars,
+                Arc::clone(&avatars),
                 profile_audience,
                 profile_notifier,
                 Arc::clone(&profile_federation),
             )),
+            serve_avatar: Arc::new(application::profile::ServeAvatar::new(avatars)),
             send_friend_request: Arc::new(SendFriendRequest::new(
                 Arc::clone(&accounts),
                 Arc::clone(&remote_actors),
