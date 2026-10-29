@@ -1,0 +1,44 @@
+# One version for the workspace, read from the v* tags; idp-api, what NodeInfo reports,
+# carries the tag and the changelog. ci.yml builds and publishes from the tag.
+[workspace]
+git_only = true
+git_tag_name = "v{{ version }}"
+git_tag_enable = false
+git_release_enable = false
+changelog_update = false
+# Nothing outside the workspace depends on these crates' API.
+semver_check = false
+# Otherwise every push to main would release: v0.1.0 as soon as this file lands.
+release_always = false
+
+[[package]]
+name = "idp-api"
+git_tag_enable = true
+changelog_update = true
+changelog_path = "./CHANGELOG.md"
+changelog_include = [
+    "activitypub",
+    "federation-transport",
+    "http-signatures",
+    "jwt-utils",
+    "observability",
+    "idp-app",
+    "idp-application",
+    "idp-connections",
+    "idp-domain",
+    "idp-infrastructure",
+]
+
+[[package]]
+name = "dev-inject-data"
+release = false
+
+# For self-hosters: what changes for them, the rest of the history stays in git.
+[changelog]
+commit_parsers = [
+    { message = "^feat(\\([^)]*\\))?!?:", group = "added" },
+    { message = "^fix(\\([^)]*\\))?!?:", group = "fixed" },
+    { message = "^perf(\\([^)]*\\))?!?:", group = "performance" },
+    { message = "^[a-z]+(\\([^)]*\\))?!:", group = "changed" },
+    { message = ".*", skip = true },
+]

@@ -554,21 +554,54 @@ image for amd64 and arm64 on native runners. What it publishes to
 |---|---|
 | A pull request | nothing |
 | A push to `main` | `edge` and `sha-<short>`, for testing only |
-| A tag `vX.Y.Z` | `X.Y.Z`, `X.Y` and `latest`, then a GitHub release carrying `pinai-deploy.tar.gz`: `deploy/` and `LICENSE`, its `compose.yaml` running `X.Y` |
+| A tag `vX.Y.Z` | `X.Y.Z`, `X.Y` and `latest`, then a GitHub release carrying `pinai-deploy.tar.gz`: `deploy/` and `LICENSE`, its `compose.yaml` running `X.Y`; its notes are the version's section of `CHANGELOG.md` |
 | A tag `vX.Y.Z-rc.1` | `X.Y.Z-rc.1`, then a pre-release with the bundle pinned to it |
 
 A tag must name the version of `idp-api` (what NodeInfo reports), or a release
-candidate of it: the run checks it first. For a new minor, first set the default of
-`PINAI_VERSION` in `deploy/compose.yaml` (`${PINAI_VERSION:-X.Y}`) to it and copy
-the file into this README: the run refuses a tag `vX.Y.Z` whose minor it doesn't
-name. Tag the commit of `main` whose run passed, and push the tag:
+candidate of it: the run checks it first. The workspace has one version,
+`[workspace.package]` in `Cargo.toml`, which every crate inherits.
 
-```bash
-git tag -a v0.1.0 -m "v0.1.0" && git push origin v0.1.0
-```
+[release-plz](https://release-plz.dev) (`.github/workflows/release-plz.yml`,
+configured by `release-plz.toml`) sets it and makes the tags, from commit messages
+written as [Conventional Commits](https://www.conventionalcommits.org). On every
+push to `main` it opens or refreshes a release PR, which sets the next version and
+adds its section to `CHANGELOG.md`. Merging that PR tags `vX.Y.Z`, and the tag
+publishes as above.
+
+- **The version.** In 0.x, a breaking change (`feat!:`, `refactor!:`, a
+  `BREAKING CHANGE:` footer) opens a new minor, anything else a patch.
+  `deploy/compose.yaml` follows its minor's latest patch, so self-hosters get
+  every patch and choose when to take a minor.
+- **A new minor.** Every run checks that the default of `PINAI_VERSION` in
+  `deploy/compose.yaml` (`${PINAI_VERSION:-X.Y}`) names `idp-api`'s minor. The
+  release PR of a minor therefore fails until you push to its branch a commit
+  that sets it, with the file copied into this README. Merge right after: a new
+  commit on `main` makes release-plz close that PR and open a fresh one without
+  your commit.
+- **The changelog** lists the `feat`, `fix`, `perf` and breaking commits of the
+  workspace's crates. Other commits, and commits touching only files outside the
+  crates (`deploy/`, `identity-provider/docker/`, `identity-provider/migrations/`),
+  are left out, and don't open a release PR on their own.
+- **A release candidate.** Tag the head of the release PR with its version and
+  push the tag:
+
+  ```bash
+  git fetch origin release-plz-<suffix>
+  git tag -a v0.2.0-rc.1 FETCH_HEAD -m "v0.2.0-rc.1" && git push origin v0.2.0-rc.1
+  ```
+
+- **A release without a crate change** (a fix in `deploy/` alone): commit the
+  new version to `Cargo.toml` and `Cargo.lock` on `main`, then tag that commit
+  `vX.Y.Z` and push the tag yourself.
+
+The workflow authenticates as a GitHub App: unlike `GITHUB_TOKEN`, its token
+runs `ci.yml` on the release PR and on the tag. The App needs read and write
+access to Contents and Pull requests, and must be installed on this
+repository. Its client ID goes in the `RELEASE_PLZ_CLIENT_ID` variable and a
+private key in the `RELEASE_PLZ_PRIVATE_KEY` secret.
 
 The Rust toolchain is pinned in both Dockerfiles (the cargo-chef image) and in
-the workflow (`RUSTUP_TOOLCHAIN`): change the three together.
+both workflows (`RUSTUP_TOOLCHAIN`): change the four together.
 
 ---
 

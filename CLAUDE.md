@@ -73,6 +73,10 @@ When a change touches more than one spec:
 - New crates are picked up by the `crates/*` and `identity-provider/crates/*`
   globs. Add a `chat-server/crates/*` member when that service gets its first
   crate.
+- Every crate takes `version.workspace = true`: the workspace has one version.
+  A new crate also goes in `changelog_include` in `release-plz.toml`, or its
+  commits never reach `CHANGELOG.md`. Dev tools such as `dev-inject-data` keep
+  their own version and `release = false` there.
 
 ## Tests
 
@@ -148,5 +152,7 @@ they are.
 
 `.github/workflows/ci.yml` publishes the image: `edge` from `main`, and on a tag
 `vX.Y.Z` (`idp-api`'s version) the release tags and a GitHub release carrying
-the `deploy/` bundle; the root `README.md` § Releasing has the table. The Rust
-toolchain is pinned in both Dockerfiles and the workflow: change the three together.
+the `deploy/` bundle; the root `README.md` § Releasing has the table. The tags
+come from release-plz (`.github/workflows/release-plz.yml`), so commit messages
+are Conventional Commits. The Rust toolchain is pinned in both Dockerfiles and
+both workflows: change the four together.
