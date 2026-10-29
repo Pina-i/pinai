@@ -582,23 +582,33 @@ publishes as above.
   workspace's crates. Other commits, and commits touching only files outside the
   crates (`deploy/`, `identity-provider/docker/`, `identity-provider/migrations/`),
   are left out, and don't open a release PR on their own.
-- **A release candidate.** Tag the head of the release PR with its version and
-  push the tag:
-
-  ```bash
-  git fetch origin release-plz-<suffix>
-  git tag -a v0.2.0-rc.1 FETCH_HEAD -m "v0.2.0-rc.1" && git push origin v0.2.0-rc.1
-  ```
-
+- **A release candidate.** Tag the head of the release PR with its version
+  (see *Tagging by hand* below), from its `release-plz-…` branch.
 - **A release without a crate change** (a fix in `deploy/` alone): commit the
   new version to `Cargo.toml` and `Cargo.lock` on `main`, then tag that commit
-  `vX.Y.Z` and push the tag yourself.
+  `vX.Y.Z` by hand.
 
-The workflow authenticates as a GitHub App: unlike `GITHUB_TOKEN`, its token
-runs `ci.yml` on the release PR and on the tag. The App needs read and write
-access to Contents and Pull requests, and must be installed on this
-repository. Its client ID goes in the `RELEASE_PLZ_CLIENT_ID` variable and a
-private key in the `RELEASE_PLZ_PRIVATE_KEY` secret.
+**Tagging by hand.** In the Actions tab, run the **CI** workflow on the branch
+(*Run workflow*), with the version (`X.Y.Z` from `main` only, or
+`X.Y.Z-rc.N`). That run checks the version as a tag's run would, then tags the
+branch's head, and the tag's own run publishes. From a clone instead:
+
+```bash
+git tag -a v0.2.0 -m "v0.2.0" && git push --atomic origin main v0.2.0
+# a release candidate, on the release PR's branch
+git fetch origin release-plz-<suffix>
+git tag -a v0.2.0-rc.1 FETCH_HEAD -m "v0.2.0-rc.1" && git push origin v0.2.0-rc.1
+```
+
+A version pushed to `main` untagged, with crate commits since the last tag,
+makes release-plz open a release PR for it, which stays open once the version
+is tagged: close it. `git push --atomic` with the tag avoids it.
+
+release-plz, and the CI run by hand, authenticate as a GitHub App: unlike
+`GITHUB_TOKEN`, its token runs `ci.yml` on the release PR and on the tags. The
+App needs read and write access to Contents and Pull requests, and must be
+installed on this repository. Its client ID goes in the `RELEASE_PLZ_CLIENT_ID`
+variable and a private key in the `RELEASE_PLZ_PRIVATE_KEY` secret.
 
 The Rust toolchain is pinned in both Dockerfiles (the cargo-chef image) and in
 both workflows (`RUSTUP_TOOLCHAIN`): change the four together.

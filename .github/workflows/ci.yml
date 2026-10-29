@@ -5,13 +5,21 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
+  # Run workflow, in the Actions tab: only tags the branch's head, and the tag's run publishes.
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to tag: idp-api's (X.Y.Z, from main only) or a release candidate of it (X.Y.Z-rc.N)"
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 # A newer push waits for the run under way rather than racing it: edge is always main's latest.
+# The event keeps a manual run apart from main's pushes, whose pending run it would cancel.
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -21,33 +29,16 @@ env:
 
 jobs:
   check:
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component clippy,rustfmt
-      # NodeInfo reports idp-api's version: a tag must name it, or a release candidate of it.
+      # On every run, not only tags: a release PR opening a minor fails until compose names it.
       - name: Check the version against the tag and compose's default image
-        run: |
-          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "idp-api") | .version')
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            case "$GITHUB_REF_NAME" in
-              "v$version" | "v$version"-*) ;;
-              *)
-                echo "::error::tag $GITHUB_REF_NAME, but idp-api is at $version"
-                exit 1 ;;
-            esac
-          fi
-          # The README shows deploy/compose.yaml, whose default image is the latest minor's.
-          # Checked on every run: a release PR opening a minor fails until the file names it.
-          case "$GITHUB_REF" in
-            refs/tags/v*-*) ;;
-            *)
-              minor=${version%.*}
-              grep -qF "\${PINAI_VERSION:-$minor}" deploy/compose.yaml || {
-                echo "::error::set PINAI_VERSION's default to $minor in deploy/compose.yaml, and copy the file into README.md"
-                exit 1
-              } ;;
-          esac
+        env:
+          TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
+        run: sh scripts/check-release-version.sh "$TAG"
       # Saved from main only: another ref's cache would evict main's, which every run reads.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
@@ -204,3 +195,35 @@ jobs:
           fi
           gh release create "$GITHUB_REF_NAME" pinai-deploy.tar.gz \
             --verify-tag "${notes[@]}" --title "$GITHUB_REF_NAME" "${prerelease[@]}"
+
+  # A run by hand: tags the branch's head as the GitHub App, since a tag GITHUB_TOKEN creates
+  # starts no run.
+  tag:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+      # Checked before tagging too: a refused tag would stay behind.
+      - name: Check the version
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if [[ "$VERSION" != *-* && "$GITHUB_REF" != refs/heads/main ]]; then
+            echo "::error::$VERSION is a release: run from main, not $GITHUB_REF_NAME"
+            exit 1
+          fi
+          sh scripts/check-release-version.sh "v$VERSION"
+      - id: token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.RELEASE_PLZ_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_PLZ_PRIVATE_KEY }}
+          permission-contents: write
+      - name: Tag the commit
+        env:
+          GH_TOKEN: ${{ steps.token.outputs.token }}
+          VERSION: ${{ inputs.version }}
+        run: gh api "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/v$VERSION" -f sha="$GITHUB_SHA"

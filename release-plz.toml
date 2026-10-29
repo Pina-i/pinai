@@ -8,7 +8,7 @@ git_release_enable = false
 changelog_update = false
 # Nothing outside the workspace depends on these crates' API.
 semver_check = false
-# Otherwise every push to main would release: v0.1.0 as soon as this file lands.
+# Otherwise every push to main would release its version, one set by hand included.
 release_always = false
 
 [[package]]

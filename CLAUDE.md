@@ -9,7 +9,7 @@ Discord alternative. One Cargo workspace spans every Rust crate here.
 compose.yaml               # the platform — `docker compose up` from here
 .env.example               # one deployment unit, one env template
 deploy/                    # hosting an instance: compose.yaml (the published image, for the hoster's proxy), .env.example
-scripts/                   # repository checks `make check` runs; not shipped
+scripts/                   # repository checks `make check` and ci.yml run; not shipped
 specs/                     # platform-wide specs; service specs live in the service
 crates/                    # shared libraries (was the core-libs repo)
   jwt-utils/  http-signatures/  activitypub/  observability/
@@ -154,5 +154,5 @@ they are.
 `vX.Y.Z` (`idp-api`'s version) the release tags and a GitHub release carrying
 the `deploy/` bundle; the root `README.md` § Releasing has the table. The tags
 come from release-plz (`.github/workflows/release-plz.yml`), so commit messages
-are Conventional Commits. The Rust toolchain is pinned in both Dockerfiles and
+are Conventional Commits, or from a run of `ci.yml` by hand, which only tags. The Rust toolchain is pinned in both Dockerfiles and
 both workflows: change the four together.
