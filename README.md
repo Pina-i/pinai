@@ -226,12 +226,20 @@ services:
 ```
 
 **2. `.env`**, beside it, holds what only you decide. An invite-only instance, the
-default, needs its domain and its first admin:
+default, needs its domain and its first admin; the rest is optional:
 
 ```sh
 DOMAIN=chat.example.org
 ADMIN_EMAIL=you@example.org
 ADMIN_PASSWORD='at least 8 bytes'
+
+# Optional
+# The port the instance is published on, on 127.0.0.1, for your proxy: 8080 unset.
+PORT=8090
+# Shown on the sign-in pages and in NodeInfo: the domain unset.
+INSTANCE_NAME=Aotearoa
+# Shown with the name: "An identity provider." unset.
+INSTANCE_DESCRIPTION="Wellington's design and type people."
 ```
 
 A public instance needs its domain and a mail relay:
@@ -248,19 +256,14 @@ The relay is reached on port 587 over STARTTLS; `SMTP_PORT=465` switches to TLS,
 `SMTP_TLS` sets it outright. The instance mails as `Pīna'i <no-reply@chat.example.org>`
 unless `SMTP_FROM` says otherwise.
 
-Either kind can also be given a name and a description, both optional. The sign-in
-pages and NodeInfo show them; without them, the domain and "An identity provider.".
-An admin can change them later in the web app's Settings → Instance, which then takes
-over from `.env`:
+Either kind takes the optional settings. With `PORT` set, your proxy sends to
+`127.0.0.1:<PORT>`. An admin can change the name and the description later in the web
+app's Settings → Instance, which then takes over from `.env`; the name holds 40
+characters at most, the description 90.
 
-```sh
-INSTANCE_NAME=Aotearoa
-INSTANCE_DESCRIPTION='Design and type people, mostly around Wellington.'
-```
-
-The name holds 40 characters at most, the description 90. Put a value holding spaces,
-`#` or `$` in single quotes. `deploy/.env.example` lists every setting. The file holds
-passwords, so make it yours alone: `chmod 600 .env`.
+Put a value holding spaces, `#` or `$` in single quotes, and one holding an apostrophe
+in double quotes. `deploy/.env.example` lists every setting. The file holds passwords,
+so make it yours alone: `chmod 600 .env`.
 
 **3. Start it:**
 
