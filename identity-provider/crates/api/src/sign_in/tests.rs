@@ -152,17 +152,29 @@ async fn the_login_form_goes_back_with_a_code_and_a_session_that_signs_the_brows
 }
 
 #[tokio::test]
-async fn a_wrong_password_goes_back_to_the_login_form_with_the_reason() {
+async fn a_wrong_password_shows_the_login_form_again_with_the_reason_and_the_address_kept() {
     let alice = signed_up("alice");
     let app = app_with(std::slice::from_ref(&alice)).await;
 
     let response = app.respond(login(&alice.email, "not-it")).await;
 
-    assert_eq!(
-        location(&response),
-        format!("/login?{CARRIED}&nonce=the-nonce&error=invalid_credentials")
-    );
     assert!(!response.headers().contains_key(header::SET_COOKIE));
+    assert!(!response.headers().contains_key(header::LOCATION));
+    let (status, page) = TestApp::html_of(response).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(page.contains("Invalid email or password"), "{page}");
+    assert!(
+        page.contains(&format!("value=\"{}\"", alice.email)),
+        "the address stays in its field: {page}"
+    );
+    assert!(
+        !page.contains("not-it"),
+        "the password is never echoed: {page}"
+    );
+    assert!(
+        page.contains("name=\"nonce\" value=\"the-nonce\""),
+        "the request is still carried: {page}"
+    );
 }
 
 #[tokio::test]
@@ -516,11 +528,7 @@ async fn ten_wrong_passwords_hold_an_email_off_for_a_while_whatever_its_case() {
 
     for _ in 0..10 {
         let wrong = app.respond(login(&alice.email, "not-it")).await;
-        assert!(
-            location(&wrong).ends_with("error=invalid_credentials"),
-            "{}",
-            location(&wrong)
-        );
+        assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED);
     }
     let held = app
         .respond(login(&alice.email.to_uppercase(), "alice-password"))
@@ -528,13 +536,11 @@ async fn ten_wrong_passwords_hold_an_email_off_for_a_while_whatever_its_case() {
     let right = app.respond(login(&alice.email, "alice-password")).await;
     let other = app.respond(login(&bob.email, "bob-password")).await;
 
-    for response in [&held, &right] {
-        assert!(
-            location(response).ends_with("error=rate_limited"),
-            "{}",
-            location(response)
-        );
+    for response in [held, right] {
         assert!(!response.headers().contains_key(header::SET_COOKIE));
+        let (status, page) = TestApp::html_of(response).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        assert!(page.contains("Too many attempts"), "{page}");
     }
     assert!(
         location(&other).starts_with(REDIRECT_URI),

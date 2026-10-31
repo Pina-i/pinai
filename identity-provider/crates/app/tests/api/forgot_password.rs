@@ -111,10 +111,7 @@ async fn someone_who_forgot_their_password_is_mailed_a_link_sets_a_new_one_and_s
             &[("email", &alice.email), ("password", NEW_PASSWORD)],
         )
         .await;
-    assert_eq!(
-        query_of(&location(&with_the_old))["error"],
-        "invalid_credentials"
-    );
+    assert_eq!(with_the_old.status(), 401, "the old password is refused");
     let landed = location(&with_the_new);
     assert!(landed.starts_with(&app.redirect_uri), "{landed}");
     let tokens = app.tokens_for(&query_of(&landed)["code"]).await;

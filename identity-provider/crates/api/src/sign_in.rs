@@ -334,15 +334,9 @@ pub async fn log_in(
     let Some(request) = form.carried.request() else {
         return Ok(to("/login", &appearance.pairs()));
     };
-    let again = |error: &str| {
-        to(
-            "/login",
-            &carried(&request, appearance, &[("error", error)]),
-        )
-    };
     // Counted per address in any case, known or not: which is limited never tells who exists.
     if !attempts.allow(&form.email.to_lowercase()) {
-        return Ok(again("rate_limited"));
+        return again(&pages, StatusCode::TOO_MANY_REQUESTS, &form, "rate_limited").await;
     }
     let outcome = match log_in
         .execute(
@@ -361,7 +355,15 @@ pub async fn log_in(
         Err(other) => return Err(authorize_error(other)),
     };
     Ok(match outcome {
-        LoginOutcome::Refused => again("invalid_credentials"),
+        LoginOutcome::Refused => {
+            return again(
+                &pages,
+                StatusCode::UNAUTHORIZED,
+                &form,
+                "invalid_credentials",
+            )
+            .await;
+        }
         LoginOutcome::Unverified { user, email } => {
             let user = user.to_string();
             let pending = [
@@ -383,6 +385,22 @@ pub async fn log_in(
         )
             .into_response(),
     })
+}
+
+/// The login form again, saying why: the address kept in its field — in the page only, never in
+/// a URL —, the password not.
+async fn again(
+    pages: &SignInPages,
+    status: StatusCode,
+    form: &LoginForm,
+    error: &str,
+) -> Result<Response, ApiError> {
+    let answer = LoginAnswer {
+        error: Some(error),
+        email: &form.email,
+        ..LoginAnswer::default()
+    };
+    login_view(pages, status, &form.carried, LoginView::SignIn, answer).await
 }
 
 /// Each grant reads its own fields; one left out is empty, and refused as such.

@@ -30,7 +30,7 @@ sequenceDiagram
         else authenticator
             I-->>P: 303 /login/totp?ticket (§ 3)
         else wrong email or password
-            I-->>P: 303 /login?…&error=invalid_credentials
+            I-->>P: 401 the login form again, the email kept, error invalid_credentials
         end
     end
     C->>I: POST /token (code, redirect_uri, client_id, code_verifier)
@@ -219,11 +219,13 @@ The login form, posted by the browser with the request it carries.
   could have a code sent wherever it names. A failure is the "This app couldn't be verified"
   page, `401` / `400`, never a redirect.
 - Password guesses are bounded per email address, in any case: 10, then one a minute. Past that,
-  the form is sent back with `error=rate_limited`, whatever the password — known address or not,
-  so the limit tells nothing of who has an account.
+  the form is shown again with `rate_limited` (`429`), whatever the password — known address or
+  not, so the limit tells nothing of who has an account.
 - An unknown email is checked against a decoy hash as costly as a real one, and answered like a
-  wrong password: `error=invalid_credentials`. Neither the answer nor its timing tells whether
-  the address has an account.
+  wrong password: the form again with `invalid_credentials` (`401`). Neither the answer nor its
+  timing tells whether the address has an account.
+- A refused form is rendered in the answer, not sent to `/login` again: the email stays in its
+  field — in the page only, never in a URL —, the password field is left empty.
 - The right password on an address neither confirmed nor admitted (§ 4) mails a fresh code and
   goes to `/verify-email` (§ 2); on an account with an authenticator it opens a ticket and goes
   to `/login/totp` (§ 3). Otherwise it issues a code and sets the session cookie.

@@ -3,7 +3,7 @@ use serde_json::Value;
 
 use crate::helpers::{
     ADMIN, Account, PASSWORD, TestApp, admin_of, an_admin, closed_as_ended, eventually, location,
-    open_socket, query_of, spawn_app_with,
+    open_socket, spawn_app_with,
 };
 
 const NEW_PASSWORD: &str = "a-new-journey-password";
@@ -98,10 +98,7 @@ async fn a_member_resets_their_password_with_an_admins_link_and_is_signed_out_ev
         [401, 400],
         "her tokens went with her session"
     );
-    assert_eq!(
-        query_of(&location(&with_the_old))["error"],
-        "invalid_credentials"
-    );
+    assert_eq!(with_the_old.status(), 401, "the old password is refused");
     let landed = location(&with_the_new);
     assert!(landed.starts_with(&app.redirect_uri), "{landed}");
     assert_eq!(again, 404);

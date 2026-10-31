@@ -47,8 +47,13 @@ async fn a_confirmed_account_signs_in_again_with_its_password() {
         )
         .await;
     assert_eq!(status, 200);
-    assert_eq!(wrong.status(), 303);
-    assert_eq!(query_of(&location(&wrong))["error"], "invalid_credentials");
+    assert_eq!(wrong.status(), 401);
+    let page = wrong.text().await.unwrap();
+    assert!(page.contains("Invalid email or password"), "{page}");
+    assert!(
+        page.contains(&format!("value=\"{}\"", alice.email)),
+        "{page}"
+    );
     assert_eq!(
         app.mail.count_for(&alice.email),
         1,
