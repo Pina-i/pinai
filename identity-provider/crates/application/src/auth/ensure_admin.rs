@@ -32,11 +32,13 @@ impl EnsureAdmin {
         }
     }
 
-    /// What was done about the admin: `Create` with the address of the account created.
+    /// What was done about the admin: `Create` with the address of the account created. `name`
+    /// is its display name, `Admin` when unset, checked whether or not the account is created.
     pub async fn execute(
         &self,
         registrations: Registrations,
         address: Option<&str>,
+        name: Option<&str>,
         password: Option<&str>,
         now: OffsetDateTime,
     ) -> Result<AdminBootstrap<Email>, AuthError> {
@@ -47,6 +49,10 @@ impl EnsureAdmin {
                     bad.reason,
                 )));
             }
+        };
+        let name = match admin_display_name(name) {
+            Ok(name) => name,
+            Err(refusal) => return Ok(AdminBootstrap::Refused(refusal)),
         };
         let facts = self.sign_ups.admin_facts(address.as_ref()).await?;
         let bootstrap = admin_bootstrap(
@@ -61,7 +67,7 @@ impl EnsureAdmin {
                 &self.origin,
                 &*self.suffixes,
                 Creation::Admin(now),
-                &admin_display_name(),
+                &name,
                 &admin.address,
                 &self.hasher.hash(admin.password.as_str())?,
             )

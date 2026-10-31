@@ -537,6 +537,7 @@ impl Application {
         .execute(
             config.registrations,
             config.admin_email.as_deref(),
+            config.admin_name.as_deref(),
             config.admin_password.as_deref(),
             time::OffsetDateTime::now_utc(),
         )
@@ -1265,6 +1266,10 @@ fn report_admin(bootstrap: AdminBootstrap<Email>) -> anyhow::Result<()> {
         AdminBootstrap::Refused(AdminRefusal::BadAddress(reason)) => {
             anyhow::bail!("ADMIN_EMAIL: {reason}")
         }
+        AdminBootstrap::Refused(AdminRefusal::BadName) => anyhow::bail!(
+            "ADMIN_NAME: a name of 1 to {} characters",
+            domain::profile::DisplayName::MAX_CHARS
+        ),
         AdminBootstrap::Refused(AdminRefusal::PasswordTooShort) => {
             anyhow::bail!("ADMIN_PASSWORD: at least 8 bytes")
         }

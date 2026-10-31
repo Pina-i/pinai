@@ -110,6 +110,8 @@ pub struct Config {
     // ── The first admin ──────────────────────────────────────────────────
     /// `ADMIN_EMAIL`: the admin account is created with it at startup when no account has it.
     pub admin_email: Option<String>,
+    /// `ADMIN_NAME`: that account's display name, `Admin` unset; read only to create it.
+    pub admin_name: Option<String>,
     /// `ADMIN_PASSWORD`: read only to create that account, never to change it.
     pub admin_password: Option<String>,
 
@@ -256,6 +258,7 @@ impl Config {
             email_otp_pepper: email_otp_pepper(env_var("EMAIL_OTP_PEPPER")?)?,
             registrations: registrations(env_var("REGISTRATIONS")?)?,
             admin_email: unless_empty(env_var("ADMIN_EMAIL")?),
+            admin_name: unless_empty(env_var("ADMIN_NAME")?),
             admin_password: unless_empty(env_var("ADMIN_PASSWORD")?),
             web_app: web_app(environment, env_var("WEB_APP_ORIGIN")?)?,
             domain,

@@ -13,14 +13,14 @@ const ROOT: &str = "root@idp.test";
 
 async fn open(w: &World, address: Option<&str>, password: Option<&str>) -> AdminBootstrap<Email> {
     w.ensure_admin
-        .execute(Registrations::Open, address, password, now())
+        .execute(Registrations::Open, address, None, password, now())
         .await
         .unwrap()
 }
 
 async fn invite(w: &World, address: Option<&str>, password: Option<&str>) -> AdminBootstrap<Email> {
     w.ensure_admin
-        .execute(Registrations::Invite, address, password, now())
+        .execute(Registrations::Invite, address, None, password, now())
         .await
         .unwrap()
 }
@@ -59,6 +59,46 @@ async fn an_address_nobody_has_becomes_the_admin_account_admitted_and_unconfirme
     assert!(!account.needs_code(), "it is admitted");
     assert_eq!(facts(&*w.accounts, ROOT).await.holder, AddressHolder::Admin);
     assert!(w.mailer.sent().is_empty());
+}
+
+#[tokio::test]
+async fn the_admin_takes_the_configured_name_and_a_handle_drawn_from_it() {
+    let w = world().await;
+
+    w.ensure_admin
+        .execute(
+            Registrations::Open,
+            Some(ROOT),
+            Some(" Hōkū Kealoha "),
+            Some("admin-password"),
+            now(),
+        )
+        .await
+        .unwrap();
+
+    let created = &w.accounts.created()[0];
+    assert_eq!(created.display_name, "Hōkū Kealoha");
+    assert_eq!(created.username.as_str(), "hoku_kealoha_sfx01");
+}
+
+#[tokio::test]
+async fn a_blank_name_is_refused_and_creates_nothing() {
+    let w = world().await;
+
+    let bootstrap = w
+        .ensure_admin
+        .execute(
+            Registrations::Open,
+            Some(ROOT),
+            Some("   "),
+            Some("admin-password"),
+            now(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(bootstrap, AdminBootstrap::Refused(AdminRefusal::BadName));
+    assert!(w.accounts.created().is_empty());
 }
 
 #[tokio::test]

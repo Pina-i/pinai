@@ -2,9 +2,10 @@ use crate::profile::DisplayName;
 
 use super::{AuthError, Email, Registrations, check_password};
 
-/// The name the instance's first admin account is created with.
-pub fn admin_display_name() -> DisplayName {
-    DisplayName::parse("Admin").expect("a name within the rules")
+/// The name the instance's first admin account is created with: the one configured, `Admin`
+/// when none is.
+pub fn admin_display_name(configured: Option<&str>) -> Result<DisplayName, AdminRefusal> {
+    DisplayName::parse(configured.unwrap_or("Admin")).map_err(|_| AdminRefusal::BadName)
 }
 
 /// Who has the address the instance is told to make its admin's.
@@ -93,6 +94,8 @@ impl<Account> AdminBootstrap<Account> {
 pub enum AdminRefusal {
     /// The configured address is not one: the rule it breaks.
     BadAddress(String),
+    /// The configured name is blank or longer than a display name may be.
+    BadName,
     NoPassword,
     PasswordTooShort,
     /// The password breaks another of the instance's rules.

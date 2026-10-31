@@ -37,6 +37,7 @@ set `WEB_APP_ORIGIN` in `.env` to its address.
    ```sh
    DOMAIN=chat.example.org
    ADMIN_EMAIL=you@example.org
+   ADMIN_NAME=Hōkū
    ADMIN_PASSWORD='at least 8 bytes'
    ```
 
@@ -183,10 +184,11 @@ talk with people on other instances.
 ### The first admin
 
 `ADMIN_EMAIL` and `ADMIN_PASSWORD` name the first admin. At each start, if no
-account has that address, the instance creates an admin account named "Admin" with
-that password. Sign in with them from the app, no code asked, and rename the
-account there. The password needs at least 8 bytes: with a shorter one, the
-account isn't created and the instance doesn't start.
+account has that address, the instance creates an admin account with that
+password, named `ADMIN_NAME` — "Admin" when unset. Sign in with them from the app,
+no code asked. The password needs at least 8 bytes and the name 1 to 50
+characters: otherwise the account isn't created and the instance doesn't start.
+`ADMIN_NAME` is read only then: rename the account later from the app.
 
 - The instance never writes over an existing account's password, and never makes
   an existing account admin: the log warns when `ADMIN_EMAIL` names an account that

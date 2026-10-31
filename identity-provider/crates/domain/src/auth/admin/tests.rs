@@ -166,6 +166,21 @@ fn the_admin_password_is_never_shown() {
 }
 
 #[test]
-fn the_admin_is_named_admin() {
-    assert_eq!(admin_display_name().as_str(), "Admin");
+fn the_admin_is_named_admin_unless_a_name_is_configured() {
+    assert_eq!(admin_display_name(None).unwrap().as_str(), "Admin");
+    assert_eq!(
+        admin_display_name(Some("  Hōkū ")).unwrap().as_str(),
+        "Hōkū"
+    );
+}
+
+#[test]
+fn a_blank_or_overlong_admin_name_is_refused() {
+    let overlong = "a".repeat(DisplayName::MAX_CHARS + 1);
+
+    assert_eq!(admin_display_name(Some("   ")), Err(AdminRefusal::BadName));
+    assert_eq!(
+        admin_display_name(Some(&overlong)),
+        Err(AdminRefusal::BadName)
+    );
 }

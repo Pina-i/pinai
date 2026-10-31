@@ -893,15 +893,17 @@ account an invitation let in, vouched for by the admin who made the invitation (
 
 ### The first admin
 
-`ADMIN_EMAIL` and `ADMIN_PASSWORD` name the first admin. An empty value counts as unset. They are
+`ADMIN_EMAIL` and `ADMIN_PASSWORD` name the first admin, and `ADMIN_NAME`, optional, its display
+name. An empty value counts as unset. They are
 read once, as the instance starts: `Application::build` runs `application::auth::EnsureAdmin`
 after the migrations and before anything is served, so nobody can register that address first.
 The decision is a domain rule, `admin_bootstrap`, over who may join (§ 6), the address paired
 with who has it (found as signing in finds it, whatever its case) and whether any admin exists,
 both read in one query (`SignUps::admin_facts`). A decision to create carries the address and
 the password, so none is taken without them; the use case carries it out and reports what it did
-without the password, and the start logs that, or stops on a refusal — a bad address and a bad
-password alike.
+without the password, and the start logs that, or stops on a refusal — a bad address, a bad name
+and a bad password alike. The name is checked at each start, the account created or not
+(`admin_display_name`), so a typo shows before it matters.
 
 ```mermaid
 flowchart TD
@@ -925,12 +927,14 @@ flowchart TD
 
 - **Nobody has the address**: the admin account is created, in one insert through the sign-up
   store, which settles a race for the address or the handle as for a registration (§ 2): display
-  name `Admin` (the admin edits it like any name), a handle drawn from it as a registration draws
-  one (`admin_xk9mp`), the password hashed as a registration's, `is_admin`, admitted, its address
+  name `ADMIN_NAME`, `Admin` when unset (the admin edits it like any name afterwards; the variable
+  is never read again), a handle drawn from it as a registration draws one (`ADMIN_NAME=Hōkū` →
+  `hoku_xk9mp`, unset → `admin_xk9mp`), the password hashed as a registration's, `is_admin`, admitted, its address
   unconfirmed. No code is mailed. Without `ADMIN_PASSWORD`, or with one shorter than the
   instance's 8 bytes, the instance refuses to start ("ADMIN_PASSWORD is needed to create the admin
   account ADMIN_EMAIL names", "ADMIN_PASSWORD: at least 8 bytes"); an `ADMIN_EMAIL` that is not an
-  address stops it too ("ADMIN_EMAIL: an address like name@example.com").
+  address stops it too ("ADMIN_EMAIL: an address like name@example.com"), as does an
+  `ADMIN_NAME` blank or over 50 characters ("ADMIN_NAME: a name of 1 to 50 characters").
 - **The admin has the address**: the account is left as it is. `ADMIN_PASSWORD` never writes over
   its password, so a password the admin chose is never reverted by a restart. While
   `ADMIN_PASSWORD` is set, each start warns that it is unused once the account exists and can be
@@ -988,8 +992,8 @@ never left out to mean the default, so a body missing one resets nothing.
 
 ### Scenarios
 
-- **Setting up an instance.** The operator sets `ADMIN_EMAIL` and `ADMIN_PASSWORD` in `.env`
-  and starts it. The admin account exists before the first request, and signs in at once with
+- **Setting up an instance.** The operator sets `ADMIN_EMAIL`, `ADMIN_NAME` and `ADMIN_PASSWORD`
+  in `.env` and starts it. The admin account exists before the first request, and signs in at once with
   that password, no code asked — mail may not be set up yet. `/userinfo` answers `admin: true`.
 - **The restarts after.** The admin account is left as it is; a warning asks to remove
   `ADMIN_PASSWORD` from `.env`.

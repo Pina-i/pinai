@@ -38,6 +38,7 @@ fn config() -> Config {
         e2ee_keypackage_refill_threshold: 20,
         e2ee_keypackage_lifetime: Duration::from_secs(90 * 24 * 3600),
         admin_email: None,
+        admin_name: None,
         admin_password: None,
         web_app: None,
     }

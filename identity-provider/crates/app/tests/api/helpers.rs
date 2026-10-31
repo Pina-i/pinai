@@ -205,6 +205,7 @@ async fn build_on(
         // The journeys sign up on their own; the invite-only ones say so.
         registrations: domain::auth::Registrations::Open,
         admin_email: None,
+        admin_name: None,
         admin_password: None,
         // The journeys' web client stands in for the official one.
         web_app: Some(domain::auth::WebApp::parse(&client.uri()).unwrap()),
