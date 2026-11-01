@@ -673,6 +673,7 @@ The main groups:
 - **Session** — `SESSION_SECRET`
 - **Instance** — `INSTANCE_NAME`, `INSTANCE_DESCRIPTION`: how the sign-in pages and NodeInfo present it, until an admin changes them in Settings → Instance; at most 40 and 90 characters
 - **Source code** — `SOURCE_URL`: where the code the instance runs can be had, an http(s) URL, as NodeInfo's `software.repository` and the sign-in pages' "Source" link; `https://github.com/Pina-i/pinai` when unset. An instance running modified code points it at that code (see [License](#license))
+- **GIFs** — `KLIPY_API_KEY`: the Klipy key the instance's clients, web and desktop, search GIFs with, handed out in NodeInfo (`metadata.gifs`); no GIF picker when unset. A test key allows 100 calls an hour for the whole instance: ask Klipy for a production one
 - **Who can join** — `REGISTRATIONS`: `open` (anyone signs up; needs an SMTP relay) or `invite` (only people an admin invited; needs an admin), `invite` when unset
 - **Admin** — `ADMIN_EMAIL`, `ADMIN_NAME`, `ADMIN_PASSWORD`: the first admin account, created at startup when no account has that address, never written over; `ADMIN_NAME` is its display name, `Admin` when unset
 - **Web app** — `WEB_APP_ORIGIN`: overrides, in any environment, the built-in address of the official web app, where someone joining by invitation lands signed in and the reset pages' Sign in links go (default `http://localhost:5173` in development)

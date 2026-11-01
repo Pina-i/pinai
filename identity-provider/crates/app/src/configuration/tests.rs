@@ -14,6 +14,7 @@ fn config() -> Config {
         instance_name: None,
         instance_description: None,
         source_url: SourceUrl::parse(PINAI_SOURCE_URL).unwrap(),
+        klipy_key: None,
         redis_url: "redis://127.0.0.1:6379".into(),
         storage_endpoint: None,
         storage_access_key: None,
@@ -782,4 +783,34 @@ fn an_unset_or_empty_pepper_is_missing() {
             "{raw:?}"
         );
     }
+}
+
+// ─── The GIF picker's key ────────────────────────────────────────────────────
+
+#[test]
+fn an_unset_or_empty_klipy_key_turns_the_gif_picker_off() {
+    for raw in [None, Some(String::new())] {
+        assert_eq!(klipy_key(raw).unwrap(), None);
+    }
+}
+
+#[test]
+fn a_klipy_key_given_is_kept() {
+    assert_eq!(
+        klipy_key(Some("klipy-key_1".into()))
+            .unwrap()
+            .map(|key| key.as_str().to_owned()),
+        Some("klipy-key_1".to_owned())
+    );
+}
+
+#[test]
+fn a_klipy_key_klipy_wouldnt_give_is_refused_without_quoting_it() {
+    let refused = klipy_key(Some("not/a key".into())).unwrap_err();
+
+    assert!(matches!(
+        refused,
+        ConfigError::InvalidValue("KLIPY_API_KEY", _)
+    ));
+    assert!(!refused.to_string().contains("not/a key"), "{refused}");
 }

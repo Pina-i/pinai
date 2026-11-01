@@ -1,5 +1,5 @@
 use domain::identity::testing::{InMemoryAccounts, account};
-use domain::identity::{InstanceOrigin, IntroText, PINAI_SOURCE_URL};
+use domain::identity::{InstanceOrigin, IntroText, KlipyKey, PINAI_SOURCE_URL};
 
 use super::*;
 
@@ -38,8 +38,27 @@ async fn an_instance_is_described_by_its_intro_its_source_and_its_accounts() {
             people: 2,
             open_registrations: true,
             source,
+            klipy_key: None,
         }
     );
+}
+
+#[tokio::test]
+async fn an_instance_given_a_klipy_key_hands_it_out() {
+    let key = KlipyKey::parse("klipy-key_1").unwrap();
+
+    let facts = DescribeInstance::new(
+        intro(None, None),
+        pinai(),
+        Registrations::Open,
+        Arc::new(InMemoryAccounts::default()),
+    )
+    .with_klipy_key(Some(key.clone()))
+    .execute(now())
+    .await
+    .unwrap();
+
+    assert_eq!(facts.klipy_key, Some(key));
 }
 
 #[tokio::test]

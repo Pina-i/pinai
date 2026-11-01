@@ -24,7 +24,7 @@ pub async fn discovery(State(origin): State<InstanceOrigin>) -> Json<Value> {
 }
 
 /// `GET /nodeinfo/2.1` — the instance: its software and where its code is, its accounts, whether
-/// anyone may sign up, its name and description.
+/// anyone may sign up, its name and description, and the key its clients search GIFs with.
 pub async fn document(State(describe): State<Arc<DescribeInstance>>) -> Result<Response, ApiError> {
     let facts = describe
         .execute(OffsetDateTime::now_utc())
@@ -33,6 +33,9 @@ pub async fn document(State(describe): State<Arc<DescribeInstance>>) -> Result<R
     let mut metadata = json!({ "nodeName": facts.name });
     if let Some(description) = facts.description {
         metadata["nodeDescription"] = description.into();
+    }
+    if let Some(key) = facts.klipy_key {
+        metadata["gifs"] = json!({ "provider": "klipy", "apiKey": key.as_str() });
     }
     let document = json!({
         "version": "2.1",

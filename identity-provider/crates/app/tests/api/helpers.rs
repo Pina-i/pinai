@@ -179,6 +179,7 @@ async fn build_on(
         instance_name: None,
         instance_description: None,
         source_url: domain::identity::SourceUrl::parse(domain::identity::PINAI_SOURCE_URL).unwrap(),
+        klipy_key: None,
         redis_url: std::env::var("TEST_REDIS_URL")
             .unwrap_or_else(|_| "redis://localhost:56479".into()),
         storage_endpoint: None,

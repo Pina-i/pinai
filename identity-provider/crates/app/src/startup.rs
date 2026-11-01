@@ -608,12 +608,15 @@ impl Application {
             reset_mailer,
         ));
         let (reset_requests, reset_queue) = api::background::reset_requests();
-        let describe_instance = Arc::new(application::identity::DescribeInstance::new(
-            Arc::clone(&intro),
-            config.source_url.clone(),
-            config.registrations,
-            Arc::clone(&accounts),
-        ));
+        let describe_instance = Arc::new(
+            application::identity::DescribeInstance::new(
+                Arc::clone(&intro),
+                config.source_url.clone(),
+                config.registrations,
+                Arc::clone(&accounts),
+            )
+            .with_klipy_key(config.klipy_key.clone()),
+        );
 
         let api_state = api::AppState {
             authenticate: Arc::new(application::auth::Authenticate::new(

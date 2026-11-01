@@ -4,6 +4,7 @@
 mod account;
 mod actor_uri;
 mod address;
+mod gifs;
 mod handle;
 mod intro;
 mod origin;
@@ -16,6 +17,7 @@ pub mod testing;
 pub use account::{Account, RemoteActor};
 pub use actor_uri::ActorUri;
 pub use address::{Domain, FederatedAddress, host_of};
+pub use gifs::KlipyKey;
 pub use handle::{Handle, HandleSuffix, UsernameChoice};
 pub use intro::{
     InstanceIntro, IntroError, IntroField, IntroText, intro_in_force, overridden_settings,

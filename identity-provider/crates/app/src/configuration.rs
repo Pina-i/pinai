@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use domain::auth::{OFFICIAL_WEB_APP_ORIGIN, Registrations, WebApp};
-use domain::identity::{PINAI_SOURCE_URL, SourceUrl, host_of};
+use domain::identity::{KlipyKey, PINAI_SOURCE_URL, SourceUrl, host_of};
 use infrastructure::email::SmtpTls;
 
 /// Deployment environment. Controls scheme selection (http vs https) for the
@@ -48,6 +48,9 @@ pub struct Config {
     /// `SOURCE_URL`: where the code this instance runs can be had, linked from NodeInfo and the
     /// sign-in pages; Pīna'i's own repository when unset.
     pub source_url: SourceUrl,
+    /// `KLIPY_API_KEY`: the key NodeInfo hands the instance's clients for their GIF picker; unset,
+    /// they show none.
+    pub klipy_key: Option<KlipyKey>,
 
     // ── Redis (Message Broker) ───────────────────────────────────────────
     /// Redis connection URL for the event broker (Streams + pub-sub).
@@ -208,6 +211,7 @@ impl Config {
             instance_name: env_var("INSTANCE_NAME")?,
             instance_description: env_var("INSTANCE_DESCRIPTION")?,
             source_url: source_url(env_var("SOURCE_URL")?)?,
+            klipy_key: klipy_key(env_var("KLIPY_API_KEY")?)?,
             redis_url: env_var("REDIS_URL")?.unwrap_or_else(|| "redis://127.0.0.1:6379".into()),
             storage_endpoint: env_var("STORAGE_ENDPOINT")?,
             storage_access_key: env_var("STORAGE_ACCESS_KEY")?,
@@ -432,6 +436,16 @@ fn source_url(raw: Option<String>) -> Result<SourceUrl, ConfigError> {
         }),
         None => Ok(SourceUrl::parse(PINAI_SOURCE_URL).expect("a built-in URL")),
     }
+}
+
+/// Unset or empty, no GIF picker. A key Klipy wouldn't have given refuses the start, unquoted: it
+/// is an account's credential, however public.
+fn klipy_key(raw: Option<String>) -> Result<Option<KlipyKey>, ConfigError> {
+    unless_empty(raw)
+        .map(|raw| {
+            KlipyKey::parse(&raw).map_err(|e| ConfigError::InvalidValue("KLIPY_API_KEY", e.reason))
+        })
+        .transpose()
 }
 
 /// Unset or empty, no-reply at the instance's own host: a `.env` without a relay leaves

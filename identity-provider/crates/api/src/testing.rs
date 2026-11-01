@@ -58,7 +58,8 @@ use domain::identity::testing::{
     InMemoryAccounts, InMemoryRemoteActors, InMemorySavedIntro, InMemoryTokens, TrustedSignatures,
 };
 use domain::identity::{
-    Account, Accounts, ActorUri, InstanceOrigin, IntroText, RemoteActor, RemoteActors, SourceUrl,
+    Account, Accounts, ActorUri, InstanceOrigin, IntroText, KlipyKey, RemoteActor, RemoteActors,
+    SourceUrl,
 };
 use domain::messaging::AttachmentLimits;
 use domain::messaging::testing::{
@@ -180,6 +181,7 @@ impl TestApp {
             Some(web_app()),
             Registrations::Open,
             false,
+            None,
         )
     }
 
@@ -191,6 +193,7 @@ impl TestApp {
             None,
             Registrations::Open,
             false,
+            None,
         )
     }
 
@@ -202,6 +205,7 @@ impl TestApp {
             Some(web_app()),
             Registrations::Invite,
             false,
+            None,
         )
     }
 
@@ -213,6 +217,19 @@ impl TestApp {
             Some(web_app()),
             Registrations::Open,
             true,
+            None,
+        )
+    }
+
+    /// An instance whose NodeInfo hands its clients a Klipy key for the GIF picker.
+    pub fn with_klipy_key(key: &str) -> Self {
+        Self::built(
+            [],
+            InMemoryRemoteActors::default(),
+            Some(web_app()),
+            Registrations::Open,
+            false,
+            Some(KlipyKey::parse(key).unwrap()),
         )
     }
 
@@ -222,6 +239,7 @@ impl TestApp {
         web_app: Option<WebApp>,
         registrations: Registrations,
         production: bool,
+        klipy_key: Option<KlipyKey>,
     ) -> Self {
         let accounts: Arc<dyn Accounts> = Arc::new(InMemoryAccounts::with(accounts));
         let remote_actors: Arc<dyn RemoteActors> = Arc::new(remote_actors);
@@ -310,12 +328,15 @@ impl TestApp {
             origin.clone(),
             IntroText::parse(Some("Aotearoa"), Some("Design and type people.")).unwrap(),
         ));
-        let describe_instance = Arc::new(DescribeInstance::new(
-            intro.clone(),
-            SourceUrl::parse(SOURCE).unwrap(),
-            registrations,
-            accounts.clone(),
-        ));
+        let describe_instance = Arc::new(
+            DescribeInstance::new(
+                intro.clone(),
+                SourceUrl::parse(SOURCE).unwrap(),
+                registrations,
+                accounts.clone(),
+            )
+            .with_klipy_key(klipy_key),
+        );
         let request_reset = Arc::new(RequestPasswordReset::new(
             registrations,
             origin.clone(),

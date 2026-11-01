@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use domain::auth::Registrations;
-use domain::identity::{Accounts, AccountsError, SourceUrl};
+use domain::identity::{Accounts, AccountsError, KlipyKey, SourceUrl};
 use time::{Duration, OffsetDateTime};
 
 use super::IntroInForce;
@@ -17,6 +17,8 @@ pub struct InstanceFacts {
     pub open_registrations: bool,
     /// Where the code it runs can be had: `SOURCE_URL`.
     pub source: SourceUrl,
+    /// What turns on its members' GIF picker: `KLIPY_API_KEY`.
+    pub klipy_key: Option<KlipyKey>,
 }
 
 /// Its sign-in pages and its NodeInfo, which anyone may ask for: the count is kept a minute,
@@ -26,6 +28,7 @@ pub struct DescribeInstance {
     source: SourceUrl,
     registrations: Registrations,
     accounts: Arc<dyn Accounts>,
+    klipy_key: Option<KlipyKey>,
     counted: Mutex<Option<(OffsetDateTime, u64)>>,
 }
 
@@ -43,8 +46,15 @@ impl DescribeInstance {
             source,
             registrations,
             accounts,
+            klipy_key: None,
             counted: Mutex::new(None),
         }
+    }
+
+    /// The instance hands its members' clients this key for the GIF picker; none, no picker.
+    pub fn with_klipy_key(mut self, key: Option<KlipyKey>) -> Self {
+        self.klipy_key = key;
+        self
     }
 
     pub async fn execute(&self, now: OffsetDateTime) -> Result<InstanceFacts, AccountsError> {
@@ -64,6 +74,7 @@ impl DescribeInstance {
             people,
             open_registrations: self.registrations.are_open(),
             source: self.source.clone(),
+            klipy_key: self.klipy_key.clone(),
         })
     }
 }
