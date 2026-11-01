@@ -257,13 +257,11 @@ async fn an_upload_names_the_entry_it_refuses() {
         { "key_package": "%%%", "expires_at": in_days(7) },
     ]);
     let empty = json!([{ "key_package": "", "expires_at": in_days(7) }]);
-    let expired = json!([{ "key_package": B64.encode([1; 8]), "expires_at": in_days(-1) }]);
 
     for (packages, description) in [
         (json!([]), "packages must be non-empty"),
         (bad_base64, "packages[1].key_package is not valid base64"),
         (empty, "packages[0].key_package is empty"),
-        (expired, "packages[0].expires_at is in the past"),
     ] {
         assert_eq!(
             w.upload(&w.alice, device, packages).await,

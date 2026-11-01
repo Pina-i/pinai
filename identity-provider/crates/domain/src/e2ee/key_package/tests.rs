@@ -25,36 +25,56 @@ fn a_key_package_is_never_empty() {
     assert!(KeyPackageBytes::parse(Vec::new()).is_err());
 }
 
+fn expiries(packages: &[NewKeyPackage]) -> Vec<OffsetDateTime> {
+    packages.iter().map(|p| p.expires_at).collect()
+}
+
 #[test]
-fn a_batch_of_future_packages_within_the_lifetime_is_accepted() {
-    let batch = [
+fn a_batch_within_the_lifetime_keeps_its_expiries() {
+    let batch = vec![
         expiring(now() + Duration::days(1)),
         expiring(now() + Duration::days(30)),
     ];
 
-    assert_eq!(policy().check_batch(&batch, now()), Ok(()));
+    let admitted = policy().admit_batch(batch.clone(), now()).unwrap();
+
+    assert_eq!(admitted, batch);
 }
 
 #[test]
-fn a_batch_is_refused_empty_or_at_its_first_bad_expiry() {
-    assert_eq!(
-        policy().check_batch(&[], now()),
-        Err(KeyPackageRefusal::NoPackages)
-    );
-    assert_eq!(
-        policy().check_batch(
-            &[
-                expiring(now() + Duration::days(1)),
-                expiring(now() + Duration::days(31)),
-                expiring(now() - Duration::days(1)),
+fn an_expiry_past_the_lifetime_is_brought_back_to_it() {
+    // A device whose clock runs ahead of ours asks for "30 days" and lands past them.
+    let admitted = policy()
+        .admit_batch(
+            vec![
+                expiring(now() + Duration::days(30) + Duration::seconds(5)),
+                expiring(now() + Duration::days(400)),
             ],
-            now()
-        ),
-        Err(KeyPackageRefusal::LivesTooLong(1))
-    );
+            now(),
+        )
+        .unwrap();
+
+    assert_eq!(expiries(&admitted), vec![now() + Duration::days(30); 2]);
+}
+
+#[test]
+fn an_expiry_already_gone_gets_the_full_lifetime() {
+    // A device whose clock runs a month behind ours.
+    let admitted = policy()
+        .admit_batch(
+            vec![expiring(now()), expiring(now() - Duration::days(45))],
+            now(),
+        )
+        .unwrap();
+
+    assert_eq!(expiries(&admitted), vec![now() + Duration::days(30); 2]);
+}
+
+#[test]
+fn a_batch_is_refused_only_when_empty() {
     assert_eq!(
-        policy().check_batch(&[expiring(now())], now()),
-        Err(KeyPackageRefusal::Expired(0))
+        policy().admit_batch(Vec::new(), now()),
+        Err(KeyPackageRefusal::NoPackages)
     );
 }
 

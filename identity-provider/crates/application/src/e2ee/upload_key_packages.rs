@@ -41,7 +41,7 @@ impl UploadKeyPackages {
         packages: Vec<NewKeyPackage>,
         now: OffsetDateTime,
     ) -> Result<Uploaded, KeyDirectoryError> {
-        self.policy.check_batch(&packages, now)?;
+        let packages = self.policy.admit_batch(packages, now)?;
         if let Some(known) = self.devices.find(device).await? {
             known.usable_by(owner)?;
         }
