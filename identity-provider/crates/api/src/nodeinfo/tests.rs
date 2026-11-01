@@ -56,6 +56,19 @@ async fn an_instances_nodeinfo_names_it_and_counts_its_accounts() {
     );
 }
 
+#[tokio::test]
+async fn an_instance_with_a_klipy_key_hands_it_to_its_clients_in_its_nodeinfo() {
+    let app = TestApp::with_klipy_key("klipy-key_1");
+
+    let (status, document) = app.send(get("/nodeinfo/2.1")).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        document["metadata"]["gifs"],
+        json!({ "provider": "klipy", "apiKey": "klipy-key_1" })
+    );
+}
+
 /// AGPL-3.0 § 13: an instance running modified code offers that code, not Pīna'i's.
 #[tokio::test]
 async fn an_instances_nodeinfo_names_the_source_it_was_given_as_its_repository() {

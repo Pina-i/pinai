@@ -255,7 +255,11 @@ running a fork points `SOURCE_URL` at the fork, and both places follow.
   "services": { "inbound": [], "outbound": [] },
   "openRegistrations": true,
   "usage": { "users": { "total": 1204 } },
-  "metadata": { "nodeName": "Aotearoa", "nodeDescription": "Design and type people." }
+  "metadata": {
+    "nodeName": "Aotearoa",
+    "nodeDescription": "Design and type people.",
+    "gifs": { "provider": "klipy", "apiKey": "<KLIPY_API_KEY>" }
+  }
 }
 ```
 
@@ -264,3 +268,23 @@ one. `software.repository` is `SOURCE_URL`, normalised (`https://github.com/Pina
 default). `nodeDescription` is left out when there is none. The web client's landing reads it while the user
 types an instance's address, to show `✓ resolved · Aotearoa · 1,204 people` before sending them
 there; a client tells a Pīna'i instance by `software.name`.
+
+**The GIF picker's key.** `metadata.gifs` hands the instance's clients — the web app, the desktop
+app, whichever deployment or build they come from — the Klipy API key their GIF picker searches
+with: `KLIPY_API_KEY`, left out when unset, and the picker then says GIFs aren't set up. The key is
+the instance's, made in Klipy's Partner Panel, so its quota and its standing with Klipy are the
+instance's own. It is no secret: Klipy expects every client to hold a copy, and NodeInfo answers
+anyone. A key of anything but ASCII letters, digits, `-` and `_` (256 at most), which a client
+writes into a URL path, stops the instance at startup (`KlipyKey`), without quoting it.
+
+```mermaid
+sequenceDiagram
+    participant C as Client (web or desktop)
+    participant I as Identity provider
+    participant K as Klipy
+    C->>I: GET /nodeinfo/2.1
+    I-->>C: metadata.gifs { provider: klipy, apiKey }
+    C->>K: GET /api/v1/{apiKey}/gifs/search?q=…
+    K-->>C: results, then the GIF's bytes
+    Note over C: the GIF is sent as an attachment,<br/>encrypted like any other file
+```
