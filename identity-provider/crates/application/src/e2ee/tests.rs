@@ -354,20 +354,14 @@ async fn an_upload_stashes_the_batch_and_names_a_new_device() {
 }
 
 #[tokio::test]
-async fn an_upload_past_the_cap_or_the_lifetime_is_refused_whole() {
+async fn an_upload_past_the_cap_is_refused_whole() {
     let w = world();
     let device = DeviceId::generate();
     w.upload(&w.alice, device, batch(9)).await;
-    let mut too_long = batch(2);
-    too_long[1].expires_at = now() + Duration::days(31);
 
     let full = w
         .upload
         .execute(w.alice.id, device, phone(), batch(2), now())
-        .await;
-    let long = w
-        .upload
-        .execute(w.alice.id, DeviceId::generate(), phone(), too_long, now())
         .await;
 
     assert!(
@@ -381,15 +375,6 @@ async fn an_upload_past_the_cap_or_the_lifetime_is_refused_whole() {
         ),
         "{full:?}"
     );
-    assert!(
-        matches!(
-            long,
-            Err(KeyDirectoryError::Refused(KeyPackageRefusal::LivesTooLong(
-                1
-            )))
-        ),
-        "{long:?}"
-    );
     assert_eq!(w.store.available(w.alice.id, device).await.unwrap(), 9);
     assert_eq!(
         w.store
@@ -399,6 +384,46 @@ async fn an_upload_past_the_cap_or_the_lifetime_is_refused_whole() {
             .len(),
         1
     );
+}
+
+/// The device's clock is not ours: an expiry it got wrong is stored within the lifetime, not refused.
+#[tokio::test]
+async fn an_upload_whose_expiries_are_off_is_stored_within_the_lifetime() {
+    let w = world();
+    let (ahead, behind) = (DeviceId::generate(), DeviceId::generate());
+    let at = now();
+    let mut too_long = batch(1);
+    too_long[0].expires_at = at + Duration::days(30) + Duration::seconds(5);
+    let mut gone = batch(1);
+    gone[0].expires_at = at - Duration::days(1);
+
+    for (device, packages) in [(ahead, too_long), (behind, gone)] {
+        let uploaded = w
+            .upload
+            .execute(w.alice.id, device, phone(), packages, at)
+            .await;
+        assert!(
+            matches!(
+                uploaded,
+                Ok(Uploaded {
+                    uploaded: 1,
+                    available_after: 1
+                })
+            ),
+            "{uploaded:?}"
+        );
+    }
+    for device in [ahead, behind] {
+        let claim = w
+            .claim_as(
+                Requester::User(w.alice.id),
+                &w.alice.actor_uri,
+                Some(device),
+            )
+            .await
+            .unwrap();
+        assert_eq!(claim.package.expires_at, at + Duration::days(30));
+    }
 }
 
 #[tokio::test]

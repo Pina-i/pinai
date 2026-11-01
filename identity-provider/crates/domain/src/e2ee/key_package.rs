@@ -61,25 +61,29 @@ pub struct KeyPackagePolicy {
 }
 
 impl KeyPackagePolicy {
-    /// A batch is refused whole, at its first bad entry.
-    pub fn check_batch(
+    /// The batch as it is stored: refused only when empty, every expiry set by this instance's
+    /// clock. A device's clock is not ours, so a date past the lifetime, or already gone, means
+    /// the device's clock is off, not that the package is bad: either one gets the full lifetime.
+    pub fn admit_batch(
         &self,
-        packages: &[NewKeyPackage],
+        packages: Vec<NewKeyPackage>,
         now: OffsetDateTime,
-    ) -> Result<(), KeyPackageRefusal> {
+    ) -> Result<Vec<NewKeyPackage>, KeyPackageRefusal> {
         if packages.is_empty() {
             return Err(KeyPackageRefusal::NoPackages);
         }
-        for (i, package) in packages.iter().enumerate() {
-            let lifetime = package.expires_at - now;
-            if lifetime > self.max_lifetime {
-                return Err(KeyPackageRefusal::LivesTooLong(i));
-            }
-            if lifetime <= Duration::ZERO {
-                return Err(KeyPackageRefusal::Expired(i));
-            }
-        }
-        Ok(())
+        let latest = now + self.max_lifetime;
+        Ok(packages
+            .into_iter()
+            .map(|package| NewKeyPackage {
+                expires_at: if package.expires_at <= now || package.expires_at > latest {
+                    latest
+                } else {
+                    package.expires_at
+                },
+                ..package
+            })
+            .collect())
     }
 
     /// `available` is what the device holds before the upload.
@@ -103,10 +107,6 @@ impl KeyPackagePolicy {
 pub enum KeyPackageRefusal {
     #[error("packages must be non-empty")]
     NoPackages,
-    #[error("packages[{0}].expires_at exceeds the maximum allowed lifetime")]
-    LivesTooLong(usize),
-    #[error("packages[{0}].expires_at is in the past")]
-    Expired(usize),
     #[error("stash cap exceeded: have {available}, uploading {uploading}, cap is {cap}")]
     StashFull {
         available: usize,
