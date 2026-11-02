@@ -285,6 +285,15 @@ instance without a relay logs `no SMTP relay: mail is off` instead:
 docker compose logs idp | grep SMTP
 ```
 
+## GIFs
+
+The GIF picker of the web and desktop apps searches Klipy with the instance's key,
+`KLIPY_API_KEY` in `.env`; unset, there is no GIF picker. Make one in Klipy's
+Partner Panel ([docs.klipy.com](https://docs.klipy.com): API Keys → Add Platform). A
+test key allows 100 calls an hour for the whole instance: ask Klipy for a production
+key. Every client receives the key, in the instance's NodeInfo, so it is no secret.
+A key that isn't only letters, digits, `-` and `_` refuses the start.
+
 ## Secrets
 
 At each start, the `init` service generates in `./data/secrets` any secret missing

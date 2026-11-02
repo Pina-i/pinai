@@ -241,6 +241,8 @@ PORT=8090
 INSTANCE_NAME=Aotearoa
 # Shown with the name: "An identity provider." unset.
 INSTANCE_DESCRIPTION="Wellington's design and type people."
+# The key the web and desktop apps' GIF picker searches Klipy with: no GIFs unset.
+KLIPY_API_KEY=…
 ```
 
 A public instance needs its domain and a mail relay:
@@ -260,7 +262,8 @@ unless `SMTP_FROM` says otherwise.
 Either kind takes the optional settings. With `PORT` set, your proxy sends to
 `127.0.0.1:<PORT>`. An admin can change the name and the description later in the web
 app's Settings → Instance, which then takes over from `.env`; the name holds 40
-characters at most, the description 90.
+characters at most, the description 90. Klipy's Partner Panel gives the GIF key: see
+[`deploy/README.md`](deploy/README.md#gifs).
 
 Put a value holding spaces, `#` or `$` in single quotes, and one holding an apostrophe
 in double quotes. `deploy/.env.example` lists every setting. The file holds passwords,
