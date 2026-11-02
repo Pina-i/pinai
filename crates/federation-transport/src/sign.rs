@@ -44,6 +44,23 @@ pub async fn send_signed_post(
     content_type: &str,
     policy: UrlPolicy,
 ) -> Result<reqwest::Response, TransportError> {
+    let request = signed_post_request(signer, target_url, body, content_type, policy).await?;
+
+    debug!(%target_url, "sending signed POST");
+
+    client()
+        .execute(request)
+        .await
+        .map_err(|e| TransportError::Upstream(format!("signed POST failed: {e}")))
+}
+
+async fn signed_post_request(
+    signer: &Signer<'_>,
+    target_url: &str,
+    body: &[u8],
+    content_type: &str,
+    policy: UrlPolicy,
+) -> Result<reqwest::Request, TransportError> {
     let url = screen_url(target_url, policy).await?;
     let host = url
         .host_str()
@@ -71,19 +88,17 @@ pub async fn send_signed_post(
     })
     .map_err(|e| TransportError::Upstream(format!("HTTP Signature failed: {e}")))?;
 
-    debug!(%target_url, "sending signed POST");
-
+    // No `Host` header: the client writes it from the URL, and over HTTP/2 nginx refuses a
+    // request that carries one beside `:authority`.
     client()
         .post(target_url)
         .header("Content-Type", content_type)
         .header("Date", &date)
         .header("Digest", &digest)
-        .header("Host", &host_with_port)
         .header("Signature", &signature)
         .body(body.to_vec())
-        .send()
-        .await
-        .map_err(|e| TransportError::Upstream(format!("signed POST failed: {e}")))
+        .build()
+        .map_err(|e| TransportError::BadRequest(format!("signed POST: {e}")))
 }
 
 /// GET a peer's resource as the signer, to download it: the URL is screened like any peer
@@ -93,6 +108,27 @@ pub async fn signed_get(
     target_url: &str,
     policy: UrlPolicy,
 ) -> Result<reqwest::Response, TransportError> {
+    let request = signed_get_request(signer, target_url, policy).await?;
+
+    debug!(%target_url, "sending signed GET");
+    let resp = download_client()
+        .execute(request)
+        .await
+        .map_err(|e| TransportError::Upstream(format!("signed GET failed: {e}")))?;
+    if !resp.status().is_success() {
+        return Err(TransportError::Upstream(format!(
+            "peer returned {}",
+            resp.status()
+        )));
+    }
+    Ok(resp)
+}
+
+async fn signed_get_request(
+    signer: &Signer<'_>,
+    target_url: &str,
+    policy: UrlPolicy,
+) -> Result<reqwest::Request, TransportError> {
     let url = screen_url(target_url, policy).await?;
     let host = url
         .host_str()
@@ -117,22 +153,13 @@ pub async fn signed_get(
     })
     .map_err(|e| TransportError::Upstream(format!("HTTP Signature failed: {e}")))?;
 
-    debug!(%target_url, "sending signed GET");
-    let resp = download_client()
+    // No `Host` header, as for a POST.
+    download_client()
         .get(url)
         .header("Date", &date)
-        .header("Host", &host_with_port)
         .header("Signature", &signature)
-        .send()
-        .await
-        .map_err(|e| TransportError::Upstream(format!("signed GET failed: {e}")))?;
-    if !resp.status().is_success() {
-        return Err(TransportError::Upstream(format!(
-            "peer returned {}",
-            resp.status()
-        )));
-    }
-    Ok(resp)
+        .build()
+        .map_err(|e| TransportError::BadRequest(format!("signed GET: {e}")))
 }
 
 #[cfg(test)]

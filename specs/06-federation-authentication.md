@@ -86,6 +86,11 @@ Signature: keyId="https://idp.alice.com/users/alice#main-key",
 Signing the request target is what stops a captured signature from being replayed at a
 different endpoint or with a different method.
 
+The signed `host` is the target URL's host, with its port when the URL names one. The HTTP
+client writes the header from that same URL, so the request sets none itself: over HTTP/2
+the host travels as `:authority`, and nginx refuses (`400`) a request that carries a `Host`
+header beside it.
+
 ---
 
 ## Inbound
