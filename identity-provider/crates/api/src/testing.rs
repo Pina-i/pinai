@@ -52,7 +52,8 @@ use domain::auth::{Registrations, WebApp};
 use domain::e2ee::KeyPackagePolicy;
 use domain::e2ee::testing::{
     InMemoryArchive, InMemoryDelivery, InMemoryKeyDirectory, InMemoryRemoteKeyPackages,
-    PlainAttester, RecordingDeviceNotifier, RecordingMlsFederation, RecordingMlsNotifier,
+    PlainAttester, PlainRootKeyVerifier, RecordingDeviceNotifier, RecordingMlsFederation,
+    RecordingMlsNotifier,
 };
 use domain::identity::testing::{
     InMemoryAccounts, InMemoryRemoteActors, InMemorySavedIntro, InMemoryTokens, TrustedSignatures,
@@ -812,6 +813,8 @@ impl TestApp {
                 accounts.clone(),
                 keys.clone(),
                 Arc::new(PlainAttester),
+                Arc::new(PlainRootKeyVerifier),
+                sign_in.sessions.clone(),
                 device_notifier.clone(),
             )),
             list_devices: Arc::new(ListDevices::new(keys.clone(), sign_in.sessions.clone())),

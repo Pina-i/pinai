@@ -3,8 +3,8 @@ use std::time::Duration;
 use tokio::io::AsyncReadExt;
 
 use crate::helpers::{
-    Account, CHALLENGE, PASSWORD, TestApp, VERIFIER, closed_as_ended, location, open_socket,
-    query_of, spawn_app,
+    Account, CHALLENGE, PASSWORD, VERIFIER, another_browser, closed_as_ended, location,
+    open_socket, query_of, spawn_app,
 };
 
 #[tokio::test]
@@ -186,28 +186,6 @@ async fn signing_out_of_the_browser_ends_the_web_clients_refresh_tokens_not_the_
         1
     );
     app.stop().await.unwrap();
-}
-
-/// Another browser signing in to `who`'s account with the password: a session of its own.
-async fn another_browser(app: &TestApp, who: &Account) -> Account {
-    let signed_in = app
-        .form("/login", &[("email", &who.email), ("password", PASSWORD)])
-        .await;
-    let landed = location(&signed_in);
-    assert!(landed.starts_with(&app.redirect_uri), "{landed}");
-    let tokens = app.tokens_for(&query_of(&landed)["code"]).await;
-    Account {
-        token: tokens["access_token"].as_str().unwrap().to_owned(),
-        refresh_token: tokens["refresh_token"].as_str().unwrap().to_owned(),
-        cookie: signed_in.headers()["set-cookie"]
-            .to_str()
-            .unwrap()
-            .split(';')
-            .next()
-            .unwrap()
-            .to_owned(),
-        ..who.clone()
-    }
 }
 
 #[tokio::test]

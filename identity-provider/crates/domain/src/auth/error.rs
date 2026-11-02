@@ -18,6 +18,8 @@ pub enum AuthError {
     RefreshUnusable,
     #[error("not one of the account's devices, or revoked")]
     DeviceRefused,
+    #[error("this session declared another device")]
+    DeviceMismatch,
     #[error("the code was issued to another client")]
     ClientMismatch,
     #[error("the code_verifier does not match the code_challenge")]

@@ -80,3 +80,56 @@ async fn a_device_that_isnt_the_accounts_or_was_revoked_is_refused() {
         None
     );
 }
+
+#[tokio::test]
+async fn a_session_that_named_its_device_names_it_again_but_no_other() {
+    let w = world().await;
+    let (laptop, phone) = (
+        device_of(&w, w.alice.id).await,
+        device_of(&w, w.alice.id).await,
+    );
+    let (on_the_laptop, on_the_phone) = (
+        signed_in(&w, w.alice.id).await,
+        signed_in(&w, w.alice.id).await,
+    );
+    let bearer = |session| Bearer {
+        user: w.alice.id,
+        session,
+        authenticated_at: now(),
+    };
+    w.link
+        .execute(bearer(on_the_laptop), laptop, now())
+        .await
+        .unwrap();
+    w.link
+        .execute(bearer(on_the_phone), phone, now())
+        .await
+        .unwrap();
+
+    let again = w.link.execute(bearer(on_the_laptop), laptop, now()).await;
+    let elsewhere = w.link.execute(bearer(on_the_laptop), phone, now()).await;
+
+    assert!(again.is_ok(), "{again:?}");
+    assert!(
+        matches!(elsewhere, Err(AuthError::DeviceMismatch)),
+        "{elsewhere:?}"
+    );
+    assert_eq!(
+        w.sessions
+            .find(on_the_laptop)
+            .await
+            .unwrap()
+            .unwrap()
+            .device,
+        Some(laptop)
+    );
+    assert!(
+        w.sessions
+            .find(on_the_phone)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_live(now()),
+        "the phone keeps its session"
+    );
+}

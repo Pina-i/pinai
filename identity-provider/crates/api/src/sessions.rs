@@ -34,6 +34,11 @@ pub async fn link_device(
                 "access_denied",
                 "Not one of your devices, or revoked",
             ),
+            AuthError::DeviceMismatch => ApiError::new(
+                StatusCode::FORBIDDEN,
+                "device_mismatch",
+                "This session signed in another device",
+            ),
             other => ApiError::internal(anyhow::Error::from(other)),
         })?;
     Ok(StatusCode::NO_CONTENT)

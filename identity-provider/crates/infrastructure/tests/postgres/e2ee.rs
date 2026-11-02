@@ -27,6 +27,79 @@ async fn registering_again_replaces_the_attestation_and_keeps_the_label(pool: Pg
 }
 
 #[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn a_device_holds_the_hpke_key_registered_with_its_attestation_until_replaced(pool: PgPool) {
+    let alice = a_user(&pool).await;
+    contract::a_device_holds_the_hpke_key_registered_with_its_attestation_until_replaced(
+        &PgDevices::new(pool),
+        alice,
+    )
+    .await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn a_registration_decided_on_a_stale_read_writes_nothing(pool: PgPool) {
+    let alice = a_user(&pool).await;
+    contract::a_registration_decided_on_a_stale_read_writes_nothing(&PgDevices::new(pool), alice)
+        .await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn a_revoked_device_holds_no_hpke_key(pool: PgPool) {
+    let alice = a_user(&pool).await;
+    contract::a_revoked_device_holds_no_hpke_key(&PgDevices::new(pool), alice).await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn stashing_keeps_the_hpke_key_registered(pool: PgPool) {
+    let alice = a_user(&pool).await;
+    contract::stashing_keeps_the_hpke_key_registered(
+        &PgDevices::new(pool.clone()),
+        &PgKeyPackages::new(pool),
+        alice,
+    )
+    .await;
+}
+
+/// Whoever writes the row: an HPKE key comes whole and signed by a root key, or not at all.
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn the_table_takes_an_hpke_key_only_whole_and_with_a_root_key(pool: PgPool) {
+    let alice = a_user(&pool).await;
+    let insert = |drk: Option<Vec<u8>>, key: Option<Vec<u8>>, signature: Option<Vec<u8>>| {
+        sqlx::query(
+            "INSERT INTO user_devices \
+                 (device_id, user_id, display_name, kind, drk_public_key, hpke_public_key, \
+                  hpke_key_signature) \
+             VALUES ($1, $2, 'laptop', 'laptop', $3, $4, $5)",
+        )
+        .bind(uuid::Uuid::new_v4())
+        .bind(alice.as_uuid())
+        .bind(drk)
+        .bind(key)
+        .bind(signature)
+        .execute(&pool)
+    };
+
+    let whole = insert(Some(vec![1; 32]), Some(vec![2; 32]), Some(vec![3; 64])).await;
+    let mut refused = Vec::new();
+    for (drk, key, signature) in [
+        (Some(vec![1; 32]), Some(vec![2; 32]), None),
+        (Some(vec![1; 32]), None, Some(vec![3; 64])),
+        (None, Some(vec![2; 32]), Some(vec![3; 64])),
+    ] {
+        let Err(sqlx::Error::Database(error)) = insert(drk, key, signature).await else {
+            panic!("a broken HPKE key was stored");
+        };
+        refused.push(error.constraint().map(str::to_owned));
+    }
+
+    assert!(whole.is_ok(), "{whole:?}");
+    assert_eq!(
+        refused,
+        vec![Some("user_devices_hpke_key_signed".to_owned()); 3]
+    );
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
 async fn devices_are_listed_active_first_then_most_recently_seen(pool: PgPool) {
     let (alice, bob) = (a_user(&pool).await, a_user(&pool).await);
     contract::devices_are_listed_active_first_then_most_recently_seen(

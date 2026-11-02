@@ -13,6 +13,10 @@ pub enum KeyDirectoryError {
     DeviceRevoked,
     #[error("the device id is another account's")]
     DeviceTaken,
+    #[error("the HPKE key's signature does not verify under the root key")]
+    HpkeKeyUnsigned,
+    #[error("this session signed in another device")]
+    NotTheSessionsDevice,
     #[error("user not found")]
     UserNotFound,
     #[error("no available KeyPackage")]

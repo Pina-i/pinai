@@ -355,6 +355,15 @@ sequenceDiagram
   The client sends it once the account's device storage is open and the device exists — on a
   first sign-in, after the onboarding that creates it. `204`; `403 access_denied` "Not one of
   your devices, or revoked" for a device that isn't the account's, is revoked, or is unknown.
+- **A session is limited to the device it declared.** Once it names one, it is never pointed at
+  another: `PUT /api/sessions/current/device` naming any other device is `403 device_mismatch`
+  "This session signed in another device" (naming the same one again is `204`), and `POST
+  /api/keys/devices` from it registers that device only (`identity-provider/specs/e2ee.md § 5`,
+  "Key directory rules"). A session that names none yet registers and names any device of the
+  account. A device whose local storage was wiped registers as a new device from a new session:
+  a browser signs out (`GET /logout`) and signs in again with the password — signing in while its
+  session lives keeps that session —, and the desktop app's sign-in opens an app session of its
+  own.
 - **A device is signed in once at a time.** Linking a session ends the device's other live
   sessions (`replaced`): signing in again on a device — after the browser lost its cookie, or a
   desktop app its refresh token — leaves no session behind.

@@ -124,27 +124,61 @@ that device produces.
 ### 3.2 IdP attestation
 
 A signature by the IdP's existing JWKS key (the same one that signs
-OIDC tokens and HTTP Signatures) over the canonical bytes:
-
-```
-IDP-ATTEST-v1\n
-<actor_uri>\n
-<device_id>\n
-<base64(drk_pub)>\n
-<iso8601(expires_at)>\n
-<kid>
-```
-
-The domain-separation tag `IDP-ATTEST-v1` prevents an attestation
-signature from ever validating as some other Ed25519 use of the same
-key. The leading newline-separated fields are stable across versions;
-new fields would require bumping the tag.
+OIDC tokens and HTTP Signatures) over the `IDP-ATTEST-v1` canonical
+bytes of § 7.2: the account's actor URI, the device id, the DRK, the
+attestation's expiry and the key's `kid`.
 
 The signature lives inside every MLS leaf credential the device
 produces. Peers verify by fetching the issuer's JWKS, looking up the
 key by `kid`, and validating the signature.
 
-### 3.3 MLS leaf credential
+### 3.3 Device HPKE key
+
+Each device also makes an HPKE key pair (RFC 9180, DHKEM(X25519, HKDF-SHA256)) once, beside its
+DRK, and keeps the private half in its sealed store. Its public half — a raw 32-byte X25519 key —
+is what the account's other devices encrypt to. The DRK signs it over the `PINAI-DEVICE-HPKE-v1`
+canonical bytes of § 7.2: the account's actor URI, the device id and the key.
+
+The instance checks only the key's length. A low-order key is refused by the sender's HPKE —
+X25519 then gives the all-zero shared secret (RFC 9180 § 7.1.4) —, so a sender must never skip
+that check.
+
+The device registers the key with its DRK: `POST /api/keys/devices` takes `hpke_public_key` and
+`hpke_key_signature` together, and refuses the registration (`400`) unless the DRK sent in the same
+request verifies the signature. Both are optional — a device registering without them is attested
+all the same, and holds no HPKE key until it sends one.
+
+**The chain a device verifies.** A device trusts another device's HPKE key only through the
+attestation the instance already signs, and checks every link itself, from what `GET
+/api/keys/devices` lists for that device:
+
+```mermaid
+flowchart LR
+    JWKS["Instance key<br/>(JWKS, by attestation_kid)"]
+    DRK["drk_public_key"]
+    HPKE["hpke_public_key"]
+    JWKS -->|"attestation_signature over IDP-ATTEST-v1"| DRK
+    DRK -->|"hpke_key_signature over PINAI-DEVICE-HPKE-v1"| HPKE
+```
+
+1. The device isn't revoked: `revoked_at` is null.
+2. The instance's key named by `attestation_kid` verifies `attestation_signature` over the
+   `IDP-ATTEST-v1` bytes rebuilt from the account's actor URI, the device id, `drk_public_key`,
+   `attestation_expires_at` and `attestation_kid`; `attestation_expires_at` is still ahead.
+3. `drk_public_key` verifies `hpke_key_signature` over the `PINAI-DEVICE-HPKE-v1` bytes rebuilt
+   from the actor URI, the device id and `hpke_public_key`.
+
+**The key follows the DRK that signed it.** On each registration:
+
+| Registration | Brings a key | Brings none |
+|---|---|---|
+| First (no attestation yet) | stored | none held |
+| Renewal (the same DRK) | replaces the one held | the one held is kept |
+| Rotation (another DRK) | replaces the one held | the one held is cleared — only the old DRK signed it |
+
+Revoking a device clears its HPKE key in the same write that sets `revoked_at`.
+
+### 3.4 MLS leaf credential
 
 Every MLS leaf carries a `BasicCredential` whose identity bytes are
 this JSON:
@@ -178,12 +212,12 @@ Receivers verify in this order:
 After verification, the leaf is trusted as "actor X's device Y." MLS's
 own LeafNode self-signature handles per-message integrity.
 
-### 3.4 KeyPackage
+### 3.5 KeyPackage
 
 A single-use bundle the device publishes ahead of time so peers can
 add it to groups without a round-trip. Each KeyPackage contains a
 leaf-signing public key of the device + the device's full credential
-(Section 3.3) + MLS protocol fields (HPKE init key, capabilities,
+(Section 3.4) + MLS protocol fields (HPKE init key, capabilities,
 lifetime). The server stores them in an inventory keyed by
 `(user_id, device_id)`; peers claim one atomically when adding the user
 to a conversation.
@@ -209,7 +243,7 @@ up a missed push on its next start. KeyPackages live 30 days, so a
 device left unopened for longer can't be added to a group until it is
 opened again.
 
-### 3.5 24-word recovery passphrase
+### 3.6 24-word recovery passphrase
 
 A BIP-39 mnemonic generated client-side by an account's first device,
 on its first sign-in. Its only job is to derive the History Archive Key
@@ -227,7 +261,7 @@ Devices → "Restore history". A device's passphrase is stored locally,
 encrypted under its AES-GCM key, for revealability in Settings →
 Devices.
 
-### 3.6 History Archive Key (HAK)
+### 3.7 History Archive Key (HAK)
 
 Derived from a passphrase and a per-user salt via Argon2id
 (`t=3, m=64 MiB, p=4, dkLen=32`). Salt is 16 bytes random, generated
@@ -239,7 +273,7 @@ Each device of a user derives the same HAK as long as they share the
 passphrase. Different passphrases = different HAKs = different
 encrypted archives.
 
-### 3.7 Encrypted plaintext archive
+### 3.8 Encrypted plaintext archive
 
 Every decrypted MLS application message gets re-encrypted under HAK
 with AES-256-GCM (fresh 12-byte nonce per entry) and batch-uploaded
@@ -267,7 +301,9 @@ user_devices             — per-device row, one per (user_id, device_id):
                             paired_at, last_seen_at, revoked_at,
                             drk_public_key BYTEA, attestation_signature BYTEA,
                             attestation_kid TEXT, attestation_issued_at,
-                            attestation_expires_at
+                            attestation_expires_at (whole seconds, as signed),
+                            hpke_public_key BYTEA, hpke_key_signature BYTEA
+                            (both or neither, and only with a drk_public_key)
 key_packages             — single-use stash (per-device, expires_at, consumed_at)
 history_messages         — PRIMARY KEY (user_id, id);
                             conversation_id, ciphertext BYTEA, nonce BYTEA,
@@ -292,9 +328,9 @@ All Bearer-auth except where noted. Cross-IdP paths use HTTP Signatures — see
 
 | Endpoint | Description |
 |---|---|
-| `POST /api/keys/devices` | Register/renew/rotate the caller's DRK attestation. Idempotent on `(device_id, drk_public_key)`. First-time mint emits a `DeviceJoined` WS event to the user's other live sessions. Returns the signature, kid, issued_at, expires_at, and the canonical bytes the IdP signed so the client can re-verify locally |
-| `GET /api/keys/devices` | List the caller's devices with their attestation expiry (the client uses this to schedule silent renewals), and whether each is signed in: `signed_in`, `last_active_at` |
-| `POST /api/keys/devices/:device_id/revoke` | Signs the device out — its sessions end (`identity-provider/specs/auth.md § 1`, "Sessions and devices") — then sets the directory-level revocation flag; the MLS Remove commits follow. Takes a password typed in the last 10 minutes (`identity-provider/specs/auth.md § 1`, "Sensitive actions"). Idempotent; `404` for a device that is not the caller's |
+| `POST /api/keys/devices` | Register/renew/rotate the caller's DRK attestation: `{ device_id, drk_public_key, hpke_public_key?, hpke_key_signature? }`, keys and signature in standard base64. Idempotent on `(device_id, drk_public_key)`. The device's HPKE key comes with the DRK's signature over its canonical bytes, both or neither (§ 3.3). A session that declared its device (`PUT /api/sessions/current/device`) registers that device only. First-time mint emits a `DeviceJoined` WS event to the user's other live sessions. Returns the signature, kid, issued_at, expires_at, and the canonical bytes the IdP signed so the client can re-verify locally |
+| `GET /api/keys/devices` | List the caller's devices with their attestation expiry (the client uses this to schedule silent renewals), and whether each is signed in: `signed_in`, `last_active_at`. With each device, what another device needs to verify its keys itself (§ 3.3): `drk_public_key`, `attestation_signature`, `attestation_kid`, `attestation_expires_at` — the text the attestation signed —, `hpke_public_key`, `hpke_key_signature`; `null` where the device has registered no DRK, or no HPKE key |
+| `POST /api/keys/devices/:device_id/revoke` | Signs the device out — its sessions end (`identity-provider/specs/auth.md § 1`, "Sessions and devices") — then sets the directory-level revocation flag and clears the device's HPKE key; the MLS Remove commits follow. Takes a password typed in the last 10 minutes (`identity-provider/specs/auth.md § 1`, "Sensitive actions"). Idempotent; `404` for a device that is not the caller's |
 | `POST /api/keys/packages` | Upload a batch of KeyPackages for one of the caller's devices — refused whole (`400`) when a package is empty or not base64, or would take the device past the cap. An `expires_at` already past or beyond the lifetime (`E2EE_KEYPACKAGE_LIFETIME_SECS`) is the device's clock being off, not a bad package: the IdP stores it as now + the lifetime, by its own clock |
 | `POST /api/keys/packages/claim` | Atomically reserve one KeyPackage for `actor_uri` — of `device_id`, or of any device with some left. Bearer or HTTP-Sig (peer IdPs); for remote `actor_uri` the local IdP proxies to the target IdP via HTTP-Sig |
 | `POST /api/keys/packages/claim/devices` | One KeyPackage of each of `actor_uri`'s unrevoked devices that has any, as `{ claims: [...] }` — a contact's first add brings all their devices in (§ 6.5). Asked, proxied, limited and refused as a single claim is; none at all → 409 |
@@ -305,6 +341,15 @@ All Bearer-auth except where noted. Cross-IdP paths use HTTP Signatures — see
 - **A device id is its first account's.** Device ids are not secret — a claim returns one — so
   registering or uploading for a device id another account holds is refused with `409`, and
   leaves that device untouched.
+- **A session is limited to the device it declared.** Once a session names its device
+  (`identity-provider/specs/auth.md § 1`, "Sessions and devices"), registering any other device
+  id from it — attested or not, new or not — is refused with `403 device_mismatch` "This session
+  signed in another device", and changes nothing: a stolen token can't take a device over. A
+  session that names no device yet registers any device of the account.
+- **A device's HPKE key is its DRK's.** A registration bringing one is refused (`400`) when only
+  one of `hpke_public_key` and `hpke_key_signature` is sent, or when the DRK sent with it doesn't
+  verify the signature over the key's canonical bytes for this device of this account; nothing is
+  stored then. What a registration does to the key held follows § 3.3.
 - **A revoked device is out of the directory.** Its KeyPackages are never claimed, and it can
   neither upload more nor renew its attestation (`403`) — a renewal would hand a stolen device
   another year.
@@ -315,7 +360,7 @@ All Bearer-auth except where noted. Cross-IdP paths use HTTP Signatures — see
   that fails to answer is `502`. A peer's own claim must name an account of this instance (`400`)
   — peers never relay through another instance.
 - **A claim tells the owner to refill** when it leaves one of their devices at the refill
-  threshold, or finds no package left: `key_packages_low` to their live sessions (§ 3.4).
+  threshold, or finds no package left: `key_packages_low` to their live sessions (§ 3.5).
 - **A claim is how someone adds a device to a group**, so it follows who may add the account
   (`identity-provider/specs/social.md § 2`): a claimer the account doesn't admit —
   a block or its contact setting — is refused with `403 Can't add this person` before a package is
@@ -394,7 +439,7 @@ and they hold for what peers deliver as much as for local clients.
 | `mls_welcome_ready` | A Welcome bundle was just deposited for one of the recipient's devices |
 | `group_created` | The recipient's IdP materialised a federated group from an inbound Note's roster snapshot |
 | `device_joined` | A new device of *this user* completed first-time DRK registration. Other live sessions of the same user run the multi-device fanout |
-| `key_packages_low` | A claim left one of *this user's* devices at the refill threshold, or found none left. Each live session tops its own device up (§ 3.4) |
+| `key_packages_low` | A claim left one of *this user's* devices at the refill threshold, or found none left. Each live session tops its own device up (§ 3.5) |
 | `dm_delivery_failed`, `friend_request`, `friend_accepted`, `friend_removed`, `presence_update`, `typing`, `heartbeat_ack` | (Out of scope for this spec — see other specs) |
 
 ---
@@ -732,7 +777,8 @@ sequenceDiagram
 ```
 
 Renewal reuses the existing DRK — only the attestation's `expires_at`
-moves forward. KeyPackages already in the server's stash stay valid.
+moves forward, and the HPKE key registered stays (§ 3.3). KeyPackages
+already in the server's stash stay valid.
 New KeyPackages built after renewal carry the fresh attestation.
 
 ### 6.9 Keeping the KeyPackage stash topped up
@@ -766,9 +812,25 @@ device it doesn't list is refilled the same way, to the cap.
 
 ### 7.1 MLS leaf credential
 
-Inside every leaf's `BasicCredential` (Section 3.3 JSON).
+Inside every leaf's `BasicCredential` (Section 3.4 JSON).
 
-### 7.2 Canonical attestation bytes
+### 7.2 Canonical signed bytes
+
+The IdP's attestation of a DRK (§ 3.2) and a DRK's signature over its
+device's HPKE key (§ 3.3) are both over UTF-8 lines, each ended by `\n`
+(a literal newline, 0x0A) but the last. Every field is written exactly so:
+
+- `actor_uri`: the account's actor URI, exactly as `/userinfo` answers
+  `actor_uri`;
+- `device_id`: a lowercase hyphenated UUID;
+- keys: standard base64, with padding;
+- `expires_at`: RFC 3339 in UTC, to the second — `2027-05-14T12:00:00Z`,
+  no fraction —, the text `GET /api/keys/devices` lists as
+  `attestation_expires_at`;
+- `kid`: as the instance's JWKS names the key.
+
+The leading tag keeps a signature from ever verifying as another use of
+the same key; a change to the fields needs a new tag.
 
 What the IdP signs in `POST /api/keys/devices`:
 
@@ -776,13 +838,19 @@ What the IdP signs in `POST /api/keys/devices`:
 IDP-ATTEST-v1\n
 <actor_uri>\n
 <device_id>\n
-<base64-std(drk_pub)>\n
-<iso8601(expires_at)>\n
+<base64(drk_pub)>\n
+<expires_at as YYYY-MM-DDThh:mm:ssZ>\n
 <kid>
 ```
 
-UTF-8 bytes. `\n` is a literal newline (0x0A). The domain-separation
-tag binds the signature to this purpose.
+What a device's DRK signs over its HPKE key:
+
+```
+PINAI-DEVICE-HPKE-v1\n
+<actor_uri>\n
+<device_id>\n
+<base64(hpke_public_key)>
+```
 
 ### 7.3 History archive entry (POST `/api/history/messages`)
 
@@ -838,7 +906,7 @@ flowchart LR
         IDB --- hist["history_archive:<br/>cached HAK (in-memory<br/>only via this slot)"]
     end
     subgraph server ["Server (Postgres)"]
-        UD["user_devices:<br/>+ attestation cols"]
+        UD["user_devices:<br/>+ attestation and HPKE key cols"]
         KP["key_packages:<br/>per-device stash"]
         DM["direct_messages:<br/>mls_ciphertext"]
         MC["mls_commits"]

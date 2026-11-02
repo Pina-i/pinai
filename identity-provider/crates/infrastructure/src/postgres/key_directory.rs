@@ -1,7 +1,8 @@
 use anyhow::Context;
 use domain::e2ee::{
-    Attestation, ClaimedKeyPackage, Device, DeviceLabel, DeviceRootKey, Devices, KeyPackageBytes,
-    KeyPackages, KeyStoreError, NewKeyPackage, Revocation,
+    Attest, Attestation, ClaimedKeyPackage, Device, DeviceLabel, DeviceRootKey, Devices,
+    HeldHpkeKey, HpkeKeyWrite, HpkePublicKey, KeyPackageBytes, KeyPackages, KeyStoreError,
+    NewKeyPackage, Revocation, RootKeySignature,
 };
 use domain::{DeviceId, UserId};
 use sqlx::{PgConnection, PgPool};
@@ -20,7 +21,7 @@ impl PgDevices {
 
 const DEVICE_COLUMNS: &str = "device_id, user_id, display_name, kind, paired_at, last_seen_at, \
      revoked_at, drk_public_key, attestation_signature, attestation_kid, attestation_issued_at, \
-     attestation_expires_at";
+     attestation_expires_at, hpke_public_key, hpke_key_signature";
 
 #[derive(sqlx::FromRow)]
 struct DeviceRow {
@@ -36,6 +37,8 @@ struct DeviceRow {
     attestation_kid: Option<String>,
     attestation_issued_at: Option<OffsetDateTime>,
     attestation_expires_at: Option<OffsetDateTime>,
+    hpke_public_key: Option<Vec<u8>>,
+    hpke_key_signature: Option<Vec<u8>>,
 }
 
 impl TryFrom<DeviceRow> for Device {
@@ -61,6 +64,18 @@ impl TryFrom<DeviceRow> for Device {
             }
             _ => anyhow::bail!("user_devices {}: a partial attestation", row.device_id),
         };
+        let hpke_key = match (row.hpke_public_key, row.hpke_key_signature) {
+            (None, None) => None,
+            (Some(key), Some(signature)) if attestation.is_some() => Some(HeldHpkeKey {
+                key: HpkePublicKey::parse(&key).context("user_devices.hpke_public_key")?,
+                signature: RootKeySignature::parse("hpke_key_signature", &signature)
+                    .context("user_devices.hpke_key_signature")?,
+            }),
+            _ => anyhow::bail!(
+                "user_devices {}: a partial HPKE key, or one without a root key",
+                row.device_id
+            ),
+        };
         Ok(Device {
             id: row.device_id.into(),
             owner: row.user_id.into(),
@@ -72,6 +87,7 @@ impl TryFrom<DeviceRow> for Device {
             last_seen_at: row.last_seen_at,
             revoked_at: row.revoked_at,
             attestation,
+            hpke_key,
         })
     }
 }
@@ -137,8 +153,15 @@ impl Devices for PgDevices {
         owner: UserId,
         id: DeviceId,
         label: &DeviceLabel,
+        read: Option<&Device>,
         attestation: &Attestation,
-    ) -> Result<(), KeyStoreError> {
+        hpke_key: &HpkeKeyWrite,
+    ) -> Result<Attest, KeyStoreError> {
+        let (keep, set) = match hpke_key {
+            HpkeKeyWrite::Keep => (true, None),
+            HpkeKeyWrite::Set(signed) => (false, Some(signed)),
+            HpkeKeyWrite::Clear => (false, None),
+        };
         let mut tx = self.pool.begin().await.context("begin attest")?;
         sqlx::query(
             "INSERT INTO user_devices (device_id, user_id, display_name, kind) \
@@ -153,8 +176,12 @@ impl Devices for PgDevices {
         .context("record a device")?;
         let attested = sqlx::query(
             "UPDATE user_devices SET drk_public_key = $3, attestation_signature = $4, \
-                 attestation_kid = $5, attestation_issued_at = $6, attestation_expires_at = $7 \
-             WHERE device_id = $1 AND user_id = $2",
+                 attestation_kid = $5, attestation_issued_at = $6, attestation_expires_at = $7, \
+                 hpke_public_key = CASE WHEN $12 THEN hpke_public_key ELSE $8 END, \
+                 hpke_key_signature = CASE WHEN $12 THEN hpke_key_signature ELSE $9 END \
+             WHERE device_id = $1 AND user_id = $2 AND revoked_at IS NULL \
+                 AND drk_public_key IS NOT DISTINCT FROM $10 \
+                 AND hpke_public_key IS NOT DISTINCT FROM $11",
         )
         .bind(id.as_uuid())
         .bind(owner.as_uuid())
@@ -163,20 +190,42 @@ impl Devices for PgDevices {
         .bind(&attestation.kid)
         .bind(attestation.issued_at)
         .bind(attestation.expires_at)
+        .bind(set.map(|signed| signed.key().as_bytes()))
+        .bind(set.map(|signed| signed.signature().as_bytes()))
+        .bind(
+            read.and_then(|d| d.attestation.as_ref())
+                .map(|a| a.root_key.as_bytes()),
+        )
+        .bind(
+            read.and_then(|d| d.hpke_key.as_ref())
+                .map(|held| held.key.as_bytes()),
+        )
+        .bind(keep)
         .execute(&mut *tx)
         .await
         .context("store an attestation")?
         .rows_affected();
         if attested == 0 {
-            return Err(KeyStoreError::DeviceTaken);
+            let owned: Option<bool> =
+                sqlx::query_scalar("SELECT user_id = $2 FROM user_devices WHERE device_id = $1")
+                    .bind(id.as_uuid())
+                    .bind(owner.as_uuid())
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .context("find whose device it is")?;
+            if owned == Some(false) {
+                return Err(KeyStoreError::DeviceTaken);
+            }
+            return Ok(Attest::Stale);
         }
         tx.commit().await.context("commit attest")?;
-        Ok(())
+        Ok(Attest::Stored)
     }
 
     async fn revoke(&self, owner: UserId, id: DeviceId) -> Result<Revocation, KeyStoreError> {
         let revoked = sqlx::query(
-            "UPDATE user_devices SET revoked_at = NOW() \
+            "UPDATE user_devices SET revoked_at = NOW(), hpke_public_key = NULL, \
+                 hpke_key_signature = NULL \
              WHERE device_id = $1 AND user_id = $2 AND revoked_at IS NULL",
         )
         .bind(id.as_uuid())

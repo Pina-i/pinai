@@ -11,8 +11,10 @@ use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
+use domain::ValidationError;
 use domain::e2ee::{
-    Claim, DeviceLabel, DeviceRootKey, KeyDirectoryError, KeyPackageBytes, NewKeyPackage,
+    Claim, DeviceLabel, DeviceRootKey, HpkePublicKey, KeyDirectoryError, KeyPackageBytes,
+    NewKeyPackage, RootKeySignature, UnverifiedHpkeKey,
 };
 use domain::identity::{ActorUri, Requester};
 use serde::{Deserialize, Serialize};
@@ -21,7 +23,7 @@ use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
 
 use crate::ApiError;
-use crate::auth::{Authenticated, CallerJson, RecentlySignedIn};
+use crate::auth::{Authenticated, CallerJson, RecentlySignedIn, SignedIn};
 use crate::rate_limit::RateLimiter;
 
 #[derive(Serialize)]
@@ -43,6 +45,11 @@ pub struct DeviceEntry {
     /// `None` until the device registers its root key.
     #[serde(with = "time::serde::rfc3339::option")]
     attestation_expires_at: Option<OffsetDateTime>,
+    drk_public_key: Option<String>,
+    attestation_signature: Option<String>,
+    attestation_kid: Option<String>,
+    hpke_public_key: Option<String>,
+    hpke_key_signature: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -55,6 +62,10 @@ pub struct RegisterRequest {
     device_id: Uuid,
     /// Standard base64 of the 32-byte Ed25519 public key.
     drk_public_key: String,
+    /// Standard base64 of the 32-byte X25519 public key; sent with its signature, or neither is.
+    hpke_public_key: Option<String>,
+    /// Standard base64 of the root key's 64-byte signature over the HPKE key's canonical bytes.
+    hpke_key_signature: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -136,6 +147,8 @@ impl From<ListedDevice> for DeviceEntry {
             last_active_at,
         }: ListedDevice,
     ) -> Self {
+        let attestation = device.attestation.as_ref();
+        let hpke_key = device.hpke_key.as_ref();
         Self {
             device_id: device.id.as_uuid(),
             display_name: device.label.name,
@@ -145,9 +158,26 @@ impl From<ListedDevice> for DeviceEntry {
             revoked_at: device.revoked_at,
             signed_in: last_active_at.is_some(),
             last_active_at,
-            attestation_expires_at: device.attestation.map(|a| a.expires_at),
+            attestation_expires_at: attestation.map(|a| a.expires_at),
+            drk_public_key: attestation.map(|a| B64.encode(a.root_key.as_bytes())),
+            attestation_signature: attestation.map(|a| B64.encode(&a.signature)),
+            attestation_kid: attestation.map(|a| a.kid.clone()),
+            hpke_public_key: hpke_key.map(|h| B64.encode(h.key.as_bytes())),
+            hpke_key_signature: hpke_key.map(|h| B64.encode(h.signature.as_bytes())),
         }
     }
+}
+
+/// The standard base64 in `field`, parsed into its domain type.
+fn base64_field<T>(
+    field: &'static str,
+    raw: &str,
+    parse: impl FnOnce(&[u8]) -> Result<T, ValidationError>,
+) -> Result<T, ValidationError> {
+    let bytes = B64
+        .decode(raw)
+        .map_err(|_| ValidationError::new(field, "must be base64"))?;
+    parse(&bytes)
 }
 
 fn rfc3339(at: OffsetDateTime) -> Result<String, ApiError> {
@@ -169,16 +199,33 @@ pub async fn devices(
 /// `POST /api/keys/devices`
 pub async fn register(
     State(register): State<Arc<RegisterDevice>>,
-    Authenticated(user): Authenticated,
+    SignedIn(bearer): SignedIn,
     Json(body): Json<RegisterRequest>,
 ) -> Result<(StatusCode, Json<RegisteredBody>), ApiError> {
-    let key = B64
-        .decode(&body.drk_public_key)
-        .map_err(|_| ApiError::bad_request("drk_public_key must be base64"))?;
-    let key = DeviceRootKey::parse(&key)
-        .map_err(|_| ApiError::bad_request("drk_public_key must be 32 bytes (Ed25519)"))?;
+    let key = base64_field("drk_public_key", &body.drk_public_key, DeviceRootKey::parse)?;
+    let hpke_public_key = body
+        .hpke_public_key
+        .as_deref()
+        .map(|raw| base64_field("hpke_public_key", raw, HpkePublicKey::parse))
+        .transpose()?;
+    let hpke_key_signature = body
+        .hpke_key_signature
+        .as_deref()
+        .map(|raw| {
+            base64_field("hpke_key_signature", raw, |bytes| {
+                RootKeySignature::parse("hpke_key_signature", bytes)
+            })
+        })
+        .transpose()?;
+    let brought = UnverifiedHpkeKey::from_parts(hpke_public_key, hpke_key_signature)?;
     let registered = register
-        .execute(user, body.device_id.into(), key, OffsetDateTime::now_utc())
+        .execute(
+            &bearer,
+            body.device_id.into(),
+            key,
+            brought,
+            OffsetDateTime::now_utc(),
+        )
         .await?;
     Ok((
         StatusCode::CREATED,
@@ -350,6 +397,14 @@ impl From<KeyDirectoryError> for ApiError {
             KeyDirectoryError::DeviceRevoked => {
                 ApiError::new(StatusCode::FORBIDDEN, "access_denied", "Device is revoked")
             }
+            KeyDirectoryError::HpkeKeyUnsigned => {
+                ApiError::bad_request("hpke_key_signature does not verify against drk_public_key")
+            }
+            KeyDirectoryError::NotTheSessionsDevice => ApiError::new(
+                StatusCode::FORBIDDEN,
+                "device_mismatch",
+                "This session signed in another device",
+            ),
             KeyDirectoryError::UserNotFound => ApiError::not_found("User not found"),
             KeyDirectoryError::NoKeyPackage => {
                 ApiError::new(StatusCode::CONFLICT, "conflict", "no available KeyPackage")

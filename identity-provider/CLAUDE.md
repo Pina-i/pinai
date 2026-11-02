@@ -83,10 +83,11 @@ identity-provider/          # the Cargo workspace is the monorepo's, at the repo
 │   ├── infrastructure/     # idp-infrastructure — port adapters: SQLx, Redis (`broker`: the
 │   │                       #   event streams and the presence bus), S3 (`storage`), AP delivery +
 │   │                       #   WebFinger, signed downloads and claims, blob tokens, JWT and HTTP
-│   │                       #   Signature verification, device attestation, WebSocket pushes and
-│   │                       #   their wire format, the peers' presence polls and streams, the
-│   │                       #   sign-in, sign-up and second-factor stores, Argon2, TOTP, token
-│   │                       #   signing, SMTP mail; `MIGRATOR`
+│   │                       #   Signature verification, device attestation and root-key
+│   │                       #   signature checks, WebSocket pushes and their wire format, the
+│   │                       #   peers' presence polls and streams, the sign-in, sign-up and
+│   │                       #   second-factor stores, Argon2, TOTP, token signing, SMTP mail;
+│   │                       #   `MIGRATOR`
 │   ├── api/                # idp-api — Axum routes (the inbox, the actor documents and
 │   │                       #   WebFinger included), the sign-in pages (`templates/`,
 │   │                       #   `assets/`), the `/ws` upgrade and read loop, DTOs,
@@ -205,14 +206,14 @@ connections ──► (no internal deps)
 | `GET /api/presence?actors[]=` | Current presence snapshot: real for the caller, its friends and its conversations' members; anyone else reads `offline` |
 | `GET /api/presence/stream?actors[]=` | Inter-IdP SSE stream for open conversations (HTTP Signature; 400 without `actors[]`): replays the last known states, then presence and typing — only of this instance's accounts the peer's accounts know, typing only in conversations with a member on the peer's instance |
 | `POST /api/presence/batch` | Inter-IdP batch poll behind the friends lists (HTTP Signature). Body `{ actors[] }`; every actor answered in order — `offline` for whoever none of the peer's accounts knows and for other instances' actors |
-| `POST /api/keys/devices` | Register/renew/rotate this device's IdP-attested DRK (Bearer-auth). Idempotent on `(device_id, drk_public_key)`. New row → first-time mint + `DeviceJoined` WS event; same DRK → fresh `expires_at`; new DRK → rotation. Returns the signature, kid, expiries, and the canonical bytes the IdP signed so the client can re-verify locally. A device id another account holds → 409; a revoked device → 403. |
+| `POST /api/keys/devices` | Register/renew/rotate this device's IdP-attested DRK (Bearer-auth). Idempotent on `(device_id, drk_public_key)`. New row → first-time mint + `DeviceJoined` WS event; same DRK → fresh `expires_at`; new DRK → rotation. The attestation's times are whole seconds in UTC (`attestation_period`; the attester takes only an `AttestationExpiry`), so the expiry stored is the text signed. Optional `hpke_public_key` + `hpke_key_signature` (base64, 32 and 64 bytes): the device's HPKE key, signed by the DRK sent with it over `PINAI-DEVICE-HPKE-v1` canonical bytes (`UnverifiedHpkeKey::verified`, through the `RootKeyVerifier` port, alone makes the `SignedHpkeKey` that `Devices::attest` takes) — one without the other, or a signature that doesn't verify, → 400, nothing stored. A key brought replaces the one held; none brought keeps it on a renewal and clears it on a rotation (`Registration::hpke_key` → `HpkeKeyWrite` keep / set / clear; `identity-provider/specs/e2ee.md § 3.3`). The write is guarded on the device as read (unrevoked, the same DRK and HPKE key): one that changed meanwhile is read and decided again, up to 3 times. A session that declared its device (`PUT /api/sessions/current/device`) registers that device only: any other device id → 403 `device_mismatch` (`domain::e2ee::may_register`). Returns the signature, kid, expiries, and the canonical bytes the IdP signed so the client can re-verify locally. A device id another account holds → 409; a revoked device → 403. |
 | `POST /api/keys/packages` | Upload a batch of KeyPackages for one of the caller's devices (cap + lifetime enforced; the same 409 / 403 as registration) |
 | `POST /api/keys/packages/claim/devices` | One KeyPackage of each of `actor_uri`'s unrevoked devices that has any, as `{ claims: [...] }`, so a contact's first add brings every device of theirs in. Asked, proxied, rate-limited, admitted and notified as `/claim` is; none at all → 409 |
 | `POST /api/keys/packages/claim` | Atomically reserve one KeyPackage for `actor_uri` — of `device_id`, or of any unrevoked device with some left, named in the answer. Bearer requests for a remote `actor_uri` are sent to the target's IdP signed as the user; its 404 / 409 / 429 come back as they are, and a peer that fails to answer is 502. Bearer or HTTP-Sig; 60 claims then one a second per requester (429); peer requests for remote targets are refused (400). No KeyPackage left → 409. A claimer the account doesn't admit → 403 `Can't add this person`, before a package is taken (one's own packages always). A claim that leaves a device at the refill threshold, or finds none, pushes `key_packages_low` to the owner's live sessions, which top their own device up |
 | `GET /api/keys/packages/status` | Per-device available KeyPackage counts + `needs_refill` flag |
-| `GET /api/keys/devices` | List the caller's devices (Bearer-auth) — `device_id`, `display_name`, `kind`, `paired_at`, `last_seen_at`, `revoked_at`, `signed_in` and `last_active_at` (a live session of it, and its last use), `attestation_expires_at` (when the device's DRK attestation expires, for renewal scheduling). |
-| `POST /api/keys/devices/:device_id/revoke` | Revoke the caller's device (Bearer-auth, a recent password): its sessions end first (`device_revoked` — tokens, refresh tokens, sockets with `1008`), then the directory flag complementing MLS Remove commits: its KeyPackages are never claimed again. 404 for another account's device. |
-| `PUT /api/sessions/current/device` | Bearer-auth. `{ device_id }`: the session names the E2EE device it signed in, ending that device's other session (`replaced`). 403 for a device not the caller's, or revoked |
+| `GET /api/keys/devices` | List the caller's devices (Bearer-auth) — `device_id`, `display_name`, `kind`, `paired_at`, `last_seen_at`, `revoked_at`, `signed_in` and `last_active_at` (a live session of it, and its last use), `attestation_expires_at` (when the device's DRK attestation expires, for renewal scheduling — the text the attestation signed), and what another device of the account needs to verify the chain JWKS → attestation → DRK → HPKE key itself: `drk_public_key`, `attestation_signature`, `attestation_kid`, `hpke_public_key`, `hpke_key_signature` (base64; `null` for a device with no DRK registered, or no HPKE key). |
+| `POST /api/keys/devices/:device_id/revoke` | Revoke the caller's device (Bearer-auth, a recent password): its sessions end first (`device_revoked` — tokens, refresh tokens, sockets with `1008`), then the directory flag complementing MLS Remove commits — its KeyPackages are never claimed again — and its HPKE key cleared in the same write. 404 for another account's device. |
+| `PUT /api/sessions/current/device` | Bearer-auth. `{ device_id }`: the session names the E2EE device it signed in, ending that device's other session (`replaced`). 403 for a device not the caller's, or revoked; a session that names a device is never pointed at another: 403 `device_mismatch` (`domain::e2ee::may_name`), the same one again 204. A device whose storage was wiped comes back from a new session (`identity-provider/specs/auth.md § 1`, "Sessions and devices") |
 | `DELETE /api/sessions?keep=current` | Bearer-auth, a recent password. Ends every session of the account but the caller's (`signed_out_elsewhere`); 400 without `keep=current` |
 | `POST /api/history/messages` | Batch upload of encrypted plaintext archive entries (1–50). Only for conversations the caller is or was a member of (403); idempotent upsert on `(user_id, id)`, answering how many were new. |
 | `GET /api/history/messages?after_id=&after_created_at=&limit=` | Keyset-paginated download of the user's encrypted archive `(created_at DESC, id DESC)`, 100 a page by default, at most 500; `next_cursor` is null only on an empty page. |
@@ -399,13 +400,15 @@ message_attachments      — file attachments (message_id, storage_key, mime_typ
                             application messages of `kind = "reaction"` inside the encrypted
                             body, computed client-side from the decrypted stream
 key_packages             — single-use MLS KeyPackages (per-device stash, expires_at, consumed_at)
-user_devices             — per-device metadata + Phase 7 IdP-attested DRK columns:
-                            base fields (display_name, kind, paired_at, last_seen_at, revoked_at)
-                            attestation fields (drk_public_key, attestation_signature,
-                            attestation_kid, attestation_issued_at, attestation_expires_at).
-                            Upserted on every `POST /api/keys/packages` (display_name + kind
-                            parsed from User-Agent on first publish); attestation columns set
-                            by `POST /api/keys/devices` (Phase 7).
+user_devices             — per-device metadata (display_name, kind — parsed from the User-Agent
+                            on first publish —, paired_at, last_seen_at, revoked_at), upserted on
+                            every `POST /api/keys/packages`; set by `POST /api/keys/devices`: the
+                            IdP-attested DRK (drk_public_key, attestation_signature,
+                            attestation_kid, attestation_issued_at, attestation_expires_at —
+                            whole seconds; the expiry is the text signed) and the HPKE key the
+                            DRK signed (hpke_public_key, hpke_key_signature: both or neither,
+                            only with a DRK; cleared when the DRK rotates without a new one, and
+                            when the device is revoked)
 users.history_archive_salt
                             — Phase 7 per-user random salt for Argon2id HAK derivation.
                             Set once via idempotent `POST /api/history/salt`; never

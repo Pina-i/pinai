@@ -2,6 +2,7 @@ use axum::body::Body;
 use axum::http::{Method, Request, header};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
+use domain::e2ee::testing::plain_signature;
 use domain::identity::testing::{account, remote_actor};
 use domain::identity::{Account, ActorUri};
 use domain::social::testing::{BLOCKED, KEPT_OUT_BY_THE_SETTING};
@@ -61,6 +62,24 @@ impl World {
             .await
     }
 
+    async fn register_with(&self, who: &Account, body: Value) -> (StatusCode, Value) {
+        self.app
+            .call(Method::POST, "/api/keys/devices", Some(who.id), Some(body))
+            .await
+    }
+
+    async fn devices(&self, who: &Account) -> Vec<Value> {
+        let (status, body) = self
+            .app
+            .call(Method::GET, "/api/keys/devices", Some(who.id), None)
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        body["devices"]
+            .as_array()
+            .expect("a list of devices")
+            .clone()
+    }
+
     async fn upload(&self, who: &Account, device: Uuid, packages: Value) -> (StatusCode, Value) {
         self.app
             .call(
@@ -91,6 +110,16 @@ fn b64(value: &Value) -> Vec<u8> {
 
 fn time(value: &Value) -> OffsetDateTime {
     OffsetDateTime::parse(value.as_str().expect("an RFC 3339 string"), &Rfc3339).unwrap()
+}
+
+/// Base64 of the fake verifier's signature by root key `[root; 32]` over the HPKE key
+/// `[byte; 32]` of `owner`'s `device`.
+fn hpke_signature(owner: &Account, device: Uuid, root: u8, byte: u8) -> String {
+    let message = HpkePublicKey::parse(&[byte; 32])
+        .unwrap()
+        .canonical_bytes(&owner.actor_uri, device.into());
+    let root = DeviceRootKey::parse(&[root; 32]).unwrap();
+    B64.encode(plain_signature(&root, &message).as_bytes())
 }
 
 #[tokio::test]
@@ -128,7 +157,7 @@ async fn a_root_key_must_be_32_bytes_of_base64() {
         not_base64,
         (
             StatusCode::BAD_REQUEST,
-            refusal("invalid_request", "drk_public_key must be base64")
+            refusal("invalid_request", "drk_public_key: must be base64")
         )
     );
     assert_eq!(
@@ -137,7 +166,7 @@ async fn a_root_key_must_be_32_bytes_of_base64() {
             StatusCode::BAD_REQUEST,
             refusal(
                 "invalid_request",
-                "drk_public_key must be 32 bytes (Ed25519)"
+                "drk_public_key: must be 32 bytes (Ed25519)"
             )
         )
     );
@@ -160,19 +189,140 @@ async fn the_callers_devices_are_listed_with_their_attestation_expiry() {
     let devices = body["devices"].as_array().unwrap();
     assert_eq!(devices.len(), 2);
     assert_eq!(devices[0]["device_id"], json!(unattested));
-    assert_eq!(devices[0]["attestation_expires_at"], Value::Null);
+    for field in [
+        "attestation_expires_at",
+        "drk_public_key",
+        "attestation_signature",
+        "attestation_kid",
+        "hpke_public_key",
+        "hpke_key_signature",
+    ] {
+        assert_eq!(devices[0][field], Value::Null, "{field}");
+    }
     assert_eq!(devices[1]["device_id"], json!(attested));
     assert_eq!(
         (&devices[1]["display_name"], &devices[1]["kind"]),
         (&json!("Web client"), &json!("unknown"))
     );
     assert_eq!(
-        time(&devices[1]["attestation_expires_at"]),
-        time(&registered["expires_at"])
+        devices[1]["attestation_expires_at"], registered["expires_at"],
+        "the text signed"
+    );
+    assert_eq!(
+        (
+            &devices[1]["hpke_public_key"],
+            &devices[1]["hpke_key_signature"]
+        ),
+        (&Value::Null, &Value::Null)
     );
     assert_eq!(devices[1]["revoked_at"], Value::Null);
     time(&devices[1]["paired_at"]);
     time(&devices[1]["last_seen_at"]);
+}
+
+#[tokio::test]
+async fn a_device_registers_its_hpke_key_and_the_list_shows_what_vouches_for_it() {
+    let w = world();
+    let device = Uuid::new_v4();
+    let signature = hpke_signature(&w.alice, device, 7, 9);
+
+    let (status, registered) = w
+        .register_with(
+            &w.alice,
+            json!({
+                "device_id": device,
+                "drk_public_key": B64.encode([7; 32]),
+                "hpke_public_key": B64.encode([9; 32]),
+                "hpke_key_signature": signature,
+            }),
+        )
+        .await;
+    let devices = w.devices(&w.alice).await;
+
+    assert_eq!(status, StatusCode::CREATED, "{registered}");
+    let listed = &devices[0];
+    assert_eq!(
+        (
+            &listed["device_id"],
+            &listed["drk_public_key"],
+            &listed["attestation_signature"],
+            &listed["attestation_kid"],
+            &listed["attestation_expires_at"],
+        ),
+        (
+            &json!(device),
+            &json!(B64.encode([7; 32])),
+            &registered["signature"],
+            &registered["kid"],
+            &registered["expires_at"],
+        )
+    );
+    assert_eq!(
+        (&listed["hpke_public_key"], &listed["hpke_key_signature"]),
+        (&json!(B64.encode([9; 32])), &json!(signature))
+    );
+}
+
+#[tokio::test]
+async fn an_hpke_key_alone_malformed_or_not_signed_by_the_root_key_is_refused() {
+    let w = world();
+    let device = Uuid::new_v4();
+    let request = |key: Value, signature: Value| {
+        json!({
+            "device_id": device,
+            "drk_public_key": B64.encode([7; 32]),
+            "hpke_public_key": key,
+            "hpke_key_signature": signature,
+        })
+    };
+    let (key, signature) = (
+        json!(B64.encode([9; 32])),
+        json!(hpke_signature(&w.alice, device, 7, 9)),
+    );
+
+    for (body, description) in [
+        (
+            request(key.clone(), Value::Null),
+            "hpke_key_signature: comes with hpke_public_key, or neither is sent",
+        ),
+        (
+            request(Value::Null, signature.clone()),
+            "hpke_key_signature: comes with hpke_public_key, or neither is sent",
+        ),
+        (
+            request(json!("not base64!"), signature.clone()),
+            "hpke_public_key: must be base64",
+        ),
+        (
+            request(json!(B64.encode([9; 31])), signature.clone()),
+            "hpke_public_key: must be 32 bytes (X25519)",
+        ),
+        (
+            request(key.clone(), json!(B64.encode([1; 63]))),
+            "hpke_key_signature: must be 64 bytes (Ed25519)",
+        ),
+        (
+            request(key.clone(), json!(hpke_signature(&w.alice, device, 8, 9))),
+            "hpke_key_signature does not verify against drk_public_key",
+        ),
+        (
+            request(key.clone(), json!(hpke_signature(&w.bob, device, 7, 9))),
+            "hpke_key_signature does not verify against drk_public_key",
+        ),
+    ] {
+        assert_eq!(
+            w.register_with(&w.alice, body).await,
+            (
+                StatusCode::BAD_REQUEST,
+                refusal("invalid_request", description)
+            )
+        );
+    }
+    assert_eq!(
+        w.devices(&w.alice).await,
+        Vec::<Value>::new(),
+        "nothing stored"
+    );
 }
 
 #[tokio::test]

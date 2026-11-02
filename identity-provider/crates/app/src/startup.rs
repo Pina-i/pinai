@@ -995,6 +995,8 @@ impl Application {
                 Arc::new(infrastructure::attestation::Ed25519DeviceAttester::new(
                     Arc::clone(&keypair),
                 )),
+                Arc::new(infrastructure::attestation::Ed25519RootKeyVerifier),
+                Arc::clone(&sessions),
                 Arc::clone(&device_notifier),
             )),
             list_devices: Arc::new(application::e2ee::ListDevices::new(

@@ -1,4 +1,5 @@
 use super::*;
+use crate::e2ee::testing::{PlainRootKeyVerifier, hpke_key, plain_signature};
 
 fn label(name: &str, kind: DeviceKind) -> DeviceLabel {
     DeviceLabel {
@@ -31,6 +32,7 @@ fn device(attested: Option<DeviceRootKey>) -> Device {
             issued_at: at,
             expires_at: at + ATTESTATION_LIFETIME,
         }),
+        hpke_key: None,
     }
 }
 
@@ -186,4 +188,146 @@ fn a_device_id_another_account_holds_registers_no_key() {
             "{taken:?}"
         );
     }
+}
+
+#[test]
+fn an_hpke_key_is_an_x25519_public_key_and_its_signature_an_ed25519_one() {
+    assert_eq!(HpkePublicKey::parse(&[1; 32]).unwrap().as_bytes(), &[1; 32]);
+    assert_eq!(
+        RootKeySignature::parse("signature", &[2; 64])
+            .unwrap()
+            .as_bytes(),
+        &[2; 64]
+    );
+    for len in [0, 31, 33, 64] {
+        assert!(HpkePublicKey::parse(&vec![1; len]).is_err(), "{len} bytes");
+    }
+    for len in [0, 32, 63, 65] {
+        let refused = RootKeySignature::parse("hpke_key_signature", &vec![1; len]).unwrap_err();
+        assert_eq!(refused.field, "hpke_key_signature", "{len} bytes");
+    }
+}
+
+#[test]
+fn an_hpke_key_comes_with_its_signature_or_not_at_all() {
+    let (key, signature) = (hpke_key(1).key().clone(), hpke_key(1).signature().clone());
+
+    assert_eq!(
+        UnverifiedHpkeKey::from_parts(Some(key.clone()), Some(signature.clone())).unwrap(),
+        Some(UnverifiedHpkeKey::new(key.clone(), signature.clone()))
+    );
+    assert_eq!(UnverifiedHpkeKey::from_parts(None, None).unwrap(), None);
+    assert!(UnverifiedHpkeKey::from_parts(Some(key), None).is_err());
+    assert!(UnverifiedHpkeKey::from_parts(None, Some(signature)).is_err());
+}
+
+/// The wire format's golden vector: a break here means a new version tag.
+#[test]
+fn the_bytes_a_root_key_signs_over_its_hpke_key_are_the_documented_canonical_form() {
+    let actor = ActorUri::parse("https://idp.alice.com/users/alice_xK9mP").unwrap();
+    let device: DeviceId = uuid::Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000")
+        .unwrap()
+        .into();
+
+    let bytes = HpkePublicKey::parse(&[0; 32])
+        .unwrap()
+        .canonical_bytes(&actor, device);
+
+    let expected: &[u8] = b"PINAI-DEVICE-HPKE-v1\n\
+        https://idp.alice.com/users/alice_xK9mP\n\
+        550e8400-e29b-41d4-a716-446655440000\n\
+        AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+    assert_eq!(bytes, expected);
+}
+
+#[test]
+fn an_hpke_key_verifies_only_under_its_root_key_for_its_device_and_account() {
+    let alice = ActorUri::parse("https://idp.alice.com/users/alice_xK9mP").unwrap();
+    let bob = ActorUri::parse("https://idp.alice.com/users/bob_k2m9x").unwrap();
+    let (device, hpke) = (
+        DeviceId::generate(),
+        HpkePublicKey::parse(&[9; 32]).unwrap(),
+    );
+    let signed_for = |root: u8, actor: &ActorUri, device: DeviceId, over: &HpkePublicKey| {
+        UnverifiedHpkeKey::new(
+            hpke.clone(),
+            plain_signature(&key(root), &over.canonical_bytes(actor, device)),
+        )
+    };
+    let verify = |brought: UnverifiedHpkeKey| {
+        brought.verified(&key(1), &alice, device, &PlainRootKeyVerifier)
+    };
+
+    let verified = verify(signed_for(1, &alice, device, &hpke)).unwrap();
+
+    assert_eq!(verified.key(), &hpke);
+    for forged in [
+        signed_for(2, &alice, device, &hpke),
+        signed_for(1, &bob, device, &hpke),
+        signed_for(1, &alice, DeviceId::generate(), &hpke),
+        signed_for(1, &alice, device, &HpkePublicKey::parse(&[8; 32]).unwrap()),
+    ] {
+        let refused = verify(forged);
+        assert!(
+            matches!(refused, Err(KeyDirectoryError::HpkeKeyUnsigned)),
+            "{refused:?}"
+        );
+    }
+}
+
+#[test]
+fn a_registration_bringing_an_hpke_key_sets_it_whatever_it_is() {
+    for registration in [
+        Registration::FirstTime,
+        Registration::Renewal,
+        Registration::Rotation,
+    ] {
+        assert_eq!(
+            registration.hpke_key(Some(hpke_key(2))),
+            HpkeKeyWrite::Set(hpke_key(2)),
+            "{registration:?}"
+        );
+    }
+}
+
+#[test]
+fn a_renewal_keeps_the_hpke_key_held_and_a_rotation_clears_it() {
+    assert_eq!(Registration::Renewal.hpke_key(None), HpkeKeyWrite::Keep);
+    assert_eq!(Registration::Rotation.hpke_key(None), HpkeKeyWrite::Clear);
+    assert_eq!(Registration::FirstTime.hpke_key(None), HpkeKeyWrite::Clear);
+}
+
+#[test]
+fn an_attestation_is_issued_in_utc_and_whole_seconds() {
+    let in_tahiti = OffsetDateTime::from_unix_timestamp_nanos(1_788_000_000_123_456_789)
+        .unwrap()
+        .to_offset(time::UtcOffset::from_hms(-10, 0, 0).unwrap());
+
+    let (issued_at, expires_at) = attestation_period(in_tahiti);
+
+    assert_eq!(issued_at.offset(), time::UtcOffset::UTC);
+    assert_eq!(
+        issued_at,
+        OffsetDateTime::from_unix_timestamp(1_788_000_000).unwrap()
+    );
+    assert_eq!(expires_at.at(), issued_at + ATTESTATION_LIFETIME);
+    assert_eq!(expires_at.at().offset(), time::UtcOffset::UTC);
+}
+
+#[test]
+fn a_session_registers_and_names_only_the_device_it_declared() {
+    let (laptop, phone) = (DeviceId::generate(), DeviceId::generate());
+
+    assert!(may_register(None, phone).is_ok());
+    assert!(may_register(Some(laptop), laptop).is_ok());
+    assert!(matches!(
+        may_register(Some(laptop), phone),
+        Err(KeyDirectoryError::NotTheSessionsDevice)
+    ));
+    assert!(may_name(None, phone).is_ok());
+    assert!(may_name(Some(laptop), laptop).is_ok());
+    assert!(matches!(
+        may_name(Some(laptop), phone),
+        Err(AuthError::DeviceMismatch)
+    ));
 }

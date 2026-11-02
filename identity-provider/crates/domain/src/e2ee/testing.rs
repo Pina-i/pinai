@@ -16,11 +16,12 @@ use super::{
     NewArchiveEntry,
 };
 use super::{
-    Attestation, Claim, ClaimedKeyPackage, Commit, CommitLog, DeliveryStoreError, Device,
-    DeviceAttester, DeviceLabel, DeviceNotifier, DeviceRootKey, Devices, Epoch, KeyPackages,
-    KeyStoreError, MlsFederation, MlsNotifier, NewCommit, NewKeyPackage, NewWelcome,
-    OutgoingWelcome, RemoteClaimError, RemoteKeyPackages, Revocation, SignedAttestation, Welcome,
-    Welcomes,
+    Attest, Attestation, AttestationExpiry, Claim, ClaimedKeyPackage, Commit, CommitLog,
+    DeliveryStoreError, Device, DeviceAttester, DeviceLabel, DeviceNotifier, DeviceRootKey,
+    Devices, Epoch, HeldHpkeKey, HpkeKeyWrite, HpkePublicKey, KeyPackages, KeyStoreError,
+    MlsFederation, MlsNotifier, NewCommit, NewKeyPackage, NewWelcome, OutgoingWelcome,
+    RemoteClaimError, RemoteKeyPackages, Revocation, RootKeySignature, RootKeyVerifier,
+    SignedAttestation, SignedHpkeKey, UnverifiedHpkeKey, Welcome, Welcomes,
 };
 
 /// Both stores over one state, as KeyPackages mark their device seen.
@@ -73,6 +74,7 @@ impl State {
                 last_seen_at: now,
                 revoked_at: None,
                 attestation: None,
+                hpke_key: None,
             });
         }
         Ok(self.device_mut(id).expect("just recorded"))
@@ -103,11 +105,26 @@ impl Devices for InMemoryKeyDirectory {
         owner: UserId,
         id: DeviceId,
         label: &DeviceLabel,
+        read: Option<&Device>,
         attestation: &Attestation,
-    ) -> Result<(), KeyStoreError> {
+        hpke_key: &HpkeKeyWrite,
+    ) -> Result<Attest, KeyStoreError> {
         let mut state = self.state.lock().unwrap();
-        state.record(owner, id, label)?.attestation = Some(attestation.clone());
-        Ok(())
+        let current = state.devices.iter().find(|d| d.id == id);
+        if current.is_some_and(|d| d.owner != owner) {
+            return Err(KeyStoreError::DeviceTaken);
+        }
+        if current.is_some_and(Device::is_revoked) || keys(current) != keys(read) {
+            return Ok(Attest::Stale);
+        }
+        let device = state.record(owner, id, label)?;
+        device.attestation = Some(attestation.clone());
+        match hpke_key {
+            HpkeKeyWrite::Keep => {}
+            HpkeKeyWrite::Set(signed) => device.hpke_key = Some(signed.into()),
+            HpkeKeyWrite::Clear => device.hpke_key = None,
+        }
+        Ok(Attest::Stored)
     }
 
     async fn revoke(&self, owner: UserId, id: DeviceId) -> Result<Revocation, KeyStoreError> {
@@ -119,8 +136,21 @@ impl Devices for InMemoryKeyDirectory {
             return Ok(Revocation::AlreadyRevoked);
         }
         device.revoked_at = Some(OffsetDateTime::now_utc());
+        device.hpke_key = None;
         Ok(Revocation::Revoked)
     }
+}
+
+/// What a registration's write is guarded on, besides the device being unrevoked.
+fn keys(device: Option<&Device>) -> (Option<&DeviceRootKey>, Option<&HpkePublicKey>) {
+    (
+        device
+            .and_then(|d| d.attestation.as_ref())
+            .map(|a| &a.root_key),
+        device
+            .and_then(|d| d.hpke_key.as_ref())
+            .map(|held| &held.key),
+    )
 }
 
 #[async_trait::async_trait]
@@ -232,16 +262,58 @@ impl DeviceAttester for PlainAttester {
         actor: &ActorUri,
         device: DeviceId,
         key: &DeviceRootKey,
-        expires_at: OffsetDateTime,
+        expires_at: AttestationExpiry,
     ) -> SignedAttestation {
-        let signed_message =
-            format!("{actor}\n{device}\n{:?}\n{expires_at}", key.as_bytes()).into_bytes();
+        let signed_message = format!(
+            "{actor}\n{device}\n{:?}\n{}",
+            key.as_bytes(),
+            expires_at.at()
+        )
+        .into_bytes();
         SignedAttestation {
             signature: signed_message.iter().rev().copied().collect(),
             kid: "test-key".to_owned(),
             signed_message,
         }
     }
+}
+
+/// Takes for a root key's signature what [`plain_signature`] makes: no cryptography.
+pub struct PlainRootKeyVerifier;
+
+impl RootKeyVerifier for PlainRootKeyVerifier {
+    fn verifies(&self, key: &DeviceRootKey, message: &[u8], signature: &RootKeySignature) -> bool {
+        plain_signature(key, message) == *signature
+    }
+}
+
+/// `key`'s "signature" over `message` as [`PlainRootKeyVerifier`] takes it: two SHA-256 rounds.
+pub fn plain_signature(key: &DeviceRootKey, message: &[u8]) -> RootKeySignature {
+    use sha2::{Digest, Sha256};
+    let first = Sha256::new()
+        .chain_update(key.as_bytes())
+        .chain_update(message)
+        .finalize();
+    let second = Sha256::digest(first);
+    RootKeySignature::parse("signature", &[first.as_slice(), second.as_slice()].concat())
+        .expect("two digests are 64 bytes")
+}
+
+/// The HPKE key `[byte; 32]`, verified as root key `[byte; 32]` signed it for a test device.
+pub fn hpke_key(byte: u8) -> SignedHpkeKey {
+    let root = DeviceRootKey::parse(&[byte; 32]).unwrap();
+    let actor = ActorUri::parse("https://idp.test/users/alice_t3st0").unwrap();
+    let device = DeviceId::from(uuid::Uuid::nil());
+    let key = HpkePublicKey::parse(&[byte; 32]).unwrap();
+    let signature = plain_signature(&root, &key.canonical_bytes(&actor, device));
+    UnverifiedHpkeKey::new(key, signature)
+        .verified(&root, &actor, device, &PlainRootKeyVerifier)
+        .expect("signed by its root key")
+}
+
+/// [`hpke_key`] as the directory reads it back.
+pub fn held(byte: u8) -> HeldHpkeKey {
+    HeldHpkeKey::from(&hpke_key(byte))
 }
 
 #[derive(Default)]
@@ -674,14 +746,47 @@ pub mod contract {
         package(byte, Duration::days(30))
     }
 
+    fn set(byte: u8) -> HpkeKeyWrite {
+        HpkeKeyWrite::Set(hpke_key(byte))
+    }
+
+    /// A registration that read the device just before writing.
+    async fn register(
+        devices: &dyn Devices,
+        owner: UserId,
+        id: DeviceId,
+        attestation: &Attestation,
+        hpke_key: HpkeKeyWrite,
+    ) -> Attest {
+        let read = devices.find(id).await.unwrap();
+        devices
+            .attest(
+                owner,
+                id,
+                &label("laptop"),
+                read.as_ref(),
+                attestation,
+                &hpke_key,
+            )
+            .await
+            .unwrap()
+    }
+
     pub async fn a_registered_device_is_found_and_listed_with_its_attestation(
         devices: &dyn Devices,
         alice: UserId,
     ) {
         let (id, attested) = (DeviceId::generate(), attestation(1));
 
-        devices
-            .attest(alice, id, &label("Firefox on Linux"), &attested)
+        let stored = devices
+            .attest(
+                alice,
+                id,
+                &label("Firefox on Linux"),
+                None,
+                &attested,
+                &HpkeKeyWrite::Clear,
+            )
             .await
             .unwrap();
 
@@ -690,6 +795,7 @@ pub mod contract {
             (device.owner, &device.label, device.revoked_at),
             (alice, &label("Firefox on Linux"), None)
         );
+        assert_eq!(stored, Attest::Stored);
         assert_eq!(device.attestation, Some(attested));
         assert_eq!(devices.list(alice).await.unwrap(), vec![device]);
         assert_eq!(devices.find(DeviceId::generate()).await.unwrap(), None);
@@ -701,13 +807,28 @@ pub mod contract {
     ) {
         let id = DeviceId::generate();
         devices
-            .attest(alice, id, &label("first"), &attestation(1))
+            .attest(
+                alice,
+                id,
+                &label("first"),
+                None,
+                &attestation(1),
+                &HpkeKeyWrite::Clear,
+            )
             .await
             .unwrap();
+        let read = devices.find(id).await.unwrap();
 
         let renewed = attestation(2);
         devices
-            .attest(alice, id, &label("second"), &renewed)
+            .attest(
+                alice,
+                id,
+                &label("second"),
+                read.as_ref(),
+                &renewed,
+                &HpkeKeyWrite::Clear,
+            )
             .await
             .unwrap();
 
@@ -716,6 +837,95 @@ pub mod contract {
             (device.label, device.attestation),
             (label("first"), Some(renewed))
         );
+    }
+
+    pub async fn a_device_holds_the_hpke_key_registered_with_its_attestation_until_replaced(
+        devices: &dyn Devices,
+        alice: UserId,
+    ) {
+        let id = DeviceId::generate();
+
+        register(devices, alice, id, &attestation(1), set(1)).await;
+        let registered = devices.find(id).await.unwrap().unwrap().hpke_key;
+        let listed = devices.list(alice).await.unwrap()[0].hpke_key.clone();
+        register(devices, alice, id, &attestation(1), HpkeKeyWrite::Keep).await;
+        let kept = devices.find(id).await.unwrap().unwrap().hpke_key;
+        register(devices, alice, id, &attestation(1), set(2)).await;
+        let replaced = devices.find(id).await.unwrap().unwrap().hpke_key;
+        register(devices, alice, id, &attestation(2), HpkeKeyWrite::Clear).await;
+        let cleared = devices.find(id).await.unwrap().unwrap().hpke_key;
+
+        assert_eq!(registered, Some(held(1)));
+        assert_eq!(listed, Some(held(1)));
+        assert_eq!(kept, Some(held(1)));
+        assert_eq!(replaced, Some(held(2)));
+        assert_eq!(cleared, None);
+    }
+
+    pub async fn a_registration_decided_on_a_stale_read_writes_nothing(
+        devices: &dyn Devices,
+        alice: UserId,
+    ) {
+        let id = DeviceId::generate();
+        register(devices, alice, id, &attestation(1), set(1)).await;
+        let read_before_the_new_key = devices.find(id).await.unwrap();
+        register(devices, alice, id, &attestation(1), set(2)).await;
+        let keyed = devices.find(id).await.unwrap();
+        let attest = |read: Option<Device>| async move {
+            devices
+                .attest(
+                    alice,
+                    id,
+                    &label("laptop"),
+                    read.as_ref(),
+                    &attestation(3),
+                    &HpkeKeyWrite::Keep,
+                )
+                .await
+                .unwrap()
+        };
+
+        let as_if_unknown = attest(None).await;
+        let before_the_new_key = attest(read_before_the_new_key).await;
+        let unchanged = devices.find(id).await.unwrap();
+        devices.revoke(alice, id).await.unwrap();
+        let revoked = devices.find(id).await.unwrap();
+        let after_the_revoke = attest(keyed.clone()).await;
+
+        assert_eq!(
+            (as_if_unknown, before_the_new_key, after_the_revoke),
+            (Attest::Stale, Attest::Stale, Attest::Stale)
+        );
+        assert_eq!(unchanged, keyed);
+        assert_eq!(devices.find(id).await.unwrap(), revoked);
+    }
+
+    pub async fn a_revoked_device_holds_no_hpke_key(devices: &dyn Devices, alice: UserId) {
+        let id = DeviceId::generate();
+        register(devices, alice, id, &attestation(1), set(1)).await;
+
+        devices.revoke(alice, id).await.unwrap();
+
+        let revoked = devices.find(id).await.unwrap().unwrap();
+        assert_eq!(revoked.hpke_key, None);
+        assert_eq!(revoked.attestation, Some(attestation(1)));
+    }
+
+    pub async fn stashing_keeps_the_hpke_key_registered(
+        devices: &dyn Devices,
+        packages: &dyn KeyPackages,
+        alice: UserId,
+    ) {
+        let id = DeviceId::generate();
+        register(devices, alice, id, &attestation(1), set(1)).await;
+
+        packages
+            .stash(alice, id, &label("laptop"), &[fresh(1)])
+            .await
+            .unwrap();
+
+        let device = devices.find(id).await.unwrap().unwrap();
+        assert_eq!(device.hpke_key, Some(held(1)));
     }
 
     pub async fn devices_are_listed_active_first_then_most_recently_seen(
@@ -730,15 +940,16 @@ pub mod contract {
             DeviceId::generate(),
         );
         for id in [old, seen, recent] {
-            devices
-                .attest(alice, id, &label("laptop"), &attestation(1))
-                .await
-                .unwrap();
+            register(devices, alice, id, &attestation(1), HpkeKeyWrite::Clear).await;
         }
-        devices
-            .attest(bob, DeviceId::generate(), &label("bob's"), &attestation(1))
-            .await
-            .unwrap();
+        register(
+            devices,
+            bob,
+            DeviceId::generate(),
+            &attestation(1),
+            HpkeKeyWrite::Clear,
+        )
+        .await;
         devices.revoke(alice, recent).await.unwrap();
         packages
             .stash(alice, seen, &label("laptop"), &[fresh(1)])
@@ -762,10 +973,7 @@ pub mod contract {
         bob: UserId,
     ) {
         let id = DeviceId::generate();
-        devices
-            .attest(alice, id, &label("laptop"), &attestation(1))
-            .await
-            .unwrap();
+        register(devices, alice, id, &attestation(1), HpkeKeyWrite::Clear).await;
 
         assert_eq!(devices.revoke(bob, id).await.unwrap(), Revocation::NotFound);
         assert_eq!(
@@ -848,8 +1056,13 @@ pub mod contract {
 
         let seen = devices.find(id).await.unwrap().unwrap();
         assert_eq!(
-            (recorded.owner, &recorded.label, &recorded.attestation),
-            (alice, &label("Chrome on Android"), &None)
+            (
+                recorded.owner,
+                &recorded.label,
+                &recorded.attestation,
+                &recorded.hpke_key
+            ),
+            (alice, &label("Chrome on Android"), &None, &None)
         );
         assert_eq!(seen.label, label("Chrome on Android"));
         assert!(seen.last_seen_at >= recorded.last_seen_at);
@@ -947,14 +1160,11 @@ pub mod contract {
         bob: UserId,
     ) {
         let id = DeviceId::generate();
-        devices
-            .attest(alice, id, &label("alice's"), &attestation(1))
-            .await
-            .unwrap();
+        register(devices, alice, id, &attestation(1), HpkeKeyWrite::Clear).await;
         let before = devices.find(id).await.unwrap();
 
         let attested = devices
-            .attest(bob, id, &label("bob's"), &attestation(2))
+            .attest(bob, id, &label("bob's"), None, &attestation(2), &set(2))
             .await;
         let stashed = packages.stash(bob, id, &label("bob's"), &[fresh(1)]).await;
 

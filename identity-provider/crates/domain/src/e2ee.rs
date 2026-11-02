@@ -22,7 +22,9 @@ pub use delivery::{
     NewWelcome, Welcome, WelcomeBlob, check_welcome, may_commit,
 };
 pub use device::{
-    ATTESTATION_LIFETIME, Attestation, Device, DeviceKind, DeviceLabel, DeviceRootKey, Registration,
+    ATTESTATION_LIFETIME, Attestation, AttestationExpiry, Device, DeviceKind, DeviceLabel,
+    DeviceRootKey, HeldHpkeKey, HpkeKeyWrite, HpkePublicKey, Registration, RootKeySignature,
+    SignedHpkeKey, UnverifiedHpkeKey, attestation_period, may_name, may_register,
 };
 pub use error::{
     ArchiveError, ArchiveStoreError, DeliveryError, DeliveryStoreError, KeyDirectoryError,
@@ -33,6 +35,7 @@ pub use key_package::{
     KeyPackageRefusal, NewKeyPackage,
 };
 pub use ports::{
-    CommitLog, DeviceAttester, DeviceNotifier, Devices, HistoryArchive, KeyPackages, MlsFederation,
-    MlsNotifier, OutgoingWelcome, RemoteKeyPackages, Revocation, SignedAttestation, Welcomes,
+    Attest, CommitLog, DeviceAttester, DeviceNotifier, Devices, HistoryArchive, KeyPackages,
+    MlsFederation, MlsNotifier, OutgoingWelcome, RemoteKeyPackages, Revocation, RootKeyVerifier,
+    SignedAttestation, Welcomes,
 };

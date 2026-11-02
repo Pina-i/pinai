@@ -5,10 +5,10 @@ use crate::messaging::GroupSnapshot;
 use crate::{ConversationId, DeviceId, UserId};
 
 use super::{
-    Append, ArchiveCursor, ArchiveEntry, ArchiveSalt, ArchiveStoreError, Attestation, Claim,
-    ClaimedKeyPackage, Commit, DeliveryStoreError, Device, DeviceLabel, DeviceRootKey, Epoch,
-    KeyStoreError, NewArchiveEntry, NewCommit, NewKeyPackage, NewWelcome, RemoteClaimError,
-    Welcome, WelcomeBlob,
+    Append, ArchiveCursor, ArchiveEntry, ArchiveSalt, ArchiveStoreError, Attestation,
+    AttestationExpiry, Claim, ClaimedKeyPackage, Commit, DeliveryStoreError, Device, DeviceLabel,
+    DeviceRootKey, Epoch, HpkeKeyWrite, KeyStoreError, NewArchiveEntry, NewCommit, NewKeyPackage,
+    NewWelcome, RemoteClaimError, RootKeySignature, Welcome, WelcomeBlob,
 };
 
 /// The devices accounts registered, and their attestations.
@@ -17,15 +17,27 @@ pub trait Devices: Send + Sync {
     async fn find(&self, id: DeviceId) -> Result<Option<Device>, KeyStoreError>;
     /// The owner's devices: active ones first, each group most recently seen first.
     async fn list(&self, owner: UserId) -> Result<Vec<Device>, KeyStoreError>;
-    /// Store the device's attestation, recording the device under `label` if it is new.
+    /// Store the device's attestation and do `hpke_key` to its HPKE key, recording the device under
+    /// `label` if it is new; only while the device is still as `read` (`None`: not recorded):
+    /// unrevoked, with the same root key and HPKE key.
     async fn attest(
         &self,
         owner: UserId,
         id: DeviceId,
         label: &DeviceLabel,
+        read: Option<&Device>,
         attestation: &Attestation,
-    ) -> Result<(), KeyStoreError>;
+        hpke_key: &HpkeKeyWrite,
+    ) -> Result<Attest, KeyStoreError>;
+    /// Revoke the device and drop its HPKE key in one write: nothing encrypts to it again.
     async fn revoke(&self, owner: UserId, id: DeviceId) -> Result<Revocation, KeyStoreError>;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Attest {
+    Stored,
+    /// The device changed since it was read: nothing was written.
+    Stale,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,8 +99,13 @@ pub trait DeviceAttester: Send + Sync {
         actor: &ActorUri,
         device: DeviceId,
         key: &DeviceRootKey,
-        expires_at: OffsetDateTime,
+        expires_at: AttestationExpiry,
     ) -> SignedAttestation;
+}
+
+/// Checks what devices sign with their root keys.
+pub trait RootKeyVerifier: Send + Sync {
+    fn verifies(&self, key: &DeviceRootKey, message: &[u8], signature: &RootKeySignature) -> bool;
 }
 
 /// Tells an account's live sessions about its devices: one registered for the first time, or

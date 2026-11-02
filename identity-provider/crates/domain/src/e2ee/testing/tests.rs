@@ -23,6 +23,32 @@ async fn registering_again_replaces_the_attestation_and_keeps_the_label() {
 }
 
 #[tokio::test]
+async fn a_device_holds_the_hpke_key_registered_with_its_attestation_until_replaced() {
+    contract::a_device_holds_the_hpke_key_registered_with_its_attestation_until_replaced(
+        &store(),
+        UserId::generate(),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_registration_decided_on_a_stale_read_writes_nothing() {
+    contract::a_registration_decided_on_a_stale_read_writes_nothing(&store(), UserId::generate())
+        .await;
+}
+
+#[tokio::test]
+async fn a_revoked_device_holds_no_hpke_key() {
+    contract::a_revoked_device_holds_no_hpke_key(&store(), UserId::generate()).await;
+}
+
+#[tokio::test]
+async fn stashing_keeps_the_hpke_key_registered() {
+    let store = store();
+    contract::stashing_keeps_the_hpke_key_registered(&store, &store, UserId::generate()).await;
+}
+
+#[tokio::test]
 async fn devices_are_listed_active_first_then_most_recently_seen() {
     let store = store();
     contract::devices_are_listed_active_first_then_most_recently_seen(

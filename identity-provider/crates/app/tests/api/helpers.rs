@@ -497,6 +497,28 @@ async fn drop_database(name: &str) {
     }
 }
 
+/// Another browser signing in to `who`'s account with the password: a session of its own.
+pub async fn another_browser(app: &TestApp, who: &Account) -> Account {
+    let signed_in = app
+        .form("/login", &[("email", &who.email), ("password", PASSWORD)])
+        .await;
+    let landed = location(&signed_in);
+    assert!(landed.starts_with(&app.redirect_uri), "{landed}");
+    let tokens = app.tokens_for(&query_of(&landed)["code"]).await;
+    Account {
+        token: tokens["access_token"].as_str().unwrap().to_owned(),
+        refresh_token: tokens["refresh_token"].as_str().unwrap().to_owned(),
+        cookie: signed_in.headers()["set-cookie"]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned(),
+        ..who.clone()
+    }
+}
+
 /// A WebSocket opened with `token`: the stream past the handshake, or the refusal's status line.
 pub async fn open_socket(app: &TestApp, token: &str) -> Result<TcpStream, String> {
     let mut socket = TcpStream::connect(app.domain.as_str()).await.unwrap();
