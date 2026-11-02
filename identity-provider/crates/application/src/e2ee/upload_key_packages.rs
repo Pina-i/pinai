@@ -32,7 +32,8 @@ impl UploadKeyPackages {
         }
     }
 
-    /// `label` names the device if this is the first the instance hears of it.
+    /// `label` names the device if this is the first the instance hears of it, or if it was
+    /// recorded before its client said what it is ([`DeviceLabel::replaces`]).
     pub async fn execute(
         &self,
         owner: UserId,
@@ -42,14 +43,16 @@ impl UploadKeyPackages {
         now: OffsetDateTime,
     ) -> Result<Uploaded, KeyDirectoryError> {
         let packages = self.policy.admit_batch(packages, now)?;
-        if let Some(known) = self.devices.find(device).await? {
+        let known = self.devices.find(device).await?;
+        if let Some(known) = &known {
             known.usable_by(owner)?;
         }
+        let relabel = known.is_some_and(|known| label.replaces(&known.label));
         let available = self.key_packages.available(owner, device).await?;
         self.policy.check_stash(available, packages.len())?;
         let uploaded = self
             .key_packages
-            .stash(owner, device, &label, &packages)
+            .stash(owner, device, &label, relabel, &packages)
             .await?;
         Ok(Uploaded {
             uploaded,

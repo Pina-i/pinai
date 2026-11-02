@@ -265,11 +265,11 @@ stateDiagram-v2
 
 A device signing in to an account that has a history key (`GET /api/history/key`) is asked for
 the words instead (`/onboarding/recovery-restore`, § 6.4): typing them restores the archive, and
-the device keeps them, so it archives under the same key from then on. "Start fresh on this
-device" leaves it without a passphrase: it reads its conversations from then on but archives
-nothing, until the words are entered from Settings → Devices → "Restore history". A device's
-passphrase is stored locally, encrypted under its AES-GCM key, for revealability in Settings →
-Devices.
+the device keeps them, so it archives under the same key from then on, and approves itself
+(§ 3.9). "Start fresh on this device" leaves it without a passphrase: it reads its conversations
+from then on but archives nothing, until the words are entered from Settings → Devices →
+"Restore history". A device's passphrase is stored locally, encrypted under its AES-GCM key, for
+revealability in Settings → Devices.
 
 A device says which generation it holds (`PUT /api/keys/devices/:device_id/history-key`), only for
 the current one and from its own session, once it has named its device
@@ -328,6 +328,130 @@ paginate the archive and decrypt every entry; a device without it sees only byte
 - Settings → Clear (`DELETE /api/history/messages`) erases the entries only: the key and its
   generation stay, and every device goes on saving new messages under it.
 
+### 3.9 Approvals
+
+The user's own devices decide which devices belong to the account. A device counts once another
+device of the account approves it, or once the passphrase is typed on it. The instance stores and
+lists the approvals and refuses malformed ones, but never decides whom to trust: each device checks
+them itself.
+
+**An approval** is an Ed25519 signature over the `PINAI-DEVICE-APPROVAL-v1` canonical bytes of
+§ 7.2 — the account's actor URI, the approved device's id and its DRK —, made either:
+
+- **by another device** of the account, with its DRK (`by: "device"`); or
+- **by the passphrase**, with the current generation's approval key (§ 3.7), on the device the
+  words are typed on (`by: "passphrase"`): the device approves itself.
+
+It binds the approved device's DRK: a device whose DRK changes is no longer approved.
+
+**What the instance checks** (`POST /api/keys/devices/:device_id/approvals`, § 5, "Approvals"),
+before it stores the approval in `device_approvals`, one per approved device and approver:
+
+- the calling session named its device (§ 5, "Key directory rules"), an unrevoked device of the
+  account: the approver, or with the passphrase the device approved;
+- a device approves another unrevoked device of the account that registered a DRK, never itself;
+  the passphrase approves the session's own device, under the current generation only, which the
+  request names;
+- the signature verifies — Ed25519, strict, as every root-key signature here — under the
+  approver's DRK or the generation's approval public key, over the bytes rebuilt from the approved
+  device's DRK as held.
+
+The write is checked again: an approval whose devices or generation changed meanwhile is decided
+anew, so none outlives what it was checked on. A new approval pushes `device_approved { device_id }`
+to the account's live sessions, which read the device list again.
+
+**What drops them**, in the very write that leaves them unverifiable:
+
+| Change | Approvals dropped |
+|---|---|
+| A device revoked (`POST /api/keys/devices/:device_id/revoke`) | Those it signed |
+| A device's DRK rotated (`POST /api/keys/devices`, another DRK) | Its own, and those it signed |
+| A new generation set (`PUT /api/history/key`) | Those by the passphrase under older generations |
+
+**Who is approved** each device works out itself, from `GET /api/keys/devices` — each device's
+`approvals`, beside its DRK — and the generation's approval public key from `GET /api/history/key`:
+
+```mermaid
+flowchart LR
+    AK["approval key of the current generation<br/>(approval_public_key)"]
+    A["device A's drk_public_key"]
+    B["device B's drk_public_key"]
+    AK -->|"approval by passphrase over PINAI-DEVICE-APPROVAL-v1"| A
+    A -->|"approval by device over PINAI-DEVICE-APPROVAL-v1"| B
+```
+
+A device is approved when it carries an approval by the current approval key, or by an unrevoked
+device that carries one: two links at most. A device holding the current passphrase approves
+itself with the approval key, so its chain is one link from then on — and again whenever its own
+DRK changes, which drops its approvals.
+
+The stored approval public key is the instance's word until a device can check it, so two rules
+keep the chain out of the instance's hands:
+
+- **A device that doesn't hold the current passphrase** can't confirm the approval public key: until
+  it holds the passphrase, it trusts only the device it approved itself in a code handshake
+  (§ 3.10), whose keys it took from that device, never from the list.
+- **A device that holds it** derives the approval key itself (§ 3.7) and compares. When the stored
+  approval public key differs, the instance changed it: the device trusts no approval made by that
+  key, trusts no device it hasn't trusted already, and warns the user.
+
+### 3.10 The approval handshake
+
+A new device is approved with a short code, over a request the instance relays between it and one
+other device of the account. The instance carries the two devices' messages without reading them,
+and never sees the code.
+
+**What the two devices do.** The new device opens a request and shows a 6-digit code; the user
+types it on a device of theirs that is approved. The two run SPAKE2 keyed by the code over the
+request's messages; under its session key, each device then sends the other its device id, DRK and
+HPKE key. An approval signs a device id and a DRK (§ 7.2), so each signs the other's as they came
+out of the exchange, never as the device list shows them: the approved device's approval makes the
+new one approved, and the new device's approval of the other is the one it trusts before it holds
+the passphrase (§ 3.9). Should the instance list another key for either device, the approval
+doesn't verify over it, and is refused. A wrong code fails the exchange, and the device that finds
+it wrong ends the request: without the code, the instance gets one guess per request — a
+one-in-a-million chance. The messages' byte format is the clients': the client step that speaks
+it adds it to this section; the instance never parses it.
+
+**The relay** (§ 5, "Approvals"):
+
+```mermaid
+stateDiagram-v2
+    [*] --> Open: the device asking opens it
+    Open --> Bound: the first message from another device
+    Open --> Ended: closed, replaced by its device's next request, its device revoked, or 10 minutes on
+    Bound --> Ended: closed by either side, replaced, either side revoked, or 10 minutes on
+    Ended --> [*]: deleted an hour after it opened
+```
+
+Pushes go to the sessions of devices only: a session that named none can take no part.
+
+- **Opening.** A session that named its device, which registered a DRK, opens a request for that
+  device: open 10 minutes. A device has one open request — a new one closes the one before —, and an
+  account opens 10 an hour at most (`429`), counted under the account's lock. The account's other
+  devices get `approval_requested { request_id, device_id, display_name }` — the name the
+  `User-Agent` of its first registration, or of a KeyPackage upload after one that said nothing,
+  gave the device: "Chrome on Android" —; a device coming online lists the open requests instead.
+- **Binding.** Until another device posts, any device of the account may read or close the
+  request. The first message from a device other than the one asking binds the request to it — a
+  device with a DRK only (`409 no_root_key`), as answering ends in approving —, and the devices left
+  out get `approval_closed { request_id }`: their prompt goes. From then on only the two of them
+  post, read or close it, and any other device is refused (`409 approval_request_taken`), ended or
+  not.
+- **Messages** are opaque, 1 to 4096 bytes each, 12 a request at most
+  (`409 approval_request_full`), numbered `seq` 1, 2, … in the order they arrive. A device reads
+  those after a `seq` that are not its own. Each post pushes `approval_message { request_id, seq }`
+  to the other side's sessions — every message the asking device posts before one answers, to
+  every other device's.
+- **Ending.** Either side closes the request (`DELETE`); it ends by itself 10 minutes after it
+  opened, and when a device taking part in it is revoked. An ended request takes no message and no
+  close (`410 approval_request_ended` rather than `404`, so a device tells a request that ended from
+  one that never was), but its two sides still read it — the last message may come with the close.
+  A close, a request replaced by its device's next one, or a revoke, pushes
+  `approval_closed { request_id }` to both sides' sessions — every device's while nobody answers;
+  an expiry pushes nothing, as each side holds `expires_at`. Requests are deleted an hour after
+  they opened, when they no longer count against the limit, and are then unknown (`404`).
+
 ---
 
 ## 4. Schema
@@ -358,6 +482,20 @@ history_keys             — the account's history key, one row per account, non
                             (> 0), salt BYTEA (16), check_value BYTEA (32),
                             approval_public_key BYTEA (32), set_at,
                             set_by_device (the device whose session set it)
+device_approvals         — one per (device_id, approver): device_id, drk_public_key
+                            BYTEA (32, the root key it binds), approver_device_id
+                            (another device's DRK signed) or generation (that
+                            generation's approval key signed) — exactly one —,
+                            signature BYTEA (64), created_at. Dropped with the
+                            approver's revocation, a DRK rotation (the device's
+                            and those it signed), and older generations'
+                            passphrase approvals when a new one is set
+approval_requests        — id, user_id, device_id (asking), approver_device_id
+                            (the first other device to post, NULL until then),
+                            created_at, expires_at (+ 10 min), closed_at; one not
+                            closed per device; deleted an hour after created_at
+approval_messages        — PRIMARY KEY (request_id, seq); device_id (the poster),
+                            body BYTEA (1–4096, opaque), created_at
 history_messages         — PRIMARY KEY (user_id, id);
                             conversation_id, ciphertext BYTEA, nonce BYTEA,
                             client_message_id, created_at.
@@ -382,10 +520,10 @@ All Bearer-auth except where noted. Cross-IdP paths use HTTP Signatures — see
 
 | Endpoint | Description |
 |---|---|
-| `POST /api/keys/devices` | Register/renew/rotate the caller's DRK attestation: `{ device_id, drk_public_key, hpke_public_key?, hpke_key_signature? }`, keys and signature in standard base64. Idempotent on `(device_id, drk_public_key)`. The device's HPKE key comes with the DRK's signature over its canonical bytes, both or neither (§ 3.3). A session that declared its device (`PUT /api/sessions/current/device`) registers that device only. First-time mint emits a `DeviceJoined` WS event to the user's other live sessions. Returns the signature, kid, issued_at, expires_at, and the canonical bytes the IdP signed so the client can re-verify locally |
-| `GET /api/keys/devices` | List the caller's devices with their attestation expiry (the client uses this to schedule silent renewals), and whether each is signed in: `signed_in`, `last_active_at`. With each device, what another device needs to verify its keys itself (§ 3.3): `drk_public_key`, `attestation_signature`, `attestation_kid`, `attestation_expires_at` — the text the attestation signed —, `hpke_public_key`, `hpke_key_signature`; `null` where the device has registered no DRK, or no HPKE key. And `history_generation`, the history key's generation the device says it holds (§ 3.6), `null` until it says: the client compares it with the current generation |
+| `POST /api/keys/devices` | Register/renew/rotate the caller's DRK attestation: `{ device_id, drk_public_key, hpke_public_key?, hpke_key_signature? }`, keys and signature in standard base64. Idempotent on `(device_id, drk_public_key)`. The device's HPKE key comes with the DRK's signature over its canonical bytes, both or neither (§ 3.3). A session that declared its device (`PUT /api/sessions/current/device`) registers that device only. A device seen for the first time is named from the request's `User-Agent` ("Chrome on Linux"); one recorded unnamed takes the name of its first KeyPackage upload that says. First-time mint emits a `DeviceJoined` WS event to the user's other live sessions; a rotation drops, in the same write, the device's approvals and those it signed (§ 3.9). Returns the signature, kid, issued_at, expires_at, and the canonical bytes the IdP signed so the client can re-verify locally |
+| `GET /api/keys/devices` | List the caller's devices with their attestation expiry (the client uses this to schedule silent renewals), and whether each is signed in: `signed_in`, `last_active_at`. With each device, what another device needs to verify its keys itself (§ 3.3): `drk_public_key`, `attestation_signature`, `attestation_kid`, `attestation_expires_at` — the text the attestation signed —, `hpke_public_key`, `hpke_key_signature`; `null` where the device has registered no DRK, or no HPKE key. And `history_generation`, the history key's generation the device says it holds (§ 3.6), `null` until it says: the client compares it with the current generation. And `approvals`, oldest first, those binding the device's `drk_public_key` (§ 3.9): `{ by: "device", device_id, signature, created_at }` — `device_id` the approver — or `{ by: "passphrase", generation, signature, created_at }`, the signature in standard base64 |
 | `PUT /api/keys/devices/:device_id/history-key` | `{ generation }`: the device says it holds that generation of the account's history key (§ 3.6). Only from the device's own session: one that has named this very device (`403 device_required` when it named none, `403 device_mismatch` when another; below). The current generation only (`409 stale_history_key`, none set yet included, checked again as it is written); an unrevoked device of the caller's only (`403` revoked, `404` another account's or unknown). `204` |
-| `POST /api/keys/devices/:device_id/revoke` | Signs the device out — its sessions end (`identity-provider/specs/auth.md § 1`, "Sessions and devices") — then sets the directory-level revocation flag and clears the device's HPKE key; the MLS Remove commits follow. Takes a password typed in the last 10 minutes (`identity-provider/specs/auth.md § 1`, "Sensitive actions"). Idempotent; `404` for a device that is not the caller's |
+| `POST /api/keys/devices/:device_id/revoke` | Signs the device out — its sessions end (`identity-provider/specs/auth.md § 1`, "Sessions and devices") — then sets the directory-level revocation flag, clears the device's HPKE key, drops the approvals it signed (§ 3.9) and closes the approval requests it asks or answers (§ 3.10, `approval_closed` to the other side) in one write; the MLS Remove commits follow. Takes a password typed in the last 10 minutes (`identity-provider/specs/auth.md § 1`, "Sensitive actions"). Idempotent; `404` for a device that is not the caller's |
 | `POST /api/keys/packages` | Upload a batch of KeyPackages for one of the caller's devices — refused whole (`400`) when a package is empty or not base64, or would take the device past the cap. An `expires_at` already past or beyond the lifetime (`E2EE_KEYPACKAGE_LIFETIME_SECS`) is the device's clock being off, not a bad package: the IdP stores it as now + the lifetime, by its own clock |
 | `POST /api/keys/packages/claim` | Atomically reserve one KeyPackage for `actor_uri` — of `device_id`, or of any device with some left. Bearer or HTTP-Sig (peer IdPs); for remote `actor_uri` the local IdP proxies to the target IdP via HTTP-Sig |
 | `POST /api/keys/packages/claim/devices` | One KeyPackage of each of `actor_uri`'s unrevoked devices that has any, as `{ claims: [...] }` — a contact's first add brings all their devices in (§ 6.5). Asked, proxied, limited and refused as a single claim is; none at all → 409 |
@@ -401,8 +539,9 @@ All Bearer-auth except where noted. Cross-IdP paths use HTTP Signatures — see
   id from it — attested or not, new or not —, or saying another device holds the history key, is
   refused with `403 device_mismatch` "This session signed in another device", and changes
   nothing: a stolen token can't take a device over. A session that names no device yet registers
-  any device of the account, but neither sets the history key nor says a device holds it:
-  `403 device_required` "Name this session's device first".
+  any device of the account, but neither sets the history key nor says a device holds it, approves
+  a device nor takes part in an approval request: `403 device_required` "Name this session's
+  device first".
 - **A device's HPKE key is its DRK's.** A registration bringing one is refused (`400`) when only
   one of `hpke_public_key` and `hpke_key_signature` is sent, or when the DRK sent with it doesn't
   verify the signature over the key's canonical bytes for this device of this account; nothing is
@@ -431,6 +570,37 @@ All Bearer-auth except where noted. Cross-IdP paths use HTTP Signatures — see
 | `409` | The account has no KeyPackage left on any unrevoked device |
 | `429` | Too many claims from this requester, or the account's instance is rate-limiting this one |
 | `502` | The account's instance did not answer |
+
+### Approvals
+
+The approvals of § 3.9 and the relay of § 3.10. Every route takes a session that named its device,
+an unrevoked device of the account (`403 device_required` otherwise; `403` revoked).
+
+| Endpoint | Description |
+|---|---|
+| `POST /api/keys/devices/:device_id/approvals` | `{ by: "device", signature }`: the session's device approves `device_id`, another unrevoked device of the account with a DRK; the signature its DRK's. `{ by: "passphrase", generation, signature }`: the session's own device approved by the passphrase, `generation` the current one, the signature its approval key's. The signature — 64 bytes, standard base64 — is over the `PINAI-DEVICE-APPROVAL-v1` bytes of § 7.2 for `device_id`'s DRK as held. `204`, and the same approval again `204`; only a new one pushes `device_approved` to the account's sessions |
+| `POST /api/keys/devices/approval-requests` | No body. The session's device, which registered a DRK, asks to be approved: `201 { id, expires_at }`, open 10 minutes; its open request closed. 10 an account an hour. Pushes `approval_requested { request_id, device_id, display_name }` to the account's other devices' sessions |
+| `GET /api/keys/devices/approval-requests` | The account's open requests, oldest first: `{ requests: [{ id, device_id, display_name, approver_device_id, created_at, expires_at }] }` — `device_id` the device asking, `approver_device_id` the one answering, `null` until one posts |
+| `POST /api/keys/devices/approval-requests/:id/messages` | `{ body }`: 1 to 4096 bytes, standard base64, opaque. `201 { seq }`. The first from another device than the one asking — one with a DRK — binds the request to it (§ 3.10), and pushes `approval_closed` to the devices left out; 12 a request. Pushes `approval_message { request_id, seq }` to the other side's sessions |
+| `GET /api/keys/devices/approval-requests/:id/messages?after=<seq>` | The messages after `after` (0 when left out), but the caller's own, in order: `{ messages: [{ seq, device_id, body, created_at }] }`, `device_id` the poster. The two sides read it until it is deleted, ended or not; any other device while it is open and nobody answers |
+| `DELETE /api/keys/devices/approval-requests/:id` | Either side ends the request — while nobody answers, any device: `204`. Pushes `approval_closed { request_id }` to both sides' sessions — every device's while nobody answers |
+
+| Refusal | Status | `error` |
+|---|---|---|
+| A body not as described: `by` neither `device` nor `passphrase`, `generation` missing with `passphrase` or sent with `device`, a signature or message body malformed, `after` negative | `400` | `invalid_request` |
+| A signature that doesn't verify | `400` | `invalid_request`, "signature does not verify over the device's root key" |
+| A device approving itself by device | `400` | `invalid_request` |
+| A session that named no device | `403` | `device_required` |
+| The passphrase approving another device than the session's | `403` | `device_mismatch` |
+| A revoked device, approving or approved | `403` | `access_denied` |
+| Approving a device not the account's, or unknown | `404` | `not_found` |
+| A request not the account's, unknown, or deleted | `404` | `not_found` |
+| A device with no DRK, approving, approved, asking or answering | `409` | `no_root_key` |
+| The passphrase under another generation than the current one, or none set | `409` | `stale_history_key` |
+| A third device posting to, reading or closing a request another answers — before any other refusal, ended or not | `409` | `approval_request_taken` |
+| A request holding its 12 messages | `409` | `approval_request_full` |
+| A request closed or past its 10 minutes — posted to or closed, or read by a device that isn't one of its sides (a third device on an answered one gets the `409` above) | `410` | `approval_request_ended` |
+| An 11th request within the hour | `429` | `too_many_requests` |
 
 ### MLS Delivery Service
 
@@ -482,7 +652,7 @@ and they hold for what peers deliver as much as for local clients.
 | Endpoint | Description |
 |---|---|
 | `GET /api/history/key` | The account's history key (§ 3.6–3.7): `{ generation, salt, check_value, approval_public_key, set_by_device }`, bytes in standard base64; `set_by_device` is the device whose session set the generation (`null` only once that device's row is gone). `404` before its first device sets one |
-| `PUT /api/history/key` | `{ generation, salt, check_value, approval_public_key }` — 16, 32 and 32 bytes, standard base64 (`400` otherwise). From a session that has named its device (`403 device_required` otherwise), which the key records as `set_by_device`. Set only for the generation right after the current one, 1 when there is none: a compare-and-set, so two devices setting the same generation make one, and the other is answered `409 history_key_conflict` with `current_generation` (`0` for none). The very key held already — the same generation, salt, check value and approval key — is a retry: `204`, nothing written. Generation 1 takes no recent password; any later one does, as it erases the archive (`identity-provider/specs/auth.md § 1`, "Sensitive actions"). In one transaction: the key replaced, the account's archive erased. `204` |
+| `PUT /api/history/key` | `{ generation, salt, check_value, approval_public_key }` — 16, 32 and 32 bytes, standard base64 (`400` otherwise). From a session that has named its device (`403 device_required` otherwise), which the key records as `set_by_device`. Set only for the generation right after the current one, 1 when there is none: a compare-and-set, so two devices setting the same generation make one, and the other is answered `409 history_key_conflict` with `current_generation` (`0` for none). The very key held already — the same generation, salt, check value and approval key — is a retry: `204`, nothing written. Generation 1 takes no recent password; any later one does, as it erases the archive (`identity-provider/specs/auth.md § 1`, "Sensitive actions"). In one transaction: the key replaced, the account's archive erased, the passphrase approvals of older generations dropped (§ 3.9). `204` |
 | `POST /api/history/messages` | `{ generation, entries }`: a batch of 1 to 50 entries (`400` otherwise; a nonce is 12 bytes), sealed under `generation` — the current one only (`409 stale_history_key`, also while none is set; § 3.8). Every `conversation_id` must be one the caller is or was a member of — leaving a group keeps the history already read — or the batch is refused whole (`403`). Idempotent upsert on `(user_id, id)` — first decryptor of a message wins; subsequent uploads from the user's other devices no-op. Answers `{ inserted }`, how many were new |
 | `GET /api/history/messages?after_id=&after_created_at=&limit=` | Keyset pagination over `(created_at DESC, id DESC)`, limit clamped 1..=500, default 100. `next_cursor` names the page's last entry, and is `null` only on an empty page; `after_id` and `after_created_at` (RFC 3339) go together (`400`) |
 | `DELETE /api/history/messages` | Erase the user's archive. Settings → Devices → Clear. The history key and its generation stay: every device goes on saving under it. Takes a password typed in the last 10 minutes (`identity-provider/specs/auth.md § 1`, "Sensitive actions") |
@@ -506,6 +676,10 @@ and they hold for what peers deliver as much as for local clients.
 | `group_created` | The recipient's IdP materialised a federated group from an inbound Note's roster snapshot |
 | `device_joined` | A new device of *this user* completed first-time DRK registration. Other live sessions of the same user run the multi-device fanout |
 | `key_packages_low` | A claim left one of *this user's* devices at the refill threshold, or found none left. Each live session tops its own device up (§ 3.5) |
+| `device_approved` | `{ device_id }`: a device of *this user* was approved (§ 3.9). Every live session reads `GET /api/keys/devices` again |
+| `approval_requested` | `{ request_id, device_id, display_name }`: another device of *this user* asks to be approved (§ 3.10). To the sessions of the account's devices but the asking one |
+| `approval_message` | `{ request_id, seq }`: the other side of a request posted; the device reads `…/messages?after=`. To the other side's sessions — while nobody answers, every device's but the asking one's |
+| `approval_closed` | `{ request_id }`: a request ended — closed by a side, replaced by its device's next one, or a side revoked —, to both sides' sessions (every device's while nobody answers); or another device answered it, to the devices left out. Sessions that named no device hear none of the `approval_*` pushes |
 | `dm_delivery_failed`, `friend_request`, `friend_accepted`, `friend_removed`, `presence_update`, `typing`, `heartbeat_ack` | (Out of scope for this spec — see other specs) |
 
 ---
@@ -543,17 +717,22 @@ sequenceDiagram
     Web->>Web: random 16-byte salt → HAK → check value, approval public key
     Web->>IdP: PUT /api/history/key {generation: 1, salt, check_value, approval_public_key}
     IdP-->>Web: 204
+    Web->>Web: sign PINAI-DEVICE-APPROVAL-v1 for itself with the approval key
+    Web->>IdP: POST /api/keys/devices/:device_id/approvals {by: passphrase, generation: 1, signature}
+    IdP-->>Web: 204
     Web->>IdP: PUT /api/keys/devices/:device_id/history-key {generation: 1}
     Web->>U: show 24 words on RecoverySetupPage
     U->>Web: Continue / Skip → /home
 ```
 
 The session names its device right after registering it: setting
-generation 1 and saying the device holds it both take a session that has
-named its device (§ 3.6). The user is now able to send and receive E2EE
-messages. The history key's generation 1 and the locally-stored passphrase
-mean every future decrypted message will be archived to
-`/api/history/messages` under HAK.
+generation 1, approving the device with its approval key and saying the
+device holds it all take a session that has named its device (§ 3.6,
+§ 3.9). The first device approves itself, so it is the account's first
+approved device. The user is now able to send and receive E2EE messages.
+The history key's generation 1 and the locally-stored passphrase mean
+every future decrypted message will be archived to `/api/history/messages`
+under HAK.
 
 ### 6.2 Same user signs in on a second device
 
@@ -573,7 +752,7 @@ sequenceDiagram
     Mobile->>IdP: POST /api/keys/packages (initial batch)
     Mobile->>IdP: GET /api/history/key
     IdP-->>Mobile: the history key (the account has one)
-    Note over Mobile: asks for the account's 24 words (§ 6.4)<br/>or starts fresh, without a passphrase
+    Note over Mobile: asks to be approved with a code (§ 6.10),<br/>or for the account's 24 words (§ 6.4),<br/>or starts fresh, without a passphrase
     IdP-->>Laptop: WS device_joined {actor, new_device_id, drk_pub}
     Laptop->>Laptop: useDeviceFanout.onDeviceJoined
     loop for each conversation laptop is in
@@ -682,7 +861,9 @@ deleted once used, so what has been read stays out of reach.
 ### 6.4 Restoring history on a new device
 
 The user reaches `/onboarding/recovery-restore` either by direct URL or
-via Settings → Devices → "Restore history."
+via Settings → Devices → "Restore history." Typing the 24 words is one
+flow whatever brings the user there: the words checked, the device
+approved by them, its generation reported, the archive restored.
 
 ```mermaid
 sequenceDiagram
@@ -695,11 +876,16 @@ sequenceDiagram
     U->>Web: type 24 words
     Web->>IdP: GET /api/history/key
     IdP-->>Web: {generation, salt, check_value, approval_public_key, set_by_device}
-    Web->>Web: Argon2id(words, salt) → candidate HAK → its check value
+    Web->>Web: Argon2id(words, salt) → candidate HAK → its check value and approval key
     alt the check value differs
         Web->>U: "Wrong passphrase"
-    else it matches
+    else the stored approval public key differs from the one derived
+        Web->>U: a warning: the key was changed; nothing new is trusted
+    else both match
         Web->>IDB: save the words and their generation (sealed)
+        Web->>Web: sign PINAI-DEVICE-APPROVAL-v1 for itself with the approval key
+        Web->>IdP: POST /api/keys/devices/:device_id/approvals {by: passphrase, generation, signature}
+        IdP-->>Web: 204, then WS device_approved to the account's sessions
         Web->>IdP: PUT /api/keys/devices/:device_id/history-key {generation}
         IdP-->>Web: 204
         loop until next_cursor is null
@@ -720,12 +906,20 @@ sequenceDiagram
 ```
 
 The words are checked before anything is read: the HAK derived from them and the generation's
-salt must give the generation's check value (§ 3.7). A mismatch is "Wrong passphrase", whether
-the archive holds entries or not, and nothing is kept. A match keeps the words with their
-generation, says the device holds it, then pages the archive under the HAK. Every entry is the
+salt must give the generation's check value, and the approval key derived from it the stored
+approval public key (§ 3.7). A wrong check value is "Wrong passphrase", whether the archive holds
+entries or not, and nothing is kept. A right check value with another approval public key means the
+instance changed the key: the device trusts no approval made by it and warns (§ 3.9).
+
+When both match, the device keeps the words with their generation and approves itself: the request
+comes from the session that named it, and names the generation it derived the key under — a new
+generation set meanwhile refuses it (`409 stale_history_key`), and the device reads the key again.
+The other devices see it approved on `device_approved`, or on their next look at the device list.
+It then says it holds the generation and pages the archive under the HAK. Every entry is the
 current generation's (§ 3.8), so one failing its auth tag is damaged and skipped — never a sign of
 a wrong passphrase —, and an empty archive restores nothing: "No archive". An account with no
-history key (`404`) has nothing to restore.
+history key (`404`) has nothing to restore. Setting a new generation drops the approvals made with
+the old words, so after a start over a device approves itself again with the new ones.
 
 ### 6.5 Sending a message to a new contact
 
@@ -779,13 +973,18 @@ sequenceDiagram
 
     U->>Web: Settings → Devices → Revoke
     Web->>IdP: POST /api/keys/devices/:device_id/revoke
-    IdP->>IdP: end the device's sessions, then mark user_devices.revoked_at = now()
+    IdP->>IdP: end the device's sessions, then mark user_devices.revoked_at = now(), drop the approvals it signed, close its approval requests
     Note over IdP: its tokens and sockets stop at once;<br/>future /api/keys/packages/claim<br/>requests for this device fail
     loop for each conversation the revoked device is in
         Web->>Web: build MLS Remove commit
         Web->>IdP: POST /api/mls/groups/:id/commits
     end
 ```
+
+The flag, the HPKE key cleared, the approvals the device signed dropped and its approval requests
+closed are one write: a device approved through it alone needs another approval (it normally holds
+the passphrase by then and approves itself), and the other side of a request it took part in gets
+`approval_closed`.
 
 The IdP goes first. It may refuse — a password typed more than 10 minutes ago
 (`identity-provider/specs/auth.md § 1`, "Sensitive actions") — and then nothing
@@ -891,6 +1090,46 @@ still pushes: once the owner's device has refilled, adding them again
 succeeds. The status lists only devices with a package left, so a
 device it doesn't list is refilled the same way, to the cap.
 
+### 6.10 Approving a new device with a code
+
+The phone has just signed in, registered its DRK and HPKE key and named its device; the laptop is
+an approved device of the same account.
+
+```mermaid
+sequenceDiagram
+    participant P as Phone (new)
+    participant I as IdP
+    participant L as Laptop (approved)
+    P->>I: POST /api/keys/devices/approval-requests
+    I-->>P: 201 {id, expires_at}
+    I-->>L: WS approval_requested {request_id, device_id, display_name: "Chrome on Android"}
+    Note over P: shows a 6-digit code
+    Note over L: "New sign-in on Chrome on Android — type the code it shows"
+    P->>I: POST …/approval-requests/:id/messages {SPAKE2 message}
+    I-->>L: WS approval_message {request_id, seq: 1}
+    L->>I: GET …/messages?after=0
+    L->>I: POST …/messages {SPAKE2 message} — binds the request to the laptop
+    I-->>P: WS approval_message {request_id, seq: 2}
+    Note over I: the account's other devices get approval_closed: their prompt goes
+    P->>I: GET …/messages?after=1
+    Note over P,L: under the session key from the code, each sends its device id, DRK and HPKE key, relayed the same way
+    L->>I: POST /api/keys/devices/:phone/approvals {by: device, signature}
+    I-->>P: WS device_approved {device_id: phone}
+    I-->>L: WS device_approved {device_id: phone}
+    P->>I: POST /api/keys/devices/:laptop/approvals {by: device, signature}
+    P->>I: DELETE /api/keys/devices/approval-requests/:id
+    I-->>L: WS approval_closed {request_id}
+```
+
+Each side signs the other's DRK as it came out of the exchange: should the instance list another
+key for that device, the approval doesn't verify over it, and is refused. A wrong code fails the
+exchange; the device that finds it wrong closes the request, and a new attempt is a new request,
+with a new code. A device that comes online meanwhile lists the open requests
+(`GET /api/keys/devices/approval-requests`); once the laptop answered, any other device of the
+account is refused (`409 approval_request_taken`). The phone trusts the laptop from the exchange
+alone until it holds the passphrase (§ 3.9); once it does, it approves itself with the approval
+key and checks every chain from the device list.
+
 ---
 
 ## 7. Wire formats
@@ -901,9 +1140,10 @@ Inside every leaf's `BasicCredential` (Section 3.4 JSON).
 
 ### 7.2 Canonical signed bytes
 
-The IdP's attestation of a DRK (§ 3.2) and a DRK's signature over its
-device's HPKE key (§ 3.3) are both over UTF-8 lines, each ended by `\n`
-(a literal newline, 0x0A) but the last. Every field is written exactly so:
+The IdP's attestation of a DRK (§ 3.2), a DRK's signature over its
+device's HPKE key (§ 3.3) and an approval of a device (§ 3.9) are all over
+UTF-8 lines, each ended by `\n` (a literal newline, 0x0A) but the last.
+Every field is written exactly so:
 
 - `actor_uri`: the account's actor URI, exactly as `/userinfo` answers
   `actor_uri`;
@@ -935,6 +1175,16 @@ PINAI-DEVICE-HPKE-v1\n
 <actor_uri>\n
 <device_id>\n
 <base64(hpke_public_key)>
+```
+
+What an approval signs — by another device's DRK, or by the generation's
+approval key —, `device_id` and `drk_public_key` the approved device's:
+
+```
+PINAI-DEVICE-APPROVAL-v1\n
+<actor_uri>\n
+<device_id>\n
+<base64(drk_public_key)>
 ```
 
 ### 7.3 History archive entry (POST `/api/history/messages`)
@@ -1001,6 +1251,8 @@ flowchart LR
         MW["mls_welcomes"]
         HM["history_messages:<br/>opaque archive"]
         HK["history_keys:<br/>generation, salt, check value,<br/>approval public key"]
+        DA["device_approvals:<br/>signatures over root keys"]
+        AR["approval_requests:<br/>the handshake's opaque messages"]
     end
     att -.->|attests| KP
     pass -.->|derives| hist
@@ -1021,8 +1273,10 @@ Two persistence boundaries:
 - **Server Postgres** holds opaque material only — MLS ciphertexts,
   base64'd KeyPackages, encrypted history archive entries, the history
   keys' salts, check values and approval public keys (none of them
-  secret), public attestation columns. Read access to the database
-  yields no plaintext message content.
+  secret), public attestation columns, the approvals' signatures and the
+  approval handshake's messages (public by design: SPAKE2 messages reveal
+  nothing of the code). Read access to the database yields no plaintext
+  message content.
 
 The same per-device AES-GCM key encrypts the Zustand `persist`
 middleware's message-plaintext cache — that way the cache (used for

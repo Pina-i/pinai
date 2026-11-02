@@ -1,6 +1,8 @@
 //! Devices, their attestations, and the KeyPackages peers claim to add them to MLS groups; the
-//! Delivery Service's commits and Welcomes; each account's history archive and its key.
+//! approvals the account's devices give each other, and the requests relaying their handshake;
+//! the Delivery Service's commits and Welcomes; each account's history archive and its key.
 
+mod approval;
 mod archive;
 mod claim_key_package;
 mod delivery;
@@ -14,6 +16,10 @@ mod sweep_key_packages;
 mod tests;
 mod upload_key_packages;
 
+pub use approval::{
+    ApproveDevice, CloseApprovalRequest, ListApprovalRequests, ListedRequest, OpenApprovalRequest,
+    PostApprovalMessage, ReadApprovalMessages, SweepApprovalRequests,
+};
 pub use archive::{ArchiveMessages, ArchivePage, ClearArchive, ReadArchive};
 pub use claim_key_package::ClaimKeyPackage;
 pub use delivery::{

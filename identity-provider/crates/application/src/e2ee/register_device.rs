@@ -4,7 +4,7 @@ use domain::DeviceId;
 use domain::auth::Sessions;
 use domain::e2ee::{
     Attest, Attestation, DeviceAttester, DeviceLabel, DeviceNotifier, DeviceRootKey, Devices,
-    KeyDirectoryError, Registration, RootKeyVerifier, SignedAttestation, UnverifiedHpkeKey,
+    Ed25519Verifier, KeyDirectoryError, Registration, SignedAttestation, UnverifiedHpkeKey,
     attestation_period, may_register,
 };
 use domain::identity::{Accounts, Bearer};
@@ -28,7 +28,7 @@ pub struct RegisterDevice {
     accounts: Arc<dyn Accounts>,
     devices: Arc<dyn Devices>,
     attester: Arc<dyn DeviceAttester>,
-    verifier: Arc<dyn RootKeyVerifier>,
+    verifier: Arc<dyn Ed25519Verifier>,
     sessions: Arc<dyn Sessions>,
     notifier: Arc<dyn DeviceNotifier>,
 }
@@ -38,7 +38,7 @@ impl RegisterDevice {
         accounts: Arc<dyn Accounts>,
         devices: Arc<dyn Devices>,
         attester: Arc<dyn DeviceAttester>,
-        verifier: Arc<dyn RootKeyVerifier>,
+        verifier: Arc<dyn Ed25519Verifier>,
         sessions: Arc<dyn Sessions>,
         notifier: Arc<dyn DeviceNotifier>,
     ) -> Self {
@@ -58,6 +58,7 @@ impl RegisterDevice {
         device: DeviceId,
         key: DeviceRootKey,
         brought: Option<UnverifiedHpkeKey>,
+        label: &DeviceLabel,
         now: OffsetDateTime,
     ) -> Result<Registered, KeyDirectoryError> {
         let owner = bearer.user;
@@ -86,13 +87,12 @@ impl RegisterDevice {
             let existing = self.devices.find(device).await?;
             let registration = Registration::of(existing.as_ref(), owner, &attestation.root_key)?;
             let hpke_key = registration.hpke_key(brought.clone());
-            // A device registering before it publishes any KeyPackage is not known yet.
             let written = self
                 .devices
                 .attest(
                     owner,
                     device,
-                    &DeviceLabel::unknown(),
+                    label,
                     existing.as_ref(),
                     &attestation,
                     &hpke_key,

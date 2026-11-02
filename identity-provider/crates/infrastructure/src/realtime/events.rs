@@ -38,6 +38,15 @@ pub enum WsEvent {
     /// A claim left one of the recipient's devices at the refill threshold, or found none left.
     /// Each live session tops its own device up.
     KeyPackagesLow(KeyPackagesLowPayload),
+    /// A device of the recipient's account was approved; every session reads the device list
+    /// again.
+    DeviceApproved(DeviceApprovedPayload),
+    /// Another device of the recipient's account asks to be approved with a code.
+    ApprovalRequested(ApprovalRequestedPayload),
+    /// The other side of an approval request posted a message; read it over REST.
+    ApprovalMessage(ApprovalMessagePayload),
+    /// An approval request the recipient's device takes part in ended.
+    ApprovalClosed(ApprovalClosedPayload),
     /// A group conversation was created with the recipient as a member.
     GroupCreated(GroupCreatedPayload),
     /// A member was added to a group the recipient belongs to.
@@ -192,6 +201,35 @@ pub struct DeviceJoinedPayload {
 /// Empty: each device reads its own stash back over REST.
 #[derive(Debug, Clone, Serialize)]
 pub struct KeyPackagesLowPayload {}
+
+// ─── Approvals ─────────────────────────────────────────────────────────────────
+//
+// Signals only: the approvals are read from `GET /api/keys/devices`, a request's messages from
+// its own route, so a replayed or reordered push cannot mislead.
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DeviceApprovedPayload {
+    pub device_id: Uuid,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ApprovalRequestedPayload {
+    pub request_id: Uuid,
+    /// The device asking.
+    pub device_id: Uuid,
+    pub display_name: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ApprovalMessagePayload {
+    pub request_id: Uuid,
+    pub seq: i32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ApprovalClosedPayload {
+    pub request_id: Uuid,
+}
 
 // ─── Group membership payloads ─────────────────────────────────────────────────
 //

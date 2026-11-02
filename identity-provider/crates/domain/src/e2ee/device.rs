@@ -9,7 +9,7 @@ use crate::auth::AuthError;
 use crate::identity::ActorUri;
 use crate::{DeviceId, UserId, ValidationError};
 
-use super::{HistoryGeneration, KeyDirectoryError, RootKeyVerifier};
+use super::{Ed25519Verifier, HistoryGeneration, KeyDirectoryError};
 
 /// How long an attestation holds; clients renew it silently within its last 30 days.
 pub const ATTESTATION_LIFETIME: Duration = Duration::days(365);
@@ -36,6 +36,12 @@ pub fn attestation_period(now: OffsetDateTime) -> (OffsetDateTime, AttestationEx
     )
 }
 
+/// An Ed25519 public key signatures are checked against: a device's root key, or a generation's
+/// approval key.
+pub trait Ed25519PublicKey {
+    fn public_bytes(&self) -> &[u8; 32];
+}
+
 /// A device's Ed25519 public key, which its IdP attests: every MLS leaf the device signs
 /// chains to it.
 #[derive(Clone, PartialEq, Eq)]
@@ -54,17 +60,23 @@ impl DeviceRootKey {
     }
 }
 
+impl Ed25519PublicKey for DeviceRootKey {
+    fn public_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
 impl fmt::Debug for DeviceRootKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("DeviceRootKey(..)")
     }
 }
 
-/// An Ed25519 signature made with a device's root key.
+/// An Ed25519 signature: by a device's root key, or by a generation's approval key.
 #[derive(Clone, PartialEq, Eq)]
-pub struct RootKeySignature([u8; 64]);
+pub struct Ed25519Signature([u8; 64]);
 
-impl RootKeySignature {
+impl Ed25519Signature {
     /// `field` names it in the refusal: the same kind of signature signs more than one thing.
     pub fn parse(field: &'static str, bytes: &[u8]) -> Result<Self, ValidationError> {
         bytes
@@ -78,9 +90,9 @@ impl RootKeySignature {
     }
 }
 
-impl fmt::Debug for RootKeySignature {
+impl fmt::Debug for Ed25519Signature {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("RootKeySignature(..)")
+        f.write_str("Ed25519Signature(..)")
     }
 }
 
@@ -122,18 +134,18 @@ impl fmt::Debug for HpkePublicKey {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnverifiedHpkeKey {
     key: HpkePublicKey,
-    signature: RootKeySignature,
+    signature: Ed25519Signature,
 }
 
 impl UnverifiedHpkeKey {
-    pub fn new(key: HpkePublicKey, signature: RootKeySignature) -> Self {
+    pub fn new(key: HpkePublicKey, signature: Ed25519Signature) -> Self {
         Self { key, signature }
     }
 
     /// A registration sends both halves, or neither.
     pub fn from_parts(
         key: Option<HpkePublicKey>,
-        signature: Option<RootKeySignature>,
+        signature: Option<Ed25519Signature>,
     ) -> Result<Option<Self>, ValidationError> {
         match (key, signature) {
             (Some(key), Some(signature)) => Ok(Some(Self::new(key, signature))),
@@ -151,7 +163,7 @@ impl UnverifiedHpkeKey {
         root: &DeviceRootKey,
         actor: &ActorUri,
         device: DeviceId,
-        verifier: &dyn RootKeyVerifier,
+        verifier: &dyn Ed25519Verifier,
     ) -> Result<SignedHpkeKey, KeyDirectoryError> {
         let signed = self.key.canonical_bytes(actor, device);
         if !verifier.verifies(root, &signed, &self.signature) {
@@ -169,7 +181,7 @@ impl UnverifiedHpkeKey {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignedHpkeKey {
     key: HpkePublicKey,
-    signature: RootKeySignature,
+    signature: Ed25519Signature,
 }
 
 impl SignedHpkeKey {
@@ -177,7 +189,7 @@ impl SignedHpkeKey {
         &self.key
     }
 
-    pub fn signature(&self) -> &RootKeySignature {
+    pub fn signature(&self) -> &Ed25519Signature {
         &self.signature
     }
 }
@@ -186,7 +198,7 @@ impl SignedHpkeKey {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeldHpkeKey {
     pub key: HpkePublicKey,
-    pub signature: RootKeySignature,
+    pub signature: Ed25519Signature,
 }
 
 impl From<&SignedHpkeKey> for HeldHpkeKey {
@@ -256,6 +268,11 @@ impl DeviceLabel {
             name: "Web client".to_owned(),
             kind: DeviceKind::Unknown,
         }
+    }
+
+    /// A device recorded before its client said what it is takes the first label that says.
+    pub fn replaces(&self, held: &DeviceLabel) -> bool {
+        *held == Self::unknown() && *self != Self::unknown()
     }
 
     /// Coarse on purpose — an icon and a "Chrome on macOS" line. An iPadOS Safari claiming to be
@@ -370,6 +387,18 @@ impl Device {
         }
         Ok(())
     }
+}
+
+/// One of `caller`'s devices, unrevoked, from what the directory holds under its id: another
+/// account's id says nothing here.
+pub fn own_unrevoked(caller: UserId, found: Option<&Device>) -> Result<&Device, KeyDirectoryError> {
+    let device = found
+        .filter(|device| device.owner == caller)
+        .ok_or(KeyDirectoryError::DeviceNotFound)?;
+    if device.is_revoked() {
+        return Err(KeyDirectoryError::DeviceRevoked);
+    }
+    Ok(device)
 }
 
 /// A session is limited to the device it declared — identity-provider/specs/auth.md § 1.

@@ -5,7 +5,8 @@ use domain::auth::testing::{InMemorySessions, RecordingSessionNotifier};
 use domain::auth::{RevokedReason, SessionKind, Sessions};
 use domain::e2ee::testing::{
     InMemoryArchive, InMemoryKeyDirectory, InMemoryRemoteKeyPackages, PlainAttester,
-    PlainRootKeyVerifier, RecordingDeviceNotifier, hpke_key, plain_signature,
+    PlainEd25519Verifier, RecordingApprovalNotifier, RecordingDeviceNotifier, hpke_key,
+    plain_signature,
 };
 use domain::e2ee::{
     ATTESTATION_LIFETIME, ApprovalPublicKey, Attest, Attestation, Claim, ClaimedKeyPackage, Device,
@@ -112,12 +113,17 @@ fn world() -> World {
             accounts.clone(),
             store.clone(),
             Arc::new(PlainAttester),
-            Arc::new(PlainRootKeyVerifier),
+            Arc::new(PlainEd25519Verifier),
             sessions.clone(),
             notifier.clone(),
         ),
-        list: ListDevices::new(store.clone(), sessions.clone()),
-        revoke: RevokeDevice::new(store.clone(), sessions.clone(), ended.clone()),
+        list: ListDevices::new(store.clone(), store.clone(), sessions.clone()),
+        revoke: RevokeDevice::new(
+            store.clone(),
+            sessions.clone(),
+            ended.clone(),
+            Arc::new(RecordingApprovalNotifier::default()),
+        ),
         upload: UploadKeyPackages::new(policy(), store.clone(), store.clone()),
         claim: ClaimKeyPackage::new(
             InstanceOrigin::parse("http://localhost:8080").unwrap(),
@@ -172,7 +178,14 @@ impl World {
     ) -> Result<Registered, KeyDirectoryError> {
         let bearer = self.signed_in(who, None).await;
         self.register
-            .execute(&bearer, device, key(root), brought, at)
+            .execute(
+                &bearer,
+                device,
+                key(root),
+                brought,
+                &DeviceLabel::unknown(),
+                at,
+            )
             .await
     }
 
@@ -188,7 +201,7 @@ impl World {
             Arc::new(InMemoryAccounts::with([self.alice.clone()])),
             devices,
             Arc::new(PlainAttester),
-            Arc::new(PlainRootKeyVerifier),
+            Arc::new(PlainEd25519Verifier),
             self.sessions.clone(),
             self.notifier.clone(),
         )
@@ -469,16 +482,31 @@ async fn a_session_registers_only_the_device_it_declared() {
             phone,
             key(2),
             Some(hpke(&w.alice, phone, 2, 9)),
+            &DeviceLabel::unknown(),
             now(),
         )
         .await;
     let itself = w
         .register
-        .execute(&on_the_laptop, laptop, key(1), None, now())
+        .execute(
+            &on_the_laptop,
+            laptop,
+            key(1),
+            None,
+            &DeviceLabel::unknown(),
+            now(),
+        )
         .await;
     let a_new_one = w
         .register
-        .execute(&on_the_laptop, new, key(3), None, now())
+        .execute(
+            &on_the_laptop,
+            new,
+            key(3),
+            None,
+            &DeviceLabel::unknown(),
+            now(),
+        )
         .await;
 
     for refused in [the_phone, a_new_one] {
@@ -597,7 +625,14 @@ async fn a_device_revoked_while_it_reports_its_history_key_is_refused() {
     let device = DeviceId::generate();
     let unnamed = w.signed_in(&w.alice, None).await;
     w.registering_over(store.clone())
-        .execute(&unnamed, device, key(1), None, now())
+        .execute(
+            &unnamed,
+            device,
+            key(1),
+            None,
+            &DeviceLabel::unknown(),
+            now(),
+        )
         .await
         .unwrap();
     let bearer = w.signed_in(&w.alice, Some(device)).await;
@@ -642,7 +677,14 @@ async fn a_registration_that_loses_a_race_decides_again_on_what_won() {
     let bearer = w.signed_in(&w.alice, None).await;
 
     w.registering_over(racing)
-        .execute(&bearer, device, key(1), None, now())
+        .execute(
+            &bearer,
+            device,
+            key(1),
+            None,
+            &DeviceLabel::unknown(),
+            now(),
+        )
         .await
         .unwrap();
 
@@ -670,6 +712,7 @@ async fn a_device_revoked_while_it_registers_gets_nothing_written() {
             device,
             key(1),
             Some(hpke(&w.alice, device, 1, 9)),
+            &DeviceLabel::unknown(),
             now() + Duration::days(1),
         )
         .await;
@@ -694,7 +737,14 @@ async fn a_device_that_keeps_changing_fails_its_registration() {
 
     let failed = w
         .registering_over(Racing::new(w.store.clone(), Meanwhile::Always))
-        .execute(&bearer, DeviceId::generate(), key(1), None, now())
+        .execute(
+            &bearer,
+            DeviceId::generate(),
+            key(1),
+            None,
+            &DeviceLabel::unknown(),
+            now(),
+        )
         .await;
 
     assert!(
@@ -1296,4 +1346,52 @@ async fn a_claim_that_finds_no_package_tells_the_owner_to_refill() {
         "{empty:?}"
     );
     assert_eq!(w.notifier.key_packages_low(), vec![w.alice.id]);
+}
+
+#[tokio::test]
+async fn a_device_is_recorded_under_the_label_of_its_first_registration() {
+    let w = world();
+    let (device, bearer) = (DeviceId::generate(), w.signed_in(&w.alice, None).await);
+
+    w.register
+        .execute(&bearer, device, key(1), None, &phone(), now())
+        .await
+        .unwrap();
+    w.register
+        .execute(
+            &bearer,
+            device,
+            key(1),
+            None,
+            &DeviceLabel::unknown(),
+            now(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(w.store.find(device).await.unwrap().unwrap().label, phone());
+}
+
+#[tokio::test]
+async fn an_upload_names_a_device_registered_unnamed_and_no_other() {
+    let w = world();
+    let (unnamed, named) = (DeviceId::generate(), DeviceId::generate());
+    let bearer = w.signed_in(&w.alice, None).await;
+    let laptop = DeviceLabel {
+        name: "Firefox on Linux".to_owned(),
+        kind: DeviceKind::Laptop,
+    };
+    for (device, label) in [(unnamed, DeviceLabel::unknown()), (named, laptop.clone())] {
+        w.register
+            .execute(&bearer, device, key(1), None, &label, now())
+            .await
+            .unwrap();
+    }
+
+    w.upload(&w.alice, unnamed, batch(1)).await;
+    w.upload(&w.alice, named, batch(1)).await;
+
+    let found = |device| w.store.find(device);
+    assert_eq!(found(unnamed).await.unwrap().unwrap().label, phone());
+    assert_eq!(found(named).await.unwrap().unwrap().label, laptop);
 }

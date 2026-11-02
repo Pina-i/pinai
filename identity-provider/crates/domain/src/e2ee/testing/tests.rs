@@ -291,3 +291,133 @@ async fn a_new_generation_erases_its_owners_archive_in_the_same_write() {
     )
     .await;
 }
+
+#[tokio::test]
+async fn approvals_are_stored_once_per_approver_and_listed_by_owner() {
+    let (archive, devices) = history();
+    contract::approvals_are_stored_once_per_approver_and_listed_by_owner(
+        &devices,
+        &devices,
+        &*archive,
+        UserId::generate(),
+        UserId::generate(),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn an_approval_is_stored_only_while_what_it_was_checked_on_holds() {
+    let (archive, devices) = history();
+    contract::an_approval_is_stored_only_while_what_it_was_checked_on_holds(
+        &devices,
+        &devices,
+        &*archive,
+        UserId::generate(),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn revoking_a_device_drops_the_approvals_it_signed() {
+    let store = store();
+    contract::revoking_a_device_drops_the_approvals_it_signed(&store, &store, UserId::generate())
+        .await;
+}
+
+#[tokio::test]
+async fn a_new_root_key_drops_the_devices_approvals_and_those_it_signed() {
+    let store = store();
+    contract::a_new_root_key_drops_the_devices_approvals_and_those_it_signed(
+        &store,
+        &store,
+        UserId::generate(),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_new_generation_drops_the_approvals_made_under_older_ones() {
+    let (archive, devices) = history();
+    contract::a_new_generation_drops_the_approvals_made_under_older_ones(
+        &devices,
+        &devices,
+        &*archive,
+        UserId::generate(),
+        UserId::generate(),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn opening_a_request_closes_the_devices_open_one() {
+    contract::opening_a_request_closes_the_devices_open_one(
+        &InMemoryApprovalRequests::default(),
+        &store(),
+        UserId::generate(),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn an_account_opens_a_limited_number_of_requests_an_hour() {
+    contract::an_account_opens_a_limited_number_of_requests_an_hour(
+        &InMemoryApprovalRequests::default(),
+        &store(),
+        UserId::generate(),
+        UserId::generate(),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn the_first_message_from_another_device_binds_the_request() {
+    contract::the_first_message_from_another_device_binds_the_request(
+        &InMemoryApprovalRequests::default(),
+        &store(),
+        UserId::generate(),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_request_takes_a_dozen_messages_while_open_and_ends_once() {
+    contract::a_request_takes_a_dozen_messages_while_open_and_ends_once(
+        &InMemoryApprovalRequests::default(),
+        &store(),
+        UserId::generate(),
+        UserId::generate(),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn requests_opened_before_the_cutoff_are_deleted_with_their_messages() {
+    contract::requests_opened_before_the_cutoff_are_deleted_with_their_messages(
+        &InMemoryApprovalRequests::default(),
+        &store(),
+        UserId::generate(),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_known_device_takes_a_stashs_label_only_when_asked() {
+    let store = store();
+    contract::a_known_device_takes_a_stashs_label_only_when_asked(
+        &store,
+        &store,
+        UserId::generate(),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn revoking_a_device_closes_the_requests_it_asks_or_answers() {
+    let requests = Arc::new(InMemoryApprovalRequests::default());
+    contract::revoking_a_device_closes_the_requests_it_asks_or_answers(
+        &*requests,
+        &store().relaying(requests.clone()),
+        UserId::generate(),
+    )
+    .await;
+}

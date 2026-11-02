@@ -76,8 +76,8 @@ fn a_root_key_signature_verifies_only_under_its_key_and_over_its_bytes() {
     let ((signing, key), (_, other)) = (root_key(1), root_key(2));
     let message = b"PINAI-DEVICE-HPKE-v1\nhttps://idp.alice.com/users/alice_xK9mP";
     let signature =
-        RootKeySignature::parse("signature", &signing.sign(message).to_bytes()).unwrap();
-    let verifier = Ed25519RootKeyVerifier;
+        Ed25519Signature::parse("signature", &signing.sign(message).to_bytes()).unwrap();
+    let verifier = StrictEd25519Verifier;
 
     assert!(verifier.verifies(&key, message, &signature));
     assert!(!verifier.verifies(&other, message, &signature));
@@ -85,7 +85,7 @@ fn a_root_key_signature_verifies_only_under_its_key_and_over_its_bytes() {
     assert!(!verifier.verifies(
         &key,
         message,
-        &RootKeySignature::parse("signature", &[0; 64]).unwrap()
+        &Ed25519Signature::parse("signature", &[0; 64]).unwrap()
     ));
 }
 
@@ -95,13 +95,27 @@ fn a_root_key_signature_verifies_only_under_its_key_and_over_its_bytes() {
 fn a_small_order_root_key_verifies_nothing() {
     let mut identity = [0; 32];
     identity[0] = 1;
-    let forged = RootKeySignature::parse("signature", &[identity, [0; 32]].concat()).unwrap();
+    let forged = Ed25519Signature::parse("signature", &[identity, [0; 32]].concat()).unwrap();
 
-    let verified = Ed25519RootKeyVerifier.verifies(
+    let verified = StrictEd25519Verifier.verifies(
         &DeviceRootKey::parse(&identity).unwrap(),
         b"anything at all",
         &forged,
     );
 
     assert!(!verified);
+}
+
+#[test]
+fn an_approval_keys_signature_verifies_under_it_as_a_root_keys_does() {
+    let (signing, _) = root_key(3);
+    let approval_key =
+        domain::e2ee::ApprovalPublicKey::parse(signing.verifying_key().as_bytes()).unwrap();
+    let (_, other) = root_key(4);
+    let message = b"PINAI-DEVICE-APPROVAL-v1\nhttps://idp.alice.com/users/alice_xK9mP";
+    let signature =
+        Ed25519Signature::parse("signature", &signing.sign(message).to_bytes()).unwrap();
+
+    assert!(StrictEd25519Verifier.verifies(&approval_key, message, &signature));
+    assert!(!StrictEd25519Verifier.verifies(&other, message, &signature));
 }

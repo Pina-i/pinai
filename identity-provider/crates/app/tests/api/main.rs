@@ -2,6 +2,7 @@
 //! `make test-integration`.
 
 mod admin;
+mod approvals;
 mod avatars;
 mod blocking;
 mod devices;

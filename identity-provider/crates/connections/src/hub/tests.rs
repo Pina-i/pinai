@@ -72,3 +72,27 @@ fn a_session_ending_closes_the_connections_opened_under_it_only() {
     assert!(tab.ended().is_cancelled());
     assert!(!phone.ended().is_cancelled());
 }
+
+#[test]
+fn a_frame_for_some_sessions_reaches_only_their_connections() {
+    let hub = Arc::new(Hub::new());
+    let alice = Uuid::new_v4();
+    let (laptop_session, phone_session) = (Uuid::new_v4(), Uuid::new_v4());
+    let (mut laptop, _laptop_handle, _) = hub.subscribe(alice, laptop_session);
+    let (mut laptop_tab, _tab_handle, _) = hub.subscribe(alice, laptop_session);
+    let (mut phone, _phone_handle, _) = hub.subscribe(alice, phone_session);
+    let (gone, _gone_handle, _) = hub.subscribe(alice, phone_session);
+    drop(gone);
+
+    hub.send_to_sessions(&alice, &[phone_session], frame("{}"));
+    hub.send_to_sessions(&Uuid::new_v4(), &[phone_session], frame("{}"));
+
+    assert_eq!(&*phone.try_recv().unwrap(), "{}");
+    assert!(laptop.try_recv().is_err());
+    assert!(laptop_tab.try_recv().is_err());
+    assert_eq!(
+        hub.connection_count(&alice),
+        3,
+        "the dead connection was pruned"
+    );
+}

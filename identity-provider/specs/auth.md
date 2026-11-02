@@ -353,7 +353,7 @@ sequenceDiagram
 
 - **`PUT /api/sessions/current/device`** `{ device_id }`: the bearer's session names its device.
   The client sends it right after registering the device (`POST /api/keys/devices`), before it
-  sets or reports the history key (`identity-provider/specs/e2ee.md § 6.1`). `204`;
+  sets, reports or approves with the history key (`identity-provider/specs/e2ee.md § 6.1`). `204`;
   `403 access_denied` "Not one of your devices, or revoked" for a device that isn't the
   account's, is revoked, or is unknown.
 - **A session is limited to the device it declared.** Once it names one, it is never pointed at
@@ -361,12 +361,14 @@ sequenceDiagram
   "This session signed in another device" (naming the same one again is `204`), and `POST
   /api/keys/devices` from it registers that device only (`identity-provider/specs/e2ee.md § 5`,
   "Key directory rules"). A session that names none yet registers and names any device of the
-  account, but can't set the account's history key or say a device holds it: both take a
-  session that has named its device (`403 device_required`, `identity-provider/specs/e2ee.md
-  § 3.6`), so the key records the device that set it, and a device speaks only for itself. A
-  device whose local storage was wiped registers as a new device from a new session: a browser
-  signs out (`GET /logout`) and signs in again with the password — signing in while its session
-  lives keeps that session —, and the desktop app's sign-in opens an app session of its own.
+  account, but can't set the account's history key or say a device holds it, approve a device or
+  take part in an approval request: each takes a session that has named its device
+  (`403 device_required`, `identity-provider/specs/e2ee.md § 3.6`, § 3.9 and § 3.10), so the key
+  records the device that set it, an approval the device that gave it, and a device speaks only
+  for itself. A device whose local storage was wiped registers as a new device from a new
+  session: a browser signs out (`GET /logout`) and signs in again with the password — signing in
+  while its session lives keeps that session —, and the desktop app's sign-in opens an app
+  session of its own.
 - **A device is signed in once at a time.** Linking a session ends the device's other live
   sessions (`replaced`): signing in again on a device — after the browser lost its cookie, or a
   desktop app its refresh token — leaves no session behind.

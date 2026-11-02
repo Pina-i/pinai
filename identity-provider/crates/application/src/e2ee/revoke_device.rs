@@ -1,19 +1,20 @@
 use std::sync::Arc;
 
 use domain::auth::{SessionNotifier, Sessions};
-use domain::e2ee::{Devices, KeyDirectoryError, Revocation};
+use domain::e2ee::{ApprovalNotifier, Devices, KeyDirectoryError, Revocation};
 use domain::{DeviceId, UserId};
 use time::OffsetDateTime;
 
 use crate::auth::tell_ended;
 
 /// `POST /api/keys/devices/{id}/revoke`: the device is signed out — its sessions end, their
-/// tokens and sockets with them — and flagged in the directory; the MLS Remove commits that
-/// exclude it are the clients'. Revoking twice is fine.
+/// tokens and sockets with them — and flagged in the directory, the approval requests it took part
+/// in closed; the MLS Remove commits that exclude it are the clients'. Revoking twice is fine.
 pub struct RevokeDevice {
     devices: Arc<dyn Devices>,
     sessions: Arc<dyn Sessions>,
     notifier: Arc<dyn SessionNotifier>,
+    approvals: Arc<dyn ApprovalNotifier>,
 }
 
 impl RevokeDevice {
@@ -21,11 +22,13 @@ impl RevokeDevice {
         devices: Arc<dyn Devices>,
         sessions: Arc<dyn Sessions>,
         notifier: Arc<dyn SessionNotifier>,
+        approvals: Arc<dyn ApprovalNotifier>,
     ) -> Self {
         Self {
             devices,
             sessions,
             notifier,
+            approvals,
         }
     }
 
@@ -44,9 +47,26 @@ impl RevokeDevice {
             .await
             .map_err(|e| KeyDirectoryError::Unexpected(e.into()))?;
         tell_ended(&*self.notifier, &ended);
-        match self.devices.revoke(owner, device).await? {
-            Revocation::Revoked | Revocation::AlreadyRevoked => Ok(()),
-            Revocation::NotFound => Err(KeyDirectoryError::DeviceNotFound),
+        let closed = match self.devices.revoke(owner, device).await? {
+            Revocation::Revoked { closed } => closed,
+            Revocation::AlreadyRevoked => return Ok(()),
+            Revocation::NotFound => return Err(KeyDirectoryError::DeviceNotFound),
+        };
+        if closed.is_empty() {
+            return Ok(());
         }
+        // The revoke is done: the other side's prompts are left to their expiry.
+        match self.sessions.of_user(owner).await {
+            Ok(sessions) => {
+                for request in closed {
+                    let to = request.parties().sessions(&sessions, now);
+                    self.approvals.approval_closed(owner, &to, request.id);
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = ?e, user_id = %owner, "the closed approval requests went untold");
+            }
+        }
+        Ok(())
     }
 }

@@ -12,8 +12,9 @@ use axum::http::{HeaderMap, StatusCode, header};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use domain::e2ee::{
-    Claim, DeviceLabel, DeviceRootKey, HistoryGeneration, HpkePublicKey, KeyDirectoryError,
-    KeyPackageBytes, NewKeyPackage, RootKeySignature, UnverifiedHpkeKey,
+    Approval, Approver, Claim, DeviceLabel, DeviceRootKey, Ed25519Signature, HistoryGeneration,
+    HpkePublicKey, KeyDirectoryError, KeyPackageBytes, NewKeyPackage, RequestRefusal,
+    UnverifiedHpkeKey,
 };
 use domain::identity::{ActorUri, Requester};
 use serde::{Deserialize, Serialize};
@@ -52,6 +53,37 @@ pub struct DeviceEntry {
     hpke_key_signature: Option<String>,
     /// The history key's generation the device says it holds.
     history_generation: Option<i32>,
+    /// Oldest first; each binds `drk_public_key`, which another device checks it over.
+    approvals: Vec<ApprovalEntry>,
+}
+
+/// `{ by: "device", device_id }` or `{ by: "passphrase", generation }`, with the signature.
+#[derive(Serialize)]
+pub struct ApprovalEntry {
+    by: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    device_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    generation: Option<i32>,
+    signature: String,
+    #[serde(with = "time::serde::rfc3339")]
+    created_at: OffsetDateTime,
+}
+
+impl From<Approval> for ApprovalEntry {
+    fn from(approval: Approval) -> Self {
+        let (by, device_id, generation) = match approval.approver {
+            Approver::Device(device) => ("device", Some(device.as_uuid()), None),
+            Approver::Passphrase(generation) => ("passphrase", None, Some(generation.value())),
+        };
+        Self {
+            by,
+            device_id,
+            generation,
+            signature: B64.encode(approval.signature.as_bytes()),
+            created_at: approval.created_at,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -152,6 +184,7 @@ impl From<ListedDevice> for DeviceEntry {
         ListedDevice {
             device,
             last_active_at,
+            approvals,
         }: ListedDevice,
     ) -> Self {
         let attestation = device.attestation.as_ref();
@@ -172,8 +205,17 @@ impl From<ListedDevice> for DeviceEntry {
             hpke_public_key: hpke_key.map(|h| B64.encode(h.key.as_bytes())),
             hpke_key_signature: hpke_key.map(|h| B64.encode(h.signature.as_bytes())),
             history_generation: device.history_generation.map(HistoryGeneration::value),
+            approvals: approvals.into_iter().map(ApprovalEntry::from).collect(),
         }
     }
+}
+
+fn user_agent_label(headers: &HeaderMap) -> DeviceLabel {
+    DeviceLabel::from_user_agent(
+        headers
+            .get(header::USER_AGENT)
+            .and_then(|value| value.to_str().ok()),
+    )
 }
 
 fn rfc3339(at: OffsetDateTime) -> Result<String, ApiError> {
@@ -196,6 +238,7 @@ pub async fn devices(
 pub async fn register(
     State(register): State<Arc<RegisterDevice>>,
     SignedIn(bearer): SignedIn,
+    headers: HeaderMap,
     Json(body): Json<RegisterRequest>,
 ) -> Result<(StatusCode, Json<RegisteredBody>), ApiError> {
     let key = base64_field("drk_public_key", &body.drk_public_key, DeviceRootKey::parse)?;
@@ -209,7 +252,7 @@ pub async fn register(
         .as_deref()
         .map(|raw| {
             base64_field("hpke_key_signature", raw, |bytes| {
-                RootKeySignature::parse("hpke_key_signature", bytes)
+                Ed25519Signature::parse("hpke_key_signature", bytes)
             })
         })
         .transpose()?;
@@ -220,6 +263,7 @@ pub async fn register(
             body.device_id.into(),
             key,
             brought,
+            &user_agent_label(&headers),
             OffsetDateTime::now_utc(),
         )
         .await?;
@@ -285,11 +329,7 @@ pub async fn upload(
             })
         })
         .collect::<Result<Vec<_>, ApiError>>()?;
-    let label = DeviceLabel::from_user_agent(
-        headers
-            .get(header::USER_AGENT)
-            .and_then(|value| value.to_str().ok()),
-    );
+    let label = user_agent_label(&headers);
     let uploaded = upload
         .execute(
             user,
@@ -396,6 +436,41 @@ fn rate_limited() -> ApiError {
     )
 }
 
+fn no_root_key() -> ApiError {
+    ApiError::new(
+        StatusCode::CONFLICT,
+        "no_root_key",
+        "The device has registered no root key",
+    )
+}
+
+fn request_refused(refusal: RequestRefusal) -> ApiError {
+    match refusal {
+        RequestRefusal::NotFound => ApiError::not_found("Approval request not found"),
+        RequestRefusal::Ended => ApiError::new(
+            StatusCode::GONE,
+            "approval_request_ended",
+            "The approval request has ended",
+        ),
+        RequestRefusal::Taken => ApiError::new(
+            StatusCode::CONFLICT,
+            "approval_request_taken",
+            "Another device is answering this approval request",
+        ),
+        RequestRefusal::Full => ApiError::new(
+            StatusCode::CONFLICT,
+            "approval_request_full",
+            "The approval request holds no more messages",
+        ),
+        RequestRefusal::TooMany => ApiError::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "too_many_requests",
+            "Too many approval requests in the last hour",
+        ),
+        RequestRefusal::NoRootKey => no_root_key(),
+    }
+}
+
 impl From<KeyDirectoryError> for ApiError {
     fn from(error: KeyDirectoryError) -> Self {
         match error {
@@ -415,6 +490,14 @@ impl From<KeyDirectoryError> for ApiError {
                 "device_mismatch",
                 "This session signed in another device",
             ),
+            KeyDirectoryError::NoRootKey => no_root_key(),
+            KeyDirectoryError::SelfApproval => {
+                ApiError::bad_request("A device approves itself with the passphrase only")
+            }
+            KeyDirectoryError::ApprovalUnsigned => {
+                ApiError::bad_request("signature does not verify over the device's root key")
+            }
+            KeyDirectoryError::Request(refusal) => request_refused(refusal),
             KeyDirectoryError::DeviceRequired(_) => device_required(),
             KeyDirectoryError::StaleHistoryKey(_) => stale_history_key(),
             KeyDirectoryError::UserNotFound => ApiError::not_found("User not found"),

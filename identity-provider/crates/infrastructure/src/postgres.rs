@@ -1,3 +1,4 @@
+mod approval;
 mod archive;
 mod attachments;
 mod auth;
@@ -13,6 +14,7 @@ mod reach;
 mod settings;
 mod social;
 
+pub use approval::{PgApprovalRequests, PgDeviceApprovals};
 pub use archive::{PgHistoryArchive, PgHistoryKeys};
 pub use attachments::PgAttachments;
 pub use auth::{

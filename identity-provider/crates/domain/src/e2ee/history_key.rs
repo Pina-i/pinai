@@ -5,7 +5,7 @@ use time::OffsetDateTime;
 use crate::identity::Bearer;
 use crate::{DeviceId, UserId, ValidationError};
 
-use super::{ArchiveError, Device, KeyDirectoryError};
+use super::{ArchiveError, Device, Ed25519PublicKey, KeyDirectoryError, own_unrevoked};
 
 /// A generation of the account's history passphrase: 1 for the first, one more each time the
 /// account starts over with a new one — identity-provider/specs/e2ee.md § 3.6.
@@ -108,6 +108,12 @@ impl ApprovalPublicKey {
     }
 }
 
+impl Ed25519PublicKey for ApprovalPublicKey {
+    fn public_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
 impl fmt::Debug for ApprovalPublicKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("ApprovalPublicKey(..)")
@@ -141,9 +147,9 @@ pub struct StaleHistoryKey;
 #[error("this session named no device")]
 pub struct DeviceRequired;
 
-/// Setting or holding a generation takes a session that named its device: the history key is
-/// set by, and held on, a device the account's others can tell.
-fn sessions_device(named: Option<DeviceId>) -> Result<DeviceId, DeviceRequired> {
+/// Setting or holding a generation, or approving a device, takes a session that named its device:
+/// the history key is set by, held on and approved from a device the account's others can tell.
+pub fn sessions_device(named: Option<DeviceId>) -> Result<DeviceId, DeviceRequired> {
     named.ok_or(DeviceRequired)
 }
 
@@ -190,12 +196,7 @@ pub fn may_report_history_key(
     if sessions_device(named)? != id {
         return Err(KeyDirectoryError::NotTheSessionsDevice);
     }
-    let device = device
-        .filter(|device| device.owner == caller)
-        .ok_or(KeyDirectoryError::DeviceNotFound)?;
-    if device.is_revoked() {
-        return Err(KeyDirectoryError::DeviceRevoked);
-    }
+    own_unrevoked(caller, device)?;
     check_history_generation(generation, current)?;
     Ok(())
 }

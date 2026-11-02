@@ -474,6 +474,20 @@ impl Application {
         let sweep_key_packages = Arc::new(application::e2ee::SweepKeyPackages::new(Arc::clone(
             &key_packages,
         )));
+        let ed25519_verifier: Arc<dyn domain::e2ee::Ed25519Verifier> =
+            Arc::new(infrastructure::attestation::StrictEd25519Verifier);
+        let approvals: Arc<dyn domain::e2ee::DeviceApprovals> = Arc::new(
+            infrastructure::postgres::PgDeviceApprovals::new(pool.clone()),
+        );
+        let approval_requests: Arc<dyn domain::e2ee::ApprovalRequests> = Arc::new(
+            infrastructure::postgres::PgApprovalRequests::new(pool.clone()),
+        );
+        let approval_notifier: Arc<dyn domain::e2ee::ApprovalNotifier> = Arc::new(
+            infrastructure::realtime::HubApprovalNotifier::new(Arc::clone(&hub)),
+        );
+        let sweep_approval_requests = Arc::new(application::e2ee::SweepApprovalRequests::new(
+            Arc::clone(&approval_requests),
+        ));
 
         // Every client is its own document; the official desktop app's is described here.
         let clients: Arc<dyn domain::auth::Clients> =
@@ -997,23 +1011,62 @@ impl Application {
                 Arc::new(infrastructure::attestation::Ed25519DeviceAttester::new(
                     Arc::clone(&keypair),
                 )),
-                Arc::new(infrastructure::attestation::Ed25519RootKeyVerifier),
+                Arc::clone(&ed25519_verifier),
                 Arc::clone(&sessions),
                 Arc::clone(&device_notifier),
             )),
             list_devices: Arc::new(application::e2ee::ListDevices::new(
                 Arc::clone(&devices),
+                Arc::clone(&approvals),
                 Arc::clone(&sessions),
             )),
             revoke_device: Arc::new(application::e2ee::RevokeDevice::new(
                 Arc::clone(&devices),
                 Arc::clone(&sessions),
                 Arc::clone(&session_notifier),
+                Arc::clone(&approval_notifier),
             )),
             report_history_key: Arc::new(application::e2ee::ReportHistoryKey::new(
                 Arc::clone(&sessions),
                 Arc::clone(&devices),
                 Arc::clone(&history_keys),
+            )),
+            approve_device: Arc::new(application::e2ee::ApproveDevice::new(
+                Arc::clone(&accounts),
+                Arc::clone(&sessions),
+                Arc::clone(&devices),
+                Arc::clone(&history_keys),
+                approvals,
+                ed25519_verifier,
+                Arc::clone(&approval_notifier),
+            )),
+            open_approval_request: Arc::new(application::e2ee::OpenApprovalRequest::new(
+                Arc::clone(&sessions),
+                Arc::clone(&devices),
+                Arc::clone(&approval_requests),
+                Arc::clone(&approval_notifier),
+            )),
+            list_approval_requests: Arc::new(application::e2ee::ListApprovalRequests::new(
+                Arc::clone(&sessions),
+                Arc::clone(&devices),
+                Arc::clone(&approval_requests),
+            )),
+            post_approval_message: Arc::new(application::e2ee::PostApprovalMessage::new(
+                Arc::clone(&sessions),
+                Arc::clone(&devices),
+                Arc::clone(&approval_requests),
+                Arc::clone(&approval_notifier),
+            )),
+            read_approval_messages: Arc::new(application::e2ee::ReadApprovalMessages::new(
+                Arc::clone(&sessions),
+                Arc::clone(&devices),
+                Arc::clone(&approval_requests),
+            )),
+            close_approval_request: Arc::new(application::e2ee::CloseApprovalRequest::new(
+                Arc::clone(&sessions),
+                Arc::clone(&devices),
+                approval_requests,
+                approval_notifier,
             )),
             upload_key_packages: Arc::new(application::e2ee::UploadKeyPackages::new(
                 key_package_policy,
@@ -1177,6 +1230,11 @@ impl Application {
         ));
         tasks.spawn(api::background::sweep_welcomes(
             sweep_welcomes,
+            stop.clone(),
+        ));
+        // The approval requests past the hour they count in.
+        tasks.spawn(api::background::sweep_approval_requests(
+            sweep_approval_requests,
             stop.clone(),
         ));
         // Reap uploads never sent.

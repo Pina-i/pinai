@@ -42,6 +42,7 @@ macro_rules! id {
     };
 }
 
+id!(ApprovalRequestId);
 id!(AttachmentId);
 id!(CommitId);
 id!(ConnectionId);

@@ -146,6 +146,17 @@ async fn a_stash_counts_per_device_what_is_neither_claimed_nor_expired(pool: PgP
 }
 
 #[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn a_known_device_takes_a_stashs_label_only_when_asked(pool: PgPool) {
+    let alice = a_user(&pool).await;
+    contract::a_known_device_takes_a_stashs_label_only_when_asked(
+        &PgDevices::new(pool.clone()),
+        &PgKeyPackages::new(pool),
+        alice,
+    )
+    .await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
 async fn stashing_records_a_new_device_and_marks_a_known_one_seen(pool: PgPool) {
     let alice = a_user(&pool).await;
     contract::stashing_records_a_new_device_and_marks_a_known_one_seen(

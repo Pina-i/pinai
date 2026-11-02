@@ -1,14 +1,15 @@
 use anyhow::Context;
 use domain::e2ee::{
     Attest, Attestation, ClaimedKeyPackage, Device, DeviceLabel, DeviceRootKey, Devices,
-    HeldHpkeKey, HistoryGeneration, Holding, HpkeKeyWrite, HpkePublicKey, KeyPackageBytes,
-    KeyPackages, KeyStoreError, NewKeyPackage, Revocation, RootKeySignature,
+    Ed25519Signature, HeldHpkeKey, HistoryGeneration, Holding, HpkeKeyWrite, HpkePublicKey,
+    KeyPackageBytes, KeyPackages, KeyStoreError, NewKeyPackage, Revocation,
     check_history_generation,
 };
 use domain::{DeviceId, UserId};
 use sqlx::{PgConnection, PgPool};
 use time::OffsetDateTime;
 
+use super::approval::{close_requests_of, drop_approvals_by, drop_approvals_of};
 use super::archive::locked_generation;
 
 /// `user_devices`.
@@ -72,7 +73,7 @@ impl TryFrom<DeviceRow> for Device {
             (None, None) => None,
             (Some(key), Some(signature)) if attestation.is_some() => Some(HeldHpkeKey {
                 key: HpkePublicKey::parse(&key).context("user_devices.hpke_public_key")?,
-                signature: RootKeySignature::parse("hpke_key_signature", &signature)
+                signature: Ed25519Signature::parse("hpke_key_signature", &signature)
                     .context("user_devices.hpke_key_signature")?,
             }),
             _ => anyhow::bail!(
@@ -102,23 +103,29 @@ impl TryFrom<DeviceRow> for Device {
 }
 
 /// Records a device not seen before under `label`, or marks it seen — a known one keeps its
-/// name. `DeviceTaken` when another account holds the id: the guarded upsert touches no row.
+/// name, unless `relabel`. `DeviceTaken` when another account holds the id: the guarded upsert
+/// touches no row.
 async fn record_device(
     c: &mut PgConnection,
     owner: UserId,
     id: DeviceId,
     label: &DeviceLabel,
+    relabel: bool,
 ) -> Result<(), KeyStoreError> {
     let recorded = sqlx::query(
         "INSERT INTO user_devices (device_id, user_id, display_name, kind) \
          VALUES ($1, $2, $3, $4) \
-         ON CONFLICT (device_id) DO UPDATE SET last_seen_at = NOW() \
+         ON CONFLICT (device_id) DO UPDATE SET last_seen_at = NOW(), \
+             display_name = CASE WHEN $5 THEN EXCLUDED.display_name \
+                 ELSE user_devices.display_name END, \
+             kind = CASE WHEN $5 THEN EXCLUDED.kind ELSE user_devices.kind END \
          WHERE user_devices.user_id = EXCLUDED.user_id",
     )
     .bind(id.as_uuid())
     .bind(owner.as_uuid())
     .bind(&label.name)
     .bind(label.kind.as_str())
+    .bind(relabel)
     .execute(&mut *c)
     .await
     .context("record a device")?
@@ -227,11 +234,20 @@ impl Devices for PgDevices {
             }
             return Ok(Attest::Stale);
         }
+        // The write held to `read`'s root key: this is a rotation exactly when it differs.
+        let rotated = read
+            .and_then(|device| device.attestation.as_ref())
+            .is_some_and(|held| held.root_key != attestation.root_key);
+        if rotated {
+            drop_approvals_of(&mut tx, id).await?;
+            drop_approvals_by(&mut tx, id).await?;
+        }
         tx.commit().await.context("commit attest")?;
         Ok(Attest::Stored)
     }
 
     async fn revoke(&self, owner: UserId, id: DeviceId) -> Result<Revocation, KeyStoreError> {
+        let mut tx = self.pool.begin().await.context("begin a revoke")?;
         let revoked = sqlx::query(
             "UPDATE user_devices SET revoked_at = NOW(), hpke_public_key = NULL, \
                  hpke_key_signature = NULL \
@@ -239,19 +255,22 @@ impl Devices for PgDevices {
         )
         .bind(id.as_uuid())
         .bind(owner.as_uuid())
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .context("revoke a device")?
         .rows_affected();
         if revoked > 0 {
-            return Ok(Revocation::Revoked);
+            drop_approvals_by(&mut tx, id).await?;
+            let closed = close_requests_of(&mut tx, owner, id).await?;
+            tx.commit().await.context("commit a revoke")?;
+            return Ok(Revocation::Revoked { closed });
         }
         let owned: bool = sqlx::query_scalar(
             "SELECT EXISTS (SELECT 1 FROM user_devices WHERE device_id = $1 AND user_id = $2)",
         )
         .bind(id.as_uuid())
         .bind(owner.as_uuid())
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *tx)
         .await
         .context("find a device to revoke")?;
         Ok(if owned {
@@ -349,6 +368,7 @@ impl KeyPackages for PgKeyPackages {
         owner: UserId,
         device: DeviceId,
         label: &DeviceLabel,
+        relabel: bool,
         packages: &[NewKeyPackage],
     ) -> Result<usize, KeyStoreError> {
         let blobs: Vec<&[u8]> = packages.iter().map(|p| p.bytes.as_bytes()).collect();
@@ -366,7 +386,7 @@ impl KeyPackages for PgKeyPackages {
         .await
         .context("stash KeyPackages")?
         .rows_affected();
-        record_device(&mut tx, owner, device, label).await?;
+        record_device(&mut tx, owner, device, label, relabel).await?;
         tx.commit().await.context("commit stash")?;
         Ok(usize::try_from(stored).unwrap_or_default())
     }

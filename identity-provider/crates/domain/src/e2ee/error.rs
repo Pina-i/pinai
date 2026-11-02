@@ -1,7 +1,9 @@
 use crate::identity::AccountsError;
 use crate::social::{SocialStoreError, Unreachable};
 
-use super::{DeviceRequired, HistoryGeneration, KeyPackageRefusal, StaleHistoryKey};
+use super::{
+    DeviceRequired, HistoryGeneration, KeyPackageRefusal, RequestRefusal, StaleHistoryKey,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum KeyDirectoryError {
@@ -17,6 +19,16 @@ pub enum KeyDirectoryError {
     HpkeKeyUnsigned,
     #[error("this session signed in another device")]
     NotTheSessionsDevice,
+    /// An approval binds a root key: a device that registered none can't be approved, nor approve.
+    #[error("the device has registered no root key")]
+    NoRootKey,
+    /// A device approves itself with the passphrase only.
+    #[error("a device approves another device")]
+    SelfApproval,
+    #[error("the approval's signature does not verify")]
+    ApprovalUnsigned,
+    #[error(transparent)]
+    Request(#[from] RequestRefusal),
     #[error(transparent)]
     DeviceRequired(#[from] DeviceRequired),
     #[error(transparent)]

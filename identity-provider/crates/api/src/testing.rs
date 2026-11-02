@@ -10,9 +10,11 @@ use application::auth::{
     ShowSignIn, SignOutOthers, StartTotpEnrollment, VerifyEmail,
 };
 use application::e2ee::{
-    AppendCommit, ArchiveMessages, CatchUpCommits, ClaimKeyPackage, ClaimWelcomes, ClearArchive,
-    KeyPackageStatus, ListDevices, LoadHistoryKey, ReadArchive, ReceiveCommit, ReceiveWelcome,
-    RegisterDevice, ReportHistoryKey, RevokeDevice, SendWelcome, SetHistoryKey, UploadKeyPackages,
+    AppendCommit, ApproveDevice, ArchiveMessages, CatchUpCommits, ClaimKeyPackage, ClaimWelcomes,
+    ClearArchive, CloseApprovalRequest, KeyPackageStatus, ListApprovalRequests, ListDevices,
+    LoadHistoryKey, OpenApprovalRequest, PostApprovalMessage, ReadApprovalMessages, ReadArchive,
+    ReceiveCommit, ReceiveWelcome, RegisterDevice, ReportHistoryKey, RevokeDevice, SendWelcome,
+    SetHistoryKey, UploadKeyPackages,
 };
 use application::identity::{
     DescribeInstance, EditIntro, FindAccount, IntroInForce, SearchAccounts, ShowIntro, WebFinger,
@@ -51,9 +53,9 @@ use domain::auth::testing::{
 use domain::auth::{Registrations, WebApp};
 use domain::e2ee::KeyPackagePolicy;
 use domain::e2ee::testing::{
-    InMemoryArchive, InMemoryDelivery, InMemoryKeyDirectory, InMemoryRemoteKeyPackages,
-    PlainAttester, PlainRootKeyVerifier, RecordingDeviceNotifier, RecordingMlsFederation,
-    RecordingMlsNotifier,
+    InMemoryApprovalRequests, InMemoryArchive, InMemoryDelivery, InMemoryKeyDirectory,
+    InMemoryRemoteKeyPackages, PlainAttester, PlainEd25519Verifier, RecordingApprovalNotifier,
+    RecordingDeviceNotifier, RecordingMlsFederation, RecordingMlsNotifier,
 };
 use domain::identity::testing::{
     InMemoryAccounts, InMemoryRemoteActors, InMemorySavedIntro, InMemoryTokens, TrustedSignatures,
@@ -263,7 +265,10 @@ impl TestApp {
             blocked_extensions: Vec::new(),
         };
         let archive = Arc::new(InMemoryArchive::default());
-        let keys = Arc::new(InMemoryKeyDirectory::keyed_by(archive.clone()));
+        let approval_requests = Arc::new(InMemoryApprovalRequests::default());
+        let keys = Arc::new(
+            InMemoryKeyDirectory::keyed_by(archive.clone()).relaying(approval_requests.clone()),
+        );
         let delivery = Arc::new(InMemoryDelivery::default());
         let tracker = Arc::new(ConnectionTracker::default());
         let board = Arc::new(PresenceBoard::default());
@@ -271,6 +276,7 @@ impl TestApp {
         let bus = Arc::new(RecordingBus::default());
         let mls_notifier = Arc::new(RecordingMlsNotifier::default());
         let device_notifier = Arc::new(RecordingDeviceNotifier::default());
+        let approval_notifier = Arc::new(RecordingApprovalNotifier::default());
         let mls_federation = Arc::new(RecordingMlsFederation::default());
         let key_policy = KeyPackagePolicy {
             cap_per_device: 100,
@@ -813,20 +819,62 @@ impl TestApp {
                 accounts.clone(),
                 keys.clone(),
                 Arc::new(PlainAttester),
-                Arc::new(PlainRootKeyVerifier),
+                Arc::new(PlainEd25519Verifier),
                 sign_in.sessions.clone(),
                 device_notifier.clone(),
             )),
-            list_devices: Arc::new(ListDevices::new(keys.clone(), sign_in.sessions.clone())),
+            list_devices: Arc::new(ListDevices::new(
+                keys.clone(),
+                keys.clone(),
+                sign_in.sessions.clone(),
+            )),
             revoke_device: Arc::new(RevokeDevice::new(
                 keys.clone(),
                 sign_in.sessions.clone(),
                 sign_in.ended.clone(),
+                approval_notifier.clone(),
             )),
             report_history_key: Arc::new(ReportHistoryKey::new(
                 sign_in.sessions.clone(),
                 keys.clone(),
                 archive.clone(),
+            )),
+            approve_device: Arc::new(ApproveDevice::new(
+                accounts.clone(),
+                sign_in.sessions.clone(),
+                keys.clone(),
+                archive.clone(),
+                keys.clone(),
+                Arc::new(PlainEd25519Verifier),
+                approval_notifier.clone(),
+            )),
+            open_approval_request: Arc::new(OpenApprovalRequest::new(
+                sign_in.sessions.clone(),
+                keys.clone(),
+                approval_requests.clone(),
+                approval_notifier.clone(),
+            )),
+            list_approval_requests: Arc::new(ListApprovalRequests::new(
+                sign_in.sessions.clone(),
+                keys.clone(),
+                approval_requests.clone(),
+            )),
+            post_approval_message: Arc::new(PostApprovalMessage::new(
+                sign_in.sessions.clone(),
+                keys.clone(),
+                approval_requests.clone(),
+                approval_notifier.clone(),
+            )),
+            read_approval_messages: Arc::new(ReadApprovalMessages::new(
+                sign_in.sessions.clone(),
+                keys.clone(),
+                approval_requests.clone(),
+            )),
+            close_approval_request: Arc::new(CloseApprovalRequest::new(
+                sign_in.sessions.clone(),
+                keys.clone(),
+                approval_requests,
+                approval_notifier,
             )),
             upload_key_packages: Arc::new(UploadKeyPackages::new(
                 key_policy,

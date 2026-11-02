@@ -8,6 +8,8 @@ use domain::{DeviceId, UserId};
 use sqlx::{PgConnection, PgPool};
 use time::OffsetDateTime;
 
+use super::approval::drop_older_passphrase_approvals;
+
 /// `history_messages`, written under the generation `history_keys` holds.
 pub struct PgHistoryArchive {
     pool: PgPool,
@@ -256,6 +258,7 @@ impl HistoryKeys for PgHistoryKeys {
             });
         }
         let erased = erase(&mut tx, owner).await?;
+        drop_older_passphrase_approvals(&mut tx, owner, key.generation).await?;
         tx.commit().await.context("commit history key replace")?;
         Ok(KeyReplace::Replaced { erased })
     }

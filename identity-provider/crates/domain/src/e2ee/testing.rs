@@ -1,5 +1,7 @@
 //! In-memory fakes of the E2EE ports and the contract every store must satisfy.
 
+mod approval;
+
 use std::sync::{Arc, Mutex};
 
 use time::OffsetDateTime;
@@ -11,35 +13,62 @@ use crate::identity::RemoteActor;
 use crate::messaging::GroupSnapshot;
 use crate::{CommitId, ConversationId, WelcomeId};
 
+pub use approval::{InMemoryApprovalRequests, RecordingApprovalNotifier, SentApproval};
+
 use super::{
     Append, ArchiveCursor, ArchiveEntry, ArchiveStoreError, Archived, HeldHistoryKey,
     HistoryArchive, HistoryGeneration, HistoryKey, HistoryKeys, Holding, KeyReplace,
     NewArchiveEntry, check_history_generation,
 };
+use super::{Approval, Approver, Ed25519PublicKey};
 use super::{
     Attest, Attestation, AttestationExpiry, Claim, ClaimedKeyPackage, Commit, CommitLog,
     DeliveryStoreError, Device, DeviceAttester, DeviceLabel, DeviceNotifier, DeviceRootKey,
-    Devices, Epoch, HeldHpkeKey, HpkeKeyWrite, HpkePublicKey, KeyPackages, KeyStoreError,
-    MlsFederation, MlsNotifier, NewCommit, NewKeyPackage, NewWelcome, OutgoingWelcome,
-    RemoteClaimError, RemoteKeyPackages, Revocation, RootKeySignature, RootKeyVerifier,
-    SignedAttestation, SignedHpkeKey, UnverifiedHpkeKey, Welcome, Welcomes,
+    Devices, Ed25519Signature, Ed25519Verifier, Epoch, HeldHpkeKey, HpkeKeyWrite, HpkePublicKey,
+    KeyPackages, KeyStoreError, MlsFederation, MlsNotifier, NewCommit, NewKeyPackage, NewWelcome,
+    OutgoingWelcome, RemoteClaimError, RemoteKeyPackages, Revocation, SignedAttestation,
+    SignedHpkeKey, UnverifiedHpkeKey, Welcome, Welcomes,
 };
 
-/// Both stores over one state, as KeyPackages mark their device seen.
+/// The approvals of each account's devices, which a revoke, a new root key and a new generation
+/// drop: shared by the directory and the history keys, as one database holds them.
+type Approvals = Arc<Mutex<Vec<(UserId, Approval)>>>;
+
+/// The devices, their KeyPackages and their approvals over one state, as KeyPackages mark their
+/// device seen.
 #[derive(Default)]
 pub struct InMemoryKeyDirectory {
     state: Mutex<State>,
-    /// Whose current generation a device's report is checked against; none, every report is
-    /// stale.
+    /// Whose current generation a device's report, or a passphrase's approval, is checked
+    /// against; none, every one is stale.
     history: Option<Arc<InMemoryArchive>>,
+    approvals: Approvals,
+    /// Whose requests a revoke closes; none, it closes none.
+    requests: Option<Arc<InMemoryApprovalRequests>>,
 }
 
 impl InMemoryKeyDirectory {
     pub fn keyed_by(history: Arc<InMemoryArchive>) -> Self {
         Self {
             state: Mutex::default(),
+            approvals: Arc::clone(&history.approvals),
             history: Some(history),
+            requests: None,
         }
+    }
+
+    pub fn relaying(self, requests: Arc<InMemoryApprovalRequests>) -> Self {
+        Self {
+            requests: Some(requests),
+            ..self
+        }
+    }
+
+    fn drop_approvals(&self, which: impl Fn(&Approval) -> bool) {
+        self.approvals
+            .lock()
+            .unwrap()
+            .retain(|(_, approval)| !which(approval));
     }
 }
 
@@ -132,11 +161,20 @@ impl Devices for InMemoryKeyDirectory {
             return Ok(Attest::Stale);
         }
         let device = state.record(owner, id, label)?;
+        let rotated = device
+            .attestation
+            .as_ref()
+            .is_some_and(|held| held.root_key != attestation.root_key);
         device.attestation = Some(attestation.clone());
         match hpke_key {
             HpkeKeyWrite::Keep => {}
             HpkeKeyWrite::Set(signed) => device.hpke_key = Some(signed.into()),
             HpkeKeyWrite::Clear => device.hpke_key = None,
+        }
+        if rotated {
+            self.drop_approvals(|approval| {
+                approval.device == id || approval.approver == Approver::Device(id)
+            });
         }
         Ok(Attest::Stored)
     }
@@ -149,9 +187,16 @@ impl Devices for InMemoryKeyDirectory {
         if device.revoked_at.is_some() {
             return Ok(Revocation::AlreadyRevoked);
         }
-        device.revoked_at = Some(OffsetDateTime::now_utc());
+        let now = OffsetDateTime::now_utc();
+        device.revoked_at = Some(now);
         device.hpke_key = None;
-        Ok(Revocation::Revoked)
+        self.drop_approvals(|approval| approval.approver == Approver::Device(id));
+        let closed = self
+            .requests
+            .as_ref()
+            .map(|requests| requests.close_for(id, now))
+            .unwrap_or_default();
+        Ok(Revocation::Revoked { closed })
     }
 
     async fn hold_history_key(
@@ -233,10 +278,15 @@ impl KeyPackages for InMemoryKeyDirectory {
         owner: UserId,
         device: DeviceId,
         label: &DeviceLabel,
+        relabel: bool,
         packages: &[NewKeyPackage],
     ) -> Result<usize, KeyStoreError> {
         let mut state = self.state.lock().unwrap();
-        state.record(owner, device, label)?.last_seen_at = OffsetDateTime::now_utc();
+        let recorded = state.record(owner, device, label)?;
+        recorded.last_seen_at = OffsetDateTime::now_utc();
+        if relabel {
+            recorded.label = label.clone();
+        }
         state
             .packages
             .extend(packages.iter().map(|package| Stashed {
@@ -318,24 +368,29 @@ impl DeviceAttester for PlainAttester {
     }
 }
 
-/// Takes for a root key's signature what [`plain_signature`] makes: no cryptography.
-pub struct PlainRootKeyVerifier;
+/// Takes for a signature what [`plain_signature`] makes: no cryptography.
+pub struct PlainEd25519Verifier;
 
-impl RootKeyVerifier for PlainRootKeyVerifier {
-    fn verifies(&self, key: &DeviceRootKey, message: &[u8], signature: &RootKeySignature) -> bool {
+impl Ed25519Verifier for PlainEd25519Verifier {
+    fn verifies(
+        &self,
+        key: &dyn Ed25519PublicKey,
+        message: &[u8],
+        signature: &Ed25519Signature,
+    ) -> bool {
         plain_signature(key, message) == *signature
     }
 }
 
-/// `key`'s "signature" over `message` as [`PlainRootKeyVerifier`] takes it: two SHA-256 rounds.
-pub fn plain_signature(key: &DeviceRootKey, message: &[u8]) -> RootKeySignature {
+/// `key`'s "signature" over `message` as [`PlainEd25519Verifier`] takes it: two SHA-256 rounds.
+pub fn plain_signature(key: &dyn Ed25519PublicKey, message: &[u8]) -> Ed25519Signature {
     use sha2::{Digest, Sha256};
     let first = Sha256::new()
-        .chain_update(key.as_bytes())
+        .chain_update(key.public_bytes())
         .chain_update(message)
         .finalize();
     let second = Sha256::digest(first);
-    RootKeySignature::parse("signature", &[first.as_slice(), second.as_slice()].concat())
+    Ed25519Signature::parse("signature", &[first.as_slice(), second.as_slice()].concat())
         .expect("two digests are 64 bytes")
 }
 
@@ -347,7 +402,7 @@ pub fn hpke_key(byte: u8) -> SignedHpkeKey {
     let key = HpkePublicKey::parse(&[byte; 32]).unwrap();
     let signature = plain_signature(&root, &key.canonical_bytes(&actor, device));
     UnverifiedHpkeKey::new(key, signature)
-        .verified(&root, &actor, device, &PlainRootKeyVerifier)
+        .verified(&root, &actor, device, &PlainEd25519Verifier)
         .expect("signed by its root key")
 }
 
@@ -649,10 +704,12 @@ impl MlsFederation for RecordingMlsFederation {
 }
 
 /// Each account's archive entries and history key, over one state: a new key erases the archive,
-/// and an upload is kept only under the current one.
+/// and an upload is kept only under the current one. A new key also drops the approvals of older
+/// generations, which a directory [`InMemoryKeyDirectory::keyed_by`] this one shares.
 #[derive(Default)]
 pub struct InMemoryArchive {
     state: Mutex<ArchiveState>,
+    approvals: Approvals,
 }
 
 #[derive(Default)]
@@ -781,6 +838,10 @@ impl HistoryKeys for InMemoryArchive {
             key: key.clone(),
             set_by,
         });
+        self.approvals.lock().unwrap().retain(|(of, approval)| {
+            *of != owner
+                || !matches!(approval.approver, Approver::Passphrase(older) if older < key.generation)
+        });
         let before = state.entries.len();
         state.entries.retain(|(o, _)| *o != owner);
         Ok(KeyReplace::Replaced {
@@ -794,22 +855,24 @@ impl HistoryKeys for InMemoryArchive {
 pub mod contract {
     use time::Duration;
 
+    pub use super::approval::contract::*;
+
     use super::*;
     use crate::e2ee::{DeviceKind, KeyPackageBytes};
 
-    fn at(offset: Duration) -> OffsetDateTime {
+    pub(super) fn at(offset: Duration) -> OffsetDateTime {
         let now = OffsetDateTime::now_utc().unix_timestamp();
         OffsetDateTime::from_unix_timestamp(now).unwrap() + offset
     }
 
-    fn label(name: &str) -> DeviceLabel {
+    pub(super) fn label(name: &str) -> DeviceLabel {
         DeviceLabel {
             name: name.to_owned(),
             kind: DeviceKind::Laptop,
         }
     }
 
-    fn attestation(key: u8) -> Attestation {
+    pub(super) fn attestation(key: u8) -> Attestation {
         Attestation {
             root_key: DeviceRootKey::parse(&[key; 32]).unwrap(),
             signature: vec![key; 64],
@@ -835,7 +898,7 @@ pub mod contract {
     }
 
     /// A registration that read the device just before writing.
-    async fn register(
+    pub(super) async fn register(
         devices: &dyn Devices,
         owner: UserId,
         id: DeviceId,
@@ -1080,7 +1143,7 @@ pub mod contract {
         register(devices, alice, id, &attestation(1), set(1)).await;
 
         packages
-            .stash(alice, id, &label("laptop"), &[fresh(1)])
+            .stash(alice, id, &label("laptop"), false, &[fresh(1)])
             .await
             .unwrap();
 
@@ -1112,7 +1175,7 @@ pub mod contract {
         .await;
         devices.revoke(alice, recent).await.unwrap();
         packages
-            .stash(alice, seen, &label("laptop"), &[fresh(1)])
+            .stash(alice, seen, &label("laptop"), false, &[fresh(1)])
             .await
             .unwrap();
 
@@ -1138,7 +1201,7 @@ pub mod contract {
         assert_eq!(devices.revoke(bob, id).await.unwrap(), Revocation::NotFound);
         assert_eq!(
             devices.revoke(alice, id).await.unwrap(),
-            Revocation::Revoked
+            Revocation::Revoked { closed: vec![] }
         );
         assert_eq!(
             devices.revoke(alice, id).await.unwrap(),
@@ -1170,6 +1233,7 @@ pub mod contract {
                 alice,
                 laptop,
                 &label("laptop"),
+                false,
                 &[fresh(1), fresh(2), fresh(3)],
             )
             .await
@@ -1179,12 +1243,19 @@ pub mod contract {
                 alice,
                 phone,
                 &label("phone"),
+                false,
                 &[fresh(4), package(5, -Duration::minutes(1))],
             )
             .await
             .unwrap();
         packages
-            .stash(bob, DeviceId::generate(), &label("bob's"), &[fresh(6)])
+            .stash(
+                bob,
+                DeviceId::generate(),
+                &label("bob's"),
+                false,
+                &[fresh(6)],
+            )
             .await
             .unwrap();
         packages.claim(alice, Some(laptop)).await.unwrap();
@@ -1204,13 +1275,13 @@ pub mod contract {
     ) {
         let id = DeviceId::generate();
         packages
-            .stash(alice, id, &label("Chrome on Android"), &[fresh(1)])
+            .stash(alice, id, &label("Chrome on Android"), false, &[fresh(1)])
             .await
             .unwrap();
         let recorded = devices.find(id).await.unwrap().expect("recorded");
 
         packages
-            .stash(alice, id, &label("another name"), &[fresh(2)])
+            .stash(alice, id, &label("another name"), false, &[fresh(2)])
             .await
             .unwrap();
 
@@ -1228,6 +1299,48 @@ pub mod contract {
         assert!(seen.last_seen_at >= recorded.last_seen_at);
     }
 
+    /// A device registered before its client said what it is, then named by a stash asked to.
+    pub async fn a_known_device_takes_a_stashs_label_only_when_asked(
+        devices: &dyn Devices,
+        packages: &dyn KeyPackages,
+        alice: UserId,
+    ) {
+        let id = DeviceId::generate();
+        devices
+            .attest(
+                alice,
+                id,
+                &DeviceLabel::unknown(),
+                None,
+                &attestation(1),
+                &HpkeKeyWrite::Clear,
+            )
+            .await
+            .unwrap();
+
+        packages
+            .stash(alice, id, &label("Chrome on Linux"), false, &[fresh(1)])
+            .await
+            .unwrap();
+        let still_unknown = devices.find(id).await.unwrap().unwrap().label;
+        packages
+            .stash(alice, id, &label("Chrome on Linux"), true, &[fresh(2)])
+            .await
+            .unwrap();
+        let named = devices.find(id).await.unwrap().unwrap().label;
+        packages
+            .stash(alice, id, &label("Firefox on Linux"), false, &[fresh(3)])
+            .await
+            .unwrap();
+
+        assert_eq!(still_unknown, DeviceLabel::unknown());
+        assert_eq!(named, label("Chrome on Linux"));
+        assert_eq!(
+            devices.find(id).await.unwrap().unwrap().label,
+            label("Chrome on Linux")
+        );
+    }
+
     pub async fn a_claim_hands_out_the_oldest_package_once(
         packages: &dyn KeyPackages,
         alice: UserId,
@@ -1235,7 +1348,7 @@ pub mod contract {
         let (device, oldest) = (DeviceId::generate(), fresh(1));
         for stashed in [oldest.clone(), fresh(2)] {
             packages
-                .stash(alice, device, &label("laptop"), &[stashed])
+                .stash(alice, device, &label("laptop"), false, &[stashed])
                 .await
                 .unwrap();
         }
@@ -1266,16 +1379,23 @@ pub mod contract {
                 alice,
                 empty,
                 &label("laptop"),
+                false,
                 &[package(1, -Duration::minutes(1))],
             )
             .await
             .unwrap();
         packages
-            .stash(alice, stocked, &label("phone"), &[fresh(2)])
+            .stash(alice, stocked, &label("phone"), false, &[fresh(2)])
             .await
             .unwrap();
         packages
-            .stash(bob, DeviceId::generate(), &label("bob's"), &[fresh(3)])
+            .stash(
+                bob,
+                DeviceId::generate(),
+                &label("bob's"),
+                false,
+                &[fresh(3)],
+            )
             .await
             .unwrap();
 
@@ -1296,11 +1416,11 @@ pub mod contract {
     ) {
         let (revoked, laptop) = (DeviceId::generate(), DeviceId::generate());
         packages
-            .stash(alice, revoked, &label("stolen phone"), &[fresh(1)])
+            .stash(alice, revoked, &label("stolen phone"), false, &[fresh(1)])
             .await
             .unwrap();
         packages
-            .stash(alice, laptop, &label("laptop"), &[fresh(2)])
+            .stash(alice, laptop, &label("laptop"), false, &[fresh(2)])
             .await
             .unwrap();
         devices.revoke(alice, revoked).await.unwrap();
@@ -1326,7 +1446,9 @@ pub mod contract {
         let attested = devices
             .attest(bob, id, &label("bob's"), None, &attestation(2), &set(2))
             .await;
-        let stashed = packages.stash(bob, id, &label("bob's"), &[fresh(1)]).await;
+        let stashed = packages
+            .stash(bob, id, &label("bob's"), false, &[fresh(1)])
+            .await;
 
         assert!(
             matches!(attested, Err(KeyStoreError::DeviceTaken)),
@@ -1350,12 +1472,13 @@ pub mod contract {
                 alice,
                 device,
                 &label("laptop"),
+                false,
                 &[package(1, -Duration::minutes(1)), fresh(2)],
             )
             .await
             .unwrap();
         packages
-            .stash(alice, device, &label("laptop"), &[fresh(3)])
+            .stash(alice, device, &label("laptop"), false, &[fresh(3)])
             .await
             .unwrap();
         packages.claim(alice, Some(device)).await.unwrap();
@@ -1517,7 +1640,7 @@ pub mod contract {
     }
 
     /// Generation `generation`, its salt, check value and approval key made of `byte`s.
-    fn history_key(generation: i64, byte: u8) -> HistoryKey {
+    pub(super) fn history_key(generation: i64, byte: u8) -> HistoryKey {
         HistoryKey {
             generation: HistoryGeneration::parse(generation).unwrap(),
             salt: crate::e2ee::HistorySalt::parse(&[byte; 16]).unwrap(),

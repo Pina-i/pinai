@@ -13,7 +13,10 @@ async fn device_of(w: &World, owner: UserId) -> DeviceId {
         name: "Firefox on Linux".to_owned(),
         kind: DeviceKind::Laptop,
     };
-    w.devices.stash(owner, device, &label, &[]).await.unwrap();
+    w.devices
+        .stash(owner, device, &label, false, &[])
+        .await
+        .unwrap();
     device
 }
 

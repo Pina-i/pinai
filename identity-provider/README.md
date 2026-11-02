@@ -142,6 +142,10 @@ Paths only — the rules, bodies and status codes of each route are in `CLAUDE.m
 | `GET` · `POST` | `/api/keys/devices` | List devices · register or renew one |
 | `POST` | `/api/keys/devices/{device_id}/revoke` | Revoke a device |
 | `PUT` | `/api/keys/devices/{device_id}/history-key` | Say a device holds the current history key |
+| `POST` | `/api/keys/devices/{device_id}/approvals` | Approve a device: by another device, or by the passphrase |
+| `POST` · `GET` | `/api/keys/devices/approval-requests` | Ask to be approved · the open requests |
+| `DELETE` | `/api/keys/devices/approval-requests/{id}` | End a request |
+| `POST` · `GET` | `/api/keys/devices/approval-requests/{id}/messages` | Relay a handshake message · read the other side's |
 | `POST` | `/api/keys/packages` | Upload KeyPackages |
 | `POST` | `/api/keys/packages/claim` | Claim one (Bearer or HTTP Signature) |
 | `GET` | `/api/keys/packages/status` | KeyPackages left per device |

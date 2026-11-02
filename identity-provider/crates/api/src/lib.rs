@@ -1,5 +1,6 @@
 mod accounts;
 mod actors;
+mod approvals;
 mod attachments;
 pub mod auth;
 pub mod background;
@@ -46,9 +47,11 @@ use application::auth::{
     VerifyEmail,
 };
 use application::e2ee::{
-    AppendCommit, ArchiveMessages, CatchUpCommits, ClaimKeyPackage, ClaimWelcomes, ClearArchive,
-    KeyPackageStatus, ListDevices, LoadHistoryKey, ReadArchive, ReceiveCommit, ReceiveWelcome,
-    RegisterDevice, ReportHistoryKey, RevokeDevice, SendWelcome, SetHistoryKey, UploadKeyPackages,
+    AppendCommit, ApproveDevice, ArchiveMessages, CatchUpCommits, ClaimKeyPackage, ClaimWelcomes,
+    ClearArchive, CloseApprovalRequest, KeyPackageStatus, ListApprovalRequests, ListDevices,
+    LoadHistoryKey, OpenApprovalRequest, PostApprovalMessage, ReadApprovalMessages, ReadArchive,
+    ReceiveCommit, ReceiveWelcome, RegisterDevice, ReportHistoryKey, RevokeDevice, SendWelcome,
+    SetHistoryKey, UploadKeyPackages,
 };
 use application::identity::{
     DescribeInstance, EditIntro, FindAccount, SearchAccounts, ShowIntro, WebFinger,
@@ -201,6 +204,13 @@ pub struct AppState {
     pub list_devices: Arc<ListDevices>,
     pub revoke_device: Arc<RevokeDevice>,
     pub report_history_key: Arc<ReportHistoryKey>,
+    pub approve_device: Arc<ApproveDevice>,
+    /// The code handshake's relay between two devices of an account.
+    pub open_approval_request: Arc<OpenApprovalRequest>,
+    pub list_approval_requests: Arc<ListApprovalRequests>,
+    pub post_approval_message: Arc<PostApprovalMessage>,
+    pub read_approval_messages: Arc<ReadApprovalMessages>,
+    pub close_approval_request: Arc<CloseApprovalRequest>,
     pub upload_key_packages: Arc<UploadKeyPackages>,
     pub claim_key_package: Arc<ClaimKeyPackage>,
     pub key_package_status: Arc<KeyPackageStatus>,
@@ -320,6 +330,22 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/keys/devices/{device_id}/history-key",
             put(key_directory::hold_history_key),
+        )
+        .route(
+            "/api/keys/devices/{device_id}/approvals",
+            post(approvals::approve),
+        )
+        .route(
+            "/api/keys/devices/approval-requests",
+            get(approvals::requests).post(approvals::open),
+        )
+        .route(
+            "/api/keys/devices/approval-requests/{request_id}",
+            delete(approvals::close),
+        )
+        .route(
+            "/api/keys/devices/approval-requests/{request_id}/messages",
+            get(approvals::messages).post(approvals::post_message),
         )
         .route("/api/sessions", delete(sessions::sign_out_others))
         .route("/api/sessions/current/device", put(sessions::link_device))

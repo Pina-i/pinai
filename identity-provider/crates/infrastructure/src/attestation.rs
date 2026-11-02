@@ -7,8 +7,8 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use domain::DeviceId;
 use domain::e2ee::{
-    AttestationExpiry, DeviceAttester, DeviceRootKey, RootKeySignature, RootKeyVerifier,
-    SignedAttestation,
+    AttestationExpiry, DeviceAttester, DeviceRootKey, Ed25519PublicKey, Ed25519Signature,
+    Ed25519Verifier, SignedAttestation,
 };
 use domain::identity::ActorUri;
 use ed25519_dalek::{Signature, Signer, VerifyingKey};
@@ -54,12 +54,17 @@ impl DeviceAttester for Ed25519DeviceAttester {
     }
 }
 
-pub struct Ed25519RootKeyVerifier;
+pub struct StrictEd25519Verifier;
 
-impl RootKeyVerifier for Ed25519RootKeyVerifier {
-    fn verifies(&self, key: &DeviceRootKey, message: &[u8], signature: &RootKeySignature) -> bool {
+impl Ed25519Verifier for StrictEd25519Verifier {
+    fn verifies(
+        &self,
+        key: &dyn Ed25519PublicKey,
+        message: &[u8],
+        signature: &Ed25519Signature,
+    ) -> bool {
         let (Ok(key), Ok(signature)) = (
-            VerifyingKey::try_from(key.as_bytes()),
+            VerifyingKey::from_bytes(key.public_bytes()),
             Signature::from_slice(signature.as_bytes()),
         ) else {
             return false;

@@ -1,9 +1,13 @@
 //! End-to-end encryption as the server sees it: the devices accounts register and the IdP
 //! attests, the KeyPackages peers claim to add those devices to MLS groups, the Delivery
 //! Service — each group's commits in order, and the Welcomes waiting for their devices — and
-//! each account's encrypted history archive, with the key it is sealed under. Every key,
-//! package, MLS message and archive entry is opaque here — see identity-provider/specs/e2ee.md.
+//! each account's encrypted history archive, with the key it is sealed under; the approvals the
+//! account's devices give each other, and the requests their handshake is relayed over. Every key,
+//! package, MLS message, archive entry and handshake message is opaque here — see
+//! identity-provider/specs/e2ee.md.
 
+mod approval;
+mod approval_request;
 mod archive;
 mod delivery;
 mod device;
@@ -14,6 +18,15 @@ mod ports;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod testing;
 
+pub use approval::{
+    Approval, ApprovalBy, ApprovalFacts, Approver, CheckedApproval, approval_bytes, calling_device,
+    may_approve,
+};
+pub use approval_request::{
+    APPROVAL_MESSAGE_MAX_BYTES, APPROVAL_MESSAGES_PER_REQUEST, APPROVAL_REQUEST_LIFETIME,
+    APPROVAL_REQUEST_WINDOW, APPROVAL_REQUESTS_PER_WINDOW, ApprovalMessage, ApprovalMessageBody,
+    ApprovalRequest, Audience, MessageSeq, Posting, RequestRefusal, may_open_request, window_start,
+};
 pub use archive::{
     ARCHIVE_BATCH_CAP, ArchiveCursor, ArchiveEntry, ArchiveNonce, BatchSize, NewArchiveEntry,
     archive_page_size, check_archive_batch,
@@ -24,8 +37,9 @@ pub use delivery::{
 };
 pub use device::{
     ATTESTATION_LIFETIME, Attestation, AttestationExpiry, Device, DeviceKind, DeviceLabel,
-    DeviceRootKey, HeldHpkeKey, HpkeKeyWrite, HpkePublicKey, Registration, RootKeySignature,
-    SignedHpkeKey, UnverifiedHpkeKey, attestation_period, may_name, may_register,
+    DeviceRootKey, Ed25519PublicKey, Ed25519Signature, HeldHpkeKey, HpkeKeyWrite, HpkePublicKey,
+    Registration, SignedHpkeKey, UnverifiedHpkeKey, attestation_period, may_name, may_register,
+    own_unrevoked,
 };
 pub use error::{
     ArchiveError, ArchiveStoreError, DeliveryError, DeliveryStoreError, KeyDirectoryError,
@@ -34,14 +48,15 @@ pub use error::{
 pub use history_key::{
     ApprovalPublicKey, DeviceRequired, HeldHistoryKey, HistoryCheckValue, HistoryGeneration,
     HistoryKey, HistorySalt, StaleHistoryKey, check_history_generation, may_report_history_key,
-    may_set_history_key,
+    may_set_history_key, sessions_device,
 };
 pub use key_package::{
     CLAIMED_KEY_PACKAGE_GRACE, Claim, ClaimedKeyPackage, KeyPackageBytes, KeyPackagePolicy,
     KeyPackageRefusal, NewKeyPackage,
 };
 pub use ports::{
-    Archived, Attest, CommitLog, DeviceAttester, DeviceNotifier, Devices, HistoryArchive,
-    HistoryKeys, Holding, KeyPackages, KeyReplace, MlsFederation, MlsNotifier, OutgoingWelcome,
-    RemoteKeyPackages, Revocation, RootKeyVerifier, SignedAttestation, Welcomes,
+    ApprovalNotifier, ApprovalRequests, Approve, Archived, Attest, Close, CommitLog,
+    DeviceApprovals, DeviceAttester, DeviceNotifier, Devices, Ed25519Verifier, HistoryArchive,
+    HistoryKeys, Holding, KeyPackages, KeyReplace, MlsFederation, MlsNotifier, Opened,
+    OutgoingWelcome, Post, Read, RemoteKeyPackages, Revocation, SignedAttestation, Welcomes,
 };

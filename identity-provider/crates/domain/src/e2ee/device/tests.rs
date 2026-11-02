@@ -1,5 +1,5 @@
 use super::*;
-use crate::e2ee::testing::{PlainRootKeyVerifier, hpke_key, plain_signature};
+use crate::e2ee::testing::{PlainEd25519Verifier, hpke_key, plain_signature};
 
 fn label(name: &str, kind: DeviceKind) -> DeviceLabel {
     DeviceLabel {
@@ -195,7 +195,7 @@ fn a_device_id_another_account_holds_registers_no_key() {
 fn an_hpke_key_is_an_x25519_public_key_and_its_signature_an_ed25519_one() {
     assert_eq!(HpkePublicKey::parse(&[1; 32]).unwrap().as_bytes(), &[1; 32]);
     assert_eq!(
-        RootKeySignature::parse("signature", &[2; 64])
+        Ed25519Signature::parse("signature", &[2; 64])
             .unwrap()
             .as_bytes(),
         &[2; 64]
@@ -204,7 +204,7 @@ fn an_hpke_key_is_an_x25519_public_key_and_its_signature_an_ed25519_one() {
         assert!(HpkePublicKey::parse(&vec![1; len]).is_err(), "{len} bytes");
     }
     for len in [0, 32, 63, 65] {
-        let refused = RootKeySignature::parse("hpke_key_signature", &vec![1; len]).unwrap_err();
+        let refused = Ed25519Signature::parse("hpke_key_signature", &vec![1; len]).unwrap_err();
         assert_eq!(refused.field, "hpke_key_signature", "{len} bytes");
     }
 }
@@ -256,7 +256,7 @@ fn an_hpke_key_verifies_only_under_its_root_key_for_its_device_and_account() {
         )
     };
     let verify = |brought: UnverifiedHpkeKey| {
-        brought.verified(&key(1), &alice, device, &PlainRootKeyVerifier)
+        brought.verified(&key(1), &alice, device, &PlainEd25519Verifier)
     };
 
     let verified = verify(signed_for(1, &alice, device, &hpke)).unwrap();
@@ -331,4 +331,13 @@ fn a_session_registers_and_names_only_the_device_it_declared() {
         may_name(Some(laptop), phone),
         Err(AuthError::DeviceMismatch)
     ));
+}
+
+#[test]
+fn only_a_label_that_says_something_replaces_the_unknown_one() {
+    let chrome = from("Mozilla/5.0 (X11; Linux x86_64) Chrome/130.0 Safari/537.36");
+
+    assert!(chrome.replaces(&DeviceLabel::unknown()));
+    assert!(!DeviceLabel::unknown().replaces(&DeviceLabel::unknown()));
+    assert!(!chrome.replaces(&label("Firefox on Linux", DeviceKind::Laptop)));
 }

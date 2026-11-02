@@ -2,13 +2,15 @@ use time::OffsetDateTime;
 
 use crate::identity::{ActorUri, RemoteActor};
 use crate::messaging::GroupSnapshot;
-use crate::{ConversationId, DeviceId, UserId};
+use crate::{ApprovalRequestId, ConversationId, DeviceId, SessionId, UserId};
 
 use super::{
-    Append, ArchiveCursor, ArchiveEntry, ArchiveStoreError, Attestation, AttestationExpiry, Claim,
-    ClaimedKeyPackage, Commit, DeliveryStoreError, Device, DeviceLabel, DeviceRootKey, Epoch,
-    HeldHistoryKey, HistoryGeneration, HistoryKey, HpkeKeyWrite, KeyStoreError, NewArchiveEntry,
-    NewCommit, NewKeyPackage, NewWelcome, RemoteClaimError, RootKeySignature, Welcome, WelcomeBlob,
+    Append, Approval, ApprovalMessage, ApprovalMessageBody, ApprovalRequest, ArchiveCursor,
+    ArchiveEntry, ArchiveStoreError, Attestation, AttestationExpiry, CheckedApproval, Claim,
+    ClaimedKeyPackage, Commit, DeliveryStoreError, Device, DeviceLabel, DeviceRootKey,
+    Ed25519PublicKey, Ed25519Signature, Epoch, HeldHistoryKey, HistoryGeneration, HistoryKey,
+    HpkeKeyWrite, KeyStoreError, MessageSeq, NewArchiveEntry, NewCommit, NewKeyPackage, NewWelcome,
+    RemoteClaimError, RequestRefusal, Welcome, WelcomeBlob,
 };
 
 /// The devices accounts registered, and their attestations.
@@ -19,7 +21,8 @@ pub trait Devices: Send + Sync {
     async fn list(&self, owner: UserId) -> Result<Vec<Device>, KeyStoreError>;
     /// Store the device's attestation and do `hpke_key` to its HPKE key, recording the device under
     /// `label` if it is new; only while the device is still as `read` (`None`: not recorded):
-    /// unrevoked, with the same root key and HPKE key.
+    /// unrevoked, with the same root key and HPKE key. Another root key than the one held drops, in
+    /// the same write, the device's approvals and those it signed: neither verifies any more.
     async fn attest(
         &self,
         owner: UserId,
@@ -29,7 +32,9 @@ pub trait Devices: Send + Sync {
         attestation: &Attestation,
         hpke_key: &HpkeKeyWrite,
     ) -> Result<Attest, KeyStoreError>;
-    /// Revoke the device and drop its HPKE key in one write: nothing encrypts to it again.
+    /// Revoke the device, drop its HPKE key and the approvals it signed, and close the approval
+    /// requests it asks or answers, in one write: nothing encrypts to it again, nothing is
+    /// approved through it, and nobody waits on it.
     async fn revoke(&self, owner: UserId, id: DeviceId) -> Result<Revocation, KeyStoreError>;
     /// Record that the device holds `generation` of its owner's history key; only while that is
     /// the owner's current generation (`check_history_generation`), and the device the owner's
@@ -58,9 +63,12 @@ pub enum Holding {
     Refused,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Revocation {
-    Revoked,
+    /// With the requests it closed that were still open.
+    Revoked {
+        closed: Vec<ApprovalRequest>,
+    },
     AlreadyRevoked,
     /// No such device of the owner's.
     NotFound,
@@ -76,13 +84,14 @@ pub trait KeyPackages: Send + Sync {
         &self,
         owner: UserId,
     ) -> Result<Vec<(DeviceId, usize)>, KeyStoreError>;
-    /// Store a batch and mark the device seen, recording it under `label` if it is new. How
-    /// many were stored.
+    /// Store a batch and mark the device seen, recording it under `label` if it is new, and
+    /// relabelling a known one when `relabel`. How many were stored.
     async fn stash(
         &self,
         owner: UserId,
         device: DeviceId,
         label: &DeviceLabel,
+        relabel: bool,
         packages: &[NewKeyPackage],
     ) -> Result<usize, KeyStoreError>;
     /// The oldest available KeyPackage of `device`, or of any of the owner's devices; never
@@ -121,9 +130,15 @@ pub trait DeviceAttester: Send + Sync {
     ) -> SignedAttestation;
 }
 
-/// Checks what devices sign with their root keys.
-pub trait RootKeyVerifier: Send + Sync {
-    fn verifies(&self, key: &DeviceRootKey, message: &[u8], signature: &RootKeySignature) -> bool;
+/// Checks Ed25519 signatures: what devices sign with their root keys, and the approvals made with a
+/// generation's approval key.
+pub trait Ed25519Verifier: Send + Sync {
+    fn verifies(
+        &self,
+        key: &dyn Ed25519PublicKey,
+        message: &[u8],
+        signature: &Ed25519Signature,
+    ) -> bool;
 }
 
 /// Tells an account's live sessions about its devices: one registered for the first time, or
@@ -252,8 +267,9 @@ pub enum Archived {
 pub trait HistoryKeys: Send + Sync {
     async fn current(&self, owner: UserId) -> Result<Option<HeldHistoryKey>, ArchiveStoreError>;
     /// Make `key` the owner's history key if its generation follows the current one
-    /// ([`HistoryGeneration::follows`]), erasing the owner's archive in the same write: the
-    /// archive only ever holds the current generation. `set_by` is the device whose session set
+    /// ([`HistoryGeneration::follows`]), erasing the owner's archive and the approvals made with
+    /// older generations' approval keys in the same write: the archive only ever holds the current
+    /// generation, and only its approval key approves. `set_by` is the device whose session set
     /// it. The very key held already is a retry: nothing is written.
     async fn replace(
         &self,
@@ -272,4 +288,133 @@ pub enum KeyReplace {
     /// The key doesn't follow `current` (`None`: none set) — another device got there first, say.
     /// Nothing was written.
     Conflict(Option<HistoryGeneration>),
+}
+
+/// The approvals of each account's devices.
+#[async_trait::async_trait]
+pub trait DeviceApprovals: Send + Sync {
+    /// Store the approval while what it was checked on holds: the approved device unrevoked with
+    /// the root key it binds, an approving device unrevoked with the root key that signed it, a
+    /// passphrase's generation still the current one. One per approved device and approver.
+    async fn approve(
+        &self,
+        owner: UserId,
+        approval: &CheckedApproval,
+    ) -> Result<Approve, KeyStoreError>;
+    /// The approvals of the owner's devices, oldest first.
+    async fn of_owner(&self, owner: UserId) -> Result<Vec<Approval>, KeyStoreError>;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Approve {
+    Recorded,
+    /// The approver had approved the device already: nothing was written.
+    AlreadyHeld,
+    /// A device or the generation changed since it was read: nothing was written.
+    Stale,
+}
+
+/// The approval requests and the messages relayed over them.
+#[async_trait::async_trait]
+pub trait ApprovalRequests: Send + Sync {
+    /// Open `request`, closing its device's open one, unless the account opened as many as
+    /// [`super::may_open_request`] allows since [`super::window_start`] — counted under the
+    /// account's lock, so two at once can't both pass —, or its device is no longer unrevoked.
+    async fn open(&self, request: &ApprovalRequest) -> Result<Opened, KeyStoreError>;
+    /// The owner's requests open at `now`, oldest first.
+    async fn open_of(
+        &self,
+        owner: UserId,
+        now: OffsetDateTime,
+    ) -> Result<Vec<ApprovalRequest>, KeyStoreError>;
+    /// Post `body` from `from` to the owner's request as [`ApprovalRequest::may_post`] decides on
+    /// the request and its messages under the request's lock, binding it when that says so; while
+    /// `from` is unrevoked.
+    async fn post(
+        &self,
+        owner: UserId,
+        id: ApprovalRequestId,
+        from: &Device,
+        body: &ApprovalMessageBody,
+        now: OffsetDateTime,
+    ) -> Result<Post, KeyStoreError>;
+    /// The owner's request's messages after `after` but `reader`'s own, in order, as
+    /// [`ApprovalRequest::may_read`] lets `reader` read them — decided on the request as it
+    /// stands, in the same read.
+    async fn read(
+        &self,
+        owner: UserId,
+        id: ApprovalRequestId,
+        reader: DeviceId,
+        after: MessageSeq,
+        now: OffsetDateTime,
+    ) -> Result<Read, KeyStoreError>;
+    /// Close the owner's request for `by`, as [`ApprovalRequest::may_take_part`] lets it.
+    async fn close(
+        &self,
+        owner: UserId,
+        id: ApprovalRequestId,
+        by: DeviceId,
+        now: OffsetDateTime,
+    ) -> Result<Close, KeyStoreError>;
+    /// Delete the requests opened before `cutoff`, their messages with them.
+    async fn delete_opened_before(&self, cutoff: OffsetDateTime) -> Result<usize, KeyStoreError>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Opened {
+    /// The requests this one closed that were still open.
+    Opened {
+        closed: Vec<ApprovalRequest>,
+    },
+    TooMany,
+    /// The device was revoked since it was read: nothing was written.
+    Stale,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Post {
+    /// The request as the message left it; `bound` when the message bound it to its poster.
+    Posted {
+        request: ApprovalRequest,
+        seq: MessageSeq,
+        bound: bool,
+    },
+    Refused(RequestRefusal),
+    /// The poster was revoked since it was read: nothing was written.
+    Stale,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Read {
+    Messages(Vec<ApprovalMessage>),
+    Refused(RequestRefusal),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Close {
+    /// The request as it was when it closed.
+    Closed(ApprovalRequest),
+    Refused(RequestRefusal),
+}
+
+/// Tells an account's live sessions about approvals and the requests relayed between its devices.
+pub trait ApprovalNotifier: Send + Sync {
+    /// To every live session of the account: each reads the device list again.
+    fn device_approved(&self, owner: UserId, device: DeviceId);
+    fn approval_requested(
+        &self,
+        owner: UserId,
+        to: &[SessionId],
+        request: &ApprovalRequest,
+        display_name: &str,
+    );
+    fn approval_message(
+        &self,
+        owner: UserId,
+        to: &[SessionId],
+        request: ApprovalRequestId,
+        seq: MessageSeq,
+    );
+    fn approval_closed(&self, owner: UserId, to: &[SessionId], request: ApprovalRequestId);
 }
