@@ -1,9 +1,10 @@
 //! Devices, their attestations, and the KeyPackages peers claim to add them to MLS groups; the
-//! Delivery Service's commits and Welcomes; each account's history archive.
+//! Delivery Service's commits and Welcomes; each account's history archive and its key.
 
 mod archive;
 mod claim_key_package;
 mod delivery;
+mod history_key;
 mod key_package_status;
 mod list_devices;
 mod register_device;
@@ -13,14 +14,13 @@ mod sweep_key_packages;
 mod tests;
 mod upload_key_packages;
 
-pub use archive::{
-    ArchiveMessages, ArchivePage, ClearArchive, LoadArchiveSalt, ReadArchive, SetArchiveSalt,
-};
+pub use archive::{ArchiveMessages, ArchivePage, ClearArchive, ReadArchive};
 pub use claim_key_package::ClaimKeyPackage;
 pub use delivery::{
     AppendCommit, CatchUpCommits, ClaimWelcomes, CommitPage, IncomingCommit, IncomingWelcome,
     ReceiveCommit, ReceiveWelcome, SendWelcome, SweepWelcomes,
 };
+pub use history_key::{LoadHistoryKey, ReportHistoryKey, SetHistoryKey};
 pub use key_package_status::{DeviceStash, KeyPackageStatus, StashStatus};
 pub use list_devices::{ListDevices, ListedDevice};
 pub use register_device::{RegisterDevice, Registered};

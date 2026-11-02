@@ -1,12 +1,15 @@
 use std::sync::Arc;
 
 use domain::e2ee::testing::InMemoryArchive;
-use domain::e2ee::{ArchiveNonce, BatchSize};
+use domain::e2ee::{
+    ApprovalPublicKey, ArchiveNonce, BatchSize, HistoryCheckValue, HistoryKey, HistorySalt,
+    KeyReplace, StaleHistoryKey,
+};
 use domain::identity::Account;
 use domain::identity::testing::{InMemoryAccounts, account};
 use domain::messaging::testing::InMemoryMessaging;
 use domain::messaging::{Member, Role};
-use domain::{ConversationId, MessageId};
+use domain::{ConversationId, DeviceId, MessageId};
 
 use super::*;
 
@@ -20,8 +23,19 @@ struct World {
     store: ArchiveMessages,
     read: ReadArchive,
     clear: ClearArchive,
-    load_salt: LoadArchiveSalt,
-    set_salt: SetArchiveSalt,
+}
+
+fn generation(raw: i64) -> HistoryGeneration {
+    HistoryGeneration::parse(raw).unwrap()
+}
+
+fn history_key(raw: i64) -> HistoryKey {
+    HistoryKey {
+        generation: generation(raw),
+        salt: HistorySalt::parse(&[1; 16]).unwrap(),
+        check_value: HistoryCheckValue::parse(&[2; 32]).unwrap(),
+        approval_public_key: ApprovalPublicKey::parse(&[3; 32]).unwrap(),
+    }
 }
 
 async fn world() -> World {
@@ -52,16 +66,21 @@ async fn world() -> World {
         .await
         .unwrap();
     let archive = Arc::new(InMemoryArchive::default());
+    for owner in [alice.id, bob.id] {
+        archive
+            .replace(owner, &history_key(1), DeviceId::generate())
+            .await
+            .unwrap();
+    }
     World {
         store: ArchiveMessages::new(
             Arc::new(InMemoryAccounts::with([alice.clone(), bob.clone(), carol])),
             conversations,
             archive.clone(),
+            archive.clone(),
         ),
         read: ReadArchive::new(archive.clone()),
         clear: ClearArchive::new(archive.clone()),
-        load_salt: LoadArchiveSalt::new(archive.clone()),
-        set_salt: SetArchiveSalt::new(archive.clone()),
         alice,
         bob,
         dm,
@@ -86,8 +105,16 @@ async fn an_account_archives_what_it_read_in_conversations_it_is_or_was_in() {
     let w = world().await;
     let batch = vec![entry(w.dm, 1), entry(w.left, 2)];
 
-    let stored = w.store.execute(w.alice.id, batch.clone()).await.unwrap();
-    let again = w.store.execute(w.alice.id, batch).await.unwrap();
+    let stored = w
+        .store
+        .execute(w.alice.id, generation(1), batch.clone())
+        .await
+        .unwrap();
+    let again = w
+        .store
+        .execute(w.alice.id, generation(1), batch)
+        .await
+        .unwrap();
 
     assert_eq!((stored, again), (2, 0));
 }
@@ -98,7 +125,11 @@ async fn an_upload_naming_a_conversation_the_account_never_held_stores_nothing()
 
     let refused = w
         .store
-        .execute(w.alice.id, vec![entry(w.dm, 1), entry(w.elsewhere, 2)])
+        .execute(
+            w.alice.id,
+            generation(1),
+            vec![entry(w.dm, 1), entry(w.elsewhere, 2)],
+        )
         .await;
 
     assert!(
@@ -118,10 +149,14 @@ async fn an_upload_naming_a_conversation_the_account_never_held_stores_nothing()
 async fn an_upload_holds_one_to_fifty_entries() {
     let w = world().await;
 
-    let empty = w.store.execute(w.alice.id, Vec::new()).await;
+    let empty = w.store.execute(w.alice.id, generation(1), Vec::new()).await;
     let too_many = w
         .store
-        .execute(w.alice.id, (0..51).map(|b| entry(w.dm, b)).collect())
+        .execute(
+            w.alice.id,
+            generation(1),
+            (0..51).map(|b| entry(w.dm, b)).collect(),
+        )
         .await;
 
     for refused in [empty, too_many] {
@@ -136,11 +171,15 @@ async fn an_upload_holds_one_to_fifty_entries() {
 async fn the_archive_reads_newest_first_a_page_at_a_time() {
     let w = world().await;
     w.store
-        .execute(w.alice.id, vec![entry(w.dm, 1), entry(w.dm, 2)])
+        .execute(
+            w.alice.id,
+            generation(1),
+            vec![entry(w.dm, 1), entry(w.dm, 2)],
+        )
         .await
         .unwrap();
     w.store
-        .execute(w.alice.id, vec![entry(w.dm, 3)])
+        .execute(w.alice.id, generation(1), vec![entry(w.dm, 3)])
         .await
         .unwrap();
 
@@ -177,11 +216,15 @@ async fn the_archive_reads_newest_first_a_page_at_a_time() {
 async fn clearing_empties_the_callers_archive() {
     let w = world().await;
     w.store
-        .execute(w.alice.id, vec![entry(w.dm, 1), entry(w.dm, 2)])
+        .execute(
+            w.alice.id,
+            generation(1),
+            vec![entry(w.dm, 1), entry(w.dm, 2)],
+        )
         .await
         .unwrap();
     w.store
-        .execute(w.bob.id, vec![entry(w.dm, 3)])
+        .execute(w.bob.id, generation(1), vec![entry(w.dm, 3)])
         .await
         .unwrap();
 
@@ -192,18 +235,72 @@ async fn clearing_empties_the_callers_archive() {
 }
 
 #[tokio::test]
-async fn the_salt_is_set_once_and_read_back() {
+async fn an_upload_under_another_generation_than_the_current_one_stores_nothing() {
     let w = world().await;
-    let (first, second) = (
-        ArchiveSalt::parse(&[1; 16]).unwrap(),
-        ArchiveSalt::parse(&[2; 16]).unwrap(),
+    let carol = UserId::generate();
+    w.archive
+        .replace(w.alice.id, &history_key(2), DeviceId::generate())
+        .await
+        .unwrap();
+
+    let replaced = w
+        .store
+        .execute(w.alice.id, generation(1), vec![entry(w.dm, 1)])
+        .await;
+    let ahead = w
+        .store
+        .execute(w.alice.id, generation(3), vec![entry(w.dm, 1)])
+        .await;
+    let none_set = w
+        .store
+        .execute(carol, generation(1), vec![entry(w.dm, 1)])
+        .await;
+
+    for refused in [replaced, ahead, none_set] {
+        assert!(
+            matches!(refused, Err(ArchiveError::Stale(StaleHistoryKey))),
+            "{refused:?}"
+        );
+    }
+    assert!(
+        w.archive
+            .page(w.alice.id, None, 10)
+            .await
+            .unwrap()
+            .is_empty()
     );
+}
 
-    let unset = w.load_salt.execute(w.alice.id).await;
-    let set = w.set_salt.execute(w.alice.id, first.clone()).await.unwrap();
-    let kept = w.set_salt.execute(w.alice.id, second).await.unwrap();
+#[tokio::test]
+async fn clearing_keeps_the_key_and_the_next_upload_is_saved_under_it() {
+    let w = world().await;
+    w.store
+        .execute(w.alice.id, generation(1), vec![entry(w.dm, 1)])
+        .await
+        .unwrap();
 
-    assert!(matches!(unset, Err(ArchiveError::NoSalt)), "{unset:?}");
-    assert_eq!((&set, &kept), (&first, &first));
-    assert_eq!(w.load_salt.execute(w.alice.id).await.unwrap(), first);
+    w.clear.execute(w.alice.id).await.unwrap();
+    let after = w
+        .store
+        .execute(w.alice.id, generation(1), vec![entry(w.dm, 2)])
+        .await
+        .unwrap();
+
+    assert_eq!(
+        w.archive
+            .current(w.alice.id)
+            .await
+            .unwrap()
+            .map(|held| held.key),
+        Some(history_key(1))
+    );
+    assert_eq!(after, 1);
+    assert_eq!(
+        w.archive
+            .replace(w.alice.id, &history_key(2), DeviceId::generate())
+            .await
+            .unwrap(),
+        KeyReplace::Replaced { erased: 1 },
+        "the generation is still the first"
+    );
 }

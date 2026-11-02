@@ -1,7 +1,7 @@
 use crate::identity::AccountsError;
 use crate::social::{SocialStoreError, Unreachable};
 
-use super::KeyPackageRefusal;
+use super::{DeviceRequired, HistoryGeneration, KeyPackageRefusal, StaleHistoryKey};
 
 #[derive(Debug, thiserror::Error)]
 pub enum KeyDirectoryError {
@@ -17,6 +17,10 @@ pub enum KeyDirectoryError {
     HpkeKeyUnsigned,
     #[error("this session signed in another device")]
     NotTheSessionsDevice,
+    #[error(transparent)]
+    DeviceRequired(#[from] DeviceRequired),
+    #[error(transparent)]
+    StaleHistoryKey(#[from] StaleHistoryKey),
     #[error("user not found")]
     UserNotFound,
     #[error("no available KeyPackage")]
@@ -184,7 +188,7 @@ impl From<crate::messaging::MessagingError> for DeliveryError {
     }
 }
 
-/// Why the history archive refused an upload or a read.
+/// Why the history backup refused a request: to its archive, or to its key.
 #[derive(Debug, thiserror::Error)]
 pub enum ArchiveError {
     #[error(transparent)]
@@ -192,8 +196,17 @@ pub enum ArchiveError {
     /// The archive holds only what its owner could read: conversations it is or was in.
     #[error("not a member of one or more conversations")]
     NotAMember,
-    #[error("no salt set")]
-    NoSalt,
+    #[error("no history key set")]
+    NoKey,
+    #[error(transparent)]
+    Stale(#[from] StaleHistoryKey),
+    /// The generation set isn't the one right after `current`, `None` when there is none.
+    #[error("the history key's generation does not follow the current one")]
+    KeyConflict { current: Option<HistoryGeneration> },
+    #[error("a recent password is needed to replace the history key")]
+    RecentSignInRequired,
+    #[error(transparent)]
+    DeviceRequired(#[from] DeviceRequired),
     #[error(transparent)]
     Unexpected(#[from] anyhow::Error),
 }

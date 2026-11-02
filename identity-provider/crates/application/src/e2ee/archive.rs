@@ -5,17 +5,20 @@ use std::sync::Arc;
 
 use domain::UserId;
 use domain::e2ee::{
-    ArchiveCursor, ArchiveEntry, ArchiveError, ArchiveSalt, HistoryArchive, NewArchiveEntry,
-    archive_page_size, check_archive_batch,
+    ArchiveCursor, ArchiveEntry, ArchiveError, Archived, HistoryArchive, HistoryGeneration,
+    HistoryKeys, NewArchiveEntry, StaleHistoryKey, archive_page_size, check_archive_batch,
+    check_history_generation,
 };
 use domain::identity::Accounts;
 use domain::messaging::Conversations;
 
-/// `POST /api/history/messages`: archive a batch, for conversations the account is or was in —
-/// leaving a group keeps the history one already read.
+/// `POST /api/history/messages`: archive a batch sealed under the account's current history key,
+/// for conversations the account is or was in — leaving a group keeps the history one already
+/// read.
 pub struct ArchiveMessages {
     accounts: Arc<dyn Accounts>,
     conversations: Arc<dyn Conversations>,
+    keys: Arc<dyn HistoryKeys>,
     archive: Arc<dyn HistoryArchive>,
 }
 
@@ -23,11 +26,13 @@ impl ArchiveMessages {
     pub fn new(
         accounts: Arc<dyn Accounts>,
         conversations: Arc<dyn Conversations>,
+        keys: Arc<dyn HistoryKeys>,
         archive: Arc<dyn HistoryArchive>,
     ) -> Self {
         Self {
             accounts,
             conversations,
+            keys,
             archive,
         }
     }
@@ -36,9 +41,16 @@ impl ArchiveMessages {
     pub async fn execute(
         &self,
         owner: UserId,
+        generation: HistoryGeneration,
         entries: Vec<NewArchiveEntry>,
     ) -> Result<usize, ArchiveError> {
         check_archive_batch(entries.len())?;
+        let current = self
+            .keys
+            .current(owner)
+            .await?
+            .map(|held| held.key.generation);
+        check_history_generation(generation, current)?;
         let account = self.accounts.find(owner).await?.ok_or_else(|| {
             ArchiveError::Unexpected(anyhow::anyhow!("the archiving account is gone"))
         })?;
@@ -52,7 +64,11 @@ impl ArchiveMessages {
         if held.len() != named.len() {
             return Err(ArchiveError::NotAMember);
         }
-        Ok(self.archive.store(owner, &entries).await?)
+        match self.archive.store(owner, generation, &entries).await? {
+            Archived::Stored(new) => Ok(new),
+            // A new generation was set since the key was read.
+            Archived::Stale => Err(StaleHistoryKey.into()),
+        }
     }
 }
 
@@ -90,7 +106,8 @@ impl ReadArchive {
     }
 }
 
-/// `DELETE /api/history/messages`: Settings → Clear.
+/// `DELETE /api/history/messages`: Settings → Clear. The key stays, and every device goes on
+/// saving under it.
 pub struct ClearArchive {
     archive: Arc<dyn HistoryArchive>,
 }
@@ -103,42 +120,6 @@ impl ClearArchive {
     /// How many entries went.
     pub async fn execute(&self, owner: UserId) -> Result<usize, ArchiveError> {
         Ok(self.archive.clear(owner).await?)
-    }
-}
-
-/// `GET /api/history/salt`
-pub struct LoadArchiveSalt {
-    archive: Arc<dyn HistoryArchive>,
-}
-
-impl LoadArchiveSalt {
-    pub fn new(archive: Arc<dyn HistoryArchive>) -> Self {
-        Self { archive }
-    }
-
-    /// `NoSalt` until a device sets one.
-    pub async fn execute(&self, owner: UserId) -> Result<ArchiveSalt, ArchiveError> {
-        self.archive.salt(owner).await?.ok_or(ArchiveError::NoSalt)
-    }
-}
-
-/// `POST /api/history/salt`: set once — a second device reads back the first one's.
-pub struct SetArchiveSalt {
-    archive: Arc<dyn HistoryArchive>,
-}
-
-impl SetArchiveSalt {
-    pub fn new(archive: Arc<dyn HistoryArchive>) -> Self {
-        Self { archive }
-    }
-
-    /// The salt now held.
-    pub async fn execute(
-        &self,
-        owner: UserId,
-        salt: ArchiveSalt,
-    ) -> Result<ArchiveSalt, ArchiveError> {
-        Ok(self.archive.set_salt_once(owner, &salt).await?)
     }
 }
 

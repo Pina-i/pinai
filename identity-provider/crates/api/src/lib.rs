@@ -4,6 +4,7 @@ mod attachments;
 pub mod auth;
 pub mod background;
 mod blocks;
+mod e2ee;
 pub mod error;
 mod forgot;
 mod groups;
@@ -46,8 +47,8 @@ use application::auth::{
 };
 use application::e2ee::{
     AppendCommit, ArchiveMessages, CatchUpCommits, ClaimKeyPackage, ClaimWelcomes, ClearArchive,
-    KeyPackageStatus, ListDevices, LoadArchiveSalt, ReadArchive, ReceiveCommit, ReceiveWelcome,
-    RegisterDevice, RevokeDevice, SendWelcome, SetArchiveSalt, UploadKeyPackages,
+    KeyPackageStatus, ListDevices, LoadHistoryKey, ReadArchive, ReceiveCommit, ReceiveWelcome,
+    RegisterDevice, ReportHistoryKey, RevokeDevice, SendWelcome, SetHistoryKey, UploadKeyPackages,
 };
 use application::identity::{
     DescribeInstance, EditIntro, FindAccount, SearchAccounts, ShowIntro, WebFinger,
@@ -199,6 +200,7 @@ pub struct AppState {
     pub register_device: Arc<RegisterDevice>,
     pub list_devices: Arc<ListDevices>,
     pub revoke_device: Arc<RevokeDevice>,
+    pub report_history_key: Arc<ReportHistoryKey>,
     pub upload_key_packages: Arc<UploadKeyPackages>,
     pub claim_key_package: Arc<ClaimKeyPackage>,
     pub key_package_status: Arc<KeyPackageStatus>,
@@ -211,8 +213,8 @@ pub struct AppState {
     pub archive_messages: Arc<ArchiveMessages>,
     pub read_archive: Arc<ReadArchive>,
     pub clear_archive: Arc<ClearArchive>,
-    pub load_archive_salt: Arc<LoadArchiveSalt>,
-    pub set_archive_salt: Arc<SetArchiveSalt>,
+    pub load_history_key: Arc<LoadHistoryKey>,
+    pub set_history_key: Arc<SetHistoryKey>,
     /// The live connections, which the WebSocket registers with.
     pub hub: Arc<Hub>,
     pub missed_events: Arc<dyn MissedEvents>,
@@ -315,6 +317,10 @@ pub fn router(state: AppState) -> Router {
             "/api/keys/devices/{device_id}/revoke",
             post(key_directory::revoke),
         )
+        .route(
+            "/api/keys/devices/{device_id}/history-key",
+            put(key_directory::hold_history_key),
+        )
         .route("/api/sessions", delete(sessions::sign_out_others))
         .route("/api/sessions/current/device", put(sessions::link_device))
         .route("/api/keys/packages", post(key_directory::upload))
@@ -338,10 +344,7 @@ pub fn router(state: AppState) -> Router {
                 .get(history::page)
                 .delete(history::clear),
         )
-        .route(
-            "/api/history/salt",
-            get(history::salt).post(history::set_salt),
-        )
+        .route("/api/history/key", get(history::key).put(history::set_key))
         .route("/api/presence", get(presence::read))
         .route("/api/presence/batch", post(presence::batch))
         .route("/api/presence/stream", get(presence::stream))

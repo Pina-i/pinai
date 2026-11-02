@@ -133,3 +133,36 @@ async fn a_session_that_named_its_device_names_it_again_but_no_other() {
         "the phone keeps its session"
     );
 }
+
+#[tokio::test]
+async fn a_session_gone_since_its_token_was_checked_is_unexpected_and_takes_no_device_over() {
+    let w = world().await;
+    let device = device_of(&w, w.alice.id).await;
+    let current = signed_in(&w, w.alice.id).await;
+    let bearer = |session| Bearer {
+        user: w.alice.id,
+        session,
+        authenticated_at: now(),
+    };
+    w.link
+        .execute(bearer(current), device, now())
+        .await
+        .unwrap();
+
+    let gone = w
+        .link
+        .execute(bearer(SessionId::generate()), device, now())
+        .await;
+
+    assert!(matches!(gone, Err(AuthError::Unexpected(_))), "{gone:?}");
+    assert!(
+        w.sessions
+            .find(current)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_live(now()),
+        "the device keeps its session"
+    );
+    assert!(w.ended.ended().is_empty());
+}

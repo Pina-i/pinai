@@ -9,7 +9,7 @@ use crate::auth::AuthError;
 use crate::identity::ActorUri;
 use crate::{DeviceId, UserId, ValidationError};
 
-use super::{KeyDirectoryError, RootKeyVerifier};
+use super::{HistoryGeneration, KeyDirectoryError, RootKeyVerifier};
 
 /// How long an attestation holds; clients renew it silently within its last 30 days.
 pub const ATTESTATION_LIFETIME: Duration = Duration::days(365);
@@ -349,6 +349,9 @@ pub struct Device {
     pub attestation: Option<Attestation>,
     /// Signed by the attested root key; `None` until the device registers one.
     pub hpke_key: Option<HeldHpkeKey>,
+    /// The generation of the account's history key the device says it holds; `None` until it
+    /// says.
+    pub history_generation: Option<HistoryGeneration>,
 }
 
 impl Device {

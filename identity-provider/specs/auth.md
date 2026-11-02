@@ -352,18 +352,21 @@ sequenceDiagram
 ```
 
 - **`PUT /api/sessions/current/device`** `{ device_id }`: the bearer's session names its device.
-  The client sends it once the account's device storage is open and the device exists — on a
-  first sign-in, after the onboarding that creates it. `204`; `403 access_denied` "Not one of
-  your devices, or revoked" for a device that isn't the account's, is revoked, or is unknown.
+  The client sends it right after registering the device (`POST /api/keys/devices`), before it
+  sets or reports the history key (`identity-provider/specs/e2ee.md § 6.1`). `204`;
+  `403 access_denied` "Not one of your devices, or revoked" for a device that isn't the
+  account's, is revoked, or is unknown.
 - **A session is limited to the device it declared.** Once it names one, it is never pointed at
   another: `PUT /api/sessions/current/device` naming any other device is `403 device_mismatch`
   "This session signed in another device" (naming the same one again is `204`), and `POST
   /api/keys/devices` from it registers that device only (`identity-provider/specs/e2ee.md § 5`,
   "Key directory rules"). A session that names none yet registers and names any device of the
-  account. A device whose local storage was wiped registers as a new device from a new session:
-  a browser signs out (`GET /logout`) and signs in again with the password — signing in while its
-  session lives keeps that session —, and the desktop app's sign-in opens an app session of its
-  own.
+  account, but can't set the account's history key or say a device holds it: both take a
+  session that has named its device (`403 device_required`, `identity-provider/specs/e2ee.md
+  § 3.6`), so the key records the device that set it, and a device speaks only for itself. A
+  device whose local storage was wiped registers as a new device from a new session: a browser
+  signs out (`GET /logout`) and signs in again with the password — signing in while its session
+  lives keeps that session —, and the desktop app's sign-in opens an app session of its own.
 - **A device is signed in once at a time.** Linking a session ends the device's other live
   sessions (`replaced`): signing in again on a device — after the browser lost its cookie, or a
   desktop app its refresh token — leaves no session behind.
@@ -392,6 +395,7 @@ taken from it, must not be enough to lock the owner out or erase their history.
 | Sign out every other device | `DELETE /api/sessions?keep=current` |
 | Turn the second factor on | `POST /api/totp/enroll` |
 | Clear the history backup | `DELETE /api/history/messages` |
+| Replace the history key — any generation past the first, which erases the backup (`identity-provider/specs/e2ee.md § 3.6`) | `PUT /api/history/key` |
 | Give a member a password reset link (§ 7) | `POST /api/admin/members/{id}/password-reset` |
 
 Turning the second factor off and replacing the recovery codes take a current authenticator code
@@ -617,9 +621,9 @@ same at every start for as long as the key lives, and another one for another ke
   password again", the login page, and back on Settings → Devices, where revoking it now goes
   through. Within the next 10 minutes, nothing more is asked.
 - **A laptop left open.** Whoever sits at it can read and write as its owner, but can't revoke
-  the owner's other devices, sign them out, turn the second factor on or clear the history
-  backup without the password — nor, on an admin's, make a member's reset link, which hands that
-  account over.
+  the owner's other devices, sign them out, turn the second factor on, or clear the history
+  backup or replace its key without the password — nor, on an admin's, make a member's reset
+  link, which hands that account over.
 
 ## 2. Sign-up email verification
 

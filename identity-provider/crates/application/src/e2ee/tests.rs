@@ -4,12 +4,13 @@ use domain::DeviceId;
 use domain::auth::testing::{InMemorySessions, RecordingSessionNotifier};
 use domain::auth::{RevokedReason, SessionKind, Sessions};
 use domain::e2ee::testing::{
-    InMemoryKeyDirectory, InMemoryRemoteKeyPackages, PlainAttester, PlainRootKeyVerifier,
-    RecordingDeviceNotifier, hpke_key, plain_signature,
+    InMemoryArchive, InMemoryKeyDirectory, InMemoryRemoteKeyPackages, PlainAttester,
+    PlainRootKeyVerifier, RecordingDeviceNotifier, hpke_key, plain_signature,
 };
 use domain::e2ee::{
-    ATTESTATION_LIFETIME, Attest, Attestation, Claim, ClaimedKeyPackage, Device, DeviceAttester,
-    DeviceKind, DeviceLabel, DeviceRootKey, Devices, HpkeKeyWrite, HpkePublicKey,
+    ATTESTATION_LIFETIME, ApprovalPublicKey, Attest, Attestation, Claim, ClaimedKeyPackage, Device,
+    DeviceAttester, DeviceKind, DeviceLabel, DeviceRootKey, Devices, HistoryCheckValue,
+    HistoryGeneration, HistoryKey, HistoryKeys, HistorySalt, Holding, HpkeKeyWrite, HpkePublicKey,
     KeyDirectoryError, KeyPackageBytes, KeyPackagePolicy, KeyPackageRefusal, KeyPackages,
     KeyStoreError, NewKeyPackage, Revocation, SignedHpkeKey, UnverifiedHpkeKey, attestation_period,
 };
@@ -573,6 +574,61 @@ impl Devices for Racing {
     ) -> Result<Revocation, KeyStoreError> {
         self.store.revoke(owner, id).await
     }
+
+    async fn hold_history_key(
+        &self,
+        owner: domain::UserId,
+        id: DeviceId,
+        generation: HistoryGeneration,
+    ) -> Result<Holding, KeyStoreError> {
+        let meanwhile = self.meanwhile.lock().unwrap().take();
+        if let Some(Meanwhile::Revoke) = meanwhile {
+            self.store.revoke(owner, id).await?;
+        }
+        self.store.hold_history_key(owner, id, generation).await
+    }
+}
+
+#[tokio::test]
+async fn a_device_revoked_while_it_reports_its_history_key_is_refused() {
+    let w = world();
+    let keys = Arc::new(InMemoryArchive::default());
+    let store = Arc::new(InMemoryKeyDirectory::keyed_by(keys.clone()));
+    let device = DeviceId::generate();
+    let unnamed = w.signed_in(&w.alice, None).await;
+    w.registering_over(store.clone())
+        .execute(&unnamed, device, key(1), None, now())
+        .await
+        .unwrap();
+    let bearer = w.signed_in(&w.alice, Some(device)).await;
+    keys.replace(w.alice.id, &first_history_key(), device)
+        .await
+        .unwrap();
+    let report = ReportHistoryKey::new(
+        w.sessions.clone(),
+        Racing::new(store.clone(), Meanwhile::Revoke),
+        keys,
+    );
+
+    let refused = report
+        .execute(&bearer, device, HistoryGeneration::FIRST)
+        .await;
+
+    assert!(
+        matches!(refused, Err(KeyDirectoryError::DeviceRevoked)),
+        "{refused:?}"
+    );
+    let device = store.find(device).await.unwrap().unwrap();
+    assert_eq!(device.history_generation, None);
+}
+
+fn first_history_key() -> HistoryKey {
+    HistoryKey {
+        generation: HistoryGeneration::FIRST,
+        salt: HistorySalt::parse(&[1; 16]).unwrap(),
+        check_value: HistoryCheckValue::parse(&[2; 32]).unwrap(),
+        approval_public_key: ApprovalPublicKey::parse(&[3; 32]).unwrap(),
+    }
 }
 
 #[tokio::test]
@@ -657,13 +713,10 @@ async fn the_owner_lists_its_own_devices() {
         .unwrap();
     w.upload(&w.alice, phone, batch(1)).await;
     w.upload(&w.bob, DeviceId::generate(), batch(1)).await;
+    let used = now() - Duration::hours(2);
     let session = w
         .sessions
-        .open(
-            w.alice.id,
-            &SessionKind::Browser,
-            now() - Duration::hours(2),
-        )
+        .open(w.alice.id, &SessionKind::Browser, used)
         .await
         .unwrap();
     w.sessions.link(session, laptop, now()).await.unwrap();
@@ -679,7 +732,7 @@ async fn the_owner_lists_its_own_devices() {
 
     assert_eq!(
         listed,
-        vec![(phone, None), (laptop, Some(now() - Duration::hours(2)))],
+        vec![(phone, None), (laptop, Some(used))],
         "the laptop is signed in, the phone isn't"
     );
 }

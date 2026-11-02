@@ -61,7 +61,7 @@ use domain::auth::{
     RESEND_WINDOW, Registration, RevokedReason, SIGNUP_CODE_TTL, Session, SessionKind,
     SessionNotifier, Sessions, SignInAccount, SignInAccounts, SignUps, SignupCodes, SignupMailer,
 };
-use domain::identity::{Handle, InstanceOrigin, UsernameChoice};
+use domain::identity::{Bearer, Handle, InstanceOrigin, UsernameChoice};
 use domain::profile::DisplayName;
 use domain::{InvitationId, SessionId, UserId};
 use time::OffsetDateTime;
@@ -167,6 +167,18 @@ pub(crate) async fn end_session(
         notifier.ended(&session);
     }
     Ok(())
+}
+
+/// The session a live token belongs to. One gone since the token was checked is unexpected —
+/// never read as a session that named no device, which would lift the device's limits.
+pub(crate) async fn calling_session(
+    sessions: &dyn Sessions,
+    bearer: &Bearer,
+) -> Result<Session, AuthError> {
+    sessions
+        .find(bearer.session)
+        .await?
+        .ok_or_else(|| AuthError::Unexpected(anyhow::anyhow!("the calling session is gone")))
 }
 
 /// Closes what hangs on each of the sessions just ended.

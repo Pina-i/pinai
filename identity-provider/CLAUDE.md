@@ -211,15 +211,16 @@ connections ──► (no internal deps)
 | `POST /api/keys/packages/claim/devices` | One KeyPackage of each of `actor_uri`'s unrevoked devices that has any, as `{ claims: [...] }`, so a contact's first add brings every device of theirs in. Asked, proxied, rate-limited, admitted and notified as `/claim` is; none at all → 409 |
 | `POST /api/keys/packages/claim` | Atomically reserve one KeyPackage for `actor_uri` — of `device_id`, or of any unrevoked device with some left, named in the answer. Bearer requests for a remote `actor_uri` are sent to the target's IdP signed as the user; its 404 / 409 / 429 come back as they are, and a peer that fails to answer is 502. Bearer or HTTP-Sig; 60 claims then one a second per requester (429); peer requests for remote targets are refused (400). No KeyPackage left → 409. A claimer the account doesn't admit → 403 `Can't add this person`, before a package is taken (one's own packages always). A claim that leaves a device at the refill threshold, or finds none, pushes `key_packages_low` to the owner's live sessions, which top their own device up |
 | `GET /api/keys/packages/status` | Per-device available KeyPackage counts + `needs_refill` flag |
-| `GET /api/keys/devices` | List the caller's devices (Bearer-auth) — `device_id`, `display_name`, `kind`, `paired_at`, `last_seen_at`, `revoked_at`, `signed_in` and `last_active_at` (a live session of it, and its last use), `attestation_expires_at` (when the device's DRK attestation expires, for renewal scheduling — the text the attestation signed), and what another device of the account needs to verify the chain JWKS → attestation → DRK → HPKE key itself: `drk_public_key`, `attestation_signature`, `attestation_kid`, `hpke_public_key`, `hpke_key_signature` (base64; `null` for a device with no DRK registered, or no HPKE key). |
+| `GET /api/keys/devices` | List the caller's devices (Bearer-auth) — `device_id`, `display_name`, `kind`, `paired_at`, `last_seen_at`, `revoked_at`, `signed_in` and `last_active_at` (a live session of it, and its last use), `attestation_expires_at` (when the device's DRK attestation expires, for renewal scheduling — the text the attestation signed), and what another device of the account needs to verify the chain JWKS → attestation → DRK → HPKE key itself: `drk_public_key`, `attestation_signature`, `attestation_kid`, `hpke_public_key`, `hpke_key_signature` (base64; `null` for a device with no DRK registered, or no HPKE key); `history_generation`, the history key's generation the device says it holds (`null` until it says) — the client compares it with the current one. |
+| `PUT /api/keys/devices/:device_id/history-key` | Bearer-auth. `{ generation }`: the device says it holds that generation of the account's history key, from its own session only — one that named this very device (`403 device_required` when it named none, `403 device_mismatch` when another); an unrevoked device of the caller's (`403` revoked, `404` another account's or unknown); the current generation (`409 stale_history_key`, none set yet included), all `domain::e2ee::may_report_history_key`. The write is checked again under the key row's lock (`check_history_generation`). `204` |
 | `POST /api/keys/devices/:device_id/revoke` | Revoke the caller's device (Bearer-auth, a recent password): its sessions end first (`device_revoked` — tokens, refresh tokens, sockets with `1008`), then the directory flag complementing MLS Remove commits — its KeyPackages are never claimed again — and its HPKE key cleared in the same write. 404 for another account's device. |
 | `PUT /api/sessions/current/device` | Bearer-auth. `{ device_id }`: the session names the E2EE device it signed in, ending that device's other session (`replaced`). 403 for a device not the caller's, or revoked; a session that names a device is never pointed at another: 403 `device_mismatch` (`domain::e2ee::may_name`), the same one again 204. A device whose storage was wiped comes back from a new session (`identity-provider/specs/auth.md § 1`, "Sessions and devices") |
 | `DELETE /api/sessions?keep=current` | Bearer-auth, a recent password. Ends every session of the account but the caller's (`signed_out_elsewhere`); 400 without `keep=current` |
-| `POST /api/history/messages` | Batch upload of encrypted plaintext archive entries (1–50). Only for conversations the caller is or was a member of (403); idempotent upsert on `(user_id, id)`, answering how many were new. |
+| `POST /api/history/messages` | `{ generation, entries }`: batch upload of encrypted plaintext archive entries (1–50), sealed under the history key's current generation — any other, or none set yet, is `409 stale_history_key`, checked again under the key row's lock as the entries are written, so a new generation set meanwhile erases them or refuses them. Only for conversations the caller is or was a member of (403); idempotent upsert on `(user_id, id)`, answering how many were new. |
 | `GET /api/history/messages?after_id=&after_created_at=&limit=` | Keyset-paginated download of the user's encrypted archive `(created_at DESC, id DESC)`, 100 a page by default, at most 500; `next_cursor` is null only on an empty page. |
-| `DELETE /api/history/messages` | Wipe the user's archive (Settings → Clear). Bearer-auth, a recent password. |
-| `GET /api/history/salt` | Return the per-user salt for Argon2id HAK derivation, or 404 when unset. |
-| `POST /api/history/salt` | Idempotent set-once. Multi-device race-safe via `COALESCE` — loser receives the winning device's salt. |
+| `DELETE /api/history/messages` | Wipe the user's archive (Settings → Clear). Bearer-auth, a recent password. The history key and its generation stay. |
+| `GET /api/history/key` | The account's history key: `{ generation, salt, check_value, approval_public_key, set_by_device }` (base64 for bytes; `set_by_device` the device whose session set it, `null` only once its row is gone), `404` before the first. The check value is `HMAC-SHA256(key = HAK, message = "pinai/history-archive/check-v1")`; the approval public key is the Ed25519 public key whose 32-byte seed is `HKDF-SHA256(ikm = HAK, info = "pinai/device-approval/v1")`, with no salt — both the client's, never computed here (`identity-provider/specs/e2ee.md § 3.7`) |
+| `PUT /api/history/key` | `{ generation, salt, check_value, approval_public_key }` (16, 32, 32 bytes; `400` otherwise), from a session that named its device (`403 device_required` otherwise), recorded as `set_by_device`: only the generation right after the current one, 1 when none (`HistoryGeneration::follows`) — a compare-and-set, so two devices setting the same one make one; the other is `409 history_key_conflict` with `current_generation` (0 for none). The very key held already is a retry: `204`, nothing written. Generation 1 takes no recent password, a later one does (`401 insufficient_user_authentication`) — `domain::e2ee::may_set_history_key`. One transaction: the row replaced, the account's `history_messages` erased. `204` |
 | `POST /api/mls/groups/:conversation_id/commits` | Append an MLS Commit at the next epoch (Bearer; active members only, 403). Returns `409` with the winning commit on epoch race; an unknown conversation is 404 at any epoch — a conversation exists before its MLS group. Pushed to every local member, sent to the remote ones — a group's with its `mlsGroup` roster, so it lands even ahead of the Welcome that would bring the group there. |
 | `GET /api/mls/groups/:conversation_id/commits?since=:epoch` | Catch-up: every commit `> since` in epoch order, 256 a page with `has_more` (Bearer; member-gated) |
 | `GET /api/mls/welcomes?device_id=:uuid` | Atomically claim every pending Welcome targeted at the calling device (Bearer; per-device to keep multi-device users from racing each other) |
@@ -408,16 +409,20 @@ user_devices             — per-device metadata (display_name, kind — parsed 
                             whole seconds; the expiry is the text signed) and the HPKE key the
                             DRK signed (hpke_public_key, hpke_key_signature: both or neither,
                             only with a DRK; cleared when the DRK rotates without a new one, and
-                            when the device is revoked)
-users.history_archive_salt
-                            — Phase 7 per-user random salt for Argon2id HAK derivation.
-                            Set once via idempotent `POST /api/history/salt`; never
-                            overwritten.
-history_messages         — Phase 7 server-side encrypted plaintext archive
-                            (user_id, id, conversation_id, ciphertext, nonce, client_message_id,
-                            created_at). Primary key `(user_id, id)` for idempotent upserts.
-                            Server stores opaque ciphertexts; clients derive HAK from the
-                            user's passphrase + salt and encrypt every decrypted plaintext.
+                            when the device is revoked); history_generation: the history key's
+                            generation the device says it holds
+history_keys             — the account's history key, one row per account, none until its first
+                            device sets one (generation > 0, salt 16 bytes, check_value 32,
+                            approval_public_key 32, set_at, set_by_device: the device the
+                            setting session named — a session naming none sets no key):
+                            replaced only by the next generation, which erases the account's
+                            history_messages in the same transaction
+history_messages         — the server-side encrypted plaintext archive (user_id, id,
+                            conversation_id, ciphertext, nonce, client_message_id, created_at).
+                            Primary key `(user_id, id)` for idempotent upserts. Opaque
+                            ciphertexts of the current generation only: clients derive the HAK
+                            from the account's passphrase and the generation's salt and
+                            encrypt every decrypted plaintext; an upload names its generation
 conversation_events      — a group's changes as its conversation shows them (kind, actor_uri,
                             subject_uri, detail, created_at = the change's stamp)
 mls_commits              — per-conversation MLS commit log (UNIQUE(conversation_id, epoch))
@@ -452,7 +457,8 @@ archive under HAK).
   history backup, giving a member a password reset link — takes the `RecentlySignedIn`
   extractor: the token's `auth_time` within `RECENT_SIGN_IN` (10 min), else
   `401 insufficient_user_authentication` (RFC 9470) (`identity-provider/specs/auth.md § 1`
-  "Sensitive actions")
+  "Sensitive actions"). Replacing the history key asks it past generation 1 only, a rule of the
+  domain's (`may_set_history_key`) on the same `Bearer::signed_in_recently`
 - A refresh token is never stored, only its SHA-256; nor is an invitation's token or a password
   reset link's, whose paths (`/i/{token}`, `/r/{token}`) the request log writes as `/i/…`, `/r/…`
 - Only admins list the members and make password reset links for them (`AuthError::NotAdmin`,

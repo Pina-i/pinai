@@ -389,6 +389,8 @@ impl Application {
         let archive: Arc<dyn domain::e2ee::HistoryArchive> = Arc::new(
             infrastructure::postgres::PgHistoryArchive::new(pool.clone()),
         );
+        let history_keys: Arc<dyn domain::e2ee::HistoryKeys> =
+            Arc::new(infrastructure::postgres::PgHistoryKeys::new(pool.clone()));
         let commits: Arc<dyn domain::e2ee::CommitLog> =
             Arc::new(infrastructure::postgres::PgCommitLog::new(pool.clone()));
         let welcomes: Arc<dyn domain::e2ee::Welcomes> =
@@ -1008,6 +1010,11 @@ impl Application {
                 Arc::clone(&sessions),
                 Arc::clone(&session_notifier),
             )),
+            report_history_key: Arc::new(application::e2ee::ReportHistoryKey::new(
+                Arc::clone(&sessions),
+                Arc::clone(&devices),
+                Arc::clone(&history_keys),
+            )),
             upload_key_packages: Arc::new(application::e2ee::UploadKeyPackages::new(
                 key_package_policy,
                 devices,
@@ -1047,14 +1054,18 @@ impl Application {
             archive_messages: Arc::new(application::e2ee::ArchiveMessages::new(
                 Arc::clone(&accounts),
                 Arc::clone(&conversations),
+                Arc::clone(&history_keys),
                 Arc::clone(&archive),
             )),
             read_archive: Arc::new(application::e2ee::ReadArchive::new(Arc::clone(&archive))),
-            clear_archive: Arc::new(application::e2ee::ClearArchive::new(Arc::clone(&archive))),
-            load_archive_salt: Arc::new(application::e2ee::LoadArchiveSalt::new(Arc::clone(
-                &archive,
+            clear_archive: Arc::new(application::e2ee::ClearArchive::new(archive)),
+            load_history_key: Arc::new(application::e2ee::LoadHistoryKey::new(Arc::clone(
+                &history_keys,
             ))),
-            set_archive_salt: Arc::new(application::e2ee::SetArchiveSalt::new(archive)),
+            set_history_key: Arc::new(application::e2ee::SetHistoryKey::new(
+                Arc::clone(&sessions),
+                history_keys,
+            )),
             hub: Arc::clone(&hub),
             missed_events: Arc::new(infrastructure::presence::BrokerMissedEvents::new(
                 Arc::clone(&broker_arc),

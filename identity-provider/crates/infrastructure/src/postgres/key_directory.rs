@@ -1,12 +1,15 @@
 use anyhow::Context;
 use domain::e2ee::{
     Attest, Attestation, ClaimedKeyPackage, Device, DeviceLabel, DeviceRootKey, Devices,
-    HeldHpkeKey, HpkeKeyWrite, HpkePublicKey, KeyPackageBytes, KeyPackages, KeyStoreError,
-    NewKeyPackage, Revocation, RootKeySignature,
+    HeldHpkeKey, HistoryGeneration, Holding, HpkeKeyWrite, HpkePublicKey, KeyPackageBytes,
+    KeyPackages, KeyStoreError, NewKeyPackage, Revocation, RootKeySignature,
+    check_history_generation,
 };
 use domain::{DeviceId, UserId};
 use sqlx::{PgConnection, PgPool};
 use time::OffsetDateTime;
+
+use super::archive::locked_generation;
 
 /// `user_devices`.
 pub struct PgDevices {
@@ -21,7 +24,7 @@ impl PgDevices {
 
 const DEVICE_COLUMNS: &str = "device_id, user_id, display_name, kind, paired_at, last_seen_at, \
      revoked_at, drk_public_key, attestation_signature, attestation_kid, attestation_issued_at, \
-     attestation_expires_at, hpke_public_key, hpke_key_signature";
+     attestation_expires_at, hpke_public_key, hpke_key_signature, history_generation";
 
 #[derive(sqlx::FromRow)]
 struct DeviceRow {
@@ -39,6 +42,7 @@ struct DeviceRow {
     attestation_expires_at: Option<OffsetDateTime>,
     hpke_public_key: Option<Vec<u8>>,
     hpke_key_signature: Option<Vec<u8>>,
+    history_generation: Option<i32>,
 }
 
 impl TryFrom<DeviceRow> for Device {
@@ -88,6 +92,11 @@ impl TryFrom<DeviceRow> for Device {
             revoked_at: row.revoked_at,
             attestation,
             hpke_key,
+            history_generation: row
+                .history_generation
+                .map(|generation| HistoryGeneration::parse(generation.into()))
+                .transpose()
+                .context("user_devices.history_generation")?,
         })
     }
 }
@@ -250,6 +259,39 @@ impl Devices for PgDevices {
         } else {
             Revocation::NotFound
         })
+    }
+
+    async fn hold_history_key(
+        &self,
+        owner: UserId,
+        id: DeviceId,
+        generation: HistoryGeneration,
+    ) -> Result<Holding, KeyStoreError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .context("begin holding a history key")?;
+        let current = locked_generation(&mut tx, owner).await?;
+        if check_history_generation(generation, current).is_err() {
+            return Ok(Holding::Stale);
+        }
+        let recorded = sqlx::query(
+            "UPDATE user_devices SET history_generation = $3 \
+             WHERE device_id = $1 AND user_id = $2 AND revoked_at IS NULL",
+        )
+        .bind(id.as_uuid())
+        .bind(owner.as_uuid())
+        .bind(generation.value())
+        .execute(&mut *tx)
+        .await
+        .context("record a device's history key")?
+        .rows_affected();
+        if recorded == 0 {
+            return Ok(Holding::Refused);
+        }
+        tx.commit().await.context("commit holding a history key")?;
+        Ok(Holding::Recorded)
     }
 }
 

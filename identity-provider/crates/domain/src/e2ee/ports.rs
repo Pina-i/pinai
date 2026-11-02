@@ -5,10 +5,10 @@ use crate::messaging::GroupSnapshot;
 use crate::{ConversationId, DeviceId, UserId};
 
 use super::{
-    Append, ArchiveCursor, ArchiveEntry, ArchiveSalt, ArchiveStoreError, Attestation,
-    AttestationExpiry, Claim, ClaimedKeyPackage, Commit, DeliveryStoreError, Device, DeviceLabel,
-    DeviceRootKey, Epoch, HpkeKeyWrite, KeyStoreError, NewArchiveEntry, NewCommit, NewKeyPackage,
-    NewWelcome, RemoteClaimError, RootKeySignature, Welcome, WelcomeBlob,
+    Append, ArchiveCursor, ArchiveEntry, ArchiveStoreError, Attestation, AttestationExpiry, Claim,
+    ClaimedKeyPackage, Commit, DeliveryStoreError, Device, DeviceLabel, DeviceRootKey, Epoch,
+    HeldHistoryKey, HistoryGeneration, HistoryKey, HpkeKeyWrite, KeyStoreError, NewArchiveEntry,
+    NewCommit, NewKeyPackage, NewWelcome, RemoteClaimError, RootKeySignature, Welcome, WelcomeBlob,
 };
 
 /// The devices accounts registered, and their attestations.
@@ -31,6 +31,15 @@ pub trait Devices: Send + Sync {
     ) -> Result<Attest, KeyStoreError>;
     /// Revoke the device and drop its HPKE key in one write: nothing encrypts to it again.
     async fn revoke(&self, owner: UserId, id: DeviceId) -> Result<Revocation, KeyStoreError>;
+    /// Record that the device holds `generation` of its owner's history key; only while that is
+    /// the owner's current generation (`check_history_generation`), and the device the owner's
+    /// and unrevoked.
+    async fn hold_history_key(
+        &self,
+        owner: UserId,
+        id: DeviceId,
+        generation: HistoryGeneration,
+    ) -> Result<Holding, KeyStoreError>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,6 +47,15 @@ pub enum Attest {
     Stored,
     /// The device changed since it was read: nothing was written.
     Stale,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Holding {
+    Recorded,
+    /// The generation is not the owner's current one: nothing was written.
+    Stale,
+    /// The device is revoked, or not the owner's: nothing was written.
+    Refused,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -198,16 +216,18 @@ pub trait MlsFederation: Send + Sync {
 }
 
 /// Each account's archive of the messages its devices decrypted, sealed under a key the server
-/// never sees, and the salt that key derives from.
+/// never sees.
 #[async_trait::async_trait]
 pub trait HistoryArchive: Send + Sync {
     /// Store the entries the owner does not hold yet — a sibling device may have archived the
-    /// same message first. How many were new.
+    /// same message first — while `generation` is the owner's current history key: a new one set
+    /// meanwhile refuses them or erases them, never keeps them.
     async fn store(
         &self,
         owner: UserId,
+        generation: HistoryGeneration,
         entries: &[NewArchiveEntry],
-    ) -> Result<usize, ArchiveStoreError>;
+    ) -> Result<Archived, ArchiveStoreError>;
     /// Newest first — `(created_at, id)` descending — strictly before `after`.
     async fn page(
         &self,
@@ -215,14 +235,41 @@ pub trait HistoryArchive: Send + Sync {
         after: Option<ArchiveCursor>,
         limit: usize,
     ) -> Result<Vec<ArchiveEntry>, ArchiveStoreError>;
-    /// Delete the owner's whole archive. How many entries went.
+    /// Delete the owner's whole archive; its key stays. How many entries went.
     async fn clear(&self, owner: UserId) -> Result<usize, ArchiveStoreError>;
-    async fn salt(&self, owner: UserId) -> Result<Option<ArchiveSalt>, ArchiveStoreError>;
-    /// Keep `salt` unless the owner has one already: the first device's wins, and every device
-    /// derives the same key. The salt now held.
-    async fn set_salt_once(
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Archived {
+    /// How many entries were new.
+    Stored(usize),
+    /// The generation named is not the owner's current one: nothing was stored.
+    Stale,
+}
+
+/// Each account's history key, one generation at a time.
+#[async_trait::async_trait]
+pub trait HistoryKeys: Send + Sync {
+    async fn current(&self, owner: UserId) -> Result<Option<HeldHistoryKey>, ArchiveStoreError>;
+    /// Make `key` the owner's history key if its generation follows the current one
+    /// ([`HistoryGeneration::follows`]), erasing the owner's archive in the same write: the
+    /// archive only ever holds the current generation. `set_by` is the device whose session set
+    /// it. The very key held already is a retry: nothing is written.
+    async fn replace(
         &self,
         owner: UserId,
-        salt: &ArchiveSalt,
-    ) -> Result<ArchiveSalt, ArchiveStoreError>;
+        key: &HistoryKey,
+        set_by: DeviceId,
+    ) -> Result<KeyReplace, ArchiveStoreError>;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyReplace {
+    /// How many archive entries went with the generation replaced.
+    Replaced { erased: usize },
+    /// `key` is the one held: a retry of the write that set it.
+    AlreadySet,
+    /// The key doesn't follow `current` (`None`: none set) — another device got there first, say.
+    /// Nothing was written.
+    Conflict(Option<HistoryGeneration>),
 }

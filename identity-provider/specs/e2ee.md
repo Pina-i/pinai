@@ -47,8 +47,8 @@ flowchart TB
         MLS --> Ratchet
     end
     subgraph history ["History backup layer (opt-out)"]
-        Pass["24-word passphrase<br/>(per device, local)"]
-        Salt["Per-user salt<br/>(server-stored)"]
+        Pass["24-word passphrase<br/>(the account's, kept on each device)"]
+        Salt["The generation's salt<br/>(server-stored)"]
         HAK["History Archive Key<br/>(Argon2id)"]
         Archive["Encrypted plaintext archive<br/>(server, opaque)"]
         Pass --> HAK
@@ -245,41 +245,88 @@ opened again.
 
 ### 3.6 24-word recovery passphrase
 
-A BIP-39 mnemonic generated client-side by an account's first device,
-on its first sign-in. Its only job is to derive the History Archive Key
-— losing it means losing past messages on a fresh device, not losing
-your account.
+A BIP-39 mnemonic of 24 words — 256 random bits — generated client-side by an account's first
+device, on its first sign-in. Its only job is to derive the History Archive Key — losing it means
+losing past messages on a fresh device, not losing your account.
 
-It belongs to the account, not to a device. A device signing in to an
-account that already has an archive (a history salt on the server) is
-asked for the words instead (`/onboarding/recovery-restore`, § 6.4):
-typing them restores the archive, and the device keeps them, so it
-archives under the same key from then on. "Start fresh on this device"
-leaves it without a passphrase: it reads its conversations from then on
-but archives nothing, until the words are entered from Settings →
-Devices → "Restore history". A device's passphrase is stored locally,
-encrypted under its AES-GCM key, for revealability in Settings →
+It belongs to the account, not to a device, and the account has one at a time, in
+**generations**: the first device makes generation 1, and a new passphrase — the next
+generation — is made only when the current one is lost: no device holds it and the words are
+gone. A new generation erases the archive (§ 3.8): what was saved under the lost passphrase could
+no longer be opened.
+
+```mermaid
+stateDiagram-v2
+    [*] --> None: the account is created
+    None --> G1: its first device sets generation 1
+    G1 --> G2: the passphrase lost — generation 2 (a recent password), the archive erased
+    G2 --> Gn: lost again — the next one, the same way
+```
+
+A device signing in to an account that has a history key (`GET /api/history/key`) is asked for
+the words instead (`/onboarding/recovery-restore`, § 6.4): typing them restores the archive, and
+the device keeps them, so it archives under the same key from then on. "Start fresh on this
+device" leaves it without a passphrase: it reads its conversations from then on but archives
+nothing, until the words are entered from Settings → Devices → "Restore history". A device's
+passphrase is stored locally, encrypted under its AES-GCM key, for revealability in Settings →
 Devices.
+
+A device says which generation it holds (`PUT /api/keys/devices/:device_id/history-key`), only for
+the current one and from its own session, once it has named its device
+(`PUT /api/sessions/current/device`, `identity-provider/specs/auth.md § 1`, "Sessions and
+devices"); `GET /api/keys/devices` lists each device's `history_generation`: a device holds the
+passphrase when that is the current generation.
 
 ### 3.7 History Archive Key (HAK)
 
-Derived from a passphrase and a per-user salt via Argon2id
-(`t=3, m=64 MiB, p=4, dkLen=32`). Salt is 16 bytes random, generated
-by the first device and stored server-side (`POST /api/history/salt`
-is idempotent set-once via `COALESCE`, so multi-device races converge
-on the first device's salt).
+Derived from the passphrase and its generation's salt via Argon2id
+(`t=3, m=64 MiB, p=4, dkLen=32`). The salt is 16 random bytes, made by the device that sets the
+generation and stored with it (`PUT /api/history/key`), so every device holding the passphrase
+derives the same HAK. Each generation has its own salt, so its own HAK.
 
-Each device of a user derives the same HAK as long as they share the
-passphrase. Different passphrases = different HAKs = different
-encrypted archives.
+A generation is set from a session that has named its device, and records that device
+(`set_by_device`): the account's other devices can tell which of them set it.
+
+The device setting a generation also derives two values from its HAK, stored with it. The
+server keeps them and hands them out; it never computes them.
+
+- **The check value**: `HMAC-SHA256(key = HAK, message = "pinai/history-archive/check-v1")`, the
+  message as ASCII bytes: 32 bytes. A device tells by it whether a passphrase is the current one:
+  it derives the HAK from the words and the current salt, and compares. A wrong passphrase is told
+  apart even when the archive is empty. The check value can't be used to brute-force the
+  passphrase: the passphrase is 256 random bits, 2²⁵⁶ guesses, each an Argon2id derivation.
+- **The approval public key**: the Ed25519 public key whose 32-byte seed is
+  `HKDF-SHA256(ikm = HAK, info = "pinai/device-approval/v1")`, with no salt. Only the devices
+  holding the passphrase have its private half; each of them checks the stored public half against
+  its own derivation.
+
+```mermaid
+flowchart LR
+    Words["24 words"] --> Argon["Argon2id"]
+    Salt["the generation's salt"] --> Argon
+    Argon --> HAK["HAK"]
+    HAK -->|"HMAC-SHA256, pinai/history-archive/check-v1"| Check["check value"]
+    HAK -->|"HKDF-SHA256, pinai/device-approval/v1 → Ed25519 seed"| Approval["approval public key"]
+    HAK -->|"AES-256-GCM"| Entries["archive entries"]
+```
 
 ### 3.8 Encrypted plaintext archive
 
-Every decrypted MLS application message gets re-encrypted under HAK
-with AES-256-GCM (fresh 12-byte nonce per entry) and batch-uploaded
-to the server. The server only sees opaque ciphertext + nonces. A
-device with the right passphrase + salt can paginate the archive and
-decrypt every entry; a device without the passphrase sees only bytes.
+Every decrypted MLS application message gets re-encrypted under HAK with AES-256-GCM (fresh
+12-byte nonce per entry) and batch-uploaded to the server, naming the generation it was sealed
+under. The server only sees opaque ciphertext + nonces. A device with the current passphrase can
+paginate the archive and decrypt every entry; a device without it sees only bytes.
+
+**The archive only ever holds the current generation's entries:**
+
+- An upload names its generation and is refused (`409 stale_history_key`) unless it is the
+  current one — and while the account has none: a device that missed a new generation mixes no
+  keys. It reads the key again (`GET /api/history/key`) and keeps its entries until it holds the
+  current passphrase.
+- A new generation erases the account's archive in the transaction that sets it. An upload under
+  way either commits first and is erased with the rest, or is refused.
+- Settings → Clear (`DELETE /api/history/messages`) erases the entries only: the key and its
+  generation stay, and every device goes on saving new messages under it.
 
 ---
 
@@ -287,8 +334,7 @@ decrypt every entry; a device without the passphrase sees only bytes.
 
 ```
 users                    — local accounts (actor_uri, inbox_url, display_name,
-                            username + NanoID suffix, avatar_url, pronouns, bio,
-                            history_archive_salt BYTEA NULL)
+                            username + NanoID suffix, avatar_url, pronouns, bio)
 remote_actors            — cache of federated users (inbox_url, avatar_url, TTL)
 conversations            — kind: dm | group, name
 conversation_members     — actor_uri, joined_at, left_at
@@ -303,13 +349,21 @@ user_devices             — per-device row, one per (user_id, device_id):
                             attestation_kid TEXT, attestation_issued_at,
                             attestation_expires_at (whole seconds, as signed),
                             hpke_public_key BYTEA, hpke_key_signature BYTEA
-                            (both or neither, and only with a drk_public_key)
+                            (both or neither, and only with a drk_public_key),
+                            history_generation INTEGER NULL (the history key's
+                            generation the device says it holds)
 key_packages             — single-use stash (per-device, expires_at, consumed_at)
+history_keys             — the account's history key, one row per account, none
+                            until its first device sets one: generation INTEGER
+                            (> 0), salt BYTEA (16), check_value BYTEA (32),
+                            approval_public_key BYTEA (32), set_at,
+                            set_by_device (the device whose session set it)
 history_messages         — PRIMARY KEY (user_id, id);
                             conversation_id, ciphertext BYTEA, nonce BYTEA,
                             client_message_id, created_at.
                             Server-opaque; idempotent upserts via
-                            ON CONFLICT DO NOTHING.
+                            ON CONFLICT DO NOTHING. Only the current
+                            generation's entries.
 
 mls_commits              — per-conversation commit log
                             UNIQUE (conversation_id, epoch)
@@ -329,7 +383,8 @@ All Bearer-auth except where noted. Cross-IdP paths use HTTP Signatures — see
 | Endpoint | Description |
 |---|---|
 | `POST /api/keys/devices` | Register/renew/rotate the caller's DRK attestation: `{ device_id, drk_public_key, hpke_public_key?, hpke_key_signature? }`, keys and signature in standard base64. Idempotent on `(device_id, drk_public_key)`. The device's HPKE key comes with the DRK's signature over its canonical bytes, both or neither (§ 3.3). A session that declared its device (`PUT /api/sessions/current/device`) registers that device only. First-time mint emits a `DeviceJoined` WS event to the user's other live sessions. Returns the signature, kid, issued_at, expires_at, and the canonical bytes the IdP signed so the client can re-verify locally |
-| `GET /api/keys/devices` | List the caller's devices with their attestation expiry (the client uses this to schedule silent renewals), and whether each is signed in: `signed_in`, `last_active_at`. With each device, what another device needs to verify its keys itself (§ 3.3): `drk_public_key`, `attestation_signature`, `attestation_kid`, `attestation_expires_at` — the text the attestation signed —, `hpke_public_key`, `hpke_key_signature`; `null` where the device has registered no DRK, or no HPKE key |
+| `GET /api/keys/devices` | List the caller's devices with their attestation expiry (the client uses this to schedule silent renewals), and whether each is signed in: `signed_in`, `last_active_at`. With each device, what another device needs to verify its keys itself (§ 3.3): `drk_public_key`, `attestation_signature`, `attestation_kid`, `attestation_expires_at` — the text the attestation signed —, `hpke_public_key`, `hpke_key_signature`; `null` where the device has registered no DRK, or no HPKE key. And `history_generation`, the history key's generation the device says it holds (§ 3.6), `null` until it says: the client compares it with the current generation |
+| `PUT /api/keys/devices/:device_id/history-key` | `{ generation }`: the device says it holds that generation of the account's history key (§ 3.6). Only from the device's own session: one that has named this very device (`403 device_required` when it named none, `403 device_mismatch` when another; below). The current generation only (`409 stale_history_key`, none set yet included, checked again as it is written); an unrevoked device of the caller's only (`403` revoked, `404` another account's or unknown). `204` |
 | `POST /api/keys/devices/:device_id/revoke` | Signs the device out — its sessions end (`identity-provider/specs/auth.md § 1`, "Sessions and devices") — then sets the directory-level revocation flag and clears the device's HPKE key; the MLS Remove commits follow. Takes a password typed in the last 10 minutes (`identity-provider/specs/auth.md § 1`, "Sensitive actions"). Idempotent; `404` for a device that is not the caller's |
 | `POST /api/keys/packages` | Upload a batch of KeyPackages for one of the caller's devices — refused whole (`400`) when a package is empty or not base64, or would take the device past the cap. An `expires_at` already past or beyond the lifetime (`E2EE_KEYPACKAGE_LIFETIME_SECS`) is the device's clock being off, not a bad package: the IdP stores it as now + the lifetime, by its own clock |
 | `POST /api/keys/packages/claim` | Atomically reserve one KeyPackage for `actor_uri` — of `device_id`, or of any device with some left. Bearer or HTTP-Sig (peer IdPs); for remote `actor_uri` the local IdP proxies to the target IdP via HTTP-Sig |
@@ -343,9 +398,11 @@ All Bearer-auth except where noted. Cross-IdP paths use HTTP Signatures — see
   leaves that device untouched.
 - **A session is limited to the device it declared.** Once a session names its device
   (`identity-provider/specs/auth.md § 1`, "Sessions and devices"), registering any other device
-  id from it — attested or not, new or not — is refused with `403 device_mismatch` "This session
-  signed in another device", and changes nothing: a stolen token can't take a device over. A
-  session that names no device yet registers any device of the account.
+  id from it — attested or not, new or not —, or saying another device holds the history key, is
+  refused with `403 device_mismatch` "This session signed in another device", and changes
+  nothing: a stolen token can't take a device over. A session that names no device yet registers
+  any device of the account, but neither sets the history key nor says a device holds it:
+  `403 device_required` "Name this session's device first".
 - **A device's HPKE key is its DRK's.** A registration bringing one is refused (`400`) when only
   one of `hpke_public_key` and `hpke_key_signature` is sent, or when the DRK sent with it doesn't
   verify the signature over the key's canonical bytes for this device of this account; nothing is
@@ -424,11 +481,20 @@ and they hold for what peers deliver as much as for local clients.
 
 | Endpoint | Description |
 |---|---|
-| `POST /api/history/salt` | Idempotent set-once via `COALESCE`. Multi-device race-safe — the loser receives the winner's salt |
-| `GET /api/history/salt` | Returns `{salt_base64}` or 404 when unset |
-| `POST /api/history/messages` | Batch upload of 1 to 50 entries (`400` otherwise; a nonce is 12 bytes). Every `conversation_id` must be one the caller is or was a member of — leaving a group keeps the history already read — or the batch is refused whole (`403`). Idempotent upsert on `(user_id, id)` — first decryptor of a message wins; subsequent uploads from the user's other devices no-op. Answers `{ inserted }`, how many were new |
+| `GET /api/history/key` | The account's history key (§ 3.6–3.7): `{ generation, salt, check_value, approval_public_key, set_by_device }`, bytes in standard base64; `set_by_device` is the device whose session set the generation (`null` only once that device's row is gone). `404` before its first device sets one |
+| `PUT /api/history/key` | `{ generation, salt, check_value, approval_public_key }` — 16, 32 and 32 bytes, standard base64 (`400` otherwise). From a session that has named its device (`403 device_required` otherwise), which the key records as `set_by_device`. Set only for the generation right after the current one, 1 when there is none: a compare-and-set, so two devices setting the same generation make one, and the other is answered `409 history_key_conflict` with `current_generation` (`0` for none). The very key held already — the same generation, salt, check value and approval key — is a retry: `204`, nothing written. Generation 1 takes no recent password; any later one does, as it erases the archive (`identity-provider/specs/auth.md § 1`, "Sensitive actions"). In one transaction: the key replaced, the account's archive erased. `204` |
+| `POST /api/history/messages` | `{ generation, entries }`: a batch of 1 to 50 entries (`400` otherwise; a nonce is 12 bytes), sealed under `generation` — the current one only (`409 stale_history_key`, also while none is set; § 3.8). Every `conversation_id` must be one the caller is or was a member of — leaving a group keeps the history already read — or the batch is refused whole (`403`). Idempotent upsert on `(user_id, id)` — first decryptor of a message wins; subsequent uploads from the user's other devices no-op. Answers `{ inserted }`, how many were new |
 | `GET /api/history/messages?after_id=&after_created_at=&limit=` | Keyset pagination over `(created_at DESC, id DESC)`, limit clamped 1..=500, default 100. `next_cursor` names the page's last entry, and is `null` only on an empty page; `after_id` and `after_created_at` (RFC 3339) go together (`400`) |
-| `DELETE /api/history/messages` | Wipe the user's archive. Settings → Devices → Clear. Takes a password typed in the last 10 minutes (`identity-provider/specs/auth.md § 1`, "Sensitive actions") |
+| `DELETE /api/history/messages` | Erase the user's archive. Settings → Devices → Clear. The history key and its generation stay: every device goes on saving under it. Takes a password typed in the last 10 minutes (`identity-provider/specs/auth.md § 1`, "Sensitive actions") |
+
+| Refusal | Status | `error` |
+|---|---|---|
+| No history key yet (`GET /api/history/key`) | `404` | `not_found` |
+| Setting the key, or saying a device holds it, from a session that named no device | `403` | `device_required` |
+| Saying another device than the session's holds the key | `403` | `device_mismatch` |
+| A generation that isn't the one right after the current one | `409` | `history_key_conflict`, with `current_generation` |
+| A generation past the first, the password not typed in the last 10 minutes | `401` | `insufficient_user_authentication` |
+| An upload, or a device's report, naming a generation that isn't the current one | `409` | `stale_history_key` |
 
 ### WebSocket events (server → client)
 
@@ -463,6 +529,8 @@ sequenceDiagram
     IdP->>IdP: sign canonical(actor, device, drk_pub, expires_at, kid)
     IdP-->>Web: {signature, kid, issued_at, expires_at, signed_message}
     Web->>IDB: store attestation
+    Web->>IdP: PUT /api/sessions/current/device {device_id}
+    IdP-->>Web: 204 (the session names its device)
     Web->>Web: generate initial KeyPackage batch (50)
     loop per KeyPackage
         Web->>Web: fresh leaf signing keypair
@@ -472,16 +540,20 @@ sequenceDiagram
     IdP->>IdP: persist KeyPackages
     Web->>Web: BIP-39 mnemonic → 24 words
     Web->>IDB: save passphrase (sealed)
-    Web->>Web: random 16-byte salt
-    Web->>IdP: POST /api/history/salt {salt}
-    IdP-->>Web: {salt} (stored)
+    Web->>Web: random 16-byte salt → HAK → check value, approval public key
+    Web->>IdP: PUT /api/history/key {generation: 1, salt, check_value, approval_public_key}
+    IdP-->>Web: 204
+    Web->>IdP: PUT /api/keys/devices/:device_id/history-key {generation: 1}
     Web->>U: show 24 words on RecoverySetupPage
     U->>Web: Continue / Skip → /home
 ```
 
-The user is now able to send and receive E2EE messages. The salt + a
-locally-stored passphrase mean every future decrypted message will be
-archived to `/api/history/messages` under HAK.
+The session names its device right after registering it: setting
+generation 1 and saying the device holds it both take a session that has
+named its device (§ 3.6). The user is now able to send and receive E2EE
+messages. The history key's generation 1 and the locally-stored passphrase
+mean every future decrypted message will be archived to
+`/api/history/messages` under HAK.
 
 ### 6.2 Same user signs in on a second device
 
@@ -496,9 +568,11 @@ sequenceDiagram
     Mobile->>Mobile: gen DRK, store locally
     Mobile->>IdP: POST /api/keys/devices
     IdP-->>Mobile: attestation
+    Mobile->>IdP: PUT /api/sessions/current/device {device_id}
+    IdP-->>Mobile: 204 (the session names its device)
     Mobile->>IdP: POST /api/keys/packages (initial batch)
-    Mobile->>IdP: GET /api/history/salt
-    IdP-->>Mobile: salt (the account has an archive)
+    Mobile->>IdP: GET /api/history/key
+    IdP-->>Mobile: the history key (the account has one)
     Note over Mobile: asks for the account's 24 words (§ 6.4)<br/>or starts fresh, without a passphrase
     IdP-->>Laptop: WS device_joined {actor, new_device_id, drk_pub}
     Laptop->>Laptop: useDeviceFanout.onDeviceJoined
@@ -571,7 +645,7 @@ sequenceDiagram
     participant IdP
     participant Receiver
     participant Buffer as Local archive buffer
-    participant Salt as Server-side salt
+    participant Key as History key
 
     Sender->>IdP: POST /api/dm {mls_ciphertext}
     IdP->>IdP: persist row, fan out
@@ -583,13 +657,13 @@ sequenceDiagram
     Buffer->>Receiver: derive HAK if not cached
     alt HAK not yet derived
         Receiver->>Receiver: load passphrase from IDB
-        Receiver->>Salt: GET /api/history/salt
+        Receiver->>Key: GET /api/history/key
         Receiver->>Receiver: Argon2id(passphrase, salt) → HAK (cached)
     end
     loop per buffered entry
         Receiver->>Receiver: AES-GCM encrypt(plaintext, HAK, fresh nonce)
     end
-    Receiver->>IdP: POST /api/history/messages {batch}
+    Receiver->>IdP: POST /api/history/messages {generation, batch}
 ```
 
 The server only sees the MLS ciphertext (per-message) and later the
@@ -614,33 +688,44 @@ via Settings → Devices → "Restore history."
 sequenceDiagram
     participant U as User
     participant Web as New device
+    participant IDB as IndexedDB
     participant IdP
     participant Store as dm slice
 
     U->>Web: type 24 words
-    Web->>IdP: GET /api/history/salt
-    IdP-->>Web: {salt}
-    Web->>Web: Argon2id(passphrase, salt) → candidate HAK
-    loop until next_cursor is null
-        Web->>IdP: GET /api/history/messages?after_id=&after_created_at=
-        IdP-->>Web: {entries, next_cursor}
-        loop per entry
-            Web->>Web: AES-GCM decrypt(ciphertext, candidate HAK, nonce)
-            alt auth tag valid
-                Web->>Store: pushDmMessage(conversation_id, parsed Message)
-                Note over Web: restored++
-            else auth tag fails
-                Note over Web: wrong passphrase or other user's entry<br/>skipped++
+    Web->>IdP: GET /api/history/key
+    IdP-->>Web: {generation, salt, check_value, approval_public_key, set_by_device}
+    Web->>Web: Argon2id(words, salt) → candidate HAK → its check value
+    alt the check value differs
+        Web->>U: "Wrong passphrase"
+    else it matches
+        Web->>IDB: save the words and their generation (sealed)
+        Web->>IdP: PUT /api/keys/devices/:device_id/history-key {generation}
+        IdP-->>Web: 204
+        loop until next_cursor is null
+            Web->>IdP: GET /api/history/messages?after_id=&after_created_at=
+            IdP-->>Web: {entries, next_cursor}
+            loop per entry
+                Web->>Web: AES-GCM decrypt(ciphertext, HAK, nonce)
+                alt auth tag valid
+                    Web->>Store: pushDmMessage(conversation_id, parsed Message)
+                    Note over Web: restored++
+                else auth tag fails
+                    Note over Web: a damaged entry, skipped++
+                end
             end
         end
+        Web->>U: toast "Restored N messages" / "No archive"
     end
-    Web->>U: toast "Restored N messages" / "Wrong passphrase" / "No archive"
 ```
 
-A wrong passphrase manifests as every entry failing the AES-GCM auth-tag
-check — the result is `{restored: 0, skipped: N>0}`, which the UI
-distinguishes from `{restored: 0, skipped: 0}` (no archive on the server)
-and reports as "wrong passphrase."
+The words are checked before anything is read: the HAK derived from them and the generation's
+salt must give the generation's check value (§ 3.7). A mismatch is "Wrong passphrase", whether
+the archive holds entries or not, and nothing is kept. A match keeps the words with their
+generation, says the device holds it, then pages the archive under the HAK. Every entry is the
+current generation's (§ 3.8), so one failing its auth tag is damaged and skipped — never a sign of
+a wrong passphrase —, and an empty archive restores nothing: "No archive". An account with no
+history key (`404`) has nothing to restore.
 
 ### 6.5 Sending a message to a new contact
 
@@ -856,6 +941,7 @@ PINAI-DEVICE-HPKE-v1\n
 
 ```json
 {
+  "generation": 2,
   "entries": [
     {
       "id": "<uuid; matches direct_messages.id>",
@@ -868,7 +954,9 @@ PINAI-DEVICE-HPKE-v1\n
 }
 ```
 
-`ciphertext` is the AES-256-GCM encryption of the JSON-serialised
+`generation` names the history key's generation the entries were sealed
+under: an upload under any other generation is `409 stale_history_key`
+(§ 3.8). `ciphertext` is the AES-256-GCM encryption of the JSON-serialised
 `ApplicationMessage` under HAK with `nonce`. The JSON includes a
 domain-specific replacer for `Uint8Array` fields (attachment AES keys
 + nonces) so they round-trip through serialization.
@@ -912,12 +1000,12 @@ flowchart LR
         MC["mls_commits"]
         MW["mls_welcomes"]
         HM["history_messages:<br/>opaque archive"]
-        US["users.history_archive_salt"]
+        HK["history_keys:<br/>generation, salt, check value,<br/>approval public key"]
     end
     att -.->|attests| KP
     pass -.->|derives| hist
     hist -.->|encrypts to| HM
-    US -.->|salts derive of| hist
+    HK -.->|salts the derivation of| hist
 ```
 
 Two persistence boundaries:
@@ -931,7 +1019,8 @@ Two persistence boundaries:
   two accounts sharing a browser are two devices, and signing in as
   one never erases the other's.
 - **Server Postgres** holds opaque material only — MLS ciphertexts,
-  base64'd KeyPackages, encrypted history archive entries, salts (not
+  base64'd KeyPackages, encrypted history archive entries, the history
+  keys' salts, check values and approval public keys (none of them
   secret), public attestation columns. Read access to the database
   yields no plaintext message content.
 

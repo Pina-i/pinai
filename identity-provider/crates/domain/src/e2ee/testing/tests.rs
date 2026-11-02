@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use super::*;
 
 fn store() -> InMemoryKeyDirectory {
@@ -40,6 +42,18 @@ async fn a_registration_decided_on_a_stale_read_writes_nothing() {
 #[tokio::test]
 async fn a_revoked_device_holds_no_hpke_key() {
     contract::a_revoked_device_holds_no_hpke_key(&store(), UserId::generate()).await;
+}
+
+#[tokio::test]
+async fn a_device_records_the_current_history_generation_while_unrevoked() {
+    let (archive, devices) = history();
+    contract::a_device_records_the_current_history_generation_while_unrevoked(
+        &devices,
+        &*archive,
+        UserId::generate(),
+        UserId::generate(),
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -179,10 +193,19 @@ async fn claimed_welcomes_are_deleted_once_past_the_cutoff() {
     .await;
 }
 
+/// An archive, and a key directory checking reports against it.
+fn history() -> (Arc<InMemoryArchive>, InMemoryKeyDirectory) {
+    let archive = Arc::new(InMemoryArchive::default());
+    (archive.clone(), InMemoryKeyDirectory::keyed_by(archive))
+}
+
 #[tokio::test]
 async fn an_entry_is_archived_once_per_owner() {
+    let (archive, devices) = history();
     contract::an_entry_is_archived_once_per_owner(
-        &InMemoryArchive::default(),
+        &*archive,
+        &*archive,
+        &devices,
         UserId::generate(),
         UserId::generate(),
         ConversationId::generate(),
@@ -192,8 +215,11 @@ async fn an_entry_is_archived_once_per_owner() {
 
 #[tokio::test]
 async fn the_archive_pages_newest_first_before_a_cursor() {
+    let (archive, devices) = history();
     contract::the_archive_pages_newest_first_before_a_cursor(
-        &InMemoryArchive::default(),
+        &*archive,
+        &*archive,
+        &devices,
         UserId::generate(),
         ConversationId::generate(),
     )
@@ -201,9 +227,12 @@ async fn the_archive_pages_newest_first_before_a_cursor() {
 }
 
 #[tokio::test]
-async fn clearing_an_archive_deletes_its_owners_entries_only() {
-    contract::clearing_an_archive_deletes_its_owners_entries_only(
-        &InMemoryArchive::default(),
+async fn clearing_an_archive_deletes_its_owners_entries_and_keeps_the_key() {
+    let (archive, devices) = history();
+    contract::clearing_an_archive_deletes_its_owners_entries_and_keeps_the_key(
+        &*archive,
+        &*archive,
+        &devices,
         UserId::generate(),
         UserId::generate(),
         ConversationId::generate(),
@@ -212,6 +241,53 @@ async fn clearing_an_archive_deletes_its_owners_entries_only() {
 }
 
 #[tokio::test]
-async fn the_first_salt_set_is_kept() {
-    contract::the_first_salt_set_is_kept(&InMemoryArchive::default(), UserId::generate()).await;
+async fn an_upload_is_stored_only_under_the_current_generation() {
+    let (archive, devices) = history();
+    contract::an_upload_is_stored_only_under_the_current_generation(
+        &*archive,
+        &*archive,
+        &devices,
+        UserId::generate(),
+        ConversationId::generate(),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_key_is_set_only_for_the_generation_after_the_current_one() {
+    let (archive, devices) = history();
+    contract::a_key_is_set_only_for_the_generation_after_the_current_one(
+        &*archive,
+        &devices,
+        UserId::generate(),
+        UserId::generate(),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn setting_the_key_held_again_is_a_retry_that_writes_nothing() {
+    let (archive, devices) = history();
+    contract::setting_the_key_held_again_is_a_retry_that_writes_nothing(
+        &*archive,
+        &*archive,
+        &devices,
+        UserId::generate(),
+        ConversationId::generate(),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_new_generation_erases_its_owners_archive_in_the_same_write() {
+    let (archive, devices) = history();
+    contract::a_new_generation_erases_its_owners_archive_in_the_same_write(
+        &*archive,
+        &*archive,
+        &devices,
+        UserId::generate(),
+        UserId::generate(),
+        ConversationId::generate(),
+    )
+    .await;
 }

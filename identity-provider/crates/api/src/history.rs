@@ -1,9 +1,9 @@
-//! The history archive — see identity-provider/specs/e2ee.md § 5.
+//! The history archive and its key — see identity-provider/specs/e2ee.md § 5.
 
 use std::sync::Arc;
 
 use application::e2ee::{
-    ArchiveMessages, ClearArchive, LoadArchiveSalt, ReadArchive, SetArchiveSalt,
+    ArchiveMessages, ClearArchive, LoadHistoryKey, ReadArchive, SetHistoryKey,
 };
 use axum::Json;
 use axum::extract::{Query, State};
@@ -11,18 +11,23 @@ use axum::http::StatusCode;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use domain::e2ee::{
-    ArchiveCursor, ArchiveEntry, ArchiveError, ArchiveNonce, ArchiveSalt, NewArchiveEntry,
+    ApprovalPublicKey, ArchiveCursor, ArchiveEntry, ArchiveError, ArchiveNonce, HeldHistoryKey,
+    HistoryCheckValue, HistoryGeneration, HistoryKey, HistorySalt, NewArchiveEntry,
 };
+use domain::identity::RECENT_SIGN_IN;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 use uuid::Uuid;
 
 use crate::ApiError;
-use crate::auth::{Authenticated, RecentlySignedIn};
+use crate::auth::{Authenticated, RecentlySignedIn, SignedIn};
+use crate::e2ee::{base64_field, device_required, stale_history_key};
 
 #[derive(Deserialize)]
 pub struct UploadRequest {
+    /// The history key's generation the entries are sealed under: the current one only.
+    generation: i64,
     entries: Vec<UploadEntry>,
 }
 
@@ -80,9 +85,53 @@ pub struct ClearedBody {
     deleted: usize,
 }
 
+/// The account's history key, bytes in standard base64, as `PUT` takes it.
 #[derive(Deserialize, Serialize)]
-pub struct SaltBody {
-    salt_base64: String,
+pub struct KeyBody {
+    generation: i64,
+    salt: String,
+    check_value: String,
+    approval_public_key: String,
+}
+
+impl TryFrom<KeyBody> for HistoryKey {
+    type Error = ApiError;
+
+    fn try_from(body: KeyBody) -> Result<Self, Self::Error> {
+        Ok(HistoryKey {
+            generation: HistoryGeneration::parse(body.generation)?,
+            salt: base64_field("salt", &body.salt, HistorySalt::parse)?,
+            check_value: base64_field("check_value", &body.check_value, HistoryCheckValue::parse)?,
+            approval_public_key: base64_field(
+                "approval_public_key",
+                &body.approval_public_key,
+                ApprovalPublicKey::parse,
+            )?,
+        })
+    }
+}
+
+/// The same, as `GET` answers it.
+#[derive(Serialize)]
+pub struct HeldKeyBody {
+    #[serde(flatten)]
+    key: KeyBody,
+    /// The device whose session set it.
+    set_by_device: Option<Uuid>,
+}
+
+impl From<HeldHistoryKey> for HeldKeyBody {
+    fn from(HeldHistoryKey { key, set_by }: HeldHistoryKey) -> Self {
+        Self {
+            key: KeyBody {
+                generation: key.generation.value().into(),
+                salt: B64.encode(key.salt.as_bytes()),
+                check_value: B64.encode(key.check_value.as_bytes()),
+                approval_public_key: B64.encode(key.approval_public_key.as_bytes()),
+            },
+            set_by_device: set_by.map(|device| device.as_uuid()),
+        }
+    }
 }
 
 fn rfc3339(at: OffsetDateTime) -> Result<String, ApiError> {
@@ -132,12 +181,13 @@ pub async fn upload(
     Authenticated(user): Authenticated,
     Json(body): Json<UploadRequest>,
 ) -> Result<Json<UploadedBody>, ApiError> {
+    let generation = HistoryGeneration::parse(body.generation)?;
     let entries = body
         .entries
         .into_iter()
         .map(NewArchiveEntry::try_from)
         .collect::<Result<Vec<_>, _>>()?;
-    let inserted = archive.execute(user, entries).await?;
+    let inserted = archive.execute(user, generation, entries).await?;
     Ok(Json(UploadedBody { inserted }))
 }
 
@@ -188,32 +238,24 @@ pub async fn clear(
     Ok(Json(ClearedBody { deleted }))
 }
 
-/// `GET /api/history/salt`
-pub async fn salt(
-    State(load): State<Arc<LoadArchiveSalt>>,
+/// `GET /api/history/key`
+pub async fn key(
+    State(load): State<Arc<LoadHistoryKey>>,
     Authenticated(user): Authenticated,
-) -> Result<Json<SaltBody>, ApiError> {
-    let salt = load.execute(user).await?;
-    Ok(Json(SaltBody {
-        salt_base64: B64.encode(salt.as_bytes()),
-    }))
+) -> Result<Json<HeldKeyBody>, ApiError> {
+    Ok(Json(load.execute(user).await?.into()))
 }
 
-/// `POST /api/history/salt`
-pub async fn set_salt(
-    State(set): State<Arc<SetArchiveSalt>>,
-    Authenticated(user): Authenticated,
-    Json(body): Json<SaltBody>,
-) -> Result<Json<SaltBody>, ApiError> {
-    let salt = B64
-        .decode(&body.salt_base64)
-        .map_err(|_| ApiError::bad_request("salt must be base64"))?;
-    let salt = ArchiveSalt::parse(&salt)
-        .map_err(|_| ApiError::bad_request("salt must be exactly 16 bytes"))?;
-    let held = set.execute(user, salt).await?;
-    Ok(Json(SaltBody {
-        salt_base64: B64.encode(held.as_bytes()),
-    }))
+/// `PUT /api/history/key` — the recent password a later generation takes is the use case's to
+/// ask, by the generation.
+pub async fn set_key(
+    State(set): State<Arc<SetHistoryKey>>,
+    SignedIn(bearer): SignedIn,
+    Json(body): Json<KeyBody>,
+) -> Result<StatusCode, ApiError> {
+    set.execute(&bearer, body.try_into()?, OffsetDateTime::now_utc())
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 impl From<ArchiveError> for ApiError {
@@ -225,7 +267,21 @@ impl From<ArchiveError> for ApiError {
                 "access_denied",
                 "not a member of one or more conversations",
             ),
-            ArchiveError::NoSalt => ApiError::not_found("no salt set"),
+            ArchiveError::NoKey => ApiError::not_found("No history key set"),
+            ArchiveError::Stale(_) => stale_history_key(),
+            ArchiveError::KeyConflict { current } => ApiError::new(
+                StatusCode::CONFLICT,
+                "history_key_conflict",
+                "The history key is at another generation",
+            )
+            .with(
+                "current_generation",
+                current.map_or(0, HistoryGeneration::value),
+            ),
+            ArchiveError::RecentSignInRequired => {
+                ApiError::insufficient_user_authentication(RECENT_SIGN_IN)
+            }
+            ArchiveError::DeviceRequired(_) => device_required(),
             ArchiveError::Unexpected(e) => ApiError::internal(e),
         }
     }

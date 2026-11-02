@@ -13,7 +13,7 @@ mod reach;
 mod settings;
 mod social;
 
-pub use archive::PgHistoryArchive;
+pub use archive::{PgHistoryArchive, PgHistoryKeys};
 pub use attachments::PgAttachments;
 pub use auth::{
     PgAuthorizationCodes, PgClientSignIns, PgInstanceMembers, PgInvitations, PgLoginTickets,

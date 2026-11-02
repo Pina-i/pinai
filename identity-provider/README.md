@@ -141,13 +141,14 @@ Paths only — the rules, bodies and status codes of each route are in `CLAUDE.m
 |---|---|---|
 | `GET` · `POST` | `/api/keys/devices` | List devices · register or renew one |
 | `POST` | `/api/keys/devices/{device_id}/revoke` | Revoke a device |
+| `PUT` | `/api/keys/devices/{device_id}/history-key` | Say a device holds the current history key |
 | `POST` | `/api/keys/packages` | Upload KeyPackages |
 | `POST` | `/api/keys/packages/claim` | Claim one (Bearer or HTTP Signature) |
 | `GET` | `/api/keys/packages/status` | KeyPackages left per device |
 | `POST` · `GET` | `/api/mls/groups/{conversation_id}/commits` | Append a commit · catch up |
 | `GET` · `POST` | `/api/mls/welcomes` | Claim this device's Welcomes · send one |
 | `POST` · `GET` · `DELETE` | `/api/history/messages` | The encrypted history archive |
-| `GET` · `POST` | `/api/history/salt` | Its per-user salt |
+| `GET` · `PUT` | `/api/history/key` | Its key, by generation |
 
 ### Realtime and presence
 

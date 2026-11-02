@@ -33,6 +33,7 @@ fn device(attested: Option<DeviceRootKey>) -> Device {
             expires_at: at + ATTESTATION_LIFETIME,
         }),
         hpke_key: None,
+        history_generation: None,
     }
 }
 

@@ -11,8 +11,8 @@ use application::auth::{
 };
 use application::e2ee::{
     AppendCommit, ArchiveMessages, CatchUpCommits, ClaimKeyPackage, ClaimWelcomes, ClearArchive,
-    KeyPackageStatus, ListDevices, LoadArchiveSalt, ReadArchive, ReceiveCommit, ReceiveWelcome,
-    RegisterDevice, RevokeDevice, SendWelcome, SetArchiveSalt, UploadKeyPackages,
+    KeyPackageStatus, ListDevices, LoadHistoryKey, ReadArchive, ReceiveCommit, ReceiveWelcome,
+    RegisterDevice, ReportHistoryKey, RevokeDevice, SendWelcome, SetHistoryKey, UploadKeyPackages,
 };
 use application::identity::{
     DescribeInstance, EditIntro, FindAccount, IntroInForce, SearchAccounts, ShowIntro, WebFinger,
@@ -262,9 +262,9 @@ impl TestApp {
             blocked_mimes: Vec::new(),
             blocked_extensions: Vec::new(),
         };
-        let keys = Arc::new(InMemoryKeyDirectory::default());
-        let delivery = Arc::new(InMemoryDelivery::default());
         let archive = Arc::new(InMemoryArchive::default());
+        let keys = Arc::new(InMemoryKeyDirectory::keyed_by(archive.clone()));
+        let delivery = Arc::new(InMemoryDelivery::default());
         let tracker = Arc::new(ConnectionTracker::default());
         let board = Arc::new(PresenceBoard::default());
         let audience = Arc::new(InMemoryAudience::default());
@@ -823,6 +823,11 @@ impl TestApp {
                 sign_in.sessions.clone(),
                 sign_in.ended.clone(),
             )),
+            report_history_key: Arc::new(ReportHistoryKey::new(
+                sign_in.sessions.clone(),
+                keys.clone(),
+                archive.clone(),
+            )),
             upload_key_packages: Arc::new(UploadKeyPackages::new(
                 key_policy,
                 keys.clone(),
@@ -856,11 +861,12 @@ impl TestApp {
                 accounts.clone(),
                 store.clone(),
                 archive.clone(),
+                archive.clone(),
             )),
             read_archive: Arc::new(ReadArchive::new(archive.clone())),
             clear_archive: Arc::new(ClearArchive::new(archive.clone())),
-            load_archive_salt: Arc::new(LoadArchiveSalt::new(archive.clone())),
-            set_archive_salt: Arc::new(SetArchiveSalt::new(archive)),
+            load_history_key: Arc::new(LoadHistoryKey::new(archive.clone())),
+            set_history_key: Arc::new(SetHistoryKey::new(sign_in.sessions.clone(), archive)),
             hub: Arc::new(connections::Hub::new()),
             missed_events: Arc::new(InMemoryMissedEvents::default()),
             connect: Arc::new(Connect::new(accounts.clone(), tracker.clone(), bus.clone())),
@@ -934,9 +940,30 @@ impl TestApp {
         caller: Option<UserId>,
         body: Option<Value>,
     ) -> (StatusCode, Value) {
+        let token = caller.map(|user| self.token(user));
+        self.call_with(token.as_deref(), method, uri, body).await
+    }
+
+    /// The same with `token`, for calls about the session it belongs to.
+    pub async fn call_in(
+        &self,
+        token: &str,
+        method: Method,
+        uri: &str,
+        body: Option<Value>,
+    ) -> (StatusCode, Value) {
+        self.call_with(Some(token), method, uri, body).await
+    }
+
+    async fn call_with(
+        &self,
+        token: Option<&str>,
+        method: Method,
+        uri: &str,
+        body: Option<Value>,
+    ) -> (StatusCode, Value) {
         let mut request = Request::builder().method(method).uri(uri);
-        if let Some(user) = caller {
-            let token = self.token(user);
+        if let Some(token) = token {
             request = request.header(header::AUTHORIZATION, format!("Bearer {token}"));
         }
         let request = match body {
@@ -963,6 +990,39 @@ impl TestApp {
     pub fn token_signed_in_at(&self, user: UserId, at: time::OffsetDateTime) -> String {
         let session = self.sign_in.sessions.live(user);
         self.tokens.issue_signed_in_at(user, session, at)
+    }
+
+    /// A token of `session`, the password typed there at `at`.
+    pub fn token_in_signed_in_at(
+        &self,
+        user: UserId,
+        session: domain::SessionId,
+        at: time::OffsetDateTime,
+    ) -> String {
+        self.tokens.issue_signed_in_at(user, session, at)
+    }
+
+    /// A session of `user`'s that registered a new device and named it: the session, the device.
+    pub async fn on_a_device(&self, user: UserId) -> (domain::SessionId, uuid::Uuid) {
+        let (session, device) = (self.sign_in.sessions.live(user), uuid::Uuid::new_v4());
+        let token = self.token_in(user, session);
+        let drk = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [7; 32]);
+        for (method, uri, body) in [
+            (
+                Method::POST,
+                "/api/keys/devices",
+                serde_json::json!({ "device_id": device, "drk_public_key": drk }),
+            ),
+            (
+                Method::PUT,
+                "/api/sessions/current/device",
+                serde_json::json!({ "device_id": device }),
+            ),
+        ] {
+            let (status, answer) = self.call_in(&token, method, uri, Some(body)).await;
+            assert!(status.is_success(), "{uri}: {answer}");
+        }
+        (session, device)
     }
 
     /// A request another instance signed, as `peer`, with the `Digest` of its body.

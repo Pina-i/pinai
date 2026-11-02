@@ -3,18 +3,17 @@
 use std::sync::Arc;
 
 use application::e2ee::{
-    ClaimKeyPackage, KeyPackageStatus, ListDevices, ListedDevice, RegisterDevice, RevokeDevice,
-    UploadKeyPackages,
+    ClaimKeyPackage, KeyPackageStatus, ListDevices, ListedDevice, RegisterDevice, ReportHistoryKey,
+    RevokeDevice, UploadKeyPackages,
 };
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
-use domain::ValidationError;
 use domain::e2ee::{
-    Claim, DeviceLabel, DeviceRootKey, HpkePublicKey, KeyDirectoryError, KeyPackageBytes,
-    NewKeyPackage, RootKeySignature, UnverifiedHpkeKey,
+    Claim, DeviceLabel, DeviceRootKey, HistoryGeneration, HpkePublicKey, KeyDirectoryError,
+    KeyPackageBytes, NewKeyPackage, RootKeySignature, UnverifiedHpkeKey,
 };
 use domain::identity::{ActorUri, Requester};
 use serde::{Deserialize, Serialize};
@@ -24,6 +23,7 @@ use uuid::Uuid;
 
 use crate::ApiError;
 use crate::auth::{Authenticated, CallerJson, RecentlySignedIn, SignedIn};
+use crate::e2ee::{base64_field, device_required, stale_history_key};
 use crate::rate_limit::RateLimiter;
 
 #[derive(Serialize)]
@@ -50,6 +50,8 @@ pub struct DeviceEntry {
     attestation_kid: Option<String>,
     hpke_public_key: Option<String>,
     hpke_key_signature: Option<String>,
+    /// The history key's generation the device says it holds.
+    history_generation: Option<i32>,
 }
 
 #[derive(Serialize)]
@@ -66,6 +68,11 @@ pub struct RegisterRequest {
     hpke_public_key: Option<String>,
     /// Standard base64 of the root key's 64-byte signature over the HPKE key's canonical bytes.
     hpke_key_signature: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct HistoryKeyHeld {
+    generation: i64,
 }
 
 #[derive(Serialize)]
@@ -164,20 +171,9 @@ impl From<ListedDevice> for DeviceEntry {
             attestation_kid: attestation.map(|a| a.kid.clone()),
             hpke_public_key: hpke_key.map(|h| B64.encode(h.key.as_bytes())),
             hpke_key_signature: hpke_key.map(|h| B64.encode(h.signature.as_bytes())),
+            history_generation: device.history_generation.map(HistoryGeneration::value),
         }
     }
-}
-
-/// The standard base64 in `field`, parsed into its domain type.
-fn base64_field<T>(
-    field: &'static str,
-    raw: &str,
-    parse: impl FnOnce(&[u8]) -> Result<T, ValidationError>,
-) -> Result<T, ValidationError> {
-    let bytes = B64
-        .decode(raw)
-        .map_err(|_| ValidationError::new(field, "must be base64"))?;
-    parse(&bytes)
 }
 
 fn rfc3339(at: OffsetDateTime) -> Result<String, ApiError> {
@@ -247,6 +243,20 @@ pub async fn revoke(
 ) -> Result<StatusCode, ApiError> {
     revoke
         .execute(bearer.user, device_id.into(), OffsetDateTime::now_utc())
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `PUT /api/keys/devices/{device_id}/history-key`
+pub async fn hold_history_key(
+    State(report): State<Arc<ReportHistoryKey>>,
+    SignedIn(bearer): SignedIn,
+    Path(device_id): Path<Uuid>,
+    Json(body): Json<HistoryKeyHeld>,
+) -> Result<StatusCode, ApiError> {
+    let generation = HistoryGeneration::parse(body.generation)?;
+    report
+        .execute(&bearer, device_id.into(), generation)
         .await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -405,6 +415,8 @@ impl From<KeyDirectoryError> for ApiError {
                 "device_mismatch",
                 "This session signed in another device",
             ),
+            KeyDirectoryError::DeviceRequired(_) => device_required(),
+            KeyDirectoryError::StaleHistoryKey(_) => stale_history_key(),
             KeyDirectoryError::UserNotFound => ApiError::not_found("User not found"),
             KeyDirectoryError::NoKeyPackage => {
                 ApiError::new(StatusCode::CONFLICT, "conflict", "no available KeyPackage")

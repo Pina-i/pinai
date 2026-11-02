@@ -6,7 +6,7 @@ use domain::e2ee::{Devices, may_name};
 use domain::identity::Bearer;
 use time::OffsetDateTime;
 
-use super::tell_ended;
+use super::{calling_session, tell_ended};
 
 /// `PUT /api/sessions/current/device`: the client names the E2EE device its session signed in,
 /// once that device's storage is open, so revoking the device signs it out. A device is signed
@@ -47,11 +47,7 @@ impl LinkDevice {
         if !usable {
             return Err(AuthError::DeviceRefused);
         }
-        let named = self
-            .sessions
-            .find(bearer.session)
-            .await?
-            .and_then(|session| session.device);
+        let named = calling_session(&*self.sessions, &bearer).await?.device;
         may_name(named, device)?;
         let replaced = self.sessions.link(bearer.session, device, now).await?;
         tell_ended(&*self.notifier, &replaced);

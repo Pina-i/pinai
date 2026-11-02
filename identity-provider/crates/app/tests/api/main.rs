@@ -9,6 +9,7 @@ mod federation;
 mod forgot_password;
 mod groups;
 mod helpers;
+mod history;
 mod intro;
 mod invitations;
 mod password_resets;

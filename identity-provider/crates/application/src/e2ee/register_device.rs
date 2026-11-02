@@ -10,6 +10,8 @@ use domain::e2ee::{
 use domain::identity::{Accounts, Bearer};
 use time::OffsetDateTime;
 
+use crate::auth::calling_session;
+
 /// A revoke or another registration may land between the read and the write: each attempt reads
 /// the device again.
 const ATTEMPTS: usize = 3;
@@ -59,14 +61,9 @@ impl RegisterDevice {
         now: OffsetDateTime,
     ) -> Result<Registered, KeyDirectoryError> {
         let owner = bearer.user;
-        let session = self
-            .sessions
-            .find(bearer.session)
+        let session = calling_session(&*self.sessions, bearer)
             .await
-            .map_err(|e| KeyDirectoryError::Unexpected(e.into()))?
-            .ok_or_else(|| {
-                KeyDirectoryError::Unexpected(anyhow::anyhow!("the registering session is gone"))
-            })?;
+            .map_err(|e| KeyDirectoryError::Unexpected(e.into()))?;
         may_register(session.device, device)?;
         let account = self.accounts.find(owner).await?.ok_or_else(|| {
             KeyDirectoryError::Unexpected(anyhow::anyhow!("the registering account is gone"))

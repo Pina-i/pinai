@@ -196,6 +196,7 @@ async fn the_callers_devices_are_listed_with_their_attestation_expiry() {
         "attestation_kid",
         "hpke_public_key",
         "hpke_key_signature",
+        "history_generation",
     ] {
         assert_eq!(devices[0][field], Value::Null, "{field}");
     }
@@ -591,6 +592,120 @@ async fn the_stash_status_reports_each_device_against_the_threshold() {
     );
 }
 
+impl World {
+    /// A token of a session of `who`'s that named a new device of theirs, and the device.
+    async fn on_a_device(&self, who: &Account) -> (String, Uuid) {
+        let (session, device) = self.app.on_a_device(who.id).await;
+        (self.app.token_in(who.id, session), device)
+    }
+
+    /// `who`'s history key at `generation`, set as generation after generation from `token`.
+    async fn history_key_at(&self, token: &str, generation: i64) {
+        for g in 1..=generation {
+            let (status, body) = self
+                .app
+                .call_in(
+                    token,
+                    Method::PUT,
+                    "/api/history/key",
+                    Some(json!({
+                        "generation": g,
+                        "salt": B64.encode([1; 16]),
+                        "check_value": B64.encode([2; 32]),
+                        "approval_public_key": B64.encode([3; 32]),
+                    })),
+                )
+                .await;
+            assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+        }
+    }
+
+    async fn hold(&self, token: &str, device: Uuid, generation: i64) -> (StatusCode, Value) {
+        self.app
+            .call_in(
+                token,
+                Method::PUT,
+                &format!("/api/keys/devices/{device}/history-key"),
+                Some(json!({ "generation": generation })),
+            )
+            .await
+    }
+}
+
+#[tokio::test]
+async fn a_device_says_it_holds_the_current_history_key_and_the_list_shows_it() {
+    let w = world();
+    let (laptops, laptop) = w.on_a_device(&w.alice).await;
+    let (_, phone) = w.on_a_device(&w.alice).await;
+    w.history_key_at(&laptops, 2).await;
+
+    let held = w.hold(&laptops, laptop, 2).await;
+
+    assert_eq!(held, (StatusCode::NO_CONTENT, Value::Null));
+    let devices = w.devices(&w.alice).await;
+    let generation_of = |device: Uuid| {
+        devices
+            .iter()
+            .find(|d| d["device_id"] == json!(device))
+            .expect("listed")["history_generation"]
+            .clone()
+    };
+    assert_eq!(generation_of(laptop), json!(2));
+    assert_eq!(generation_of(phone), Value::Null);
+}
+
+#[tokio::test]
+async fn a_report_is_refused_with_the_documented_errors() {
+    let w = world();
+    let (laptops, laptop) = w.on_a_device(&w.alice).await;
+    let (_, phone) = w.on_a_device(&w.alice).await;
+    let unnamed = w.app.token(w.alice.id);
+
+    let none_set = w.hold(&laptops, laptop, 1).await;
+    w.history_key_at(&laptops, 2).await;
+    let replaced = w.hold(&laptops, laptop, 1).await;
+    let not_one = w.hold(&laptops, laptop, 0).await;
+    let for_another = w.hold(&laptops, phone, 2).await;
+    let from_none = w.hold(&unnamed, laptop, 2).await;
+
+    let stale = (
+        StatusCode::CONFLICT,
+        refusal("stale_history_key", "Not the account's current history key"),
+    );
+    assert_eq!(none_set, stale);
+    assert_eq!(replaced, stale);
+    assert_eq!(
+        not_one,
+        (
+            StatusCode::BAD_REQUEST,
+            refusal(
+                "invalid_request",
+                "generation: must be from 1 to 2147483647"
+            )
+        )
+    );
+    assert_eq!(
+        for_another,
+        (
+            StatusCode::FORBIDDEN,
+            refusal("device_mismatch", "This session signed in another device")
+        )
+    );
+    assert_eq!(
+        from_none,
+        (
+            StatusCode::FORBIDDEN,
+            refusal("device_required", "Name this session's device first")
+        )
+    );
+    assert!(
+        w.devices(&w.alice)
+            .await
+            .iter()
+            .all(|d| d["history_generation"].is_null())
+    );
+}
+
 #[tokio::test]
 async fn the_key_directory_needs_a_signed_in_user() {
     let w = world();
@@ -598,6 +713,10 @@ async fn the_key_directory_needs_a_signed_in_user() {
     for (method, uri) in [
         (Method::GET, "/api/keys/devices"),
         (Method::GET, "/api/keys/packages/status"),
+        (
+            Method::PUT,
+            "/api/keys/devices/00000000-0000-0000-0000-000000000000/history-key",
+        ),
     ] {
         let (status, _) = w.app.call(method, uri, None, None).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "{uri}");
