@@ -8,14 +8,14 @@ use uuid::Uuid;
 use crate::helpers::{Account, TestApp, another_browser, spawn_app};
 
 /// A device as a client makes it: its root key and HPKE key registered, its session named.
-struct Device {
-    id: Uuid,
-    root: SigningKey,
-    session: Account,
+pub(crate) struct Device {
+    pub(crate) id: Uuid,
+    pub(crate) root: SigningKey,
+    pub(crate) session: Account,
 }
 
 impl Device {
-    async fn on(app: &TestApp, session: Account) -> Self {
+    pub(crate) async fn on(app: &TestApp, session: Account) -> Self {
         Self::named(app, session, "").await
     }
 
@@ -60,7 +60,7 @@ impl Device {
     }
 
     /// `signer`'s approval of this device, as identity-provider/specs/e2ee.md § 7.2 writes it.
-    fn approved_by(&self, signer: &SigningKey) -> String {
+    pub(crate) fn approved_by(&self, signer: &SigningKey) -> String {
         let signed = approval_bytes(&self.session.actor_uri, self.id, &self.drk());
         B64.encode(signer.sign(signed.as_bytes()).to_bytes())
     }
@@ -70,7 +70,7 @@ fn approval_bytes(actor: &str, device: Uuid, drk: &str) -> String {
     format!("PINAI-DEVICE-APPROVAL-v1\n{actor}\n{device}\n{drk}")
 }
 
-async fn approve(app: &TestApp, by: &Device, device: &Device) -> (StatusCode, Value) {
+pub(crate) async fn approve(app: &TestApp, by: &Device, device: &Device) -> (StatusCode, Value) {
     app.send(
         Method::POST,
         &by.session,

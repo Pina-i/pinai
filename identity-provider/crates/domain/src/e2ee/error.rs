@@ -27,6 +27,29 @@ pub enum KeyDirectoryError {
     SelfApproval,
     #[error("the approval's signature does not verify")]
     ApprovalUnsigned,
+    /// A share goes to another device: the sender holds the passphrase already.
+    #[error("a device shares the history key with another device")]
+    SelfShare,
+    /// A share is sealed for the recipient's HPKE key.
+    #[error("the device has registered no HPKE key")]
+    NoHpkeKey,
+    /// The sender hasn't said it holds the generation it shares.
+    #[error("the sending device does not hold the current history key")]
+    HistoryKeyNotHeld,
+    #[error("the device holds the current history key already")]
+    HistoryKeyHeld,
+    #[error("the sending device is not approved under the current history key")]
+    SenderNotApproved,
+    #[error("the device is not approved under the current history key")]
+    RecipientNotApproved,
+    /// A share comes from a device the recipient approved in a handshake: it approved that device
+    /// in return, so that is the device it trusts before it holds the passphrase.
+    #[error("only a device that approved this one shares the history key with it")]
+    NotTheApprover,
+    #[error("the share's signature does not verify")]
+    ShareUnsigned,
+    #[error("no key share for this device")]
+    NoKeyShare,
     #[error(transparent)]
     Request(#[from] RequestRefusal),
     #[error(transparent)]

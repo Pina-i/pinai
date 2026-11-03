@@ -421,3 +421,88 @@ async fn revoking_a_device_closes_the_requests_it_asks_or_answers() {
     )
     .await;
 }
+
+/// The stores a share is decided on, over one state as one database holds them.
+fn stores<'a>(
+    archive: &'a InMemoryArchive,
+    directory: &'a InMemoryKeyDirectory,
+) -> contract::ShareStores<'a> {
+    contract::ShareStores {
+        devices: directory,
+        approvals: directory,
+        keys: archive,
+        shares: directory,
+    }
+}
+
+#[tokio::test]
+async fn a_share_is_stored_once_per_recipient_and_generation_and_read_by_its_recipient() {
+    let (archive, directory) = history();
+    contract::a_share_is_stored_once_per_recipient_and_generation_and_read_by_its_recipient(
+        stores(&archive, &directory),
+        UserId::generate(),
+        UserId::generate(),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_holder_that_did_not_approve_the_recipient_shares_nothing() {
+    let (archive, directory) = history();
+    contract::a_holder_that_did_not_approve_the_recipient_shares_nothing(
+        stores(&archive, &directory),
+        UserId::generate(),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_share_is_stored_only_while_what_it_was_checked_on_holds() {
+    let (archive, directory) = history();
+    contract::a_share_is_stored_only_while_what_it_was_checked_on_holds(
+        stores(&archive, &directory),
+        UserId::generate(),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_new_generation_deletes_the_accounts_shares() {
+    let (archive, directory) = history();
+    contract::a_new_generation_deletes_the_accounts_shares(
+        stores(&archive, &directory),
+        UserId::generate(),
+        UserId::generate(),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn revoking_a_device_deletes_the_shares_it_sent_or_was_sent() {
+    let (archive, directory) = history();
+    contract::revoking_a_device_deletes_the_shares_it_sent_or_was_sent(
+        stores(&archive, &directory),
+        UserId::generate(),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_new_root_key_or_hpke_key_deletes_the_shares_it_no_longer_fits() {
+    let (archive, directory) = history();
+    contract::a_new_root_key_or_hpke_key_deletes_the_shares_it_no_longer_fits(
+        stores(&archive, &directory),
+        UserId::generate(),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn the_recipient_holding_the_generation_deletes_its_share() {
+    let (archive, directory) = history();
+    contract::the_recipient_holding_the_generation_deletes_its_share(
+        stores(&archive, &directory),
+        UserId::generate(),
+    )
+    .await;
+}

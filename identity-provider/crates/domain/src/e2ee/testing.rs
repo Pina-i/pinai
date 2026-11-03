@@ -1,6 +1,7 @@
 //! In-memory fakes of the E2EE ports and the contract every store must satisfy.
 
 mod approval;
+mod key_share;
 
 use std::sync::{Arc, Mutex};
 
@@ -13,14 +14,15 @@ use crate::identity::RemoteActor;
 use crate::messaging::GroupSnapshot;
 use crate::{CommitId, ConversationId, WelcomeId};
 
-pub use approval::{InMemoryApprovalRequests, RecordingApprovalNotifier, SentApproval};
+pub use approval::{InMemoryApprovalRequests, RecordingDeviceTrustNotifier, SentTrust};
+pub use key_share::sealed_share;
 
 use super::{
     Append, ArchiveCursor, ArchiveEntry, ArchiveStoreError, Archived, HeldHistoryKey,
     HistoryArchive, HistoryGeneration, HistoryKey, HistoryKeys, Holding, KeyReplace,
     NewArchiveEntry, check_history_generation,
 };
-use super::{Approval, Approver, Ed25519PublicKey};
+use super::{Approval, Approver, Ed25519PublicKey, KeyShare};
 use super::{
     Attest, Attestation, AttestationExpiry, Claim, ClaimedKeyPackage, Commit, CommitLog,
     DeliveryStoreError, Device, DeviceAttester, DeviceLabel, DeviceNotifier, DeviceRootKey,
@@ -34,6 +36,10 @@ use super::{
 /// drop: shared by the directory and the history keys, as one database holds them.
 type Approvals = Arc<Mutex<Vec<(UserId, Approval)>>>;
 
+/// The key shares of each account's devices, which a revoke, a new root key or HPKE key, a report
+/// and a new generation drop: shared as the approvals are.
+type Shares = Arc<Mutex<Vec<(UserId, KeyShare)>>>;
+
 /// The devices, their KeyPackages and their approvals over one state, as KeyPackages mark their
 /// device seen.
 #[derive(Default)]
@@ -43,6 +49,7 @@ pub struct InMemoryKeyDirectory {
     /// against; none, every one is stale.
     history: Option<Arc<InMemoryArchive>>,
     approvals: Approvals,
+    shares: Shares,
     /// Whose requests a revoke closes; none, it closes none.
     requests: Option<Arc<InMemoryApprovalRequests>>,
 }
@@ -52,6 +59,7 @@ impl InMemoryKeyDirectory {
         Self {
             state: Mutex::default(),
             approvals: Arc::clone(&history.approvals),
+            shares: Arc::clone(&history.shares),
             history: Some(history),
             requests: None,
         }
@@ -69,6 +77,13 @@ impl InMemoryKeyDirectory {
             .lock()
             .unwrap()
             .retain(|(_, approval)| !which(approval));
+    }
+
+    fn drop_shares(&self, which: impl Fn(&KeyShare) -> bool) {
+        self.shares
+            .lock()
+            .unwrap()
+            .retain(|(_, share)| !which(share));
     }
 }
 
@@ -165,16 +180,22 @@ impl Devices for InMemoryKeyDirectory {
             .attestation
             .as_ref()
             .is_some_and(|held| held.root_key != attestation.root_key);
+        let hpke_before = device.hpke_key.as_ref().map(|held| held.key.clone());
         device.attestation = Some(attestation.clone());
         match hpke_key {
             HpkeKeyWrite::Keep => {}
             HpkeKeyWrite::Set(signed) => device.hpke_key = Some(signed.into()),
             HpkeKeyWrite::Clear => device.hpke_key = None,
         }
+        let resealed = hpke_before != device.hpke_key.as_ref().map(|held| held.key.clone());
         if rotated {
             self.drop_approvals(|approval| {
                 approval.device == id || approval.approver == Approver::Device(id)
             });
+            self.drop_shares(|share| share.sender == id);
+        }
+        if rotated || resealed {
+            self.drop_shares(|share| share.recipient == id);
         }
         Ok(Attest::Stored)
     }
@@ -191,6 +212,7 @@ impl Devices for InMemoryKeyDirectory {
         device.revoked_at = Some(now);
         device.hpke_key = None;
         self.drop_approvals(|approval| approval.approver == Approver::Device(id));
+        self.drop_shares(|share| share.sender == id || share.recipient == id);
         let closed = self
             .requests
             .as_ref()
@@ -219,6 +241,7 @@ impl Devices for InMemoryKeyDirectory {
         {
             Some(device) => {
                 device.history_generation = Some(generation);
+                self.drop_shares(|share| share.recipient == id);
                 Ok(Holding::Recorded)
             }
             None => Ok(Holding::Refused),
@@ -705,11 +728,13 @@ impl MlsFederation for RecordingMlsFederation {
 
 /// Each account's archive entries and history key, over one state: a new key erases the archive,
 /// and an upload is kept only under the current one. A new key also drops the approvals of older
-/// generations, which a directory [`InMemoryKeyDirectory::keyed_by`] this one shares.
+/// generations and the key shares, which a directory [`InMemoryKeyDirectory::keyed_by`] this one
+/// shares.
 #[derive(Default)]
 pub struct InMemoryArchive {
     state: Mutex<ArchiveState>,
     approvals: Approvals,
+    shares: Shares,
 }
 
 #[derive(Default)]
@@ -842,6 +867,7 @@ impl HistoryKeys for InMemoryArchive {
             *of != owner
                 || !matches!(approval.approver, Approver::Passphrase(older) if older < key.generation)
         });
+        self.shares.lock().unwrap().retain(|(of, _)| *of != owner);
         let before = state.entries.len();
         state.entries.retain(|(o, _)| *o != owner);
         Ok(KeyReplace::Replaced {
@@ -856,6 +882,7 @@ pub mod contract {
     use time::Duration;
 
     pub use super::approval::contract::*;
+    pub use super::key_share::contract::*;
 
     use super::*;
     use crate::e2ee::{DeviceKind, KeyPackageBytes};

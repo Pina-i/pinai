@@ -1,8 +1,8 @@
 //! The approval stores in memory, a recording notifier, and the contract every store must satisfy.
 
 use crate::e2ee::{
-    ApprovalMessage, ApprovalMessageBody, ApprovalNotifier, ApprovalRequest, ApprovalRequests,
-    Approve, CheckedApproval, Close, DeviceApprovals, MessageSeq, Opened, Post, Read,
+    ApprovalMessage, ApprovalMessageBody, ApprovalRequest, ApprovalRequests, Approve,
+    CheckedApproval, Close, DeviceApprovals, DeviceTrustNotifier, MessageSeq, Opened, Post, Read,
     RequestRefusal, may_open_request, window_start,
 };
 use crate::{ApprovalRequestId, SessionId};
@@ -251,7 +251,7 @@ impl ApprovalRequests for InMemoryApprovalRequests {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SentApproval {
+pub enum SentTrust {
     Approved {
         owner: UserId,
         device: DeviceId,
@@ -274,26 +274,31 @@ pub enum SentApproval {
         to: Vec<SessionId>,
         request: ApprovalRequestId,
     },
+    HistoryKeyReady {
+        owner: UserId,
+        to: Vec<SessionId>,
+        device: DeviceId,
+    },
 }
 
 #[derive(Default)]
-pub struct RecordingApprovalNotifier {
-    sent: Mutex<Vec<SentApproval>>,
+pub struct RecordingDeviceTrustNotifier {
+    sent: Mutex<Vec<SentTrust>>,
 }
 
-impl RecordingApprovalNotifier {
-    pub fn sent(&self) -> Vec<SentApproval> {
+impl RecordingDeviceTrustNotifier {
+    pub fn sent(&self) -> Vec<SentTrust> {
         self.sent.lock().unwrap().clone()
     }
 
-    fn record(&self, sent: SentApproval) {
+    fn record(&self, sent: SentTrust) {
         self.sent.lock().unwrap().push(sent);
     }
 }
 
-impl ApprovalNotifier for RecordingApprovalNotifier {
+impl DeviceTrustNotifier for RecordingDeviceTrustNotifier {
     fn device_approved(&self, owner: UserId, device: DeviceId) {
-        self.record(SentApproval::Approved { owner, device });
+        self.record(SentTrust::Approved { owner, device });
     }
 
     fn approval_requested(
@@ -303,7 +308,7 @@ impl ApprovalNotifier for RecordingApprovalNotifier {
         request: &ApprovalRequest,
         display_name: &str,
     ) {
-        self.record(SentApproval::Requested {
+        self.record(SentTrust::Requested {
             owner,
             to: to.to_vec(),
             request: request.id,
@@ -319,7 +324,7 @@ impl ApprovalNotifier for RecordingApprovalNotifier {
         request: ApprovalRequestId,
         seq: MessageSeq,
     ) {
-        self.record(SentApproval::Message {
+        self.record(SentTrust::Message {
             owner,
             to: to.to_vec(),
             request,
@@ -328,10 +333,18 @@ impl ApprovalNotifier for RecordingApprovalNotifier {
     }
 
     fn approval_closed(&self, owner: UserId, to: &[SessionId], request: ApprovalRequestId) {
-        self.record(SentApproval::Closed {
+        self.record(SentTrust::Closed {
             owner,
             to: to.to_vec(),
             request,
+        });
+    }
+
+    fn history_key_ready(&self, owner: UserId, to: &[SessionId], device: DeviceId) {
+        self.record(SentTrust::HistoryKeyReady {
+            owner,
+            to: to.to_vec(),
+            device,
         });
     }
 }
@@ -344,7 +357,7 @@ pub mod contract {
     use super::*;
     use crate::e2ee::{ApprovalBy, ApprovalFacts, HistoryKey, approval_bytes, may_approve};
 
-    fn actor() -> ActorUri {
+    pub(in crate::e2ee::testing) fn actor() -> ActorUri {
         ActorUri::parse("https://idp.test/users/alice_t3st0").unwrap()
     }
 
@@ -355,17 +368,17 @@ pub mod contract {
         id
     }
 
-    async fn found(devices: &dyn Devices, id: DeviceId) -> Device {
+    pub(in crate::e2ee::testing) async fn found(devices: &dyn Devices, id: DeviceId) -> Device {
         devices.find(id).await.unwrap().expect("recorded")
     }
 
-    fn root_key(device: &Device) -> DeviceRootKey {
+    pub(in crate::e2ee::testing) fn root_key(device: &Device) -> DeviceRootKey {
         device.attestation.as_ref().unwrap().root_key.clone()
     }
 
     /// `signer`'s approval of `approved`, signed and checked as a client and the use case would,
     /// on the devices as the store holds them now.
-    async fn by_device(
+    pub(in crate::e2ee::testing) async fn by_device(
         devices: &dyn Devices,
         signer: DeviceId,
         approved: DeviceId,
@@ -393,7 +406,7 @@ pub mod contract {
     }
 
     /// The passphrase's approval of `device`, with `key`'s approval key.
-    async fn by_passphrase(
+    pub(in crate::e2ee::testing) async fn by_passphrase(
         devices: &dyn Devices,
         device: DeviceId,
         key: &HistoryKey,

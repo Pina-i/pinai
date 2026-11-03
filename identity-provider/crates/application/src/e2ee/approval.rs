@@ -5,10 +5,10 @@ use std::sync::Arc;
 
 use domain::auth::{Session, Sessions};
 use domain::e2ee::{
-    ApprovalBy, ApprovalFacts, ApprovalMessage, ApprovalMessageBody, ApprovalNotifier,
-    ApprovalRequest, ApprovalRequests, Approve, Audience, Close, Device, DeviceApprovals, Devices,
-    Ed25519Signature, Ed25519Verifier, HistoryKeys, KeyDirectoryError, MessageSeq, Opened, Post,
-    Read, RequestRefusal, calling_device, may_approve, sessions_device, window_start,
+    ApprovalBy, ApprovalFacts, ApprovalMessage, ApprovalMessageBody, ApprovalRequest,
+    ApprovalRequests, Approve, Audience, Close, Device, DeviceApprovals, DeviceTrustNotifier,
+    Devices, Ed25519Signature, Ed25519Verifier, HistoryKeys, KeyDirectoryError, MessageSeq, Opened,
+    Post, Read, RequestRefusal, calling_device, may_approve, sessions_device, window_start,
 };
 use domain::identity::{Accounts, Bearer};
 use domain::{ApprovalRequestId, DeviceId, UserId};
@@ -18,10 +18,10 @@ use crate::auth::calling_session;
 
 /// A revoke, a new root key or a new generation may land between the reads and the write: each
 /// attempt reads them again.
-const ATTEMPTS: usize = 3;
+pub(super) const ATTEMPTS: usize = 3;
 
 /// The device the bearer's session named, the caller's and unrevoked: every route here takes one.
-async fn the_callers_device(
+pub(super) async fn the_callers_device(
     sessions: &dyn Sessions,
     devices: &dyn Devices,
     bearer: &Bearer,
@@ -64,7 +64,7 @@ pub struct ApproveDevice {
     keys: Arc<dyn HistoryKeys>,
     approvals: Arc<dyn DeviceApprovals>,
     verifier: Arc<dyn Ed25519Verifier>,
-    notifier: Arc<dyn ApprovalNotifier>,
+    notifier: Arc<dyn DeviceTrustNotifier>,
 }
 
 impl ApproveDevice {
@@ -75,7 +75,7 @@ impl ApproveDevice {
         keys: Arc<dyn HistoryKeys>,
         approvals: Arc<dyn DeviceApprovals>,
         verifier: Arc<dyn Ed25519Verifier>,
-        notifier: Arc<dyn ApprovalNotifier>,
+        notifier: Arc<dyn DeviceTrustNotifier>,
     ) -> Self {
         Self {
             accounts,
@@ -141,7 +141,7 @@ pub struct OpenApprovalRequest {
     sessions: Arc<dyn Sessions>,
     devices: Arc<dyn Devices>,
     requests: Arc<dyn ApprovalRequests>,
-    notifier: Arc<dyn ApprovalNotifier>,
+    notifier: Arc<dyn DeviceTrustNotifier>,
 }
 
 impl OpenApprovalRequest {
@@ -149,7 +149,7 @@ impl OpenApprovalRequest {
         sessions: Arc<dyn Sessions>,
         devices: Arc<dyn Devices>,
         requests: Arc<dyn ApprovalRequests>,
-        notifier: Arc<dyn ApprovalNotifier>,
+        notifier: Arc<dyn DeviceTrustNotifier>,
     ) -> Self {
         Self {
             sessions,
@@ -241,7 +241,7 @@ pub struct PostApprovalMessage {
     sessions: Arc<dyn Sessions>,
     devices: Arc<dyn Devices>,
     requests: Arc<dyn ApprovalRequests>,
-    notifier: Arc<dyn ApprovalNotifier>,
+    notifier: Arc<dyn DeviceTrustNotifier>,
 }
 
 impl PostApprovalMessage {
@@ -249,7 +249,7 @@ impl PostApprovalMessage {
         sessions: Arc<dyn Sessions>,
         devices: Arc<dyn Devices>,
         requests: Arc<dyn ApprovalRequests>,
-        notifier: Arc<dyn ApprovalNotifier>,
+        notifier: Arc<dyn DeviceTrustNotifier>,
     ) -> Self {
         Self {
             sessions,
@@ -338,7 +338,7 @@ pub struct CloseApprovalRequest {
     sessions: Arc<dyn Sessions>,
     devices: Arc<dyn Devices>,
     requests: Arc<dyn ApprovalRequests>,
-    notifier: Arc<dyn ApprovalNotifier>,
+    notifier: Arc<dyn DeviceTrustNotifier>,
 }
 
 impl CloseApprovalRequest {
@@ -346,7 +346,7 @@ impl CloseApprovalRequest {
         sessions: Arc<dyn Sessions>,
         devices: Arc<dyn Devices>,
         requests: Arc<dyn ApprovalRequests>,
-        notifier: Arc<dyn ApprovalNotifier>,
+        notifier: Arc<dyn DeviceTrustNotifier>,
     ) -> Self {
         Self {
             sessions,

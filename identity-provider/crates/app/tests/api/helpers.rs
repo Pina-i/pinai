@@ -550,6 +550,42 @@ pub async fn closed_as_ended(socket: &mut TcpStream) -> bool {
         .any(|w| w[0] == 0x88 && u16::from_be_bytes([w[2], w[3]]) == 1008)
 }
 
+/// The `data` of the next event of type `kind` the server pushes on `socket`, past the others.
+pub async fn next_event(socket: &mut TcpStream, kind: &str) -> Value {
+    let read = async {
+        loop {
+            let mut head = [0u8; 2];
+            socket.read_exact(&mut head).await.unwrap();
+            // Server frames are unmasked: the length follows the opcode byte.
+            let length = match head[1] & 0x7f {
+                126 => {
+                    let mut extended = [0u8; 2];
+                    socket.read_exact(&mut extended).await.unwrap();
+                    usize::from(u16::from_be_bytes(extended))
+                }
+                127 => {
+                    let mut extended = [0u8; 8];
+                    socket.read_exact(&mut extended).await.unwrap();
+                    usize::try_from(u64::from_be_bytes(extended)).unwrap()
+                }
+                short => usize::from(short),
+            };
+            let mut payload = vec![0u8; length];
+            socket.read_exact(&mut payload).await.unwrap();
+            if head[0] & 0x0f != 0x1 {
+                continue;
+            }
+            let event: Value = serde_json::from_slice(&payload).unwrap();
+            if event["type"] == kind {
+                return event["data"].clone();
+            }
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(5), read)
+        .await
+        .unwrap_or_else(|_| panic!("no {kind} within 5 s"))
+}
+
 /// Retries `check` for up to 10 s, until it answers `Some`.
 pub async fn eventually<T, F, Fut>(what: &str, mut check: F) -> T
 where

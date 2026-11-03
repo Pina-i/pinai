@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use domain::auth::{SessionNotifier, Sessions};
-use domain::e2ee::{ApprovalNotifier, Devices, KeyDirectoryError, Revocation};
+use domain::e2ee::{DeviceTrustNotifier, Devices, KeyDirectoryError, Revocation};
 use domain::{DeviceId, UserId};
 use time::OffsetDateTime;
 
@@ -14,7 +14,7 @@ pub struct RevokeDevice {
     devices: Arc<dyn Devices>,
     sessions: Arc<dyn Sessions>,
     notifier: Arc<dyn SessionNotifier>,
-    approvals: Arc<dyn ApprovalNotifier>,
+    trust: Arc<dyn DeviceTrustNotifier>,
 }
 
 impl RevokeDevice {
@@ -22,13 +22,13 @@ impl RevokeDevice {
         devices: Arc<dyn Devices>,
         sessions: Arc<dyn Sessions>,
         notifier: Arc<dyn SessionNotifier>,
-        approvals: Arc<dyn ApprovalNotifier>,
+        trust: Arc<dyn DeviceTrustNotifier>,
     ) -> Self {
         Self {
             devices,
             sessions,
             notifier,
-            approvals,
+            trust,
         }
     }
 
@@ -60,7 +60,7 @@ impl RevokeDevice {
             Ok(sessions) => {
                 for request in closed {
                     let to = request.parties().sessions(&sessions, now);
-                    self.approvals.approval_closed(owner, &to, request.id);
+                    self.trust.approval_closed(owner, &to, request.id);
                 }
             }
             Err(e) => {

@@ -5,7 +5,7 @@ use domain::auth::testing::InMemorySessions;
 use domain::e2ee::Approval;
 use domain::e2ee::testing::{
     InMemoryApprovalRequests, InMemoryArchive, InMemoryKeyDirectory, PlainEd25519Verifier,
-    RecordingApprovalNotifier, SentApproval, plain_signature,
+    RecordingDeviceTrustNotifier, SentTrust, plain_signature,
 };
 use domain::e2ee::{
     ApprovalPublicKey, Approver, Attestation, CheckedApproval, DeviceLabel, DeviceRootKey,
@@ -25,7 +25,7 @@ struct World {
     sessions: Arc<InMemorySessions>,
     devices: Arc<InMemoryKeyDirectory>,
     archive: Arc<InMemoryArchive>,
-    notifier: Arc<RecordingApprovalNotifier>,
+    notifier: Arc<RecordingDeviceTrustNotifier>,
     approve: ApproveDevice,
     list_devices: ListDevices,
     open: OpenApprovalRequest,
@@ -72,7 +72,7 @@ fn world_with(
     let requests = Arc::new(InMemoryApprovalRequests::default());
     let devices =
         Arc::new(InMemoryKeyDirectory::keyed_by(archive.clone()).relaying(requests.clone()));
-    let notifier = Arc::new(RecordingApprovalNotifier::default());
+    let notifier = Arc::new(RecordingDeviceTrustNotifier::default());
     World {
         approve: ApproveDevice::new(
             accounts,
@@ -192,7 +192,7 @@ impl World {
         self.open.execute(bearer, now()).await.unwrap()
     }
 
-    fn sent(&self) -> Vec<SentApproval> {
+    fn sent(&self) -> Vec<SentTrust> {
         self.notifier.sent()
     }
 }
@@ -226,7 +226,7 @@ async fn a_device_approves_another_and_the_account_hears_of_it_once() {
     assert_eq!(w.approvals_of(laptop).await, vec![]);
     assert_eq!(
         w.sent(),
-        vec![SentApproval::Approved {
+        vec![SentTrust::Approved {
             owner: w.alice.id,
             device: phone
         }]
@@ -258,7 +258,7 @@ async fn the_passphrase_approves_the_device_it_is_typed_on() {
     );
     assert_eq!(
         w.sent(),
-        vec![SentApproval::Approved {
+        vec![SentTrust::Approved {
             owner: w.alice.id,
             device: laptop
         }]
@@ -394,7 +394,7 @@ async fn opening_a_request_tells_the_accounts_other_devices() {
     assert_eq!(request.expires_at, now() + Duration::minutes(10));
     assert_eq!(
         w.sent(),
-        vec![SentApproval::Requested {
+        vec![SentTrust::Requested {
             owner: w.alice.id,
             to: vec![on_phone.session],
             request: request.id,
@@ -452,13 +452,13 @@ async fn a_new_request_closes_the_devices_open_one_and_says_so() {
 
     assert_eq!(
         w.sent()[1],
-        SentApproval::Closed {
+        SentTrust::Closed {
             owner: w.alice.id,
             to: vec![on_laptop.session, on_phone.session],
             request: first.id,
         }
     );
-    assert!(matches!(w.sent()[2], SentApproval::Requested { request, .. } if request == second.id));
+    assert!(matches!(w.sent()[2], SentTrust::Requested { request, .. } if request == second.id));
     let listed: Vec<_> = w
         .list
         .execute(&on_phone, now())
@@ -557,7 +557,7 @@ async fn a_relayed_handshake_reaches_each_side_and_binds_to_the_first_answer() {
         .sent()
         .into_iter()
         .filter_map(|sent| match sent {
-            SentApproval::Message { to, seq, .. } => Some((seq, to)),
+            SentTrust::Message { to, seq, .. } => Some((seq, to)),
             _ => None,
         })
         .collect();
@@ -570,7 +570,7 @@ async fn a_relayed_handshake_reaches_each_side_and_binds_to_the_first_answer() {
         ]
     );
     assert!(
-        w.sent().contains(&SentApproval::Closed {
+        w.sent().contains(&SentTrust::Closed {
             owner: w.alice.id,
             to: vec![on_tablet.session],
             request: request.id,
@@ -610,7 +610,7 @@ async fn either_side_ends_the_request_and_both_hear_of_it() {
     ));
     assert_eq!(
         w.sent().last(),
-        Some(&SentApproval::Closed {
+        Some(&SentTrust::Closed {
             owner: w.alice.id,
             to: vec![on_laptop.session, on_phone.session],
             request: request.id,
@@ -751,7 +751,7 @@ async fn revoking_a_device_ends_its_requests_and_tells_the_other_side() {
 
     assert_eq!(
         w.sent().last(),
-        Some(&SentApproval::Closed {
+        Some(&SentTrust::Closed {
             owner: w.alice.id,
             to: vec![on_phone.session],
             request: request.id,

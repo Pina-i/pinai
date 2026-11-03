@@ -12,9 +12,9 @@ use application::auth::{
 use application::e2ee::{
     AppendCommit, ApproveDevice, ArchiveMessages, CatchUpCommits, ClaimKeyPackage, ClaimWelcomes,
     ClearArchive, CloseApprovalRequest, KeyPackageStatus, ListApprovalRequests, ListDevices,
-    LoadHistoryKey, OpenApprovalRequest, PostApprovalMessage, ReadApprovalMessages, ReadArchive,
-    ReceiveCommit, ReceiveWelcome, RegisterDevice, ReportHistoryKey, RevokeDevice, SendWelcome,
-    SetHistoryKey, UploadKeyPackages,
+    LoadHistoryKey, LoadKeyShare, OpenApprovalRequest, PostApprovalMessage, ReadApprovalMessages,
+    ReadArchive, ReceiveCommit, ReceiveWelcome, RegisterDevice, ReportHistoryKey, RevokeDevice,
+    SendWelcome, SetHistoryKey, ShareHistoryKey, UploadKeyPackages,
 };
 use application::identity::{
     DescribeInstance, EditIntro, FindAccount, IntroInForce, SearchAccounts, ShowIntro, WebFinger,
@@ -54,8 +54,8 @@ use domain::auth::{Registrations, WebApp};
 use domain::e2ee::KeyPackagePolicy;
 use domain::e2ee::testing::{
     InMemoryApprovalRequests, InMemoryArchive, InMemoryDelivery, InMemoryKeyDirectory,
-    InMemoryRemoteKeyPackages, PlainAttester, PlainEd25519Verifier, RecordingApprovalNotifier,
-    RecordingDeviceNotifier, RecordingMlsFederation, RecordingMlsNotifier,
+    InMemoryRemoteKeyPackages, PlainAttester, PlainEd25519Verifier, RecordingDeviceNotifier,
+    RecordingDeviceTrustNotifier, RecordingMlsFederation, RecordingMlsNotifier,
 };
 use domain::identity::testing::{
     InMemoryAccounts, InMemoryRemoteActors, InMemorySavedIntro, InMemoryTokens, TrustedSignatures,
@@ -276,7 +276,7 @@ impl TestApp {
         let bus = Arc::new(RecordingBus::default());
         let mls_notifier = Arc::new(RecordingMlsNotifier::default());
         let device_notifier = Arc::new(RecordingDeviceNotifier::default());
-        let approval_notifier = Arc::new(RecordingApprovalNotifier::default());
+        let trust_notifier = Arc::new(RecordingDeviceTrustNotifier::default());
         let mls_federation = Arc::new(RecordingMlsFederation::default());
         let key_policy = KeyPackagePolicy {
             cap_per_device: 100,
@@ -832,7 +832,7 @@ impl TestApp {
                 keys.clone(),
                 sign_in.sessions.clone(),
                 sign_in.ended.clone(),
-                approval_notifier.clone(),
+                trust_notifier.clone(),
             )),
             report_history_key: Arc::new(ReportHistoryKey::new(
                 sign_in.sessions.clone(),
@@ -846,13 +846,13 @@ impl TestApp {
                 archive.clone(),
                 keys.clone(),
                 Arc::new(PlainEd25519Verifier),
-                approval_notifier.clone(),
+                trust_notifier.clone(),
             )),
             open_approval_request: Arc::new(OpenApprovalRequest::new(
                 sign_in.sessions.clone(),
                 keys.clone(),
                 approval_requests.clone(),
-                approval_notifier.clone(),
+                trust_notifier.clone(),
             )),
             list_approval_requests: Arc::new(ListApprovalRequests::new(
                 sign_in.sessions.clone(),
@@ -863,7 +863,7 @@ impl TestApp {
                 sign_in.sessions.clone(),
                 keys.clone(),
                 approval_requests.clone(),
-                approval_notifier.clone(),
+                trust_notifier.clone(),
             )),
             read_approval_messages: Arc::new(ReadApprovalMessages::new(
                 sign_in.sessions.clone(),
@@ -874,7 +874,23 @@ impl TestApp {
                 sign_in.sessions.clone(),
                 keys.clone(),
                 approval_requests,
-                approval_notifier,
+                trust_notifier.clone(),
+            )),
+            share_history_key: Arc::new(ShareHistoryKey::new(
+                accounts.clone(),
+                sign_in.sessions.clone(),
+                keys.clone(),
+                archive.clone(),
+                keys.clone(),
+                keys.clone(),
+                Arc::new(PlainEd25519Verifier),
+                trust_notifier,
+            )),
+            load_key_share: Arc::new(LoadKeyShare::new(
+                sign_in.sessions.clone(),
+                keys.clone(),
+                archive.clone(),
+                keys.clone(),
             )),
             upload_key_packages: Arc::new(UploadKeyPackages::new(
                 key_policy,

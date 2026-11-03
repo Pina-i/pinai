@@ -1,23 +1,23 @@
 use std::sync::Arc;
 
 use connections::Hub;
-use domain::e2ee::{ApprovalNotifier, ApprovalRequest, MessageSeq};
+use domain::e2ee::{ApprovalRequest, DeviceTrustNotifier, MessageSeq};
 use domain::{ApprovalRequestId, DeviceId, SessionId, UserId};
 use uuid::Uuid;
 
 use super::events::{
     ApprovalClosedPayload, ApprovalMessagePayload, ApprovalRequestedPayload, DeviceApprovedPayload,
-    WsEvent,
+    HistoryKeyReadyPayload, WsEvent,
 };
 
-/// Pushes approvals to the account's live sessions, and a request's news to the sessions of the
-/// devices taking part; a device that missed one reads the device list, or the open requests, when
-/// it connects.
-pub struct HubApprovalNotifier {
+/// Pushes approvals to the account's live sessions, a request's news to the sessions of the
+/// devices taking part, and a key share to its recipient's; a device that missed one reads the
+/// device list, the open requests or its share when it connects.
+pub struct HubDeviceTrustNotifier {
     hub: Arc<Hub>,
 }
 
-impl HubApprovalNotifier {
+impl HubDeviceTrustNotifier {
     pub fn new(hub: Arc<Hub>) -> Self {
         Self { hub }
     }
@@ -29,7 +29,7 @@ impl HubApprovalNotifier {
     }
 }
 
-impl ApprovalNotifier for HubApprovalNotifier {
+impl DeviceTrustNotifier for HubDeviceTrustNotifier {
     fn device_approved(&self, owner: UserId, device: DeviceId) {
         super::push(
             &self.hub,
@@ -81,6 +81,16 @@ impl ApprovalNotifier for HubApprovalNotifier {
             to,
             WsEvent::ApprovalClosed(ApprovalClosedPayload {
                 request_id: request.as_uuid(),
+            }),
+        );
+    }
+
+    fn history_key_ready(&self, owner: UserId, to: &[SessionId], device: DeviceId) {
+        self.push_to(
+            owner,
+            to,
+            WsEvent::HistoryKeyReady(HistoryKeyReadyPayload {
+                device_id: device.as_uuid(),
             }),
         );
     }

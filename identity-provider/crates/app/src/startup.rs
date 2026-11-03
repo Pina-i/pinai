@@ -482,9 +482,11 @@ impl Application {
         let approval_requests: Arc<dyn domain::e2ee::ApprovalRequests> = Arc::new(
             infrastructure::postgres::PgApprovalRequests::new(pool.clone()),
         );
-        let approval_notifier: Arc<dyn domain::e2ee::ApprovalNotifier> = Arc::new(
-            infrastructure::realtime::HubApprovalNotifier::new(Arc::clone(&hub)),
+        let trust_notifier: Arc<dyn domain::e2ee::DeviceTrustNotifier> = Arc::new(
+            infrastructure::realtime::HubDeviceTrustNotifier::new(Arc::clone(&hub)),
         );
+        let key_shares: Arc<dyn domain::e2ee::KeyShares> =
+            Arc::new(infrastructure::postgres::PgKeyShares::new(pool.clone()));
         let sweep_approval_requests = Arc::new(application::e2ee::SweepApprovalRequests::new(
             Arc::clone(&approval_requests),
         ));
@@ -1024,7 +1026,7 @@ impl Application {
                 Arc::clone(&devices),
                 Arc::clone(&sessions),
                 Arc::clone(&session_notifier),
-                Arc::clone(&approval_notifier),
+                Arc::clone(&trust_notifier),
             )),
             report_history_key: Arc::new(application::e2ee::ReportHistoryKey::new(
                 Arc::clone(&sessions),
@@ -1036,15 +1038,31 @@ impl Application {
                 Arc::clone(&sessions),
                 Arc::clone(&devices),
                 Arc::clone(&history_keys),
+                Arc::clone(&approvals),
+                Arc::clone(&ed25519_verifier),
+                Arc::clone(&trust_notifier),
+            )),
+            share_history_key: Arc::new(application::e2ee::ShareHistoryKey::new(
+                Arc::clone(&accounts),
+                Arc::clone(&sessions),
+                Arc::clone(&devices),
+                Arc::clone(&history_keys),
                 approvals,
+                Arc::clone(&key_shares),
                 ed25519_verifier,
-                Arc::clone(&approval_notifier),
+                Arc::clone(&trust_notifier),
+            )),
+            load_key_share: Arc::new(application::e2ee::LoadKeyShare::new(
+                Arc::clone(&sessions),
+                Arc::clone(&devices),
+                Arc::clone(&history_keys),
+                key_shares,
             )),
             open_approval_request: Arc::new(application::e2ee::OpenApprovalRequest::new(
                 Arc::clone(&sessions),
                 Arc::clone(&devices),
                 Arc::clone(&approval_requests),
-                Arc::clone(&approval_notifier),
+                Arc::clone(&trust_notifier),
             )),
             list_approval_requests: Arc::new(application::e2ee::ListApprovalRequests::new(
                 Arc::clone(&sessions),
@@ -1055,7 +1073,7 @@ impl Application {
                 Arc::clone(&sessions),
                 Arc::clone(&devices),
                 Arc::clone(&approval_requests),
-                Arc::clone(&approval_notifier),
+                Arc::clone(&trust_notifier),
             )),
             read_approval_messages: Arc::new(application::e2ee::ReadApprovalMessages::new(
                 Arc::clone(&sessions),
@@ -1066,7 +1084,7 @@ impl Application {
                 Arc::clone(&sessions),
                 Arc::clone(&devices),
                 approval_requests,
-                approval_notifier,
+                trust_notifier,
             )),
             upload_key_packages: Arc::new(application::e2ee::UploadKeyPackages::new(
                 key_package_policy,

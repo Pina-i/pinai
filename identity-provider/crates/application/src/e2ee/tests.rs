@@ -5,7 +5,7 @@ use domain::auth::testing::{InMemorySessions, RecordingSessionNotifier};
 use domain::auth::{RevokedReason, SessionKind, Sessions};
 use domain::e2ee::testing::{
     InMemoryArchive, InMemoryKeyDirectory, InMemoryRemoteKeyPackages, PlainAttester,
-    PlainEd25519Verifier, RecordingApprovalNotifier, RecordingDeviceNotifier, hpke_key,
+    PlainEd25519Verifier, RecordingDeviceNotifier, RecordingDeviceTrustNotifier, hpke_key,
     plain_signature,
 };
 use domain::e2ee::{
@@ -122,7 +122,7 @@ fn world() -> World {
             store.clone(),
             sessions.clone(),
             ended.clone(),
-            Arc::new(RecordingApprovalNotifier::default()),
+            Arc::new(RecordingDeviceTrustNotifier::default()),
         ),
         upload: UploadKeyPackages::new(policy(), store.clone(), store.clone()),
         claim: ClaimKeyPackage::new(

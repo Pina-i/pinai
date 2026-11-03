@@ -2,9 +2,9 @@
 //! attests, the KeyPackages peers claim to add those devices to MLS groups, the Delivery
 //! Service — each group's commits in order, and the Welcomes waiting for their devices — and
 //! each account's encrypted history archive, with the key it is sealed under; the approvals the
-//! account's devices give each other, and the requests their handshake is relayed over. Every key,
-//! package, MLS message, archive entry and handshake message is opaque here — see
-//! identity-provider/specs/e2ee.md.
+//! account's devices give each other, the requests their handshake is relayed over, and the
+//! passphrase shared between them. Every key, package, MLS message, archive entry, handshake
+//! message and key share is opaque here — see identity-provider/specs/e2ee.md.
 
 mod approval;
 mod approval_request;
@@ -14,13 +14,14 @@ mod device;
 mod error;
 mod history_key;
 mod key_package;
+mod key_share;
 mod ports;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod testing;
 
 pub use approval::{
-    Approval, ApprovalBy, ApprovalFacts, Approver, CheckedApproval, approval_bytes, calling_device,
-    may_approve,
+    Approval, ApprovalBy, ApprovalFacts, Approver, CheckedApproval, approval_bytes, approval_chain,
+    calling_device, may_approve,
 };
 pub use approval_request::{
     APPROVAL_MESSAGE_MAX_BYTES, APPROVAL_MESSAGES_PER_REQUEST, APPROVAL_REQUEST_LIFETIME,
@@ -54,9 +55,13 @@ pub use key_package::{
     CLAIMED_KEY_PACKAGE_GRACE, Claim, ClaimedKeyPackage, KeyPackageBytes, KeyPackagePolicy,
     KeyPackageRefusal, NewKeyPackage,
 };
+pub use key_share::{
+    CheckedShare, KEY_SHARE_CIPHERTEXT_MAX_BYTES, KeyShare, SealedShare, ShareCiphertext, ShareEnc,
+    ShareFacts, may_share, share_aad, share_signed_bytes,
+};
 pub use ports::{
-    ApprovalNotifier, ApprovalRequests, Approve, Archived, Attest, Close, CommitLog,
-    DeviceApprovals, DeviceAttester, DeviceNotifier, Devices, Ed25519Verifier, HistoryArchive,
-    HistoryKeys, Holding, KeyPackages, KeyReplace, MlsFederation, MlsNotifier, Opened,
+    ApprovalRequests, Approve, Archived, Attest, Close, CommitLog, Deposit, DeviceApprovals,
+    DeviceAttester, DeviceNotifier, DeviceTrustNotifier, Devices, Ed25519Verifier, HistoryArchive,
+    HistoryKeys, Holding, KeyPackages, KeyReplace, KeyShares, MlsFederation, MlsNotifier, Opened,
     OutgoingWelcome, Post, Read, RemoteKeyPackages, Revocation, SignedAttestation, Welcomes,
 };

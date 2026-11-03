@@ -16,6 +16,7 @@ mod intro;
 mod invitations;
 mod invite;
 mod key_directory;
+mod key_shares;
 mod members;
 mod messaging;
 mod mls;
@@ -49,9 +50,9 @@ use application::auth::{
 use application::e2ee::{
     AppendCommit, ApproveDevice, ArchiveMessages, CatchUpCommits, ClaimKeyPackage, ClaimWelcomes,
     ClearArchive, CloseApprovalRequest, KeyPackageStatus, ListApprovalRequests, ListDevices,
-    LoadHistoryKey, OpenApprovalRequest, PostApprovalMessage, ReadApprovalMessages, ReadArchive,
-    ReceiveCommit, ReceiveWelcome, RegisterDevice, ReportHistoryKey, RevokeDevice, SendWelcome,
-    SetHistoryKey, UploadKeyPackages,
+    LoadHistoryKey, LoadKeyShare, OpenApprovalRequest, PostApprovalMessage, ReadApprovalMessages,
+    ReadArchive, ReceiveCommit, ReceiveWelcome, RegisterDevice, ReportHistoryKey, RevokeDevice,
+    SendWelcome, SetHistoryKey, ShareHistoryKey, UploadKeyPackages,
 };
 use application::identity::{
     DescribeInstance, EditIntro, FindAccount, SearchAccounts, ShowIntro, WebFinger,
@@ -225,6 +226,9 @@ pub struct AppState {
     pub clear_archive: Arc<ClearArchive>,
     pub load_history_key: Arc<LoadHistoryKey>,
     pub set_history_key: Arc<SetHistoryKey>,
+    /// The passphrase, sealed by one device of an account for another.
+    pub share_history_key: Arc<ShareHistoryKey>,
+    pub load_key_share: Arc<LoadKeyShare>,
     /// The live connections, which the WebSocket registers with.
     pub hub: Arc<Hub>,
     pub missed_events: Arc<dyn MissedEvents>,
@@ -371,6 +375,10 @@ pub fn router(state: AppState) -> Router {
                 .delete(history::clear),
         )
         .route("/api/history/key", get(history::key).put(history::set_key))
+        .route(
+            "/api/history/key-shares",
+            get(key_shares::held).post(key_shares::share),
+        )
         .route("/api/presence", get(presence::read))
         .route("/api/presence/batch", post(presence::batch))
         .route("/api/presence/stream", get(presence::stream))

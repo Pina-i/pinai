@@ -13,6 +13,7 @@ mod helpers;
 mod history;
 mod intro;
 mod invitations;
+mod key_shares;
 mod password_resets;
 mod sessions;
 mod shutdown;

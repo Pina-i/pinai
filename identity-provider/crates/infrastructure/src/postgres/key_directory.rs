@@ -11,6 +11,7 @@ use time::OffsetDateTime;
 
 use super::approval::{close_requests_of, drop_approvals_by, drop_approvals_of};
 use super::archive::locked_generation;
+use super::key_share::{delete_shares_from, delete_shares_to};
 
 /// `user_devices`.
 pub struct PgDevices {
@@ -234,13 +235,26 @@ impl Devices for PgDevices {
             }
             return Ok(Attest::Stale);
         }
-        // The write held to `read`'s root key: this is a rotation exactly when it differs.
+        // The write held to `read`'s keys: this is a rotation, or a new HPKE key, exactly when
+        // they differ.
         let rotated = read
             .and_then(|device| device.attestation.as_ref())
             .is_some_and(|held| held.root_key != attestation.root_key);
+        let held_hpke = read
+            .and_then(|device| device.hpke_key.as_ref())
+            .map(|held| held.key.as_bytes());
+        let resealed = match hpke_key {
+            HpkeKeyWrite::Keep => false,
+            HpkeKeyWrite::Set(signed) => held_hpke != Some(signed.key().as_bytes()),
+            HpkeKeyWrite::Clear => held_hpke.is_some(),
+        };
         if rotated {
             drop_approvals_of(&mut tx, id).await?;
             drop_approvals_by(&mut tx, id).await?;
+            delete_shares_from(&mut tx, id).await?;
+        }
+        if rotated || resealed {
+            delete_shares_to(&mut tx, id).await?;
         }
         tx.commit().await.context("commit attest")?;
         Ok(Attest::Stored)
@@ -261,6 +275,8 @@ impl Devices for PgDevices {
         .rows_affected();
         if revoked > 0 {
             drop_approvals_by(&mut tx, id).await?;
+            delete_shares_to(&mut tx, id).await?;
+            delete_shares_from(&mut tx, id).await?;
             let closed = close_requests_of(&mut tx, owner, id).await?;
             tx.commit().await.context("commit a revoke")?;
             return Ok(Revocation::Revoked { closed });
@@ -309,6 +325,7 @@ impl Devices for PgDevices {
         if recorded == 0 {
             return Ok(Holding::Refused);
         }
+        delete_shares_to(&mut tx, id).await?;
         tx.commit().await.context("commit holding a history key")?;
         Ok(Holding::Recorded)
     }

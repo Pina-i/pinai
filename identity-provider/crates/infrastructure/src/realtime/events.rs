@@ -47,6 +47,9 @@ pub enum WsEvent {
     ApprovalMessage(ApprovalMessagePayload),
     /// An approval request the recipient's device takes part in ended.
     ApprovalClosed(ApprovalClosedPayload),
+    /// The account's history passphrase waits, sealed, for the recipient's device; read it over
+    /// REST.
+    HistoryKeyReady(HistoryKeyReadyPayload),
     /// A group conversation was created with the recipient as a member.
     GroupCreated(GroupCreatedPayload),
     /// A member was added to a group the recipient belongs to.
@@ -204,8 +207,8 @@ pub struct KeyPackagesLowPayload {}
 
 // ─── Approvals ─────────────────────────────────────────────────────────────────
 //
-// Signals only: the approvals are read from `GET /api/keys/devices`, a request's messages from
-// its own route, so a replayed or reordered push cannot mislead.
+// Signals only: the approvals are read from `GET /api/keys/devices`, a request's messages and a
+// key share from their own routes, so a replayed or reordered push cannot mislead.
 
 #[derive(Debug, Clone, Serialize)]
 pub struct DeviceApprovedPayload {
@@ -229,6 +232,12 @@ pub struct ApprovalMessagePayload {
 #[derive(Debug, Clone, Serialize)]
 pub struct ApprovalClosedPayload {
     pub request_id: Uuid,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HistoryKeyReadyPayload {
+    /// The device the share waits for.
+    pub device_id: Uuid,
 }
 
 // ─── Group membership payloads ─────────────────────────────────────────────────

@@ -168,6 +168,55 @@ pub fn may_approve(
     }
 }
 
+/// The stored approvals that make `device` approved under `generation`: its own by that
+/// generation's approval key, or one by another unrevoked device of the account carrying such an
+/// approval — two links at most (identity-provider/specs/e2ee.md § 3.9). Each binds the root key
+/// its device holds. Their signatures were checked as they were stored, so this reads their
+/// structure only: the instance's backstop to the devices' own checks. `None` when the device, or
+/// every chain to it, is no longer approved.
+pub fn approval_chain<'a>(
+    device: &Device,
+    generation: HistoryGeneration,
+    devices: &[Device],
+    approvals: &'a [Approval],
+) -> Option<Vec<&'a Approval>> {
+    if let Some(own) = by_passphrase(device, generation, approvals) {
+        return Some(vec![own]);
+    }
+    approvals
+        .iter()
+        .filter(|approval| binds(approval, device))
+        .find_map(|approval| {
+            let Approver::Device(by) = approval.approver else {
+                return None;
+            };
+            let approver = devices
+                .iter()
+                .find(|other| other.id == by && other.owner == device.owner)?;
+            by_passphrase(approver, generation, approvals).map(|theirs| vec![approval, theirs])
+        })
+}
+
+fn by_passphrase<'a>(
+    device: &Device,
+    generation: HistoryGeneration,
+    approvals: &'a [Approval],
+) -> Option<&'a Approval> {
+    approvals.iter().find(|approval| {
+        binds(approval, device) && approval.approver == Approver::Passphrase(generation)
+    })
+}
+
+/// An approval of the unrevoked `device`'s root key as it holds it now.
+fn binds(approval: &Approval, device: &Device) -> bool {
+    approval.device == device.id
+        && !device.is_revoked()
+        && device
+            .attestation
+            .as_ref()
+            .is_some_and(|held| held.root_key == approval.root_key)
+}
+
 pub(super) fn root_key_of(device: &Device) -> Result<DeviceRootKey, KeyDirectoryError> {
     device
         .attestation

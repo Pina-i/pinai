@@ -497,6 +497,43 @@ impl From<KeyDirectoryError> for ApiError {
             KeyDirectoryError::ApprovalUnsigned => {
                 ApiError::bad_request("signature does not verify over the device's root key")
             }
+            KeyDirectoryError::SelfShare => {
+                ApiError::bad_request("A device shares the history key with another device")
+            }
+            KeyDirectoryError::NoHpkeKey => ApiError::new(
+                StatusCode::CONFLICT,
+                "no_hpke_key",
+                "The device has registered no HPKE key",
+            ),
+            KeyDirectoryError::HistoryKeyNotHeld => ApiError::new(
+                StatusCode::CONFLICT,
+                "history_key_not_held",
+                "This device hasn't said it holds the current history key",
+            ),
+            KeyDirectoryError::HistoryKeyHeld => ApiError::new(
+                StatusCode::CONFLICT,
+                "history_key_held",
+                "The device holds the current history key already",
+            ),
+            KeyDirectoryError::SenderNotApproved => ApiError::new(
+                StatusCode::CONFLICT,
+                "not_approved",
+                "This device isn't approved under the current history key",
+            ),
+            KeyDirectoryError::RecipientNotApproved => ApiError::new(
+                StatusCode::CONFLICT,
+                "not_approved",
+                "The device isn't approved under the current history key",
+            ),
+            KeyDirectoryError::NotTheApprover => ApiError::new(
+                StatusCode::CONFLICT,
+                "not_the_approver",
+                "Only a device that approved this one shares the history key with it",
+            ),
+            KeyDirectoryError::ShareUnsigned => {
+                ApiError::bad_request("signature does not verify over the share")
+            }
+            KeyDirectoryError::NoKeyShare => ApiError::not_found("No key share for this device"),
             KeyDirectoryError::Request(refusal) => request_refused(refusal),
             KeyDirectoryError::DeviceRequired(_) => device_required(),
             KeyDirectoryError::StaleHistoryKey(_) => stale_history_key(),

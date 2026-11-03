@@ -326,3 +326,231 @@ fn the_passphrase_approval_takes_the_current_approval_keys_signature_over_a_root
         Err(KeyDirectoryError::NoRootKey)
     ));
 }
+
+fn generation(raw: i64) -> HistoryGeneration {
+    HistoryGeneration::parse(raw).unwrap()
+}
+
+/// `approver`'s approval of `device`'s root key as it holds it now, as the directory lists it.
+fn stored(device: &Device, approver: Approver) -> Approval {
+    Approval {
+        device: device.id,
+        root_key: device.attestation.as_ref().unwrap().root_key.clone(),
+        approver,
+        signature: Ed25519Signature::parse("signature", &[9; 64]).unwrap(),
+        created_at: device.paired_at,
+    }
+}
+
+/// Who approved each approval of the chain, from the device on.
+fn chain(
+    device: &Device,
+    generation: HistoryGeneration,
+    devices: &[Device],
+    approvals: &[Approval],
+) -> Option<Vec<Approver>> {
+    approval_chain(device, generation, devices, approvals).map(|links| {
+        links
+            .into_iter()
+            .map(|approval| approval.approver)
+            .collect()
+    })
+}
+
+#[test]
+fn a_device_the_passphrase_approved_is_approved_by_one_link() {
+    let alice = UserId::generate();
+    let laptop = device(alice, Some(1));
+    let approvals = [stored(&laptop, Approver::Passphrase(generation(1)))];
+
+    assert_eq!(
+        chain(
+            &laptop,
+            generation(1),
+            std::slice::from_ref(&laptop),
+            &approvals
+        ),
+        Some(vec![Approver::Passphrase(generation(1))])
+    );
+}
+
+#[test]
+fn a_device_approved_by_one_the_passphrase_approved_is_approved_by_two_links() {
+    let alice = UserId::generate();
+    let (laptop, phone) = (device(alice, Some(1)), device(alice, Some(2)));
+    let approvals = [
+        stored(&phone, Approver::Device(laptop.id)),
+        stored(&laptop, Approver::Passphrase(generation(1))),
+    ];
+    let devices = [laptop.clone(), phone.clone()];
+
+    assert_eq!(
+        chain(&phone, generation(1), &devices, &approvals),
+        Some(vec![
+            Approver::Device(laptop.id),
+            Approver::Passphrase(generation(1))
+        ])
+    );
+}
+
+#[test]
+fn the_passphrase_link_is_taken_first_when_a_device_carries_both() {
+    let alice = UserId::generate();
+    let (laptop, phone) = (device(alice, Some(1)), device(alice, Some(2)));
+    let approvals = [
+        stored(&phone, Approver::Device(laptop.id)),
+        stored(&laptop, Approver::Passphrase(generation(1))),
+        stored(&phone, Approver::Passphrase(generation(1))),
+    ];
+
+    assert_eq!(
+        chain(&phone, generation(1), &[laptop, phone.clone()], &approvals),
+        Some(vec![Approver::Passphrase(generation(1))])
+    );
+}
+
+#[test]
+fn three_links_are_one_too_many() {
+    let alice = UserId::generate();
+    let (laptop, phone, tablet) = (
+        device(alice, Some(1)),
+        device(alice, Some(2)),
+        device(alice, Some(3)),
+    );
+    let approvals = [
+        stored(&laptop, Approver::Passphrase(generation(1))),
+        stored(&phone, Approver::Device(laptop.id)),
+        stored(&tablet, Approver::Device(phone.id)),
+    ];
+
+    assert_eq!(
+        chain(
+            &tablet,
+            generation(1),
+            &[laptop, phone, tablet.clone()],
+            &approvals
+        ),
+        None
+    );
+}
+
+#[test]
+fn a_revoked_approver_approves_nothing() {
+    let alice = UserId::generate();
+    let (laptop, phone) = (device(alice, Some(1)), device(alice, Some(2)));
+    let approvals = [
+        stored(&phone, Approver::Device(laptop.id)),
+        stored(&laptop, Approver::Passphrase(generation(1))),
+    ];
+
+    assert_eq!(
+        chain(
+            &phone,
+            generation(1),
+            &[revoked(laptop), phone.clone()],
+            &approvals
+        ),
+        None
+    );
+}
+
+#[test]
+fn an_approver_not_listed_or_another_accounts_approves_nothing() {
+    let (alice, bob) = (UserId::generate(), UserId::generate());
+    let (bobs, phone) = (device(bob, Some(1)), device(alice, Some(2)));
+    let approvals = [
+        stored(&phone, Approver::Device(bobs.id)),
+        stored(&bobs, Approver::Passphrase(generation(1))),
+    ];
+
+    assert_eq!(
+        chain(
+            &phone,
+            generation(1),
+            std::slice::from_ref(&phone),
+            &approvals
+        ),
+        None
+    );
+    assert_eq!(
+        chain(&phone, generation(1), &[bobs, phone.clone()], &approvals),
+        None
+    );
+}
+
+#[test]
+fn an_older_generations_approval_approves_under_none_after_it() {
+    let alice = UserId::generate();
+    let (laptop, phone, tablet) = (
+        device(alice, Some(1)),
+        device(alice, Some(2)),
+        device(alice, Some(3)),
+    );
+    let approvals = [
+        stored(&laptop, Approver::Passphrase(generation(1))),
+        stored(&phone, Approver::Device(laptop.id)),
+        stored(&tablet, Approver::Passphrase(generation(2))),
+    ];
+    let devices = [laptop.clone(), phone.clone(), tablet.clone()];
+
+    assert_eq!(chain(&laptop, generation(2), &devices, &approvals), None);
+    assert_eq!(chain(&phone, generation(2), &devices, &approvals), None);
+    assert_eq!(chain(&tablet, generation(1), &devices, &approvals), None);
+    assert!(chain(&tablet, generation(2), &devices, &approvals).is_some());
+}
+
+#[test]
+fn an_approval_of_another_root_key_or_of_a_revoked_device_counts_for_nothing() {
+    let alice = UserId::generate();
+    let (laptop, phone) = (device(alice, Some(1)), device(alice, Some(2)));
+    let laptops = stored(&laptop, Approver::Passphrase(generation(1)));
+    let phones = stored(&phone, Approver::Device(laptop.id));
+    let (laptop_rotated, phone_rotated) = (device(alice, Some(8)), device(alice, Some(9)));
+    let laptop_rotated = Device {
+        id: laptop.id,
+        ..laptop_rotated
+    };
+    let phone_rotated = Device {
+        id: phone.id,
+        ..phone_rotated
+    };
+    let approvals = [laptops, phones];
+
+    assert_eq!(
+        chain(
+            &laptop_rotated,
+            generation(1),
+            std::slice::from_ref(&laptop_rotated),
+            &approvals
+        ),
+        None
+    );
+    assert_eq!(
+        chain(
+            &phone_rotated,
+            generation(1),
+            &[laptop.clone(), phone_rotated.clone()],
+            &approvals
+        ),
+        None
+    );
+    assert_eq!(
+        chain(
+            &phone,
+            generation(1),
+            &[laptop_rotated, phone.clone()],
+            &approvals
+        ),
+        None,
+        "its approver's root key changed"
+    );
+    assert_eq!(
+        chain(
+            &revoked(laptop.clone()),
+            generation(1),
+            &[laptop],
+            &approvals
+        ),
+        None
+    );
+}

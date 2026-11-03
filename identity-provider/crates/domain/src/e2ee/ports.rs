@@ -6,11 +6,11 @@ use crate::{ApprovalRequestId, ConversationId, DeviceId, SessionId, UserId};
 
 use super::{
     Append, Approval, ApprovalMessage, ApprovalMessageBody, ApprovalRequest, ArchiveCursor,
-    ArchiveEntry, ArchiveStoreError, Attestation, AttestationExpiry, CheckedApproval, Claim,
-    ClaimedKeyPackage, Commit, DeliveryStoreError, Device, DeviceLabel, DeviceRootKey,
+    ArchiveEntry, ArchiveStoreError, Attestation, AttestationExpiry, CheckedApproval, CheckedShare,
+    Claim, ClaimedKeyPackage, Commit, DeliveryStoreError, Device, DeviceLabel, DeviceRootKey,
     Ed25519PublicKey, Ed25519Signature, Epoch, HeldHistoryKey, HistoryGeneration, HistoryKey,
-    HpkeKeyWrite, KeyStoreError, MessageSeq, NewArchiveEntry, NewCommit, NewKeyPackage, NewWelcome,
-    RemoteClaimError, RequestRefusal, Welcome, WelcomeBlob,
+    HpkeKeyWrite, KeyShare, KeyStoreError, MessageSeq, NewArchiveEntry, NewCommit, NewKeyPackage,
+    NewWelcome, RemoteClaimError, RequestRefusal, Welcome, WelcomeBlob,
 };
 
 /// The devices accounts registered, and their attestations.
@@ -22,7 +22,8 @@ pub trait Devices: Send + Sync {
     /// Store the device's attestation and do `hpke_key` to its HPKE key, recording the device under
     /// `label` if it is new; only while the device is still as `read` (`None`: not recorded):
     /// unrevoked, with the same root key and HPKE key. Another root key than the one held drops, in
-    /// the same write, the device's approvals and those it signed: neither verifies any more.
+    /// the same write, the device's approvals, those it signed and the key shares it sent: none
+    /// verifies any more; another root key or HPKE key, the shares sealed for it.
     async fn attest(
         &self,
         owner: UserId,
@@ -32,13 +33,13 @@ pub trait Devices: Send + Sync {
         attestation: &Attestation,
         hpke_key: &HpkeKeyWrite,
     ) -> Result<Attest, KeyStoreError>;
-    /// Revoke the device, drop its HPKE key and the approvals it signed, and close the approval
-    /// requests it asks or answers, in one write: nothing encrypts to it again, nothing is
-    /// approved through it, and nobody waits on it.
+    /// Revoke the device, drop its HPKE key, the approvals it signed and the key shares it sent or
+    /// was sent, and close the approval requests it asks or answers, in one write: nothing
+    /// encrypts to it again, nothing is approved through it, and nobody waits on it.
     async fn revoke(&self, owner: UserId, id: DeviceId) -> Result<Revocation, KeyStoreError>;
-    /// Record that the device holds `generation` of its owner's history key; only while that is
-    /// the owner's current generation (`check_history_generation`), and the device the owner's
-    /// and unrevoked.
+    /// Record that the device holds `generation` of its owner's history key, dropping the share it
+    /// was sent; only while that is the owner's current generation (`check_history_generation`),
+    /// and the device the owner's and unrevoked.
     async fn hold_history_key(
         &self,
         owner: UserId,
@@ -267,10 +268,11 @@ pub enum Archived {
 pub trait HistoryKeys: Send + Sync {
     async fn current(&self, owner: UserId) -> Result<Option<HeldHistoryKey>, ArchiveStoreError>;
     /// Make `key` the owner's history key if its generation follows the current one
-    /// ([`HistoryGeneration::follows`]), erasing the owner's archive and the approvals made with
-    /// older generations' approval keys in the same write: the archive only ever holds the current
-    /// generation, and only its approval key approves. `set_by` is the device whose session set
-    /// it. The very key held already is a retry: nothing is written.
+    /// ([`HistoryGeneration::follows`]), erasing the owner's archive, the approvals made with older
+    /// generations' approval keys and the key shares in the same write: the archive only ever holds
+    /// the current generation, only its approval key approves, and only its passphrase is shared.
+    /// `set_by` is the device whose session set it. The very key held already is a retry: nothing
+    /// is written.
     async fn replace(
         &self,
         owner: UserId,
@@ -398,8 +400,37 @@ pub enum Close {
     Refused(RequestRefusal),
 }
 
-/// Tells an account's live sessions about approvals and the requests relayed between its devices.
-pub trait ApprovalNotifier: Send + Sync {
+/// The account's history passphrase on its way to its devices, one share per recipient and
+/// generation.
+#[async_trait::async_trait]
+pub trait KeyShares: Send + Sync {
+    /// Store the share while what it was checked on holds: its generation the owner's current one,
+    /// the sender unrevoked with the root key that signed it and holding that generation, the
+    /// recipient unrevoked with the root key and HPKE key it was sealed for and not holding it, and
+    /// every approval it relied on still held. The first share stored for a recipient and
+    /// generation stays.
+    async fn deposit(&self, owner: UserId, share: &CheckedShare) -> Result<Deposit, KeyStoreError>;
+    /// The share held for the owner's device `recipient` under `generation`.
+    async fn of_recipient(
+        &self,
+        owner: UserId,
+        recipient: DeviceId,
+        generation: HistoryGeneration,
+    ) -> Result<Option<KeyShare>, KeyStoreError>;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Deposit {
+    Stored,
+    /// A share for the recipient and generation is held already: nothing was written.
+    AlreadyHeld,
+    /// A device, an approval or the generation changed since they were read: nothing was written.
+    Stale,
+}
+
+/// Tells an account's live sessions about approvals, the requests relayed between its devices,
+/// and the passphrase shared to them.
+pub trait DeviceTrustNotifier: Send + Sync {
     /// To every live session of the account: each reads the device list again.
     fn device_approved(&self, owner: UserId, device: DeviceId);
     fn approval_requested(
@@ -417,4 +448,6 @@ pub trait ApprovalNotifier: Send + Sync {
         seq: MessageSeq,
     );
     fn approval_closed(&self, owner: UserId, to: &[SessionId], request: ApprovalRequestId);
+    /// To the recipient device's sessions: a share waits for it.
+    fn history_key_ready(&self, owner: UserId, to: &[SessionId], device: DeviceId);
 }

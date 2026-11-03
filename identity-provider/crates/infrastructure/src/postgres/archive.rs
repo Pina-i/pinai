@@ -9,6 +9,7 @@ use sqlx::{PgConnection, PgPool};
 use time::OffsetDateTime;
 
 use super::approval::drop_older_passphrase_approvals;
+use super::key_share::delete_shares_of;
 
 /// `history_messages`, written under the generation `history_keys` holds.
 pub struct PgHistoryArchive {
@@ -151,7 +152,7 @@ async fn erase(c: &mut PgConnection, owner: UserId) -> Result<usize, ArchiveStor
     Ok(usize::try_from(erased).unwrap_or_default())
 }
 
-/// `history_keys`, whose replacement erases `history_messages`.
+/// `history_keys`, whose replacement erases `history_messages` and `history_key_shares`.
 pub struct PgHistoryKeys {
     pool: PgPool,
 }
@@ -259,6 +260,7 @@ impl HistoryKeys for PgHistoryKeys {
         }
         let erased = erase(&mut tx, owner).await?;
         drop_older_passphrase_approvals(&mut tx, owner, key.generation).await?;
+        delete_shares_of(&mut tx, owner).await?;
         tx.commit().await.context("commit history key replace")?;
         Ok(KeyReplace::Replaced { erased })
     }

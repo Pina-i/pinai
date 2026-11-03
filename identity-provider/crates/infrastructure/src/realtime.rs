@@ -1,7 +1,7 @@
 //! Pushes to the accounts' live connections: each event written as its frame — the JSON clients
 //! read, `events` — onto the connections hub.
 
-mod approvals;
+mod device_trust;
 mod devices;
 mod events;
 mod groups;
@@ -16,7 +16,7 @@ mod social;
 use connections::{Frame, Hub};
 use uuid::Uuid;
 
-pub use approvals::HubApprovalNotifier;
+pub use device_trust::HubDeviceTrustNotifier;
 pub use devices::HubDeviceNotifier;
 pub use groups::HubGroupNotifier;
 pub use messaging::HubMessageNotifier;

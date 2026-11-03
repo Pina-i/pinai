@@ -6,7 +6,7 @@ authentication endpoint, a key directory, and an MLS Delivery Service. It
 never sees plaintext message content.
 
 For the protocol-level explainer of MLS itself (TreeKEM, KeyPackages,
-commits, epochs), see [`/e2ee-protocols-overview.md`](./e2ee-protocols-overview.md).
+commits, epochs), see `identity-provider/specs/e2ee-protocols-overview.md`.
 This document is the integration spec.
 
 ---
@@ -15,22 +15,32 @@ This document is the integration spec.
 
 Three properties define the system:
 
-1. **The IdP is the trust root, never the eavesdropper.** Each user picks an
-   identity-provider (`alice@idp.alice.com`). That IdP signs every device's
-   long-lived cryptographic identity. The IdP never holds the user's
-   message-decryption keys.
+1. **The user's devices decide which devices are theirs; the IdP carries
+   what it can't read.** Each user picks an identity-provider
+   (`alice@idp.alice.com`). That IdP signs every device's long-lived
+   cryptographic identity — the attestation the rest of the network checks —
+   and carries every message, archive entry and key share without being able
+   to read them. Which devices the account's existing conversations and its
+   passphrase reach is the user's own devices' call: a new device counts once
+   one of them approves it with a short code, or once the account's 24 words
+   are typed on it (§ 3.9). Contacts take the IdP's attestation instead — what
+   that leaves open is in § 2. The IdP never holds a message-decryption key,
+   the passphrase or the key it derives.
 2. **Per-device, not per-user, identity.** Every device generates its own
    Ed25519 Device Root Key (DRK) and gets a fresh attestation from the IdP.
-   A user is the set of their attested devices. New devices join existing
-   conversations through standard MLS Add commits; no master-secret has to
-   be smuggled around.
-3. **History is opt-out, not opt-in.** When a user is created, the system
-   mints a 24-word recovery passphrase on-device and uses it to derive a
-   History Archive Key. Every decrypted plaintext gets re-encrypted under
-   that key and uploaded to an opaque server-side archive. A user with the
-   passphrase on a fresh device can restore their past messages; a user
-   who lost the passphrase cannot — that's the explicit security/usability
-   trade-off this system accepts.
+   New devices join existing conversations through standard MLS Add commits,
+   which the user's devices make for approved devices only; no master-secret
+   has to be smuggled around.
+3. **History is on by default, under one passphrase per account.** The
+   account's first device mints a 24-word passphrase: the account's history
+   key, in generations (§ 3.6). Every device holding it re-encrypts each
+   decrypted plaintext under the History Archive Key it derives, and uploads
+   it to an opaque server-side archive — there is no switch to stop it; the
+   device that approves a new one with the code shares the words with it,
+   sealed (§ 3.11), so a device approved with the code restores past messages
+   by itself. An account that lost every device and the words loses its
+   archive and starts over with a new passphrase — the explicit
+   security/usability trade-off this system accepts.
 
 ```mermaid
 flowchart TB
@@ -38,22 +48,26 @@ flowchart TB
         IdP["IdP signing key<br/>(JWKS)"]
         DRK["Device Root Key<br/>(per device, Ed25519)"]
         Leaf["MLS leaf signing key<br/>(per KeyPackage)"]
+        Others["The account's other devices"]
         IdP -->|signs attestation| DRK
-        DRK -.->|holder is the MLS member| Leaf
+        DRK -.->|signs the leaf binding| Leaf
+        DRK -->|approves, or is approved by| Others
     end
     subgraph message ["Message layer"]
         MLS["MLS group state<br/>(per conversation)"]
         Ratchet["Per-epoch ratchet<br/>(per-message keys)"]
         MLS --> Ratchet
     end
-    subgraph history ["History backup layer (opt-out)"]
-        Pass["24-word passphrase<br/>(the account's, kept on each device)"]
+    subgraph history ["History backup layer (on by default)"]
+        Pass["24-word passphrase<br/>(the account's, in generations)"]
         Salt["The generation's salt<br/>(server-stored)"]
         HAK["History Archive Key<br/>(Argon2id)"]
         Archive["Encrypted plaintext archive<br/>(server, opaque)"]
+        Share["Key share<br/>(the words sealed for one<br/>approved device, server, opaque)"]
         Pass --> HAK
         Salt --> HAK
         HAK --> Archive
+        Pass -->|sealed for a device it approved| Share
     end
     Leaf -.->|signs messages in| MLS
 ```
@@ -62,42 +76,112 @@ flowchart TB
 
 ## 2. Threat model
 
-### What we protect against
+Below, **the instance** is the user's identity provider acting on its own — its server, its
+database, its routes and pushes, and whoever runs it through them. The code a device runs is set
+apart: a web app runs what its host serves, so for a web app the user's own instance serves, the
+rows below that name the instance don't hold ("What is not protected").
+
+### What is protected
 
 | Threat | Mitigation |
 |---|---|
-| IdP operator reads message content (legal order, insider, breach) | Server only sees MLS ciphertext; per-message keys are derived inside MLS, never transmitted |
-| IdP operator silently MITMs a new conversation | Adding a peer requires consuming one of *their* KeyPackages — the server can't forge MLS leaf credentials signed by Device Root Keys it doesn't control |
-| Peer IdP serves a forged KeyPackage for one of its users | Each leaf credential carries an attestation signed by the peer's IdP; verifying it pulls that IdP's JWKS. If the peer's IdP is compromised the attack succeeds — that's the explicit trust ceiling for federation |
-| Compromised device | Per-device leaves: revoke the leaf via MLS Remove commits. Post-compromise security recovers within one commit cycle. The directory-level revocation flag stops the server from handing out fresh KeyPackages for the dead device |
+| The database or one of its backups leaks; an operator browses it | It holds nothing that opens a message, the archive or the passphrase: MLS ciphertexts, the archive sealed under the HAK, key shares sealed for one device's HPKE key each; the salts, check values, public keys, signatures and the handshake's messages open none of them (§ 8) |
+| The network reads a conversation | Only MLS ciphertext crosses, over HTTPS; per-message keys are derived inside MLS on the devices, never transmitted |
+| Another instance reads a conversation it carries | It carries MLS ciphertext only; it reads what a device it attests for one of its own users is let into ("What is not protected") |
+| The instance puts a leaf key of its own under one of the user's devices' credentials, in a KeyPackage it serves, to read a conversation in that device's place | Every leaf credential carries the device's leaf binding, its DRK's signature over the leaf's signature key (§ 3.4), and every device checks it on every add and on every leaf it meets: without the DRK's private half, the instance makes none |
+| A peer instance serves a forged KeyPackage for one of its users | The leaf credential carries the peer's attestation, verified against its JWKS, and the leaf binding, verified against the attested DRK (§ 3.4). A device the peer attests for itself is its users' trust ceiling, as below |
+| The instance slips a device of its own into the user's existing conversations | The user's devices add only devices they approved (§ 3.9): approved with the code, or with the 24 words typed on it. An approval is a signature by an approved device's DRK, or by the passphrase's approval key — the instance holds neither |
+| The instance reads the archive or the passphrase | The HAK derives from the passphrase, which never reaches the instance in the clear: a device shares it only with a device it approved with the code, sealed for that device's HPKE key and signed by its own DRK (§ 3.11) |
+| The instance shows its own device just as the user signs in elsewhere, for the user to approve | Approving takes the 6-digit code the new device shows, the password of a SPAKE2 exchange: without it, the instance gets one guess per exchange — a one-in-a-million chance —, and each guess costs the user a code, asked for or typed: a device draws a new code for each exchange, runs one exchange per code, and opens a request only when the user asks (§ 3.10) |
+| The instance changes the approval public key, to approve a device itself | A device holding the passphrase derives the key itself, compares, trusts nothing new and warns on a mismatch (§ 3.9) |
+| A device nobody approved appears on the account | No device of the user's adds it to a conversation or sends it the passphrase; each one holding the current passphrase that sees it in the device list announces it — "Not you? Sign it out." The list is the instance's: a device it leaves out is caught only if met as a leaf in a conversation one of the user's devices is in ("What is not protected", § 3.9) |
+| The instance starts the history over from a device of its own | The new generation's setter isn't a device the others approved: they refuse the generation and warn — "Your history was reset from a device you haven't approved." —, and never approve that setter, which would hand it everything. The way back is a start over from one of the user's own devices (§ 6.11) |
+| A device is lost or stolen | Revoke it — MLS Remove commits leave it out of every later epoch, the approvals it signed and the key shares it sent or was sent are dropped, the directory hands out no KeyPackage of it (§ 6.6) — and, if it held the 24 words, start over from one of the user's devices (§ 6.11): only a new generation cuts its words off |
 | A member removed from a group, or gone from it, keeps reading | Every device of theirs is committed out by MLS Remove commits (§ 6.8): nothing sent from the next epoch on decrypts for them, whatever reaches them |
 | Replay / reorder / forging by transport | MLS application-message authentication + epoch ordering — handled inside the protocol |
-| Lost passphrase + lost all devices | Conversations are unrecoverable. Intentional and documented |
+
+### What is not protected
+
+- **A device the user's instance attests, in the conversations others add the user to.** A contact
+  founding a DM with the user, or a group adding the user, adds every device the instance attests
+  for the user (§ 6.5) — one of the instance's own included. It reads what is sent there until one
+  of the user's devices in the conversation, holding the current passphrase, meets its leaf, finds
+  its root key unlisted or unapproved and announces it (§ 3.9) — and it is committed out only if
+  the instance carries the commit: the instance's Delivery Service can refuse it, drop it or never
+  forward it, and can withhold the Welcomes that would bring the user's devices in.
+- **Conversations the instance opens in the user's name.** With a device of its own and the
+  user's account, it can found a DM's group before the user's devices do, befriend someone as the
+  user, or create a group as the user: none of the user's devices is ever added there, so none
+  meets its leaf. It speaks as the user in them, and it can keep them out of what the user's
+  devices are shown.
+- **A device a contact's instance attests for that contact.** The user's devices can't see a
+  contact's approvals: they add every device the contact's instance attests to the conversations
+  the user opens with them, and to a group when it gains that contact. Closing this, and the two
+  points above, takes user identity keys that contacts check, beyond this system.
+- **Anyone holding the 24 words and a session.** Approving a device by the passphrase, they have
+  it added to every existing conversation by the user's devices, and restore the archive. A
+  revoked device that held the words keeps them, as does anyone who saw them. Cutting them off is
+  starting over (§ 6.11) from one of the user's devices: it becomes the account's new root of
+  trust, the other devices are approved again from it, and the archive is erased.
+- **Someone with only the password.** Their device is announced and kept out of the existing
+  conversations and the passphrase, but they can erase the archive — Settings → Devices → Clear
+  history backup, or a start over —, and their device gets into the conversations contacts open
+  with the user from then on (above). With a recent sign-in they can sign the other sessions out,
+  revoke every device and start over: their device then becomes the account's root of trust, and
+  the existing conversations are out of the user's reach.
+- **The user approving a device that isn't theirs.** The code proves that the two devices speak to
+  each other, not whose the new one is: the prompt names the device ("New sign-in on Chrome on
+  Android"), and "Not me" signs it out.
+- **The code a device runs.** Whoever hosts the web app a user opens — the user's instance,
+  another, or the official one — can change its code, and that code does what the device does:
+  reads the passphrase, approves a device. The desktop app runs the code it was installed with
+  (`app://pinai`), never code an instance serves.
+- **The instance erasing what it stores.** It controls the database: it can drop the archive, a
+  key share, an approval or a message — never read or forge one it stores. A dropped archive loses
+  past messages on new devices; the devices that read them keep them.
+- **Metadata.** The instance knows who is in each conversation, when commits happen, message
+  ordering and sizes, the sender device of each message, and which devices share the passphrase
+  with which. There is no sealed sender and no anonymous credential.
+
+### Lost everything
+
+An account that lost every device and the 24 words starts over (§ 6.11): a new device sets the next
+generation — a recent password, the archive erased — and becomes the account's new root of trust,
+approved by its own new words. It joins none of the account's existing conversations: only the
+user's own devices add a sibling, and none is left (§ 9). Devices that still exist hold the old
+passphrase: they refuse the new generation, as one set by a device they never approved, and warn,
+until the user puts one back — it asks to be approved and its code is typed on the new device (the
+two approve each other, the new device shares the new passphrase, and the old one adds it to its
+conversations) — or types the new words on it.
 
 ### Trust ceiling
 
-The system trusts the user's IdP. The IdP can mint a fresh device
-attestation for an attacker who controls its signing key — that attacker
-can then join the user's MLS groups going forward. This is acceptable
-because it's the same ceiling OIDC already imposes: a compromised IdP
-can issue access tokens for the user too, so trusting the IdP for
-device attestation doesn't lower the ceiling, only makes it explicit.
+To the rest of the network, a device of the user's is one the user's instance attests (§ 3.2):
+contacts trust its attestation, as they trust the instance's OIDC tokens. The instance — or
+whoever holds its signing key — can therefore attest a device of its own. Such a device is kept out
+of the conversations the user's devices add devices to, and of the passphrase. It is let into the
+conversations contacts open with the user — until one of the user's devices, there, meets it and
+commits it out, and only if the instance carries that commit —, and it can open conversations of
+its own in the user's name, where none of the user's devices ever is. This is the ceiling OIDC
+already imposes — a compromised IdP issues access tokens for the user too —, made explicit.
 
 What this trust does **not** grant:
-- Reading historical messages — MLS forward secrecy means past
-  per-message keys are deleted after use (a device keeps only those of
-  messages it hasn't read yet, from its last five epochs — § 6.3), and
-  the IdP doesn't see the history archive's HAK
-- Impersonating the user to peer IdPs in a way they can detect on
-  rotation — peer IdPs cache the user's JWKS and notice key changes
-- Reading the user's local cached passphrase or attestation — the
-  IDB at-rest encryption key is non-extractable
+- Reading the messages of a conversation its device wasn't added to — MLS keys live on the
+  devices, and forward secrecy deletes past per-message keys once used (a device keeps only those
+  of messages it hasn't read yet, from its last five epochs — § 6.3)
+- Reading the history archive or the passphrase — sealed under the HAK, and for approved devices'
+  HPKE keys
+- Joining the user's existing conversations, or receiving the passphrase — both take an approval
+  the instance can't sign
+- Speaking in a conversation as one of the user's devices — every leaf it holds is bound to the
+  device's DRK (§ 3.4)
+- Approving a device by changing the approval public key — a device holding the passphrase checks
+  it
+- Reading what a device keeps — its private keys and its MLS state never leave it, and the
+  passphrase leaves it only sealed in a key share (§ 8)
 
 ### Out of scope (non-goals)
 
-- **Metadata.** The IdP knows: who's in each conversation, when commits
-  happen, message ordering, sender device per message. We don't
-  implement sealed sender or anonymous credentials.
 - **Traffic analysis.** No padded delivery, no cover traffic, no mixnets.
 - **Endpoint compromise.** Full device compromise breaks all bets, as
   with every E2EE system.
@@ -119,7 +203,7 @@ The DRK is *long-lived* by default (1-year attestation, silent renewal
 when within 30 days of expiry). It's not used to sign MLS application
 messages directly; that's the per-KeyPackage leaf signing key. The DRK
 binds the device's IdP-attested identity to whatever leaf signing keys
-that device produces.
+that device produces, by signing each one: the leaf binding (§ 3.4).
 
 ### 3.2 IdP attestation
 
@@ -136,8 +220,9 @@ key by `kid`, and validating the signature.
 
 Each device also makes an HPKE key pair (RFC 9180, DHKEM(X25519, HKDF-SHA256)) once, beside its
 DRK, and keeps the private half in its sealed store. Its public half — a raw 32-byte X25519 key —
-is what the account's other devices encrypt to. The DRK signs it over the `PINAI-DEVICE-HPKE-v1`
-canonical bytes of § 7.2: the account's actor URI, the device id and the key.
+is what the account's other devices encrypt to: the passphrase they share with it (§ 3.11). The
+DRK signs it over the `PINAI-DEVICE-HPKE-v1` canonical bytes of § 7.2: the account's actor URI,
+the device id and the key.
 
 The instance checks only the key's length. A low-order key is refused by the sender's HPKE —
 X25519 then gives the all-zero shared secret (RFC 9180 § 7.1.4) —, so a sender must never skip
@@ -185,7 +270,7 @@ this JSON:
 
 ```json
 {
-  "v": 1,
+  "v": 2,
   "actor_uri": "https://idp.alice.com/users/alice_xK9mP",
   "device_id": "550e8400-e29b-41d4-a716-446655440000",
   "drk_pub": "<base64>",
@@ -194,13 +279,23 @@ this JSON:
     "kid": "key-2026-01",
     "expires_at": "2027-05-14T12:00:00Z",
     "signature": "<base64>"
-  }
+  },
+  "leaf_binding": "<base64>"
 }
 ```
 
+`leaf_binding` is the DRK's Ed25519 signature over the
+`PINAI-LEAF-BINDING-v1` canonical bytes of § 7.2: the actor URI, the
+device id and the leaf's signature public key — the raw 32-byte Ed25519
+`signature_key` of the LeafNode the credential sits in. The attestation
+and the DRK are public, so without the binding anyone holding them — the
+instance first — could pair them with a leaf key of its own in a
+KeyPackage it serves; with it, only the device that holds the DRK makes a
+leaf under its credential.
+
 Receivers verify in this order:
 
-1. Parse JSON; reject if `v !== 1`.
+1. Parse JSON; reject if `v !== 2`.
 2. `idp_att.issuer` origin must match the origin of `actor_uri` — an
    attacker-controlled IdP must not be able to attest someone else's
    actor.
@@ -208,6 +303,20 @@ Receivers verify in this order:
 4. Look up the issuer's JWKS by `kid` (1-hour client-side cache,
    refresh-on-verify-failure for rotation safety) and verify the
    signature over the canonical bytes.
+5. `drk_pub` verifies `leaf_binding` — Ed25519, strict — over the
+   `PINAI-LEAF-BINDING-v1` bytes rebuilt from `actor_uri`, `device_id` and
+   the LeafNode's signature key.
+
+Every device runs these checks on every leaf it adds — the KeyPackage's —
+and on every leaf it meets: in a Welcome's ratchet tree, in a commit that
+adds one, and a leaf replaced by an Update or by a commit's path. A leaf
+failing them is never added, and one met in a group is warned of and
+committed out — if the instance carries the commit. A contact's leaf is
+trusted on its attestation and leaf binding; a leaf of the device's own
+account also needs the device list to list its device with the
+credential's `drk_pub`, approved over that root key (§ 3.9) — one that
+doesn't is announced, and committed out under the same proviso, by a
+device holding the current passphrase.
 
 After verification, the leaf is trusted as "actor X's device Y." MLS's
 own LeafNode self-signature handles per-message integrity.
@@ -217,10 +326,10 @@ own LeafNode self-signature handles per-message integrity.
 A single-use bundle the device publishes ahead of time so peers can
 add it to groups without a round-trip. Each KeyPackage contains a
 leaf-signing public key of the device + the device's full credential
-(Section 3.4) + MLS protocol fields (HPKE init key, capabilities,
-lifetime). The server stores them in an inventory keyed by
-`(user_id, device_id)`; peers claim one atomically when adding the user
-to a conversation.
+(§ 3.4), its leaf binding signing that very key + MLS protocol fields
+(HPKE init key, capabilities, lifetime). The server stores them in an
+inventory keyed by `(user_id, device_id)`; peers claim one atomically
+when adding the user to a conversation.
 
 In each group the device signs with the key its leaf there carries — the
 one of the KeyPackage it joined through, or the one it founded the group
@@ -251,25 +360,29 @@ losing past messages on a fresh device, not losing your account.
 
 It belongs to the account, not to a device, and the account has one at a time, in
 **generations**: the first device makes generation 1, and a new passphrase — the next
-generation — is made only when the current one is lost: no device holds it and the words are
-gone. A new generation erases the archive (§ 3.8): what was saved under the lost passphrase could
-no longer be opened.
+generation — is made only when the current one is lost (no device holds it and the words are
+gone) or must be replaced (a revoked device, or someone the user no longer trusts, holds it):
+a start over, § 6.11. A new generation erases the archive (§ 3.8): what was saved under the old
+passphrase could no longer be opened.
 
 ```mermaid
 stateDiagram-v2
     [*] --> None: the account is created
     None --> G1: its first device sets generation 1
-    G1 --> G2: the passphrase lost — generation 2 (a recent password), the archive erased
+    G1 --> G2: the passphrase lost or replaced — generation 2 (a recent password), the archive erased
     G2 --> Gn: lost again — the next one, the same way
 ```
 
-A device signing in to an account that has a history key (`GET /api/history/key`) is asked for
-the words instead (`/onboarding/recovery-restore`, § 6.4): typing them restores the archive, and
-the device keeps them, so it archives under the same key from then on, and approves itself
-(§ 3.9). "Start fresh on this device" leaves it without a passphrase: it reads its conversations
-from then on but archives nothing, until the words are entered from Settings → Devices →
-"Restore history". A device's passphrase is stored locally, encrypted under its AES-GCM key, for
-revealability in Settings → Devices.
+A device signing in to an account that has a history key (`GET /api/history/key`) gets the words
+one of two ways (`/onboarding/recovery-restore`): approved with the code by a device of the
+account (§ 3.10), it is sent them by the device that approved it (§ 3.11, § 6.10); or the
+user types them (§ 6.4), which approves it (§ 3.9). Either way it checks them against the
+generation, keeps them, approves itself with them, archives under the same key from then on and
+restores the archive. "Continue without approving" leaves it without a passphrase: it archives
+nothing, the account's devices keep it out of their conversations, and it can be approved later
+from Settings → Devices — or have the words typed there, "Restore history". "I no longer have my
+devices or my words" starts over (§ 6.11). A device's passphrase is stored locally, encrypted
+under its AES-GCM key, for revealability in Settings → Devices.
 
 A device says which generation it holds (`PUT /api/keys/devices/:device_id/history-key`), only for
 the current one and from its own session, once it has named its device
@@ -313,9 +426,11 @@ flowchart LR
 ### 3.8 Encrypted plaintext archive
 
 Every decrypted MLS application message gets re-encrypted under HAK with AES-256-GCM (fresh
-12-byte nonce per entry) and batch-uploaded to the server, naming the generation it was sealed
-under. The server only sees opaque ciphertext + nonces. A device with the current passphrase can
-paginate the archive and decrypt every entry; a device without it sees only bytes.
+12-byte nonce per entry), its conversation and message ids bound as associated data (§ 7.3), and
+batch-uploaded to the server, naming the generation it was sealed under. The server only sees
+opaque ciphertext + nonces. A device with the current passphrase can paginate the archive and
+decrypt every entry; a device without it sees only bytes. A restore files an entry only under the
+ids it was sealed with: one the instance moved to another conversation or message fails to open.
 
 **The archive only ever holds the current generation's entries:**
 
@@ -325,15 +440,17 @@ paginate the archive and decrypt every entry; a device without it sees only byte
   current passphrase.
 - A new generation erases the account's archive in the transaction that sets it. An upload under
   way either commits first and is erased with the rest, or is refused.
-- Settings → Clear (`DELETE /api/history/messages`) erases the entries only: the key and its
-  generation stay, and every device goes on saving new messages under it.
+- Settings → Devices → Clear history backup (`DELETE /api/history/messages`) erases the entries
+  only: the key and its generation stay, and every device goes on saving new messages under it.
 
 ### 3.9 Approvals
 
 The user's own devices decide which devices belong to the account. A device counts once another
 device of the account approves it, or once the passphrase is typed on it. The instance stores and
 lists the approvals and refuses malformed ones, but never decides whom to trust: each device checks
-them itself.
+them itself. It reads their structure for one thing only, a key share, which it refuses to and from
+a device that isn't approved, and from a device that didn't approve its recipient (§ 3.11) — a
+backstop behind each device's check, never one in its place.
 
 **An approval** is an Ed25519 signature over the `PINAI-DEVICE-APPROVAL-v1` canonical bytes of
 § 7.2 — the account's actor URI, the approved device's id and its DRK —, made either:
@@ -389,11 +506,53 @@ The stored approval public key is the instance's word until a device can check i
 keep the chain out of the instance's hands:
 
 - **A device that doesn't hold the current passphrase** can't confirm the approval public key: until
-  it holds the passphrase, it trusts only the device it approved itself in a code handshake
-  (§ 3.10), whose keys it took from that device, never from the list.
+  it holds the passphrase, it trusts only the devices it approved itself in a code handshake
+  (§ 3.10), whose keys it took from the exchange, never from the list.
 - **A device that holds it** derives the approval key itself (§ 3.7) and compares. When the stored
   approval public key differs, the instance changed it: the device trusts no approval made by that
   key, trusts no device it hasn't trusted already, and warns the user.
+
+**What approval gates**, on each of the user's devices: adding a device to the conversations it
+holds (§ 6.2), and the passphrase — a device shares it only with the devices it approved itself in
+a code handshake, and accepts a share only from one of them (§ 3.11).
+
+**Who acts on approval.** Only a device that holds the current passphrase, and whose own
+derivation of the approval key matches the stored one, tells approved devices from others: it
+alone adds a device, announces one, or commits one out on these grounds, and it reads the device
+list again first — `device_approved` may arrive after a sibling's add. A device without it — a new
+device before its share, one that continued without approving, an old one refusing a newer
+generation — does none of these. A device that acts:
+
+- keeps every sibling it has found approved, by device id and root key (§ 8): a sibling whose root
+  key changes is a new device, to approve again;
+- announces, once per device, a device that appears with no approval — "New device not approved:
+  Chrome on Linux. Not you? Sign it out.", with "Approve", which opens the code entry.
+
+**A reset the user didn't make.** Any device warns of a generation newer than the one it holds or
+has seen, set by a device it hasn't approved or with no chain it can check — "Your history was
+reset from a device you haven't approved." —, and of a stored approval public key that differs
+from its own derivation, worded for an unknown change. When the user didn't start over, the
+setter isn't theirs: it is never approved — approving it would hand it the account's
+conversations and its new words —, and the way back is a start over from one of the user's own
+devices (§ 6.11).
+
+**A device of the account met as a leaf.** The device list is the instance's: a device it leaves
+out of it, or shows unapproved, can still be in a conversation someone else added the user to — a
+DM a contact founds, a group that adds the user —, since contacts add every device the instance
+attests (§ 6.5). So a device that acts checks every leaf of its own account it meets in a
+conversation (§ 3.4) by its root key, not its device id alone — the instance can attest a root key
+of its own under an approved device's id: a leaf whose credential's `drk_pub` the list doesn't show
+for that device, or shows unapproved, is announced as above and committed out of the conversation
+(an MLS Remove, § 6.8) — if the instance carries the commit. It has read what was sent there until
+then.
+
+**What a device never takes back from the list.** Each device keeps what it has seen (§ 8):
+
+- **Generations only move forward.** A device never goes back to a generation older than the one
+  it holds or has seen, whatever `GET /api/history/key` answers: it warns instead.
+- **A revocation is final.** A device remembers every revocation it saw; a device the list later
+  shows unrevoked stays revoked for it — never added, never shared with, its approvals trusted for
+  nothing.
 
 ### 3.10 The approval handshake
 
@@ -409,9 +568,23 @@ out of the exchange, never as the device list shows them: the approved device's 
 new one approved, and the new device's approval of the other is the one it trusts before it holds
 the passphrase (§ 3.9). Should the instance list another key for either device, the approval
 doesn't verify over it, and is refused. A wrong code fails the exchange, and the device that finds
-it wrong ends the request: without the code, the instance gets one guess per request — a
-one-in-a-million chance. The messages' byte format is the clients': the client step that speaks
-it adds it to this section; the instance never parses it.
+it wrong ends the request.
+
+**The rules both devices keep:**
+
+- **The code** is 6 digits drawn uniformly at random by the device asking, a new one for each
+  exchange: a device never runs a second exchange on a code, and never shows one again. Without
+  the code, the instance gets one guess per exchange — a one-in-a-million chance.
+- **A request opens only when the user asks.** A device opens one — and shows a new code — only on
+  the user's "Approve from another device", never by itself after a failure, a close or an expiry:
+  each of the instance's guesses then costs the user a code, asked for or typed.
+- **The answering device holds the current passphrase**, and found the stored approval key to be
+  its own derivation, so that it shares the passphrase with the new device right after (§ 3.11) —
+  one that doesn't would leave the new device approved through it with no share coming. A device
+  that found the approval key changed answers no request. After a start over the old device is
+  the one asking, and the new device, which holds the new words, answers it (§ 6.11).
+- **The messages' byte format** — the SPAKE2 messages, then the keys sealed under the session
+  key — is the clients'; the instance never parses it.
 
 **The relay** (§ 5, "Approvals"):
 
@@ -451,6 +624,99 @@ Pushes go to the sessions of devices only: a session that named none can take no
   `approval_closed { request_id }` to both sides' sessions — every device's while nobody answers;
   an expiry pushes nothing, as each side holds `expires_at`. Requests are deleted an hour after
   they opened, when they no longer count against the limit, and are then unknown (`404`).
+
+### 3.11 Key shares
+
+The account's passphrase travels by itself from a device holding it to a device it approved with
+the code: sealed for the recipient, signed by the sender, carried by the instance, which can't read
+it. One sharing serves both directions — a new device approved with the code receives the words
+from the device that approved it, and after a start over (§ 6.11) an old device receives the new
+words from the new one.
+
+**What a share is.** The sender seals the 24 words — written as a BIP-39 mnemonic is: lowercase,
+separated by single spaces — with HPKE (RFC 9180) in base mode for the recipient's HPKE key
+(§ 3.3), with the suite DHKEM(X25519, HKDF-SHA256), HKDF-SHA256, AES-128-GCM:
+
+- `info` = `pinai/history-key-share/v1`, as ASCII bytes;
+- `aad` = the `PINAI-HISTORY-SHARE-v1` bytes of § 7.2: the account's actor URI, the sender's device
+  id, the recipient's, and the generation;
+- the output: `enc`, the 32-byte encapsulated key, and `ciphertext`, 1 to 1024 bytes.
+
+Its DRK signs the `aad` followed by `enc` and `ciphertext`, as § 7.2 writes them: the share is
+bound to the account, both devices and the generation, so the instance can neither move it to
+another device nor replay it under another generation.
+
+**Who shares with whom, and when.** Only a device that approved the recipient in a code
+handshake (§ 3.10): the recipient approved it in return, and its handshake partners are the only
+devices it trusts before it holds the passphrase.
+
+- **A new device approved with the code**: the approving device — holding the current generation
+  (it said so, § 3.6) and approved under it — shares right after the two devices' mutual approvals
+  (§ 6.10).
+- **After a start over**: the old device asks to be approved, the new device answers, and the new
+  device shares the new passphrase with it once the two approved each other (§ 6.11).
+- **A device approved by the 24 words** typed on it holds the passphrase, and needs no share.
+- **A holder that didn't approve a device** never shares with it.
+
+**The sender's rules.** A device holding the current generation shares with every one of the
+devices it approved itself in a handshake that the device list shows unrevoked and not holding that
+generation, and does so on each refresh of the list and as soon as it comes to hold a new
+generation: the instance keeps the first share and answers the others `204`, so sharing again is
+harmless. It seals for the HPKE key the list shows for that device, once its chain verifies
+(§ 3.3) from the DRK the exchange gave it — never the list's. Should the list show another DRK
+for it, or an HPKE key that DRK didn't sign, it shares nothing and warns, as for a changed
+approval key (§ 3.9).
+
+**What the instance checks** (`POST /api/history/key-shares`, § 5, "History backup"), each against
+the directory as it stands:
+
+- the calling session named its device (§ 5, "Key directory rules"): the sender, an unrevoked
+  device of the account;
+- the generation the request names is the current one — none set refuses every share;
+- the sender, which has a DRK, holds that generation (its `history_generation`); the recipient is
+  another unrevoked device of the account, with a DRK and an HPKE key, that doesn't;
+- the sender approved the recipient: the recipient carries an approval by the sender's DRK
+  (`by: "device"`) binding the root key it holds;
+- both are **approved under the current generation**, by the stored approvals' structure: a device
+  carrying an approval by the passphrase under that generation, or one by an unrevoked device that
+  carries such an approval — two links at most, as § 3.9 says, each binding the root key its
+  device holds. Their signatures were checked when stored;
+- the signature verifies — Ed25519, strict — under the sender's DRK over the bytes of § 7.2.
+
+The instance stores one share per recipient and generation, in `history_key_shares`: of two
+devices that both approved the recipient sharing at once, the first one stored stays — the
+recipient trusts either —, and the other is answered `204` too, nothing written. The write is
+checked again under the locks it takes — both devices', every device the approvals it relied on
+name, and those approvals —, so a share is never stored over devices or approvals that changed
+meanwhile. An approval it relied on dropped later — by a revoke of a device in the chain, say —
+doesn't delete it: only the changes below do. A new share pushes `history_key_ready { device_id }`
+to the recipient device's sessions only.
+
+**What deletes them**, in the very write that leaves them useless:
+
+| Change | Shares deleted |
+|---|---|
+| A new generation set (`PUT /api/history/key`) | All of the account's |
+| The recipient says it holds the generation (`PUT /api/keys/devices/:device_id/history-key`) | The one it was sent |
+| A device revoked (`POST /api/keys/devices/:device_id/revoke`) | Those it sent, and the one it was sent |
+| A device's DRK rotated (`POST /api/keys/devices`, another DRK) | Those it sent — they no longer verify —, and the one it was sent |
+| A device's HPKE key replaced or cleared (`POST /api/keys/devices`) | The one it was sent — sealed for a key it no longer holds |
+
+**Accepting one.** On `history_key_ready`, or whenever it lacks the passphrase, the recipient reads
+its share (`GET /api/history/key-shares`) and keeps the words only when every check holds:
+
+1. the sender is one of the devices it approved itself in a code handshake, by the DRK the
+   exchange gave it and never the list's (§ 3.9);
+2. the signature verifies under that DRK over the bytes of § 7.2, rebuilt from the account's actor
+   URI, the sender's device id, its own and the generation;
+3. the seal opens under its HPKE private key, with the same `info` and the `aad` rebuilt the same
+   way;
+4. the words give the current generation's check value and approval public key (§ 3.7), derived
+   from them and the generation's salt.
+
+It then keeps the words with their generation, approves itself with the approval key, says it
+holds the generation — which deletes the share — and restores the archive (§ 6.4). A share failing
+a check is left unused, and the device warns, as for a changed approval key (§ 3.9).
 
 ---
 
@@ -502,6 +768,14 @@ history_messages         — PRIMARY KEY (user_id, id);
                             Server-opaque; idempotent upserts via
                             ON CONFLICT DO NOTHING. Only the current
                             generation's entries.
+history_key_shares       — PRIMARY KEY (recipient_device_id, generation): one a
+                            recipient and generation, the first stored; user_id,
+                            sender_device_id, enc BYTEA (32), ciphertext BYTEA
+                            (1–1024), signature BYTEA (64, the sender's DRK),
+                            created_at. Server-opaque. Deleted by a new
+                            generation, the recipient's report, a revoke of
+                            either device, a DRK rotation of either, and a new
+                            HPKE key of the recipient
 
 mls_commits              — per-conversation commit log
                             UNIQUE (conversation_id, epoch)
@@ -520,10 +794,10 @@ All Bearer-auth except where noted. Cross-IdP paths use HTTP Signatures — see
 
 | Endpoint | Description |
 |---|---|
-| `POST /api/keys/devices` | Register/renew/rotate the caller's DRK attestation: `{ device_id, drk_public_key, hpke_public_key?, hpke_key_signature? }`, keys and signature in standard base64. Idempotent on `(device_id, drk_public_key)`. The device's HPKE key comes with the DRK's signature over its canonical bytes, both or neither (§ 3.3). A session that declared its device (`PUT /api/sessions/current/device`) registers that device only. A device seen for the first time is named from the request's `User-Agent` ("Chrome on Linux"); one recorded unnamed takes the name of its first KeyPackage upload that says. First-time mint emits a `DeviceJoined` WS event to the user's other live sessions; a rotation drops, in the same write, the device's approvals and those it signed (§ 3.9). Returns the signature, kid, issued_at, expires_at, and the canonical bytes the IdP signed so the client can re-verify locally |
+| `POST /api/keys/devices` | Register/renew/rotate the caller's DRK attestation: `{ device_id, drk_public_key, hpke_public_key?, hpke_key_signature? }`, keys and signature in standard base64. Idempotent on `(device_id, drk_public_key)`. The device's HPKE key comes with the DRK's signature over its canonical bytes, both or neither (§ 3.3). A session that declared its device (`PUT /api/sessions/current/device`) registers that device only. A device seen for the first time is named from the request's `User-Agent` ("Chrome on Linux"); one recorded unnamed takes the name of its first KeyPackage upload that says. First-time mint emits a `DeviceJoined` WS event to the user's other live sessions; a rotation drops, in the same write, the device's approvals and those it signed (§ 3.9), and the key shares it sent or was sent; a new HPKE key, or one cleared, the share it was sent (§ 3.11). Returns the signature, kid, issued_at, expires_at, and the canonical bytes the IdP signed so the client can re-verify locally |
 | `GET /api/keys/devices` | List the caller's devices with their attestation expiry (the client uses this to schedule silent renewals), and whether each is signed in: `signed_in`, `last_active_at`. With each device, what another device needs to verify its keys itself (§ 3.3): `drk_public_key`, `attestation_signature`, `attestation_kid`, `attestation_expires_at` — the text the attestation signed —, `hpke_public_key`, `hpke_key_signature`; `null` where the device has registered no DRK, or no HPKE key. And `history_generation`, the history key's generation the device says it holds (§ 3.6), `null` until it says: the client compares it with the current generation. And `approvals`, oldest first, those binding the device's `drk_public_key` (§ 3.9): `{ by: "device", device_id, signature, created_at }` — `device_id` the approver — or `{ by: "passphrase", generation, signature, created_at }`, the signature in standard base64 |
-| `PUT /api/keys/devices/:device_id/history-key` | `{ generation }`: the device says it holds that generation of the account's history key (§ 3.6). Only from the device's own session: one that has named this very device (`403 device_required` when it named none, `403 device_mismatch` when another; below). The current generation only (`409 stale_history_key`, none set yet included, checked again as it is written); an unrevoked device of the caller's only (`403` revoked, `404` another account's or unknown). `204` |
-| `POST /api/keys/devices/:device_id/revoke` | Signs the device out — its sessions end (`identity-provider/specs/auth.md § 1`, "Sessions and devices") — then sets the directory-level revocation flag, clears the device's HPKE key, drops the approvals it signed (§ 3.9) and closes the approval requests it asks or answers (§ 3.10, `approval_closed` to the other side) in one write; the MLS Remove commits follow. Takes a password typed in the last 10 minutes (`identity-provider/specs/auth.md § 1`, "Sensitive actions"). Idempotent; `404` for a device that is not the caller's |
+| `PUT /api/keys/devices/:device_id/history-key` | `{ generation }`: the device says it holds that generation of the account's history key (§ 3.6). Only from the device's own session: one that has named this very device (`403 device_required` when it named none, `403 device_mismatch` when another; below). The current generation only (`409 stale_history_key`, none set yet included, checked again as it is written); an unrevoked device of the caller's only (`403` revoked, `404` another account's or unknown). The key share the device was sent is deleted in the same write (§ 3.11). `204` |
+| `POST /api/keys/devices/:device_id/revoke` | Signs the device out — its sessions end (`identity-provider/specs/auth.md § 1`, "Sessions and devices") — then sets the directory-level revocation flag, clears the device's HPKE key, drops the approvals it signed (§ 3.9), deletes the key shares it sent or was sent (§ 3.11) and closes the approval requests it asks or answers (§ 3.10, `approval_closed` to the other side) in one write; the MLS Remove commits follow. Takes a password typed in the last 10 minutes (`identity-provider/specs/auth.md § 1`, "Sensitive actions"). Idempotent; `404` for a device that is not the caller's |
 | `POST /api/keys/packages` | Upload a batch of KeyPackages for one of the caller's devices — refused whole (`400`) when a package is empty or not base64, or would take the device past the cap. An `expires_at` already past or beyond the lifetime (`E2EE_KEYPACKAGE_LIFETIME_SECS`) is the device's clock being off, not a bad package: the IdP stores it as now + the lifetime, by its own clock |
 | `POST /api/keys/packages/claim` | Atomically reserve one KeyPackage for `actor_uri` — of `device_id`, or of any device with some left. Bearer or HTTP-Sig (peer IdPs); for remote `actor_uri` the local IdP proxies to the target IdP via HTTP-Sig |
 | `POST /api/keys/packages/claim/devices` | One KeyPackage of each of `actor_uri`'s unrevoked devices that has any, as `{ claims: [...] }` — a contact's first add brings all their devices in (§ 6.5). Asked, proxied, limited and refused as a single claim is; none at all → 409 |
@@ -540,8 +814,8 @@ All Bearer-auth except where noted. Cross-IdP paths use HTTP Signatures — see
   refused with `403 device_mismatch` "This session signed in another device", and changes
   nothing: a stolen token can't take a device over. A session that names no device yet registers
   any device of the account, but neither sets the history key nor says a device holds it, approves
-  a device nor takes part in an approval request: `403 device_required` "Name this session's
-  device first".
+  a device, takes part in an approval request, shares the passphrase nor reads a share:
+  `403 device_required` "Name this session's device first".
 - **A device's HPKE key is its DRK's.** A registration bringing one is refused (`400`) when only
   one of `hpke_public_key` and `hpke_key_signature` is sent, or when the DRK sent with it doesn't
   verify the signature over the key's canonical bytes for this device of this account; nothing is
@@ -652,19 +926,33 @@ and they hold for what peers deliver as much as for local clients.
 | Endpoint | Description |
 |---|---|
 | `GET /api/history/key` | The account's history key (§ 3.6–3.7): `{ generation, salt, check_value, approval_public_key, set_by_device }`, bytes in standard base64; `set_by_device` is the device whose session set the generation (`null` only once that device's row is gone). `404` before its first device sets one |
-| `PUT /api/history/key` | `{ generation, salt, check_value, approval_public_key }` — 16, 32 and 32 bytes, standard base64 (`400` otherwise). From a session that has named its device (`403 device_required` otherwise), which the key records as `set_by_device`. Set only for the generation right after the current one, 1 when there is none: a compare-and-set, so two devices setting the same generation make one, and the other is answered `409 history_key_conflict` with `current_generation` (`0` for none). The very key held already — the same generation, salt, check value and approval key — is a retry: `204`, nothing written. Generation 1 takes no recent password; any later one does, as it erases the archive (`identity-provider/specs/auth.md § 1`, "Sensitive actions"). In one transaction: the key replaced, the account's archive erased, the passphrase approvals of older generations dropped (§ 3.9). `204` |
+| `PUT /api/history/key` | `{ generation, salt, check_value, approval_public_key }` — 16, 32 and 32 bytes, standard base64 (`400` otherwise). From a session that has named its device (`403 device_required` otherwise), which the key records as `set_by_device`. Set only for the generation right after the current one, 1 when there is none: a compare-and-set, so two devices setting the same generation make one, and the other is answered `409 history_key_conflict` with `current_generation` (`0` for none). The very key held already — the same generation, salt, check value and approval key — is a retry: `204`, nothing written. Generation 1 takes no recent password; any later one does, as it erases the archive (`identity-provider/specs/auth.md § 1`, "Sensitive actions"). In one transaction: the key replaced, the account's archive erased, the passphrase approvals of older generations dropped (§ 3.9), the account's key shares deleted (§ 3.11). `204` |
 | `POST /api/history/messages` | `{ generation, entries }`: a batch of 1 to 50 entries (`400` otherwise; a nonce is 12 bytes), sealed under `generation` — the current one only (`409 stale_history_key`, also while none is set; § 3.8). Every `conversation_id` must be one the caller is or was a member of — leaving a group keeps the history already read — or the batch is refused whole (`403`). Idempotent upsert on `(user_id, id)` — first decryptor of a message wins; subsequent uploads from the user's other devices no-op. Answers `{ inserted }`, how many were new |
 | `GET /api/history/messages?after_id=&after_created_at=&limit=` | Keyset pagination over `(created_at DESC, id DESC)`, limit clamped 1..=500, default 100. `next_cursor` names the page's last entry, and is `null` only on an empty page; `after_id` and `after_created_at` (RFC 3339) go together (`400`) |
-| `DELETE /api/history/messages` | Erase the user's archive. Settings → Devices → Clear. The history key and its generation stay: every device goes on saving under it. Takes a password typed in the last 10 minutes (`identity-provider/specs/auth.md § 1`, "Sensitive actions") |
+| `DELETE /api/history/messages` | Erase the user's archive: Settings → Devices → Clear history backup. The history key and its generation stay: every device goes on saving under it. Takes a password typed in the last 10 minutes (`identity-provider/specs/auth.md § 1`, "Sensitive actions") |
+| `POST /api/history/key-shares` | `{ recipient_device_id, generation, enc, ciphertext, signature }` — `enc` 32 bytes, `ciphertext` 1 to 1024, `signature` 64, standard base64 (`400` otherwise): the session's device shares the passphrase of `generation` with `recipient_device_id`, sealed for its HPKE key and signed by the sender's DRK over the `PINAI-HISTORY-SHARE-v1` bytes of § 7.2 (§ 3.11). From a session that named its device, the sender; under the current generation, which the sender holds and is approved under; to another unrevoked device of the account with an HPKE key, approved under it, approved by the sender itself (`by: "device"`, over the root key it holds), and not holding it. `204`; a share held already for the recipient and generation — this one or another approver's — is kept and answered `204` too. Only a new share pushes `history_key_ready { device_id }` to the recipient device's sessions |
+| `GET /api/history/key-shares` | The share waiting for the session's device under the current generation: `{ sender_device_id, generation, enc, ciphertext, signature, created_at }`, bytes in standard base64. `404` when none waits — none was made, it said it holds the generation, or the account has no history key |
 
 | Refusal | Status | `error` |
 |---|---|---|
 | No history key yet (`GET /api/history/key`) | `404` | `not_found` |
-| Setting the key, or saying a device holds it, from a session that named no device | `403` | `device_required` |
+| Setting the key, saying a device holds it, sharing it or reading a share, from a session that named no device | `403` | `device_required` |
 | Saying another device than the session's holds the key | `403` | `device_mismatch` |
 | A generation that isn't the one right after the current one | `409` | `history_key_conflict`, with `current_generation` |
 | A generation past the first, the password not typed in the last 10 minutes | `401` | `insufficient_user_authentication` |
-| An upload, or a device's report, naming a generation that isn't the current one | `409` | `stale_history_key` |
+| An upload, a device's report or a share naming a generation that isn't the current one, or while none is set | `409` | `stale_history_key` |
+| A share malformed: `enc`, `ciphertext` or `signature` not base64 or not their size | `400` | `invalid_request` |
+| A share to the sending device itself | `400` | `invalid_request`, "A device shares the history key with another device" |
+| A share whose signature doesn't verify under the sender's DRK | `400` | `invalid_request`, "signature does not verify over the share" |
+| Sharing from a revoked device, or to one | `403` | `access_denied` |
+| A share to a device not the account's, or unknown | `404` | `not_found` |
+| No share waiting for the session's device (`GET /api/history/key-shares`) | `404` | `not_found` |
+| Sharing from, or to, a device with no DRK | `409` | `no_root_key` |
+| A share to a device with no HPKE key | `409` | `no_hpke_key` |
+| Sharing from a device that hasn't said it holds the generation | `409` | `history_key_not_held` |
+| Sharing from, or to, a device not approved under the current generation | `409` | `not_approved` |
+| A share to a device the sender didn't approve itself | `409` | `not_the_approver`, "Only a device that approved this one shares the history key with it" |
+| A share to a device that holds the generation already | `409` | `history_key_held` |
 
 ### WebSocket events (server → client)
 
@@ -674,12 +962,13 @@ and they hold for what peers deliver as much as for local clients.
 | `message_edited` | Sender replaced the ciphertext for one of their existing messages |
 | `mls_welcome_ready` | A Welcome bundle was just deposited for one of the recipient's devices |
 | `group_created` | The recipient's IdP materialised a federated group from an inbound Note's roster snapshot |
-| `device_joined` | A new device of *this user* completed first-time DRK registration. Other live sessions of the same user run the multi-device fanout |
+| `device_joined` | A new device of *this user* completed first-time DRK registration. Other live sessions of the same user read the device list again: the device is announced until one of them approves it, and added to their conversations once approved (§ 3.9, § 6.2) |
 | `key_packages_low` | A claim left one of *this user's* devices at the refill threshold, or found none left. Each live session tops its own device up (§ 3.5) |
 | `device_approved` | `{ device_id }`: a device of *this user* was approved (§ 3.9). Every live session reads `GET /api/keys/devices` again |
 | `approval_requested` | `{ request_id, device_id, display_name }`: another device of *this user* asks to be approved (§ 3.10). To the sessions of the account's devices but the asking one |
 | `approval_message` | `{ request_id, seq }`: the other side of a request posted; the device reads `…/messages?after=`. To the other side's sessions — while nobody answers, every device's but the asking one's |
 | `approval_closed` | `{ request_id }`: a request ended — closed by a side, replaced by its device's next one, or a side revoked —, to both sides' sessions (every device's while nobody answers); or another device answered it, to the devices left out. Sessions that named no device hear none of the `approval_*` pushes |
+| `history_key_ready` | `{ device_id }`: a key share waits for the device (§ 3.11), which reads `GET /api/history/key-shares`. To that device's sessions only; a device that missed it reads its share when it next lacks the passphrase |
 | `dm_delivery_failed`, `friend_request`, `friend_accepted`, `friend_removed`, `presence_update`, `typing`, `heartbeat_ack` | (Out of scope for this spec — see other specs) |
 
 ---
@@ -697,9 +986,9 @@ sequenceDiagram
 
     U->>Web: complete OIDC sign-in
     Web->>IDB: getOrCreateDeviceId()
-    Web->>Web: ed25519 keygen → DRK
-    Web->>IDB: store DRK private (sealed)
-    Web->>IdP: POST /api/keys/devices {device_id, drk_pub}
+    Web->>Web: ed25519 keygen → DRK; X25519 keygen → HPKE key, signed by the DRK
+    Web->>IDB: store DRK and HPKE private halves (sealed)
+    Web->>IdP: POST /api/keys/devices {device_id, drk_public_key, hpke_public_key, hpke_key_signature}
     IdP->>IdP: sign canonical(actor, device, drk_pub, expires_at, kid)
     IdP-->>Web: {signature, kid, issued_at, expires_at, signed_message}
     Web->>IDB: store attestation
@@ -708,7 +997,7 @@ sequenceDiagram
     Web->>Web: generate initial KeyPackage batch (50)
     loop per KeyPackage
         Web->>Web: fresh leaf signing keypair
-        Web->>Web: build credential JSON (DRK pub + IdP attestation)
+        Web->>Web: build credential JSON (DRK pub + IdP attestation + the DRK's leaf binding)
     end
     Web->>IdP: POST /api/keys/packages {batch}
     IdP->>IdP: persist KeyPackages
@@ -744,21 +1033,24 @@ sequenceDiagram
     participant IdP
 
     U->>Mobile: OIDC sign-in
-    Mobile->>Mobile: gen DRK, store locally
-    Mobile->>IdP: POST /api/keys/devices
+    Mobile->>Mobile: gen DRK and HPKE key, store locally (sealed)
+    Mobile->>IdP: POST /api/keys/devices {device_id, drk_public_key, hpke_public_key, hpke_key_signature}
     IdP-->>Mobile: attestation
     Mobile->>IdP: PUT /api/sessions/current/device {device_id}
     IdP-->>Mobile: 204 (the session names its device)
     Mobile->>IdP: POST /api/keys/packages (initial batch)
     Mobile->>IdP: GET /api/history/key
     IdP-->>Mobile: the history key (the account has one)
-    Note over Mobile: asks to be approved with a code (§ 6.10),<br/>or for the account's 24 words (§ 6.4),<br/>or starts fresh, without a passphrase
     IdP-->>Laptop: WS device_joined {actor, new_device_id, drk_pub}
-    Laptop->>Laptop: useDeviceFanout.onDeviceJoined
+    Note over Laptop: the mobile is announced: not approved yet
+    Note over Mobile: is approved with a code (§ 6.10),<br/>or with the account's 24 words (§ 6.4)
+    IdP-->>Laptop: WS device_approved {device_id: mobile}
+    Laptop->>IdP: GET /api/keys/devices
+    Laptop->>Laptop: the mobile's chain verifies, and it is approved (§ 3.9)
     loop for each conversation laptop is in
         Laptop->>IdP: POST /api/keys/packages/claim {actor_uri: self, device_id: new_device_id}
         IdP-->>Laptop: KeyPackage (mobile's)
-        Laptop->>Laptop: build MLS Add commit + Welcome
+        Laptop->>Laptop: attestation, leaf binding and approval check out (§ 3.4); build MLS Add commit + Welcome
         Laptop->>IdP: POST /api/mls/groups/:id/commits
         Laptop->>IdP: POST /api/mls/welcomes
         IdP-->>Mobile: WS mls_welcome_ready
@@ -767,20 +1059,33 @@ sequenceDiagram
     end
 ```
 
-The mobile can now decrypt *future* messages in every conversation. Past
-messages remain inaccessible unless the user runs the history restore
-flow (Section 6.4).
+The mobile can now decrypt *future* messages in every conversation; past
+ones come back from the archive once it holds the passphrase (§ 6.4,
+§ 6.10). A device that continues without approving reads no conversation
+the account's devices hold: none of them adds it, and it is announced on
+each until one approves it or it is signed out.
 
 **Offline case** — if every other device of the user is offline at the
 moment of registration, the WS push lands nowhere. The reconcile-on-WS-
 connect path inside `useDeviceFanout` handles this: every time any
 device of the user comes online, it pulls `/api/keys/devices` and runs
-the same fanout for any device it doesn't yet have an MLS leaf for in
-every conversation.
+the same fanout for any approved device it doesn't yet have an MLS leaf
+for in every conversation.
 
 **The fanout's rules** (`IE2eePort.addOwnDevices`, `devicesToAdd` in
 `@pinai/domain/models/group`):
 
+- Only a device holding the current passphrase, its derived approval key the
+  stored one, adds siblings — those it finds approved (§ 3.9) over the root
+  key whose chain JWKS → attestation → DRK verifies (§ 3.3), from a
+  KeyPackage whose leaf binding verifies under that DRK (§ 3.4) — and it
+  reads the device list again before it adds or removes one. One nobody
+  approved is announced, never added.
+- Such a device that meets, in a conversation it holds, a leaf of its own
+  account whose credential's root key the device list doesn't show
+  approved for that device — brought in by a contact's add (§ 6.5) —
+  announces it and commits it out, if the instance carries the commit
+  (§ 3.9).
 - A device adds its siblings only to groups it holds keys for. One that holds
   none founds nothing: a group founded there would hold only it, and its commit
   would take an epoch from the real one.
@@ -797,7 +1102,8 @@ every conversation.
   making. A run goes over every conversation the device
   holds keys for: it first applies the commits the DS holds past its epoch, then
   adds the siblings missing. It runs when the device list refreshes (the
-  `device_joined` push only refreshes it), when the conversation list changes,
+  `device_joined` and `device_approved` pushes only refresh it), when the
+  conversation list changes,
   and when the device comes to hold a group — founded on a first send or joined
   from a Welcome (`IE2eePort.onGroupHeld`).
 - A device applies a group's commits as the `mls_commit` push announces them
@@ -840,7 +1146,7 @@ sequenceDiagram
         Receiver->>Receiver: Argon2id(passphrase, salt) → HAK (cached)
     end
     loop per buffered entry
-        Receiver->>Receiver: AES-GCM encrypt(plaintext, HAK, fresh nonce)
+        Receiver->>Receiver: AES-GCM encrypt(plaintext, HAK, fresh nonce, aad PINAI-ARCHIVE-v1 of its ids)
     end
     Receiver->>IdP: POST /api/history/messages {generation, batch}
 ```
@@ -863,7 +1169,9 @@ deleted once used, so what has been read stays out of reach.
 The user reaches `/onboarding/recovery-restore` either by direct URL or
 via Settings → Devices → "Restore history." Typing the 24 words is one
 flow whatever brings the user there: the words checked, the device
-approved by them, its generation reported, the archive restored.
+approved by them, its generation reported, the archive restored. Words
+received in a key share (§ 3.11, § 6.10) go through the same flow from the
+check on.
 
 ```mermaid
 sequenceDiagram
@@ -892,7 +1200,7 @@ sequenceDiagram
             Web->>IdP: GET /api/history/messages?after_id=&after_created_at=
             IdP-->>Web: {entries, next_cursor}
             loop per entry
-                Web->>Web: AES-GCM decrypt(ciphertext, HAK, nonce)
+                Web->>Web: AES-GCM decrypt(ciphertext, HAK, nonce, aad PINAI-ARCHIVE-v1 of its ids)
                 alt auth tag valid
                     Web->>Store: pushDmMessage(conversation_id, parsed Message)
                     Note over Web: restored++
@@ -915,9 +1223,11 @@ When both match, the device keeps the words with their generation and approves i
 comes from the session that named it, and names the generation it derived the key under — a new
 generation set meanwhile refuses it (`409 stale_history_key`), and the device reads the key again.
 The other devices see it approved on `device_approved`, or on their next look at the device list.
-It then says it holds the generation and pages the archive under the HAK. Every entry is the
-current generation's (§ 3.8), so one failing its auth tag is damaged and skipped — never a sign of
-a wrong passphrase —, and an empty archive restores nothing: "No archive". An account with no
+It then says it holds the generation and pages the archive under the HAK, each entry opened with
+the ids it comes back under as associated data (§ 7.3) and filed under them only. Every entry is
+the current generation's (§ 3.8), so one failing its auth tag — damaged, or moved to other ids —
+is skipped, never a sign of a wrong passphrase, and an empty archive restores nothing: "No
+archive". An account with no
 history key (`404`) has nothing to restore. Setting a new generation drops the approvals made with
 the old words, so after a start over a device approves itself again with the new ones.
 
@@ -934,7 +1244,7 @@ sequenceDiagram
     AliceIdP->>BobIdP: HTTP-Sig POST /api/keys/packages/claim/devices {actor: bob}
     BobIdP-->>AliceIdP: a KeyPackage of each of bob's devices
     AliceIdP-->>Alice: KeyPackages
-    Alice->>Alice: verify attestation chain (fetch BobIdP JWKS)
+    Alice->>Alice: verify each attestation (fetch BobIdP JWKS) and leaf binding
     loop each of bob's devices
         Alice->>Alice: build MLS Add commit + Welcome
         Alice->>AliceIdP: POST /api/mls/groups/:id/commits
@@ -943,17 +1253,26 @@ sequenceDiagram
     AliceIdP->>BobIdP: signed AP Create{Note} mlsKind=welcome
     BobIdP-->>Bob: WS mls_welcome_ready
     Bob->>BobIdP: GET /api/mls/welcomes
-    Bob->>Bob: join group
+    Bob->>Bob: join group; check every leaf — bob's own devices approved and listed
     Alice->>Alice: encryptOutbound → mls_ciphertext
     Alice->>AliceIdP: POST /api/dm {mls_ciphertext}
     AliceIdP-->>BobIdP: AP delivery
     BobIdP-->>Bob: WS new_dm
 ```
 
-The verification step on Alice's side — "fetch BobIdP JWKS" — is the
-moment Alice's client decides whether to trust this leaf as belonging
-to Bob. JWKS is cached for an hour; rotation safety comes from
-`invalidate(issuer)` and retry on verify-failure.
+The verification step on Alice's side — "fetch BobIdP JWKS", then the leaf
+binding under the attested DRK (§ 3.4) — is the moment Alice's client
+decides whether to trust this leaf as belonging to Bob. JWKS is cached for
+an hour; rotation safety comes from `invalidate(issuer)` and retry on
+verify-failure. Alice can't see Bob's approvals: she adds every device
+Bob's instance attests for him (§ 2). Bob's devices can: each one in the
+conversation holding Bob's current passphrase checks the leaves of Bob's
+own account by their root keys, and one whose root key Bob's device list
+doesn't show approved for that device is announced on Bob's devices and
+committed out — if Bob's instance carries the commit (§ 3.9). The same
+holds for a group that adds Bob. A conversation Bob's instance opens in
+Bob's name with a device of its own, where none of Bob's devices is ever
+added, escapes this check (§ 2).
 
 A device founds a conversation's group only when it holds none, and two
 sends at once found it once. If the first add fails — most often because
@@ -973,7 +1292,7 @@ sequenceDiagram
 
     U->>Web: Settings → Devices → Revoke
     Web->>IdP: POST /api/keys/devices/:device_id/revoke
-    IdP->>IdP: end the device's sessions, then mark user_devices.revoked_at = now(), drop the approvals it signed, close its approval requests
+    IdP->>IdP: end the device's sessions, then mark user_devices.revoked_at = now(), drop the approvals it signed and its key shares, close its approval requests
     Note over IdP: its tokens and sockets stop at once;<br/>future /api/keys/packages/claim<br/>requests for this device fail
     loop for each conversation the revoked device is in
         Web->>Web: build MLS Remove commit
@@ -981,10 +1300,10 @@ sequenceDiagram
     end
 ```
 
-The flag, the HPKE key cleared, the approvals the device signed dropped and its approval requests
-closed are one write: a device approved through it alone needs another approval (it normally holds
-the passphrase by then and approves itself), and the other side of a request it took part in gets
-`approval_closed`.
+The flag, the HPKE key cleared, the approvals the device signed dropped, the key shares it sent or
+was sent deleted and its approval requests closed are one write: a device approved through it alone
+needs another approval (it normally holds the passphrase by then and approves itself), a share it
+signed is never read, and the other side of a request it took part in gets `approval_closed`.
 
 The IdP goes first. It may refuse — a password typed more than 10 minutes ago
 (`identity-provider/specs/auth.md § 1`, "Sensitive actions") — and then nothing
@@ -996,6 +1315,38 @@ a key schedule the revoked leaf was never part of. The directory-level
 flag stops the server from handing out fresh KeyPackages from the dead
 device, and the device is signed out: each session names the device it
 signed in (`identity-provider/specs/auth.md § 1`, "Sessions and devices").
+Every other device of the user's remembers the revocation (§ 3.9).
+
+A revoked device that held the 24 words keeps them: with them and a session
+it could still open the archive and approve a device by the passphrase.
+Cutting it off takes a start over (§ 6.11) from one of the user's devices:
+that device sets the next generation and becomes the account's new root of
+trust, the user's other devices are approved again from it, and the
+archive is erased — the old words approve nothing any more.
+
+### 6.7 Silent attestation renewal
+
+```mermaid
+sequenceDiagram
+    participant Web
+    participant IdP
+
+    Note over Web: on next session-start /<br/>or KP refresh tick
+    Web->>Web: loadDeviceAttestation()
+    Web->>Web: expires_at - now() < 30 days?
+    alt within renewal window
+        Web->>IdP: POST /api/keys/devices {device_id, drk_pub} (same DRK)
+        IdP-->>Web: fresh attestation (new expires_at)
+        Web->>Web: saveDeviceAttestation
+    else not yet due
+        Web->>Web: short-circuit
+    end
+```
+
+Renewal reuses the existing DRK — only the attestation's `expires_at`
+moves forward, and the HPKE key registered stays (§ 3.3). KeyPackages
+already in the server's stash stay valid.
+New KeyPackages built after renewal carry the fresh attestation.
 
 ### 6.8 Someone leaves a group's MLS state with its roster
 
@@ -1041,30 +1392,6 @@ both sides founded the group at once. A removed member who clears the group from
 (`DELETE /api/groups/:id`) drops its MLS state from the device, with its cached history; being added
 again then joins it afresh.
 
-### 6.7 Silent attestation renewal
-
-```mermaid
-sequenceDiagram
-    participant Web
-    participant IdP
-
-    Note over Web: on next session-start /<br/>or KP refresh tick
-    Web->>Web: loadDeviceAttestation()
-    Web->>Web: expires_at - now() < 30 days?
-    alt within renewal window
-        Web->>IdP: POST /api/keys/devices {device_id, drk_pub} (same DRK)
-        IdP-->>Web: fresh attestation (new expires_at)
-        Web->>Web: saveDeviceAttestation
-    else not yet due
-        Web->>Web: short-circuit
-    end
-```
-
-Renewal reuses the existing DRK — only the attestation's `expires_at`
-moves forward, and the HPKE key registered stays (§ 3.3). KeyPackages
-already in the server's stash stay valid.
-New KeyPackages built after renewal carry the fresh attestation.
-
 ### 6.9 Keeping the KeyPackage stash topped up
 
 ```mermaid
@@ -1093,7 +1420,9 @@ device it doesn't list is refilled the same way, to the cap.
 ### 6.10 Approving a new device with a code
 
 The phone has just signed in, registered its DRK and HPKE key and named its device; the laptop is
-an approved device of the same account.
+an approved device of the same account, holding the current generation's passphrase. The code
+approves the phone; the laptop then shares the passphrase with it, and the phone restores the
+archive by itself.
 
 ```mermaid
 sequenceDiagram
@@ -1119,6 +1448,20 @@ sequenceDiagram
     P->>I: POST /api/keys/devices/:laptop/approvals {by: device, signature}
     P->>I: DELETE /api/keys/devices/approval-requests/:id
     I-->>L: WS approval_closed {request_id}
+    Note over L: the phone is approved: added to the laptop's conversations (§ 6.2), and sent the passphrase
+    L->>L: HPKE-seal the 24 words for the phone's HPKE key (aad PINAI-HISTORY-SHARE-v1), sign with its DRK
+    L->>I: POST /api/history/key-shares {recipient_device_id: phone, generation, enc, ciphertext, signature}
+    I->>I: both approved under the generation, the phone by the laptop; the laptop holds it, the phone not; the signature verifies
+    I-->>L: 204
+    I-->>P: WS history_key_ready {device_id: phone}
+    P->>I: GET /api/history/key-shares
+    I-->>P: {sender_device_id: laptop, generation, enc, ciphertext, signature, created_at}
+    P->>P: from the laptop it approved; signed by the DRK the exchange gave; opens; the words give the check value and approval public key
+    P->>I: POST /api/keys/devices/:phone/approvals {by: passphrase, generation, signature}
+    P->>I: PUT /api/keys/devices/:phone/history-key {generation}
+    I->>I: the phone's share deleted
+    P->>I: GET /api/history/messages … (the restore of § 6.4)
+    Note over P: "Your history is back"
 ```
 
 Each side signs the other's DRK as it came out of the exchange: should the instance list another
@@ -1130,6 +1473,69 @@ account is refused (`409 approval_request_taken`). The phone trusts the laptop f
 alone until it holds the passphrase (§ 3.9); once it does, it approves itself with the approval
 key and checks every chain from the device list.
 
+The share is the phone's only way to the passphrase short of the 24 words: it accepts it from the
+laptop because it approved the laptop itself, by the laptop's DRK as the exchange gave it, and keeps
+the words only once they give the generation's check value and approval public key (§ 3.11). The
+instance carries the share without reading it, and checks only what it can: who shares with whom,
+under which generation, by which approvals, signed by whom — and a device that didn't approve the
+phone is refused (`409 not_the_approver`). Once the phone says it holds the generation, the device
+list shows it, and nobody shares with it again.
+
+### 6.11 Starting over
+
+A start over replaces the account's passphrase: when it is lost — no device holds it and the words
+are gone — or must be replaced — a revoked device, or someone the user no longer trusts, holds
+it. The device that starts over sets the next generation and becomes the account's new root of
+trust; the user's other devices, if any, are approved again from it; the archive is erased.
+
+Here the user lost every device and the 24 words, and signs in on a new device: "I no longer have
+my devices or my words". Later they find an old tablet, which still holds generation 1.
+
+```mermaid
+sequenceDiagram
+    participant N as New device
+    participant I as IdP
+    participant T as Old tablet (generation 1)
+    Note over N: "Your saved history will be erased; your other devices, if any, will need to approve this one"
+    N->>N: the password typed again; 24 new words → a salt, HAK, check value, approval key
+    N->>I: PUT /api/history/key {generation: 2, salt, check_value, approval_public_key}
+    I->>I: one write: the key replaced, the archive erased, generation 1's passphrase approvals and every key share dropped
+    N->>I: POST /api/keys/devices/:N/approvals {by: passphrase, generation: 2, signature}
+    N->>I: PUT /api/keys/devices/:N/history-key {generation: 2}
+    Note over N: shows the 24 new words
+    T->>I: GET /api/history/key
+    I-->>T: {generation: 2, …, set_by_device: N}
+    Note over T: N is no device it approved: it refuses generation 2, saves nothing,<br/>and warns "Your history was reset from a device you haven't approved."
+    Note over T: the user, who did start over, asks to be approved on the tablet: it shows a code
+    T->>I: POST /api/keys/devices/approval-requests
+    Note over N,T: the code typed on N, the handshake of § 6.10 the other way round: N approves T, T approves N
+    N->>I: POST /api/history/key-shares {recipient_device_id: T, generation: 2, …}
+    I->>I: T approved under generation 2 — by N, which its own new words approve
+    I-->>T: WS history_key_ready {device_id: T}
+    T->>I: GET /api/history/key-shares
+    T->>T: from N, which it approved itself; the words give generation 2's check value and approval key
+    T->>I: POST /api/keys/devices/:T/approvals {by: passphrase, generation: 2, signature}
+    T->>I: PUT /api/keys/devices/:T/history-key {generation: 2}
+    Note over T: N approved from here on: added to the tablet's conversations (§ 6.2)
+```
+
+Setting generation 2 takes a password typed in the last 10 minutes, and erases the archive
+(§ 3.8): what was saved under the lost words could no longer be opened. The new device becomes the
+account's new root of trust — its new words approve it — and every approval made under
+generation 1's key goes with that generation, so no old device is approved any more, and none can
+take a share. The old tablet can't confirm generation 2's approval key, and sees a generation set
+by a device it never approved: it refuses the generation and warns. Putting it back follows the
+usual rule (§ 3.10): the tablet, which lacks the current passphrase, asks; the new device, which
+holds it, answers. The two approve each other's DRK: N's approval makes the tablet approved under
+generation 2 — what the instance checks before it carries the share —, and the tablet's own
+approval of N is what it accepts the share by. Typing the new words on the tablet does the same
+without a share (§ 6.4).
+
+A reset the user didn't make reads the same on the tablet, and is answered the other way: the
+setter isn't the user's, so it is never approved — that would hand it the account's
+conversations and its new words —, and the way back is a start over from one of the user's own
+devices, which then becomes the root of trust in its place.
+
 ---
 
 ## 7. Wire formats
@@ -1140,10 +1546,12 @@ Inside every leaf's `BasicCredential` (Section 3.4 JSON).
 
 ### 7.2 Canonical signed bytes
 
-The IdP's attestation of a DRK (§ 3.2), a DRK's signature over its
-device's HPKE key (§ 3.3) and an approval of a device (§ 3.9) are all over
-UTF-8 lines, each ended by `\n` (a literal newline, 0x0A) but the last.
-Every field is written exactly so:
+The IdP's attestation of a DRK (§ 3.2), a DRK's signatures over its
+device's HPKE key (§ 3.3) and over each of its leaf keys (§ 3.4), an
+approval of a device (§ 3.9), a key share (§ 3.11) and an archive
+entry's associated data (§ 7.3) are all over UTF-8 lines, each ended by
+`\n` (a literal newline, 0x0A) but the last. Every field is written
+exactly so:
 
 - `actor_uri`: the account's actor URI, exactly as `/userinfo` answers
   `actor_uri`;
@@ -1152,7 +1560,12 @@ Every field is written exactly so:
 - `expires_at`: RFC 3339 in UTC, to the second — `2027-05-14T12:00:00Z`,
   no fraction —, the text `GET /api/keys/devices` lists as
   `attestation_expires_at`;
-- `kid`: as the instance's JWKS names the key.
+- `kid`: as the instance's JWKS names the key;
+- `generation`: the history key's generation in decimal ASCII digits, with
+  no sign and no leading zero — `1`, `12`;
+- a share's `enc` and `ciphertext`: standard base64, with padding.
+
+No field holds a newline, so the lines split one way only.
 
 The leading tag keeps a signature from ever verifying as another use of
 the same key; a change to the fields needs a new tag.
@@ -1177,6 +1590,16 @@ PINAI-DEVICE-HPKE-v1\n
 <base64(hpke_public_key)>
 ```
 
+What a device's DRK signs over each of its MLS leaf signature keys — the
+credential's `leaf_binding`, the key the LeafNode's `signature_key`:
+
+```
+PINAI-LEAF-BINDING-v1\n
+<actor_uri>\n
+<device_id>\n
+<base64(leaf_signature_public_key)>
+```
+
 What an approval signs — by another device's DRK, or by the generation's
 approval key —, `device_id` and `drk_public_key` the approved device's:
 
@@ -1185,6 +1608,40 @@ PINAI-DEVICE-APPROVAL-v1\n
 <actor_uri>\n
 <device_id>\n
 <base64(drk_public_key)>
+```
+
+What a key share's HPKE seal binds as its `aad`, `device_id`s the sending
+and the receiving device's:
+
+```
+PINAI-HISTORY-SHARE-v1\n
+<actor_uri>\n
+<sender_device_id>\n
+<recipient_device_id>\n
+<generation>
+```
+
+What an archive entry's AES-256-GCM seal binds as its associated data
+(§ 7.3), `conversation_id` and `id` the entry's, each a lowercase
+hyphenated UUID:
+
+```
+PINAI-ARCHIVE-v1\n
+<conversation_id>\n
+<id>
+```
+
+What the sender's DRK signs: the `aad`'s five lines, then the seal's two
+halves, as they are sent in `POST /api/history/key-shares`:
+
+```
+PINAI-HISTORY-SHARE-v1\n
+<actor_uri>\n
+<sender_device_id>\n
+<recipient_device_id>\n
+<generation>\n
+<base64(enc)>\n
+<base64(ciphertext)>
 ```
 
 ### 7.3 History archive entry (POST `/api/history/messages`)
@@ -1207,7 +1664,11 @@ PINAI-DEVICE-APPROVAL-v1\n
 `generation` names the history key's generation the entries were sealed
 under: an upload under any other generation is `409 stale_history_key`
 (§ 3.8). `ciphertext` is the AES-256-GCM encryption of the JSON-serialised
-`ApplicationMessage` under HAK with `nonce`. The JSON includes a
+`ApplicationMessage` under HAK with `nonce`, its associated data the
+`PINAI-ARCHIVE-v1` bytes of § 7.2 for the entry's `conversation_id` and
+`id`. A restore rebuilds them from the ids the entry comes back under and
+files the entry there only: an entry the instance moved to other ids
+fails its tag and is skipped as damaged (§ 6.4). The JSON includes a
 domain-specific replacer for `Uint8Array` fields (attachment AES keys
 + nonces) so they round-trip through serialization.
 
@@ -1239,8 +1700,9 @@ flowchart LR
         IDB["IndexedDB (pinai-e2ee:#lt;actor URI#gt;)<br/>one per account, encrypted at rest"]
         IDB --- meta["meta:<br/>device_id + AES-GCM key"]
         IDB --- ident["mls_snapshot:<br/>openmls KV state +<br/>leaf signing keys"]
-        IDB --- att["device_attestation:<br/>DRK private + IdP signature"]
-        IDB --- pass["recovery_passphrase:<br/>24 words"]
+        IDB --- att["device_attestation:<br/>DRK and HPKE private halves<br/>+ IdP signature"]
+        IDB --- pass["recovery_passphrase:<br/>24 words + the generation held"]
+        IDB --- trust["device_trust:<br/>handshake partners (device id,<br/>DRK, HPKE key), devices seen,<br/>devices found approved<br/>(device id, root key),<br/>newest generation seen,<br/>revocations seen"]
         IDB --- hist["history_archive:<br/>cached HAK (in-memory<br/>only via this slot)"]
     end
     subgraph server ["Server (Postgres)"]
@@ -1253,17 +1715,23 @@ flowchart LR
         HK["history_keys:<br/>generation, salt, check value,<br/>approval public key"]
         DA["device_approvals:<br/>signatures over root keys"]
         AR["approval_requests:<br/>the handshake's opaque messages"]
+        KS["history_key_shares:<br/>the words sealed for<br/>one device each"]
     end
     att -.->|attests| KP
     pass -.->|derives| hist
     hist -.->|encrypts to| HM
     HK -.->|salts the derivation of| hist
+    pass -.->|sealed for another device into| KS
 ```
 
 Two persistence boundaries:
 
 - **Client IndexedDB** holds everything the device needs to decrypt
-  messages and prove its identity to peers. Every blob is encrypted
+  messages and prove its identity to peers, and what it keeps of the
+  account's devices so the instance can't take it back (§ 3.9): the
+  devices it approved in a handshake with the keys the exchange gave, the
+  devices it has seen, those it found approved with their root keys, the
+  newest generation it has seen, the revocations it has seen. Every blob is encrypted
   under a per-device non-extractable AES-256-GCM `CryptoKey` so that
   full IDB extraction by an attacker without script execution in the
   user's origin yields nothing useful. Each account signed in on a
@@ -1273,10 +1741,11 @@ Two persistence boundaries:
 - **Server Postgres** holds opaque material only — MLS ciphertexts,
   base64'd KeyPackages, encrypted history archive entries, the history
   keys' salts, check values and approval public keys (none of them
-  secret), public attestation columns, the approvals' signatures and the
+  secret), public attestation columns, the approvals' signatures, the
   approval handshake's messages (public by design: SPAKE2 messages reveal
-  nothing of the code). Read access to the database yields no plaintext
-  message content.
+  nothing of the code) and the key shares (sealed for each recipient's
+  HPKE key, whose private half never leaves its device). Read access to
+  the database yields no plaintext message content and no passphrase.
 
 The same per-device AES-GCM key encrypts the Zustand `persist`
 middleware's message-plaintext cache — that way the cache (used for
@@ -1312,6 +1781,11 @@ threat model as the rest of the IDB content.
   (§ 6.3); only the history archive can bring it back, from a device of
   the user's that did read it.
 - **Out-of-band fingerprint verification.** No user-facing UI for
-  comparing device attestations out of band. Trust on first use plus
-  IdP-attestation is the baseline; an opt-in verification surface
-  would be additive.
+  comparing device attestations out of band: contacts trust the user's
+  instance's attestation (§ 2, "Trust ceiling"), the user's own devices
+  their approvals. An opt-in verification surface would be additive.
+- **A new device after losing every device.** Only the user's own devices
+  add a sibling to their conversations (§ 6.2), so a device that started
+  over with none left joins none of the account's existing conversations —
+  only those opened from then on —, unless an old device, found again,
+  approves it (§ 6.11).

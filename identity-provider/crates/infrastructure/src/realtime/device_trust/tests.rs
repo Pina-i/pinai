@@ -27,7 +27,7 @@ fn a_request_reaches_the_sessions_named_and_an_approval_the_whole_account() {
         expires_at: now + time::Duration::minutes(10),
         closed_at: None,
     };
-    let notifier = HubApprovalNotifier::new(hub.clone());
+    let notifier = HubDeviceTrustNotifier::new(hub.clone());
 
     notifier.approval_requested(owner, &[phone_session], &request, "Chrome on Linux");
     let on_the_phone = received(&mut phone);
@@ -61,7 +61,7 @@ fn a_message_and_an_end_carry_the_request_only() {
     let session = SessionId::generate();
     let (mut socket, _handle, _) = hub.subscribe(owner.as_uuid(), session.as_uuid());
     let request = ApprovalRequestId::generate();
-    let notifier = HubApprovalNotifier::new(hub.clone());
+    let notifier = HubDeviceTrustNotifier::new(hub.clone());
 
     notifier.approval_message(owner, &[session], request, MessageSeq::parse(2).unwrap());
     notifier.approval_closed(owner, &[session], request);
@@ -80,4 +80,26 @@ fn a_message_and_an_end_carry_the_request_only() {
             "data": { "request_id": request.to_string() },
         }))
     );
+}
+
+#[test]
+fn a_share_is_announced_to_the_sessions_named_only() {
+    let hub = Arc::new(Hub::new());
+    let owner = UserId::generate();
+    let (phones, laptops) = (SessionId::generate(), SessionId::generate());
+    let (mut phone, _phone, _) = hub.subscribe(owner.as_uuid(), phones.as_uuid());
+    let (mut laptop, _laptop, _) = hub.subscribe(owner.as_uuid(), laptops.as_uuid());
+    let device = DeviceId::generate();
+    let notifier = HubDeviceTrustNotifier::new(hub.clone());
+
+    notifier.history_key_ready(owner, &[phones], device);
+
+    assert_eq!(
+        received(&mut phone),
+        Some(json!({
+            "type": "history_key_ready",
+            "data": { "device_id": device.to_string() },
+        }))
+    );
+    assert_eq!(received(&mut laptop), None);
 }

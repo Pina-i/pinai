@@ -14,8 +14,9 @@ Built with Rust · Axum · SQLx · PostgreSQL · Redis · Ed25519
 - **ActivityPub federation** — WebFinger discovery, actor documents, friend requests, DMs and
   profile updates between instances, every inbound activity HTTP-signed
 - **Messaging backbone** — DMs and groups over WebSocket, with opaque MLS ciphertext as the body
-- **E2EE key directory** — IdP-attested devices, KeyPackages, MLS commits and Welcomes, the
-  encrypted history archive
+- **E2EE key directory** — IdP-attested devices, the approvals between them, KeyPackages, MLS
+  commits and Welcomes, the encrypted history archive and its passphrase shared, sealed, with
+  the devices each one approved
 - **Presence** — online/away/dnd and typing, shared with peer instances by poll and SSE stream
 - **User handles** — the chosen name, `_`, and 5 random characters of `a–z0–9` (e.g. `alice_xk9mp`)
 
@@ -153,6 +154,7 @@ Paths only — the rules, bodies and status codes of each route are in `CLAUDE.m
 | `GET` · `POST` | `/api/mls/welcomes` | Claim this device's Welcomes · send one |
 | `POST` · `GET` · `DELETE` | `/api/history/messages` | The encrypted history archive |
 | `GET` · `PUT` | `/api/history/key` | Its key, by generation |
+| `POST` · `GET` | `/api/history/key-shares` | Share the passphrase, sealed, with a device this one approved · the share waiting for this device |
 
 ### Realtime and presence
 

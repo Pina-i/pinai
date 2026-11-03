@@ -4,6 +4,7 @@ mod approval;
 mod auth;
 mod e2ee;
 mod identity;
+mod key_share;
 mod messaging;
 mod presence;
 mod profile;
