@@ -6,8 +6,9 @@ use time::OffsetDateTime;
 
 use super::end_session;
 
-/// `GET /logout`: the browser's session ends — every token it led to with it — and the browser
-/// goes back where its client asked if the client listed that place.
+/// `GET /logout`: the browser's session ends, and the web apps' sessions under it — every token
+/// they led to with them, never a desktop app's own — and the browser goes back where its client
+/// asked if the client listed that place.
 pub struct LogOut {
     clients: Arc<dyn Clients>,
     sessions: Arc<dyn Sessions>,

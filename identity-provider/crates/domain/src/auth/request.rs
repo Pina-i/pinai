@@ -91,7 +91,8 @@ impl AuthorizationCode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Grant {
     pub user: UserId,
-    /// The browser session the code was issued under: the tokens belong to it.
+    /// The browser session the code was issued under: the client's session its tokens belong to
+    /// hangs under it, unless the client stays signed in on its device.
     pub session: SessionId,
     pub client: ClientId,
     pub redirect_uri: String,
@@ -113,8 +114,9 @@ impl Grant {
         }
     }
 
-    /// Its tokens open a session of their own on the device, apart from the browser's: a client
-    /// allowed to stay signed in asked to, and the sign-in this code ended agreed.
+    /// Its tokens open a session of their own on the device, apart from the browser's and
+    /// outliving it: a client allowed to stay signed in asked to, and the sign-in this code ended
+    /// agreed. Any other client's belong to its session under the browser's.
     pub fn opens_app_session(&self, client: &Client) -> bool {
         client.offline_access && asks_offline_access(&self.scope)
     }

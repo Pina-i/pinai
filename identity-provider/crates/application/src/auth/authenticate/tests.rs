@@ -1,5 +1,4 @@
 use domain::UserId;
-use domain::auth::SessionKind;
 use domain::auth::testing::InMemorySessions;
 use domain::auth::{RevokedReason, SESSION_IDLE, Sessions};
 use domain::identity::testing::InMemoryTokens;
@@ -19,10 +18,7 @@ async fn a_token_of_a_live_session_names_its_user_and_session() {
         Arc::new(InMemorySessions::default()),
     );
     let alice = UserId::generate();
-    let session = sessions
-        .open(alice, &SessionKind::Browser, now())
-        .await
-        .unwrap();
+    let session = sessions.open_browser(alice, now()).await.unwrap();
     let token = tokens.issue_signed_in_at(alice, session, now());
 
     let bearer = authenticate(&tokens, &sessions)
@@ -47,20 +43,17 @@ async fn a_token_outlives_no_session_ended_idle_or_unknown() {
         Arc::new(InMemorySessions::default()),
     );
     let alice = UserId::generate();
-    let revoked = sessions
-        .open(alice, &SessionKind::Browser, now())
-        .await
-        .unwrap();
+    let revoked = sessions.open_browser(alice, now()).await.unwrap();
     sessions
         .revoke(revoked, RevokedReason::SignOut, now())
         .await
         .unwrap();
     let idle = sessions
-        .open(alice, &SessionKind::Browser, now() - SESSION_IDLE)
+        .open_browser(alice, now() - SESSION_IDLE)
         .await
         .unwrap();
     let someone_elses = sessions
-        .open(UserId::generate(), &SessionKind::Browser, now())
+        .open_browser(UserId::generate(), now())
         .await
         .unwrap();
     let authenticate = authenticate(&tokens, &sessions);

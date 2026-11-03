@@ -58,8 +58,8 @@ use std::sync::Arc;
 use domain::auth::{
     AuthError, AuthorizationCode, AuthorizationCodes, AuthorizationRequest, CODE_TTL, ClientSignIn,
     ClientSignIns, Email, Grant, HandleSuffixes, NewAccount, PasswordHash, RESEND_LIMIT,
-    RESEND_WINDOW, Registration, RevokedReason, SIGNUP_CODE_TTL, Session, SessionKind,
-    SessionNotifier, Sessions, SignInAccount, SignInAccounts, SignUps, SignupCodes, SignupMailer,
+    RESEND_WINDOW, Registration, RevokedReason, SIGNUP_CODE_TTL, Session, SessionNotifier,
+    Sessions, SignInAccount, SignInAccounts, SignUps, SignupCodes, SignupMailer,
 };
 use domain::identity::{Bearer, Handle, InstanceOrigin, UsernameChoice};
 use domain::profile::DisplayName;
@@ -144,7 +144,7 @@ impl CompleteSignIn {
                     )
                     .await?;
                 }
-                self.sessions.open(user, &SessionKind::Browser, now).await?
+                self.sessions.open_browser(user, now).await?
             }
         };
         self.sign_ins.remember(app, now).await?;
@@ -152,7 +152,7 @@ impl CompleteSignIn {
     }
 }
 
-/// Ends a session, and closes what hangs on it.
+/// Ends a session — a browser session's web apps with it —, and closes what hangs on each.
 pub(crate) async fn end_session(
     sessions: &dyn Sessions,
     notifier: &dyn SessionNotifier,
@@ -160,12 +160,8 @@ pub(crate) async fn end_session(
     reason: RevokedReason,
     now: OffsetDateTime,
 ) -> Result<(), AuthError> {
-    let Some(session) = sessions.find(id).await? else {
-        return Ok(());
-    };
-    if sessions.revoke(id, reason, now).await? {
-        notifier.ended(&session);
-    }
+    let ended = sessions.revoke(id, reason, now).await?;
+    tell_ended(notifier, &ended);
     Ok(())
 }
 

@@ -7,9 +7,11 @@ use time::OffsetDateTime;
 
 use crate::auth::tell_ended;
 
-/// `POST /api/keys/devices/{id}/revoke`: the device is signed out — its sessions end, their
-/// tokens and sockets with them — and flagged in the directory, the approval requests it took part
-/// in closed; the MLS Remove commits that exclude it are the clients'. Revoking twice is fine.
+/// `POST /api/keys/devices/{id}/revoke`: the device is flagged in the directory, the approval
+/// requests it took part in closed, then signed out — its sessions end, their tokens and sockets
+/// with them, and for a web app's the browser session above it with that browser's other apps,
+/// so no cookie signs it in again; the MLS Remove commits that exclude it are the clients'.
+/// Revoking twice is fine, and finishes a revoke cut short.
 pub struct RevokeDevice {
     devices: Arc<dyn Devices>,
     sessions: Arc<dyn Sessions>,
@@ -39,19 +41,19 @@ impl RevokeDevice {
         device: DeviceId,
         now: OffsetDateTime,
     ) -> Result<(), KeyDirectoryError> {
-        // Signed out before the flag: should the flag fail, the device is out all the same,
-        // and revoking again finishes.
+        let closed = match self.devices.revoke(owner, device).await? {
+            Revocation::Revoked { closed } => closed,
+            // Its sessions are ended again: a revoke cut short before them finishes.
+            Revocation::AlreadyRevoked => Vec::new(),
+            Revocation::NotFound => return Err(KeyDirectoryError::DeviceNotFound),
+        };
+        // After the flag, which a link checks under the same row lock: nothing names it any more.
         let ended = self
             .sessions
             .revoke_device(owner, device, now)
             .await
             .map_err(|e| KeyDirectoryError::Unexpected(e.into()))?;
         tell_ended(&*self.notifier, &ended);
-        let closed = match self.devices.revoke(owner, device).await? {
-            Revocation::Revoked { closed } => closed,
-            Revocation::AlreadyRevoked => return Ok(()),
-            Revocation::NotFound => return Err(KeyDirectoryError::DeviceNotFound),
-        };
         if closed.is_empty() {
             return Ok(());
         }

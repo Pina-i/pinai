@@ -167,15 +167,27 @@ async fn revoking_a_device_signs_it_out_at_once() {
         (status, refused["error_description"].as_str()),
         (StatusCode::UNAUTHORIZED, Some("The session has ended"))
     );
-    assert_eq!(
-        w.app.sign_in.sessions.reason(on_device),
-        Some(RevokedReason::DeviceRevoked)
-    );
+    let browser = w
+        .app
+        .sign_in
+        .sessions
+        .all()
+        .into_iter()
+        .find(|session| session.id == on_device)
+        .and_then(|session| session.browser())
+        .unwrap();
+    for ended in [browser, on_device] {
+        assert_eq!(
+            w.app.sign_in.sessions.reason(ended),
+            Some(RevokedReason::DeviceRevoked)
+        );
+    }
     assert_eq!(
         w.app.sign_in.ended.ended(),
-        vec![on_device],
-        "its sockets close"
+        vec![browser, on_device],
+        "its sockets close, and the browser it signed in through signs out"
     );
+    assert_eq!(w.app.sign_in.sessions.reason(here), None);
     let listed = w.devices(&w.alice, here).await;
     assert_eq!(listed[0]["signed_in"], false);
     assert!(listed[0]["revoked_at"].is_string());

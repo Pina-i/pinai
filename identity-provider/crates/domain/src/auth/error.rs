@@ -20,6 +20,8 @@ pub enum AuthError {
     DeviceRefused,
     #[error("this session declared another device")]
     DeviceMismatch,
+    #[error("the session has ended")]
+    SessionEnded,
     #[error("the code was issued to another client")]
     ClientMismatch,
     #[error("the code_verifier does not match the code_challenge")]

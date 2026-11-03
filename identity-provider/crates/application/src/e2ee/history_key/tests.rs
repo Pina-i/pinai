@@ -1,6 +1,6 @@
 use domain::ConversationId;
+use domain::auth::Sessions;
 use domain::auth::testing::InMemorySessions;
-use domain::auth::{SessionKind, Sessions};
 use domain::e2ee::testing::{InMemoryArchive, InMemoryKeyDirectory};
 use domain::e2ee::{
     ApprovalPublicKey, ArchiveNonce, Archived, Attestation, DeviceLabel, DeviceRequired,
@@ -57,13 +57,12 @@ fn world() -> World {
 impl World {
     /// A session of `who`'s, naming `device` when given, its password typed `minutes_ago`.
     async fn signed_in(&self, who: UserId, device: Option<DeviceId>, minutes_ago: i64) -> Bearer {
-        let session = self
-            .sessions
-            .open(who, &SessionKind::Browser, now())
-            .await
-            .unwrap();
+        let session = self.sessions.live_at(who, now());
         if let Some(device) = device {
-            self.sessions.link(session, device, now()).await.unwrap();
+            self.sessions
+                .link(who, session, device, now())
+                .await
+                .unwrap();
         }
         Bearer {
             user: who,

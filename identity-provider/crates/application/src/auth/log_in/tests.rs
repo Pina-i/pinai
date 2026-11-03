@@ -1,4 +1,4 @@
-use domain::auth::testing::{Mail, a_request, signed_up};
+use domain::auth::testing::{Mail, a_request, another_web_app, signed_up, web_client};
 use domain::auth::{ClientId, ClientSignIn, Grant, Sessions, SignInAccount};
 use time::Duration;
 
@@ -280,6 +280,55 @@ async fn an_address_signs_in_whatever_its_case() {
     assert!(
         matches!(outcome, LoginOutcome::SignedIn { .. }),
         "{outcome:?}"
+    );
+}
+
+#[tokio::test]
+async fn another_account_signing_in_on_the_browser_signs_the_first_ones_web_apps_out() {
+    let w = world().await;
+    let bob = signed_up("bob");
+    w.sign_up(&bob).await;
+    let first = w
+        .log_in
+        .execute(&w.alice.email, "alice-password", &a_request(), None, now())
+        .await
+        .unwrap();
+    let LoginOutcome::SignedIn { session, .. } = first else {
+        panic!("{first:?}")
+    };
+    let mut web_apps = Vec::new();
+    for client in [web_client(), another_web_app()] {
+        let opened = w
+            .sessions
+            .open_under(session, &client.id, now())
+            .await
+            .unwrap()
+            .expect("a live browser session signs apps in");
+        web_apps.push(opened.id);
+    }
+
+    w.log_in
+        .execute(
+            &bob.email,
+            "bob-password",
+            &a_request(),
+            Some(session),
+            now(),
+        )
+        .await
+        .unwrap();
+
+    for ended in [session, web_apps[0], web_apps[1]] {
+        assert_eq!(
+            w.sessions.reason(ended),
+            Some(domain::auth::RevokedReason::Replaced),
+            "{ended}"
+        );
+    }
+    assert_eq!(
+        w.ended.ended(),
+        [session, web_apps[0], web_apps[1]],
+        "their sockets told to close"
     );
 }
 

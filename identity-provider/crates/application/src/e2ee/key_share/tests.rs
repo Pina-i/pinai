@@ -1,6 +1,5 @@
 use std::sync::Mutex;
 
-use domain::auth::SessionKind;
 use domain::auth::testing::InMemorySessions;
 use domain::e2ee::testing::{
     InMemoryArchive, InMemoryKeyDirectory, PlainEd25519Verifier, RecordingDeviceTrustNotifier,
@@ -104,13 +103,12 @@ impl World {
 
     /// A session of Alice's, naming `device` when given.
     async fn session(&self, device: Option<DeviceId>) -> Bearer {
-        let session = self
-            .sessions
-            .open(self.alice.id, &SessionKind::Browser, now())
-            .await
-            .unwrap();
+        let session = self.sessions.live_at(self.alice.id, now());
         if let Some(device) = device {
-            self.sessions.link(session, device, now()).await.unwrap();
+            self.sessions
+                .link(self.alice.id, session, device, now())
+                .await
+                .unwrap();
         }
         Bearer {
             user: self.alice.id,

@@ -4,16 +4,17 @@ use domain::auth::testing::{
     PlainHasher, SignInSeeds, SignUpRecords, a_request, contract, seeded_actor, signed_up,
 };
 use domain::auth::{
-    AuthorizationCodes, INVITATION_TTL, Invitations, LoginTickets, PasswordChange, PasswordResets,
-    REQUESTED_RESET_TTL, RESET_REQUEST_LIMIT, RESET_TTL, RefreshTokens, Registration, Rotation,
-    SessionKind, Sessions, SignInAccount, SignInAccounts, SignUps, SignupCodes,
+    AuthError, AuthorizationCodes, INVITATION_TTL, Invitations, LoginTickets, PasswordChange,
+    PasswordResets, REQUESTED_RESET_TTL, RESET_REQUEST_LIMIT, RESET_TTL, RefreshTokens,
+    Registration, Rotation, Sessions, SignInAccount, SignInAccounts, SignUps, SignupCodes,
 };
+use domain::e2ee::Devices;
 use domain::{DeviceId, SessionId, UserId};
 use hmac::{Hmac, Mac};
 use infrastructure::postgres::{
-    PgAuthorizationCodes, PgClientSignIns, PgInstanceMembers, PgInvitations, PgLoginTickets,
-    PgPasswordResets, PgRefreshTokens, PgSecondFactors, PgSessions, PgSignInAccounts, PgSignUps,
-    PgSignupCodes,
+    PgAuthorizationCodes, PgClientSignIns, PgDevices, PgInstanceMembers, PgInvitations,
+    PgLoginTickets, PgPasswordResets, PgRefreshTokens, PgSecondFactors, PgSessions,
+    PgSignInAccounts, PgSignUps, PgSignupCodes,
 };
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
@@ -74,7 +75,7 @@ async fn an_account_is_found_by_email_and_id_with_its_sign_in_state(pool: PgPool
 async fn a_code_is_good_once_and_only_until_it_expires(pool: PgPool) {
     let user = a_user(&pool).await;
     let session = PgSessions::new(pool.clone())
-        .open(user, &SessionKind::Browser, OffsetDateTime::now_utc())
+        .open_browser(user, OffsetDateTime::now_utc())
         .await
         .unwrap();
     contract::a_code_is_good_once_and_only_until_it_expires(
@@ -102,7 +103,7 @@ async fn a_session_goes_with_its_account_and_its_codes_with_it(pool: PgPool) {
     let user = a_user(&pool).await;
     let sessions = PgSessions::new(pool.clone());
     let session = sessions
-        .open(user, &SessionKind::Browser, OffsetDateTime::now_utc())
+        .open_browser(user, OffsetDateTime::now_utc())
         .await
         .unwrap();
     let code = PgAuthorizationCodes::new(pool.clone())
@@ -158,14 +159,358 @@ async fn a_device_holds_one_session_the_latest_linked(pool: PgPool) {
 #[sqlx::test(migrator = "infrastructure::MIGRATOR")]
 async fn a_revoked_device_and_signing_out_elsewhere_end_the_right_sessions(pool: PgPool) {
     let (user, other) = (a_user(&pool).await, a_user(&pool).await);
-    let device = a_device_of(&pool, user).await;
+    let (device, desktops) = (
+        a_device_of(&pool, user).await,
+        a_device_of(&pool, user).await,
+    );
     contract::a_revoked_device_and_signing_out_elsewhere_end_the_right_sessions(
         &PgSessions::new(pool),
         user,
         other,
         device,
+        desktops,
     )
     .await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn an_apps_session_staying_signed_in_takes_its_browsers_password_and_outlives_it(
+    pool: PgPool,
+) {
+    let user = a_user(&pool).await;
+    contract::an_apps_session_staying_signed_in_takes_its_browsers_password_and_outlives_it(
+        &PgSessions::new(pool),
+        user,
+    )
+    .await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn a_browser_session_swept_takes_its_web_apps_with_it_and_counts_them(pool: PgPool) {
+    let user = a_user(&pool).await;
+    contract::a_browser_session_swept_takes_its_web_apps_with_it_and_counts_them(
+        &PgSessions::new(pool),
+        user,
+    )
+    .await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn a_session_names_one_device_and_a_browser_session_none(pool: PgPool) {
+    let user = a_user(&pool).await;
+    let (laptop, phone) = (
+        a_device_of(&pool, user).await,
+        a_device_of(&pool, user).await,
+    );
+    contract::a_session_names_one_device_and_a_browser_session_none(
+        &PgSessions::new(pool),
+        user,
+        laptop,
+        phone,
+    )
+    .await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn a_desktop_signing_out_elsewhere_keeps_its_own_session_only(pool: PgPool) {
+    let user = a_user(&pool).await;
+    contract::a_desktop_signing_out_elsewhere_keeps_its_own_session_only(
+        &PgSessions::new(pool),
+        user,
+    )
+    .await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn revoking_a_desktops_device_leaves_every_browser_signed_in(pool: PgPool) {
+    let user = a_user(&pool).await;
+    let device = a_device_of(&pool, user).await;
+    contract::revoking_a_desktops_device_leaves_every_browser_signed_in(
+        &PgSessions::new(pool),
+        user,
+        device,
+    )
+    .await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn a_web_apps_session_is_opened_once_under_its_browser_session_and_reused(pool: PgPool) {
+    let user = a_user(&pool).await;
+    contract::a_web_apps_session_is_opened_once_under_its_browser_session_and_reused(
+        &PgSessions::new(pool),
+        user,
+    )
+    .await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn a_web_apps_session_ended_or_idle_is_followed_by_a_new_one(pool: PgPool) {
+    let user = a_user(&pool).await;
+    contract::a_web_apps_session_ended_or_idle_is_followed_by_a_new_one(
+        &PgSessions::new(pool),
+        user,
+    )
+    .await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn only_a_live_browser_session_opens_web_apps_sessions(pool: PgPool) {
+    let user = a_user(&pool).await;
+    contract::only_a_live_browser_session_opens_web_apps_sessions(&PgSessions::new(pool), user)
+        .await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn a_web_apps_use_is_its_browser_sessions_and_its_end_its_alone(pool: PgPool) {
+    let user = a_user(&pool).await;
+    contract::a_web_apps_use_is_its_browser_sessions_and_its_end_its_alone(
+        &PgSessions::new(pool),
+        user,
+    )
+    .await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn exchanges_at_once_under_one_browser_session_open_one_session_for_their_app(pool: PgPool) {
+    let user = a_user(&pool).await;
+    let sessions = Arc::new(PgSessions::new(pool.clone()));
+    let now = OffsetDateTime::now_utc();
+    let browser = sessions.open_browser(user, now).await.unwrap();
+
+    let exchanges: Vec<_> = (0..8)
+        .map(|_| {
+            let sessions = sessions.clone();
+            tokio::spawn(async move {
+                sessions
+                    .open_under(browser, &a_request().client, now)
+                    .await
+                    .unwrap()
+                    .expect("a live browser session")
+                    .id
+            })
+        })
+        .collect();
+    let mut opened = Vec::new();
+    for exchange in exchanges {
+        opened.push(exchange.await.unwrap());
+    }
+
+    opened.dedup();
+    assert_eq!(opened.len(), 1, "two tabs of one app share its session");
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn a_browser_sessions_end_racing_its_web_apps_exchanges_leaves_none_signed_in(pool: PgPool) {
+    let user = a_user(&pool).await;
+    let sessions = Arc::new(PgSessions::new(pool.clone()));
+    let now = OffsetDateTime::now_utc();
+    let clients: Vec<_> = (0..6)
+        .map(|n| {
+            domain::auth::ClientId::parse(&format!("http://localhost:{}/c.json", 5000 + n)).unwrap()
+        })
+        .collect();
+    for _ in 0..5 {
+        let browser = sessions.open_browser(user, now).await.unwrap();
+        let mut racing: Vec<_> = clients
+            .iter()
+            .cloned()
+            .map(|client| {
+                let sessions = sessions.clone();
+                tokio::spawn(async move {
+                    sessions.open_under(browser, &client, now).await.unwrap();
+                })
+            })
+            .collect();
+        let ending = sessions.clone();
+        racing.push(tokio::spawn(async move {
+            ending
+                .revoke(browser, domain::auth::RevokedReason::SignOut, now)
+                .await
+                .unwrap();
+        }));
+        for task in racing {
+            task.await.unwrap();
+        }
+
+        let left: Vec<_> = sessions
+            .of_user(user)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|session| session.browser() == Some(browser) && session.is_live(now))
+            .collect();
+        assert!(left.is_empty(), "{left:?}");
+    }
+}
+
+/// A web app's session of `user`'s, under a browser session of its own.
+async fn a_web_app_of(sessions: &PgSessions, user: UserId) -> SessionId {
+    let now = OffsetDateTime::now_utc();
+    let browser = sessions.open_browser(user, now).await.unwrap();
+    sessions
+        .open_under(browser, &a_request().client, now)
+        .await
+        .unwrap()
+        .unwrap()
+        .id
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn the_store_holds_no_browser_session_naming_a_device(pool: PgPool) {
+    let user = a_user(&pool).await;
+    let device = a_device_of(&pool, user).await;
+    let browser = PgSessions::new(pool.clone())
+        .open_browser(user, OffsetDateTime::now_utc())
+        .await
+        .unwrap();
+
+    let refused = sqlx::query("UPDATE sessions SET device_id = $2 WHERE id = $1")
+        .bind(browser.as_uuid())
+        .bind(device.as_uuid())
+        .execute(&pool)
+        .await;
+
+    assert!(refused.is_err(), "its web apps' sessions name theirs");
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn a_device_another_account_holds_or_revoked_names_no_session(pool: PgPool) {
+    let (user, other) = (a_user(&pool).await, a_user(&pool).await);
+    let (theirs, revoked) = (
+        a_device_of(&pool, other).await,
+        a_device_of(&pool, user).await,
+    );
+    sqlx::query("UPDATE user_devices SET revoked_at = now() WHERE device_id = $1")
+        .bind(revoked.as_uuid())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let sessions = PgSessions::new(pool.clone());
+    let session = a_web_app_of(&sessions, user).await;
+
+    for device in [theirs, revoked, DeviceId::generate()] {
+        let refused = sessions
+            .link(user, session, device, OffsetDateTime::now_utc())
+            .await;
+        assert!(
+            matches!(refused, Err(AuthError::DeviceRefused)),
+            "{device}: {refused:?}"
+        );
+    }
+    assert_eq!(sessions.find(session).await.unwrap().unwrap().device, None);
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn a_link_racing_its_devices_revoke_never_leaves_a_session_naming_it(pool: PgPool) {
+    let user = a_user(&pool).await;
+    let sessions = Arc::new(PgSessions::new(pool.clone()));
+    let devices = Arc::new(PgDevices::new(pool.clone()));
+    for _ in 0..6 {
+        let device = a_device_of(&pool, user).await;
+        let session = a_web_app_of(&sessions, user).await;
+        let now = OffsetDateTime::now_utc();
+
+        let linking = {
+            let sessions = sessions.clone();
+            tokio::spawn(async move { sessions.link(user, session, device, now).await })
+        };
+        let revoking = {
+            let (sessions, devices) = (sessions.clone(), devices.clone());
+            // As `RevokeDevice` does: the flag, then the device's sessions.
+            tokio::spawn(async move {
+                devices.revoke(user, device).await.unwrap();
+                sessions.revoke_device(user, device, now).await.unwrap()
+            })
+        };
+        let linked = linking.await.unwrap();
+        revoking.await.unwrap();
+
+        assert!(
+            matches!(linked, Ok(_) | Err(AuthError::DeviceRefused)),
+            "{linked:?}"
+        );
+        let named: Vec<_> = sessions
+            .of_user(user)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|session| session.device == Some(device) && session.is_live(now))
+            .collect();
+        assert!(named.is_empty(), "{named:?}");
+    }
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn a_link_racing_a_sign_out_elsewhere_names_nothing_that_lives_on(pool: PgPool) {
+    let user = a_user(&pool).await;
+    let sessions = Arc::new(PgSessions::new(pool.clone()));
+    let kept = a_web_app_of(&sessions, user).await;
+    for _ in 0..6 {
+        let device = a_device_of(&pool, user).await;
+        let session = a_web_app_of(&sessions, user).await;
+        let now = OffsetDateTime::now_utc();
+
+        let linking = {
+            let sessions = sessions.clone();
+            tokio::spawn(async move { sessions.link(user, session, device, now).await })
+        };
+        let signing_out = {
+            let sessions = sessions.clone();
+            tokio::spawn(async move { sessions.revoke_others(user, kept, now).await.unwrap() })
+        };
+        let linked = linking.await.unwrap();
+        signing_out.await.unwrap();
+
+        let after = sessions.find(session).await.unwrap().unwrap();
+        assert!(!after.is_live(now), "signed out either way");
+        match linked {
+            Ok(_) => assert_eq!(after.device, Some(device)),
+            Err(AuthError::SessionEnded) => assert_eq!(after.device, None),
+            other => panic!("{other:?}"),
+        }
+    }
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn two_links_at_once_naming_two_devices_on_one_session_name_one(pool: PgPool) {
+    let user = a_user(&pool).await;
+    let sessions = Arc::new(PgSessions::new(pool.clone()));
+    for _ in 0..6 {
+        let (laptop, phone) = (
+            a_device_of(&pool, user).await,
+            a_device_of(&pool, user).await,
+        );
+        let session = a_web_app_of(&sessions, user).await;
+        let now = OffsetDateTime::now_utc();
+
+        let links: Vec<_> = [laptop, phone]
+            .map(|device| {
+                let sessions = sessions.clone();
+                tokio::spawn(async move { sessions.link(user, session, device, now).await })
+            })
+            .into_iter()
+            .collect();
+        let mut outcomes = Vec::new();
+        for link in links {
+            outcomes.push(link.await.unwrap());
+        }
+
+        let named = sessions.find(session).await.unwrap().unwrap().device;
+        let won: Vec<_> = [laptop, phone]
+            .into_iter()
+            .zip(&outcomes)
+            .filter(|(_, outcome)| outcome.is_ok())
+            .map(|(device, _)| device)
+            .collect();
+        assert_eq!(won.len(), 1, "{outcomes:?}");
+        assert_eq!(named, Some(won[0]));
+        assert!(
+            outcomes
+                .iter()
+                .any(|outcome| matches!(outcome, Err(AuthError::DeviceMismatch))),
+            "{outcomes:?}"
+        );
+    }
 }
 
 #[sqlx::test(migrator = "infrastructure::MIGRATOR")]
@@ -173,12 +518,9 @@ async fn a_session_forgets_a_device_deleted_with_its_rows(pool: PgPool) {
     let user = a_user(&pool).await;
     let device = a_device_of(&pool, user).await;
     let sessions = PgSessions::new(pool.clone());
-    let session = sessions
-        .open(user, &SessionKind::Browser, OffsetDateTime::now_utc())
-        .await
-        .unwrap();
+    let session = a_web_app_of(&sessions, user).await;
     sessions
-        .link(session, device, OffsetDateTime::now_utc())
+        .link(user, session, device, OffsetDateTime::now_utc())
         .await
         .unwrap();
 
@@ -194,7 +536,7 @@ async fn a_session_forgets_a_device_deleted_with_its_rows(pool: PgPool) {
 async fn a_session(pool: &PgPool) -> SessionId {
     let user = a_user(pool).await;
     PgSessions::new(pool.clone())
-        .open(user, &SessionKind::Browser, OffsetDateTime::now_utc())
+        .open_browser(user, OffsetDateTime::now_utc())
         .await
         .unwrap()
 }
@@ -281,10 +623,7 @@ async fn parallel_presentations_of_one_token_leave_its_chain_one_head(pool: PgPo
 async fn a_refresh_token_is_kept_as_its_hash_and_goes_with_its_session(pool: PgPool) {
     let user = a_user(&pool).await;
     let now = OffsetDateTime::now_utc();
-    let session = PgSessions::new(pool.clone())
-        .open(user, &SessionKind::App(a_request().client), now)
-        .await
-        .unwrap();
+    let session = a_web_app_of(&PgSessions::new(pool.clone()), user).await;
     let token = PgRefreshTokens::new(pool.clone())
         .start(session, &a_request().client, now)
         .await
@@ -870,10 +1209,7 @@ async fn two_submissions_racing_on_one_link_change_the_password_once(pool: PgPoo
     let now = OffsetDateTime::now_utc();
     let sessions = PgSessions::new(pool.clone());
     for _ in 0..3 {
-        sessions
-            .open(alice.id, &SessionKind::Browser, now)
-            .await
-            .unwrap();
+        sessions.open_browser(alice.id, now).await.unwrap();
     }
     let resets = Arc::new(PgPasswordResets::new(pool.clone()));
     let token = resets

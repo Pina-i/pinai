@@ -2,11 +2,11 @@ use std::sync::Arc;
 
 use domain::DeviceId;
 use domain::auth::{AuthError, SessionNotifier, Sessions};
-use domain::e2ee::{Devices, may_name};
+use domain::e2ee::Devices;
 use domain::identity::Bearer;
 use time::OffsetDateTime;
 
-use super::{calling_session, tell_ended};
+use super::tell_ended;
 
 /// `PUT /api/sessions/current/device`: the client names the E2EE device its session signed in,
 /// once that device's storage is open, so revoking the device signs it out. A device is signed
@@ -30,8 +30,9 @@ impl LinkDevice {
         }
     }
 
-    /// `DeviceRefused` for a device that isn't the account's, or is revoked; `DeviceMismatch` for
-    /// a session that named another.
+    /// `DeviceRefused` for a device that isn't the account's, or is revoked; what
+    /// `domain::auth::may_link` refuses otherwise — `DeviceMismatch` for a session that named
+    /// another, `SessionEnded` for one over since its token was checked.
     pub async fn execute(
         &self,
         bearer: Bearer,
@@ -47,9 +48,10 @@ impl LinkDevice {
         if !usable {
             return Err(AuthError::DeviceRefused);
         }
-        let named = calling_session(&*self.sessions, &bearer).await?.device;
-        may_name(named, device)?;
-        let replaced = self.sessions.link(bearer.session, device, now).await?;
+        let replaced = self
+            .sessions
+            .link(bearer.user, bearer.session, device, now)
+            .await?;
         tell_ended(&*self.notifier, &replaced);
         Ok(())
     }

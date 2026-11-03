@@ -92,7 +92,8 @@ async fn someone_who_forgot_their_password_is_mailed_a_link_sets_a_new_one_and_s
     assert_eq!(
         app.count("SELECT count(*) FROM sessions WHERE revoked_reason = 'password_reset'")
             .await,
-        1
+        2,
+        "the browser session and its web app's"
     );
     assert_eq!(
         app.count("SELECT count(*) FROM sessions WHERE revoked_at IS NULL")

@@ -8,7 +8,8 @@ use time::OffsetDateTime;
 use super::end_session;
 
 /// `POST /revoke` (RFC 7009): an app signs out by revoking its refresh token, and its session
-/// ends — every token of it, and its sockets. A token unknown here, or another client's, changes
+/// ends — every token of it, and its sockets —, the browser session a web app's hangs under and
+/// that browser's other apps left alone. A token unknown here, or another client's, changes
 /// nothing and is answered alike: the endpoint tells nothing of tokens.
 pub struct RevokeToken {
     refresh_tokens: Arc<dyn RefreshTokens>,

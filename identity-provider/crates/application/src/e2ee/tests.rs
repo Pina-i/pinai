@@ -1,8 +1,10 @@
 use std::sync::{Arc, Mutex};
 
 use domain::DeviceId;
-use domain::auth::testing::{InMemorySessions, RecordingSessionNotifier};
-use domain::auth::{RevokedReason, SessionKind, Sessions};
+use domain::auth::testing::{
+    InMemorySessions, RecordingSessionNotifier, another_web_app, web_client,
+};
+use domain::auth::{Client, RevokedReason, Sessions};
 use domain::e2ee::testing::{
     InMemoryArchive, InMemoryKeyDirectory, InMemoryRemoteKeyPackages, PlainAttester,
     PlainEd25519Verifier, RecordingDeviceNotifier, RecordingDeviceTrustNotifier, hpke_key,
@@ -152,13 +154,12 @@ fn world() -> World {
 impl World {
     /// A session of `who`'s, naming `device` when given.
     async fn signed_in(&self, who: &Account, device: Option<DeviceId>) -> Bearer {
-        let session = self
-            .sessions
-            .open(who.id, &SessionKind::Browser, now())
-            .await
-            .unwrap();
+        let session = self.sessions.live_at(who.id, now());
         if let Some(device) = device {
-            self.sessions.link(session, device, now()).await.unwrap();
+            self.sessions
+                .link(who.id, session, device, now())
+                .await
+                .unwrap();
         }
         Bearer {
             user: who.id,
@@ -764,12 +765,11 @@ async fn the_owner_lists_its_own_devices() {
     w.upload(&w.alice, phone, batch(1)).await;
     w.upload(&w.bob, DeviceId::generate(), batch(1)).await;
     let used = now() - Duration::hours(2);
-    let session = w
-        .sessions
-        .open(w.alice.id, &SessionKind::Browser, used)
+    let session = w.sessions.live_at(w.alice.id, used);
+    w.sessions
+        .link(w.alice.id, session, laptop, now())
         .await
         .unwrap();
-    w.sessions.link(session, laptop, now()).await.unwrap();
 
     let listed: Vec<(DeviceId, Option<OffsetDateTime>)> = w
         .list
@@ -792,12 +792,11 @@ async fn revoking_a_device_signs_it_out() {
     let w = world();
     let device = DeviceId::generate();
     w.upload(&w.alice, device, batch(1)).await;
-    let session = w
-        .sessions
-        .open(w.alice.id, &SessionKind::Browser, now())
+    let session = w.sessions.live_at(w.alice.id, now());
+    w.sessions
+        .link(w.alice.id, session, device, now())
         .await
         .unwrap();
-    w.sessions.link(session, device, now()).await.unwrap();
 
     let by_bob = w.revoke.execute(w.bob.id, device, now()).await;
     let still = w
@@ -815,7 +814,72 @@ async fn revoking_a_device_signs_it_out() {
         w.sessions.reason(session),
         Some(RevokedReason::DeviceRevoked)
     );
-    assert_eq!(w.ended.ended(), vec![session], "its sockets close");
+    let browser = w.sessions.find(session).await.unwrap().unwrap().browser();
+    assert_eq!(
+        w.ended.ended(),
+        [browser.unwrap(), session],
+        "its sockets close, its browser's with them"
+    );
+}
+
+#[tokio::test]
+async fn revoking_a_device_again_ends_what_a_revoke_cut_short_left_signed_in() {
+    let w = world();
+    let device = DeviceId::generate();
+    w.upload(&w.alice, device, batch(1)).await;
+    w.store.revoke(w.alice.id, device).await.unwrap();
+    let session = w.signed_in(&w.alice, None).await.session;
+    w.sessions
+        .link(w.alice.id, session, device, now())
+        .await
+        .unwrap();
+
+    w.revoke.execute(w.alice.id, device, now()).await.unwrap();
+
+    assert_eq!(
+        w.sessions.reason(session),
+        Some(RevokedReason::DeviceRevoked),
+        "the flag was set, the sessions not yet"
+    );
+}
+
+#[tokio::test]
+async fn revoking_a_web_apps_device_signs_out_the_browser_it_signed_in_through() {
+    let w = world();
+    let device = DeviceId::generate();
+    w.upload(&w.alice, device, batch(1)).await;
+    let browser = w.sessions.open_browser(w.alice.id, now()).await.unwrap();
+    let under = async |client: Client| {
+        w.sessions
+            .open_under(browser, &client.id, now())
+            .await
+            .unwrap()
+            .unwrap()
+            .id
+    };
+    let on_device = under(web_client()).await;
+    let beside = under(another_web_app()).await;
+    w.sessions
+        .link(w.alice.id, on_device, device, now())
+        .await
+        .unwrap();
+    let elsewhere = w.signed_in(&w.alice, None).await.session;
+
+    w.revoke.execute(w.alice.id, device, now()).await.unwrap();
+
+    for ended in [on_device, browser, beside] {
+        assert_eq!(
+            w.sessions.reason(ended),
+            Some(RevokedReason::DeviceRevoked),
+            "{ended}: its cookie would sign the device in again"
+        );
+    }
+    let mut told = w.ended.ended();
+    told.sort();
+    let mut expected = vec![on_device, browser, beside];
+    expected.sort();
+    assert_eq!(told, expected, "their sockets close");
+    assert_eq!(w.sessions.reason(elsewhere), None);
 }
 
 #[tokio::test]

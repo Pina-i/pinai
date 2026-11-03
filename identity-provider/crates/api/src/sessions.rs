@@ -39,6 +39,7 @@ pub async fn link_device(
                 "device_mismatch",
                 "This session signed in another device",
             ),
+            AuthError::SessionEnded => ApiError::invalid_token("The session has ended", true),
             other => ApiError::internal(anyhow::Error::from(other)),
         })?;
     Ok(StatusCode::NO_CONTENT)

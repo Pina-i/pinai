@@ -818,7 +818,7 @@ All Bearer-auth except where noted. Cross-IdP paths use HTTP Signatures — see
 | `POST /api/keys/devices` | Register/renew/rotate the caller's DRK attestation: `{ device_id, drk_public_key, hpke_public_key?, hpke_key_signature? }`, keys and signature in standard base64. Idempotent on `(device_id, drk_public_key)`. The device's HPKE key comes with the DRK's signature over its canonical bytes, both or neither (§ 3.3). A session that declared its device (`PUT /api/sessions/current/device`) registers that device only. A device seen for the first time is named from the request's `User-Agent` ("Chrome on Linux"); one recorded unnamed takes the name of its first KeyPackage upload that says. First-time mint emits a `DeviceJoined` WS event to the user's other live sessions; a rotation drops, in the same write, the device's approvals and those it signed (§ 3.9), and the key shares it sent or was sent; a new HPKE key, or one cleared, the share it was sent (§ 3.11). Returns the signature, kid, issued_at, expires_at, and the canonical bytes the IdP signed so the client can re-verify locally |
 | `GET /api/keys/devices` | List the caller's devices with their attestation expiry (the client uses this to schedule silent renewals), and whether each is signed in: `signed_in`, `last_active_at`. With each device, what another device needs to verify its keys itself (§ 3.3): `drk_public_key`, `attestation_signature`, `attestation_kid`, `attestation_expires_at` — the text the attestation signed —, `hpke_public_key`, `hpke_key_signature`; `null` where the device has registered no DRK, or no HPKE key. And `history_generation`, the history key's generation the device says it holds (§ 3.6), `null` until it says: the client compares it with the current generation. And `approvals`, oldest first, those binding the device's `drk_public_key` (§ 3.9): `{ by: "device", device_id, signature, created_at }` — `device_id` the approver — or `{ by: "passphrase", generation, signature, created_at }`, the signature in standard base64 |
 | `PUT /api/keys/devices/:device_id/history-key` | `{ generation }`: the device says it holds that generation of the account's history key (§ 3.6). Only from the device's own session: one that has named this very device (`403 device_required` when it named none, `403 device_mismatch` when another; below). The current generation only (`409 stale_history_key`, none set yet included, checked again as it is written); an unrevoked device of the caller's only (`403` revoked, `404` another account's or unknown). The key share the device was sent is deleted in the same write (§ 3.11). `204` |
-| `POST /api/keys/devices/:device_id/revoke` | Signs the device out — its sessions end (`identity-provider/specs/auth.md § 1`, "Sessions and devices") — then sets the directory-level revocation flag, clears the device's HPKE key, drops the approvals it signed (§ 3.9), deletes the key shares it sent or was sent (§ 3.11) and closes the approval requests it asks or answers (§ 3.10, `approval_closed` to the other side) in one write; the MLS Remove commits follow. Takes a password typed in the last 10 minutes (`identity-provider/specs/auth.md § 1`, "Sensitive actions"). Idempotent; `404` for a device that is not the caller's |
+| `POST /api/keys/devices/:device_id/revoke` | Sets the directory-level revocation flag, clears the device's HPKE key, drops the approvals it signed (§ 3.9), deletes the key shares it sent or was sent (§ 3.11) and closes the approval requests it asks or answers (§ 3.10, `approval_closed` to the other side) in one write, then signs the device out — its sessions end, a web app's with the browser session it signed in through and that browser's other web apps (`identity-provider/specs/auth.md § 1`, "Sessions and devices"); the MLS Remove commits follow. Takes a password typed in the last 10 minutes (`identity-provider/specs/auth.md § 1`, "Sensitive actions"). Idempotent; `404` for a device that is not the caller's |
 | `POST /api/keys/packages` | Upload a batch of KeyPackages for one of the caller's devices — refused whole (`400`) when a package is empty or not base64, or would take the device past the cap. An `expires_at` already past or beyond the lifetime (`E2EE_KEYPACKAGE_LIFETIME_SECS`) is the device's clock being off, not a bad package: the IdP stores it as now + the lifetime, by its own clock |
 | `POST /api/keys/packages/claim` | Atomically reserve one KeyPackage for `actor_uri` — of `device_id`, or of any device with some left. Bearer or HTTP-Sig (peer IdPs); for remote `actor_uri` the local IdP proxies to the target IdP via HTTP-Sig |
 | `POST /api/keys/packages/claim/devices` | One KeyPackage of each of `actor_uri`'s unrevoked devices that has any, as `{ claims: [...] }` — a contact's first add brings all their devices in (§ 6.5). Asked, proxied, limited and refused as a single claim is; none at all → 409 |
@@ -1310,7 +1310,7 @@ sequenceDiagram
 
     U->>Web: Settings → Devices → Revoke
     Web->>IdP: POST /api/keys/devices/:device_id/revoke
-    IdP->>IdP: end the device's sessions, then mark user_devices.revoked_at = now(), drop the approvals it signed and its key shares, close its approval requests
+    IdP->>IdP: mark user_devices.revoked_at = now(), drop the approvals it signed and its key shares, close its approval requests, then end the device's sessions (a web app's with its browser session)
     Note over IdP: its tokens and sockets stop at once;<br/>future /api/keys/packages/claim<br/>requests for this device fail
     loop for each leaf naming the revoked device, in each conversation it is in
         Web->>Web: build MLS Remove commit
@@ -1336,7 +1336,9 @@ MLS Remove commits provide post-compromise security: future epochs use
 a key schedule the revoked leaf was never part of. The directory-level
 flag stops the server from handing out fresh KeyPackages from the dead
 device, and the device is signed out: each session names the device it
-signed in (`identity-provider/specs/auth.md § 1`, "Sessions and devices").
+signed in, and a web app's ends with the browser session it signed in
+through, so the cookie left on that device signs nothing in again without
+the password (`identity-provider/specs/auth.md § 1`, "Sessions and devices").
 Every other device of the user's remembers the revocation (§ 3.9).
 
 A revoked device that held the 24 words keeps them: with them and a session
@@ -1769,7 +1771,10 @@ Two persistence boundaries:
   user's origin yields nothing useful. Each account signed in on a
   browser has its own databases and its own device key, so to the IdP
   two accounts sharing a browser are two devices, and signing in as
-  one never erases the other's.
+  one never erases the other's. Each web app — each origin — has its
+  own storage too, so two web apps in one browser are two devices, each
+  named on a session of its own under the browser's
+  (`identity-provider/specs/auth.md § 1`, "Sessions").
 - **Server Postgres** holds opaque material only — MLS ciphertexts,
   base64'd KeyPackages, encrypted history archive entries, the history
   keys' salts, check values and approval public keys (none of them

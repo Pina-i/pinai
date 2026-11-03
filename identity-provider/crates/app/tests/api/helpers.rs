@@ -497,6 +497,157 @@ async fn drop_database(name: &str) {
     }
 }
 
+/// Another web app than the journeys' own, on an origin of its own — an instance's beside the
+/// official one: its document, served there, and its callback.
+pub struct OtherWebApp {
+    pub client_id: String,
+    pub redirect_uri: String,
+    _server: MockServer,
+}
+
+impl OtherWebApp {
+    pub async fn start() -> Self {
+        let server = MockServer::start().await;
+        let (client_id, redirect_uri) = (
+            format!("{}/oauth-client.json", server.uri()),
+            format!("{}/callback", server.uri()),
+        );
+        Mock::given(method("GET"))
+            .and(path("/oauth-client.json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "client_id": client_id,
+                "client_name": "Pīna'i on an instance",
+                "redirect_uris": [redirect_uri],
+            })))
+            .mount(&server)
+            .await;
+        Self {
+            client_id,
+            redirect_uri,
+            _server: server,
+        }
+    }
+
+    /// Its OIDC request, as form pairs.
+    pub fn request(&self) -> Vec<(&'static str, String)> {
+        let mut pairs = vec![
+            ("client_id", self.client_id.clone()),
+            ("redirect_uri", self.redirect_uri.clone()),
+        ];
+        pairs.extend(
+            [
+                ("scope", "openid profile email"),
+                ("state", "other-state"),
+                ("code_challenge", CHALLENGE),
+                ("code_challenge_method", "S256"),
+                ("nonce", "other-nonce"),
+            ]
+            .map(|(name, value)| (name, value.to_owned())),
+        );
+        pairs
+    }
+
+    /// Its first sign-in in the browser holding `who`'s cookie: the password, as any app's first
+    /// takes, the browser session kept. Its tokens.
+    pub async fn sign_in(&self, app: &TestApp, who: &Account) -> Account {
+        let mut pairs = self.request();
+        pairs.extend([
+            ("email", who.email.clone()),
+            ("password", PASSWORD.to_owned()),
+        ]);
+        let signed_in = app
+            .http
+            .post(format!("{}/login", app.address))
+            .form(&pairs)
+            .header("cookie", &who.cookie)
+            .send()
+            .await
+            .unwrap();
+        let landed = location(&signed_in);
+        assert!(landed.starts_with(&self.redirect_uri), "{landed}");
+        self.tokens(app, who, &query_of(&landed)["code"]).await
+    }
+
+    /// A sign-in through `/authorize` with the browser's cookie, silent while its session lives:
+    /// a reload's. Its tokens.
+    pub async fn sign_in_again(&self, app: &TestApp, who: &Account) -> Account {
+        let authorized = authorize(app, &self.request(), &who.cookie).await;
+        let landed = location(&authorized);
+        assert!(landed.starts_with(&self.redirect_uri), "silent: {landed}");
+        self.tokens(app, who, &query_of(&landed)["code"]).await
+    }
+
+    async fn tokens(&self, app: &TestApp, who: &Account, code: &str) -> Account {
+        let tokens: Value = app
+            .http
+            .post(format!("{}/token", app.address))
+            .form(&[
+                ("grant_type", "authorization_code"),
+                ("code", code),
+                ("redirect_uri", self.redirect_uri.as_str()),
+                ("client_id", self.client_id.as_str()),
+                ("code_verifier", VERIFIER),
+            ])
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        Account {
+            token: tokens["access_token"].as_str().unwrap().to_owned(),
+            refresh_token: tokens["refresh_token"].as_str().unwrap().to_owned(),
+            ..who.clone()
+        }
+    }
+
+    /// Its refresh: `/token`'s status.
+    pub async fn refresh(&self, app: &TestApp, token: &str) -> reqwest::StatusCode {
+        app.http
+            .post(format!("{}/token", app.address))
+            .form(&[
+                ("grant_type", "refresh_token"),
+                ("client_id", self.client_id.as_str()),
+                ("refresh_token", token),
+            ])
+            .send()
+            .await
+            .unwrap()
+            .status()
+    }
+}
+
+/// `GET /authorize` with `request`, in the browser holding `cookie`.
+pub async fn authorize(
+    app: &TestApp,
+    request: &[(&'static str, String)],
+    cookie: &str,
+) -> reqwest::Response {
+    let mut pairs = vec![("response_type", "code".to_owned())];
+    pairs.extend_from_slice(request);
+    app.http
+        .get(format!("{}/authorize", app.address))
+        .query(&pairs)
+        .header("cookie", cookie)
+        .send()
+        .await
+        .unwrap()
+}
+
+/// The journeys' own web app signing in again with the browser's cookie, silent while its
+/// session lives: a reload's. Its tokens.
+pub async fn signed_in_again(app: &TestApp, who: &Account) -> Account {
+    let authorized = authorize(app, &app.the_request(), &who.cookie).await;
+    let landed = location(&authorized);
+    assert!(landed.starts_with(&app.redirect_uri), "silent: {landed}");
+    let tokens = app.tokens_for(&query_of(&landed)["code"]).await;
+    Account {
+        token: tokens["access_token"].as_str().unwrap().to_owned(),
+        refresh_token: tokens["refresh_token"].as_str().unwrap().to_owned(),
+        ..who.clone()
+    }
+}
+
 /// Another browser signing in to `who`'s account with the password: a session of its own.
 pub async fn another_browser(app: &TestApp, who: &Account) -> Account {
     let signed_in = app

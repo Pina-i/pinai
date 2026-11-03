@@ -5,7 +5,6 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use time::{Duration, OffsetDateTime, UtcOffset};
 
-use crate::auth::AuthError;
 use crate::identity::ActorUri;
 use crate::{DeviceId, UserId, ValidationError};
 
@@ -405,14 +404,6 @@ pub fn own_unrevoked(caller: UserId, found: Option<&Device>) -> Result<&Device, 
 pub fn may_register(named: Option<DeviceId>, device: DeviceId) -> Result<(), KeyDirectoryError> {
     match named {
         Some(named) if named != device => Err(KeyDirectoryError::NotTheSessionsDevice),
-        _ => Ok(()),
-    }
-}
-
-/// The same limit on naming: a session that declared a device is never pointed at another.
-pub fn may_name(named: Option<DeviceId>, device: DeviceId) -> Result<(), AuthError> {
-    match named {
-        Some(named) if named != device => Err(AuthError::DeviceMismatch),
         _ => Ok(()),
     }
 }

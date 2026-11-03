@@ -7,7 +7,8 @@ use time::OffsetDateTime;
 use super::tell_ended;
 
 /// `DELETE /api/sessions?keep=current`: every other session of the account ends — other
-/// browsers, other apps — their tokens and sockets with them. The caller's stays.
+/// browsers, other apps, this browser's other web apps — their tokens and sockets with them. The
+/// caller's stays, with the browser session it hangs under.
 pub struct SignOutOthers {
     sessions: Arc<dyn Sessions>,
     notifier: Arc<dyn SessionNotifier>,

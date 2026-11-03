@@ -2,7 +2,7 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
 use domain::UserId;
 use domain::auth::testing::{SignInSeeds, seeded_actor, signed_up};
-use domain::auth::{PasswordResets, ResetToken, SessionKind, Sessions, SignInAccount};
+use domain::auth::{PasswordResets, ResetToken, Sessions, SignInAccount};
 use domain::presence::PresenceState;
 use serde_json::{Value, json};
 use time::{Duration, OffsetDateTime};
@@ -99,7 +99,7 @@ async fn an_admin_lists_the_members_by_display_name_with_their_activity_and_pres
     let an_hour_ago = OffsetDateTime::now_utc() - Duration::hours(1);
     app.sign_in
         .sessions
-        .open(alice.id, &SessionKind::Browser, an_hour_ago)
+        .open_browser(alice.id, an_hour_ago)
         .await
         .unwrap();
     app.board.set(&seeded_actor(&alice), PresenceState::Away);

@@ -1,7 +1,7 @@
 use domain::SessionId;
 use domain::auth::testing::{CLIENT_ID, a_request};
 use domain::auth::{
-    REFRESH_GRACE, RefreshToken, RefreshTokens, RevokedReason, SESSION_IDLE, SessionKind, Sessions,
+    REFRESH_GRACE, RefreshToken, RefreshTokens, RevokedReason, SESSION_IDLE, Sessions,
 };
 use time::Duration;
 
@@ -11,11 +11,7 @@ use super::*;
 
 /// A browser session of Alice's, and the web client's first refresh token under it.
 async fn signed_in(w: &World) -> (SessionId, RefreshToken) {
-    let session = w
-        .sessions
-        .open(w.alice.id, &SessionKind::Browser, now())
-        .await
-        .unwrap();
+    let session = w.sessions.open_browser(w.alice.id, now()).await.unwrap();
     let token = w
         .refresh_tokens
         .start(session, &a_request().client, now())

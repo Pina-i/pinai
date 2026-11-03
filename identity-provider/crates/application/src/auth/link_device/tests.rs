@@ -1,4 +1,4 @@
-use domain::auth::{RevokedReason, SessionKind, Sessions};
+use domain::auth::{RevokedReason, Sessions};
 use domain::e2ee::{DeviceKind, DeviceLabel, Devices, KeyPackages};
 use domain::identity::Bearer;
 use domain::{DeviceId, SessionId, UserId};
@@ -21,10 +21,7 @@ async fn device_of(w: &World, owner: UserId) -> DeviceId {
 }
 
 async fn signed_in(w: &World, user: UserId) -> SessionId {
-    w.sessions
-        .open(user, &SessionKind::Browser, now())
-        .await
-        .unwrap()
+    w.sessions.live_at(user, now())
 }
 
 #[tokio::test]
@@ -168,4 +165,37 @@ async fn a_session_gone_since_its_token_was_checked_is_unexpected_and_takes_no_d
         "the device keeps its session"
     );
     assert!(w.ended.ended().is_empty());
+}
+
+#[tokio::test]
+async fn a_session_ended_since_its_token_was_checked_names_no_device() {
+    let w = world().await;
+    let device = device_of(&w, w.alice.id).await;
+    let session = signed_in(&w, w.alice.id).await;
+    w.sessions
+        .revoke(session, RevokedReason::SignOut, now())
+        .await
+        .unwrap();
+
+    let refused = w
+        .link
+        .execute(
+            Bearer {
+                user: w.alice.id,
+                session,
+                authenticated_at: now(),
+            },
+            device,
+            now(),
+        )
+        .await;
+
+    assert!(
+        matches!(refused, Err(AuthError::SessionEnded)),
+        "{refused:?}"
+    );
+    assert_eq!(
+        w.sessions.find(session).await.unwrap().unwrap().device,
+        None
+    );
 }

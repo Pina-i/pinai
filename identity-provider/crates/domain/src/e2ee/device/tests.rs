@@ -316,7 +316,7 @@ fn an_attestation_is_issued_in_utc_and_whole_seconds() {
 }
 
 #[test]
-fn a_session_registers_and_names_only_the_device_it_declared() {
+fn a_session_registers_only_the_device_it_declared() {
     let (laptop, phone) = (DeviceId::generate(), DeviceId::generate());
 
     assert!(may_register(None, phone).is_ok());
@@ -324,12 +324,6 @@ fn a_session_registers_and_names_only_the_device_it_declared() {
     assert!(matches!(
         may_register(Some(laptop), phone),
         Err(KeyDirectoryError::NotTheSessionsDevice)
-    ));
-    assert!(may_name(None, phone).is_ok());
-    assert!(may_name(Some(laptop), laptop).is_ok());
-    assert!(matches!(
-        may_name(Some(laptop), phone),
-        Err(AuthError::DeviceMismatch)
     ));
 }
 

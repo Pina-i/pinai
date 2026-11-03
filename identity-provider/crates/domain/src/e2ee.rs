@@ -39,7 +39,7 @@ pub use delivery::{
 pub use device::{
     ATTESTATION_LIFETIME, Attestation, AttestationExpiry, Device, DeviceKind, DeviceLabel,
     DeviceRootKey, Ed25519PublicKey, Ed25519Signature, HeldHpkeKey, HpkeKeyWrite, HpkePublicKey,
-    Registration, SignedHpkeKey, UnverifiedHpkeKey, attestation_period, may_name, may_register,
+    Registration, SignedHpkeKey, UnverifiedHpkeKey, attestation_period, may_register,
     own_unrevoked,
 };
 pub use error::{

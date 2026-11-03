@@ -34,7 +34,7 @@ sequenceDiagram
         end
     end
     C->>I: POST /token (code, redirect_uri, client_id, code_verifier)
-    I-->>C: access_token + refresh_token + id_token
+    I-->>C: access_token + refresh_token + id_token, of the app's session under the browser's
     Note over C: before the hour is up
     C->>I: POST /token (refresh_token)
     I-->>C: access_token + the next refresh_token
@@ -237,44 +237,77 @@ kept.
 ### Sessions
 
 A session is a row, so each one can end on its own, and every code, access token and refresh token
-it leads to belongs to it. There are two kinds:
+it leads to belongs to it. There are three kinds:
 
 - A **browser session** is what a password sign-in opens — the login form, the code mailed at
   sign-up, the second factor, an invitation's sign-up form (§ 5) — and what the `idp_session`
-  cookie names. The web client's tokens belong to it.
-- An **app session** is opened by a native client's code exchange when it stays signed in on its
-  device: its document allows `offline_access`, its request asked for it, and the password sign-in
-  agreed (`Grant::opens_app_session`). The desktop app's tokens belong to it, not to the system
-  browser it signed in through, so signing out of that browser leaves the app signed in. Its
-  password is the browser session's: it was typed there.
+  cookie names. Codes are issued under it; no token belongs to it, and it names no device: each
+  app signed in through it has a session of its own.
+- A **web app's session** (`web`) is opened by a client's code exchange under the browser
+  session the code was issued under, unless the client stays signed in (below): every web app's,
+  each origin's — the official one, an instance's, the development server, the Docker image. Its
+  tokens and its device are its own, so two web apps in one browser — each origin has its own
+  storage, so its own device — each name theirs. **One live session per browser session and
+  client**: the client's next exchange there — a reload's silent `/authorize`, a `prompt=login`
+  before a sensitive action — reuses it, so the device it names stays named, and two tabs of one
+  app share it as they share the device. It ends with its browser session.
+- An **app session** (`app`) is opened by a native client's code exchange when it stays signed in
+  on its device: its document allows `offline_access`, its request asked for it, and the password
+  sign-in agreed (`Grant::opens_app_session`). The desktop app's tokens belong to it, not to the
+  system browser it signed in through, so signing out of that browser leaves the app signed in.
+
+A web app's session and an app session take their password from the browser session: it was
+typed there. Each exchange copies the browser session's `authenticated_at` (§ "Sensitive
+actions").
+
+```mermaid
+flowchart TD
+    cookie(["idp_session cookie"]) --> browser["browser session<br/>the password typed here<br/>no token, no device"]
+    ends(["/logout · another account signing in here · 90 days idle<br/>a web app's device revoked here · signed out from another device"]) -- "end" --> browser
+    browser -- "under it, ends with it" --> official["web app's session<br/>the official web app<br/>its device, its tokens"]
+    browser -- "under it, ends with it" --> hosted["web app's session<br/>an instance's web app<br/>its device, its tokens"]
+    browser -. "signed in through, not under" .- desktop["app session<br/>the desktop app, offline_access<br/>its device, its tokens"]
+    every(["a password reset"]) -- "ends every session" --> browser
+    every -- "ends every session" --> desktop
+    own(["/revoke · its device revoked · signed out from another device"]) -- "end" --> desktop
+```
 
 ```sql
 CREATE TABLE sessions (
-    id             UUID PRIMARY KEY,
-    user_id        UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    kind           TEXT NOT NULL,           -- browser | app
-    client_id      TEXT,                    -- an app session's client, and only theirs
-    device_id      UUID REFERENCES user_devices(device_id) ON DELETE SET NULL,
-                                            -- the E2EE device it signed in (§ "Sessions and devices")
-    created_at     TIMESTAMPTZ NOT NULL,
-    last_used_at   TIMESTAMPTZ NOT NULL,    -- the last sign-in or refresh that used it
-    authenticated_at TIMESTAMPTZ NOT NULL,  -- the account's password last typed on it
-                                            --   (§ "Sensitive actions")
-    revoked_at     TIMESTAMPTZ,
-    revoked_reason TEXT                     -- sign_out | replaced | reuse | device_revoked
+    id                 UUID PRIMARY KEY,
+    user_id            UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    kind               TEXT NOT NULL,       -- browser | web | app
+    client_id          TEXT,                -- a web app's or an app's client; never a browser's
+    browser_session_id UUID REFERENCES sessions(id) ON DELETE CASCADE,
+                                            -- a web app's, and only theirs: the browser session
+                                            --   it hangs under, and ends with
+    device_id          UUID REFERENCES user_devices(device_id) ON DELETE SET NULL,
+                                            -- the E2EE device it signed in (§ "Sessions and
+                                            --   devices"); never a browser session's
+    created_at         TIMESTAMPTZ NOT NULL,
+    last_used_at       TIMESTAMPTZ NOT NULL, -- the last sign-in or refresh that used it
+    authenticated_at   TIMESTAMPTZ NOT NULL, -- the account's password last typed on it
+                                             --   (§ "Sensitive actions")
+    revoked_at         TIMESTAMPTZ,
+    revoked_reason     TEXT                 -- sign_out | replaced | reuse | device_revoked
                                             --   | signed_out_elsewhere | password_reset
 );
+-- One live session a browser session and client.
+CREATE UNIQUE INDEX sessions_one_per_browser_and_client
+    ON sessions (browser_session_id, client_id) WHERE revoked_at IS NULL;
 -- and authorization_codes.session_id: the browser session a code was issued under
 ```
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Live: a password sign-in (browser), a code exchange staying signed in (app)
-    Live --> Live: a silent /authorize, a refresh (used again)
+    [*] --> Live: a password sign-in (browser), a client's first exchange under it (web), an exchange staying signed in (app)
+    Live --> Live: a silent /authorize, an exchange reusing it (web), a refresh (used again)
     Live --> Ended: /logout (sign_out), another account signs in here (replaced)
-    Live --> Ended: a new session on its device (replaced)
+    Live --> Ended: its refresh token revoked (sign_out)
+    Live --> Ended: its browser session ended (web, with the same reason)
+    Live --> Ended: a new session on its device, or a new one where it idled (replaced)
     Live --> Ended: a rotated refresh token presented again (reuse)
-    Live --> Ended: its device revoked (device_revoked)
+    Live --> Ended: its device revoked, or that of a web app under the same browser session (device_revoked)
     Live --> Ended: the account signs out of every other device (signed_out_elsewhere)
     Live --> Ended: its account's password set with a reset link (password_reset)
     Live --> Ended: 90 days without use
@@ -282,25 +315,35 @@ stateDiagram-v2
 ```
 
 - **Live** while it isn't revoked and was used in the last 90 days (`Session::is_live`). A password
-  sign-in, a silent `/authorize` and a refresh count as use. There is no absolute limit: an active
-  user never signs in again.
+  sign-in, a silent `/authorize`, a code exchange and a refresh count as use. There is no absolute
+  limit: an active user never signs in again. **A web app's use is its browser session's too**: a
+  refresh stamps both, the browser session first, and no stamp sets a use back, so a browser
+  whose apps are in use stays signed in, and a web app's session never outlives its browser
+  session's 90 days.
 - **The cookie** holds the browser session's id, signed (HMAC-SHA256) with a key derived from
   `SESSION_SECRET`: `HttpOnly`, `SameSite=Lax`, `Path=/`, `Secure` in production. It lasts as long as
   the session may, 90 days, and is **set again at every use**, so it slides with it. A cookie naming
   a session that isn't live is no cookie: the login page shows.
 - **One account per browser.** A password sign-in keeps the browser's live session when it is the
   same account's, stamping its use and its password (`authenticated_at`); another account's is
-  ended (`replaced`) and a new one opened.
+  ended (`replaced`), its web apps' sessions with it, and a new one opened.
 - **Codes and tokens belong to it.** A code is issued under the browser session and refused at
-  `/token` once that session has ended. The access token names its session (`sid`), and every
+  `/token` once that session has ended. Its tokens belong to the client's session — a web app's
+  under that browser session, or an app session —: the access token names it (`sid`), and every
   authenticated request and the `/ws` upgrade check that it still lives — one read by primary key
   — so an ended session's tokens stop at once, not an hour later: `401 invalid_token`, "The
   session has ended". A refresh token works while its session lives (§ "Tokens").
-- **Ending one** (`/logout`, a replacement, a reuse, a revoked device, a sign-out elsewhere, a
-  password reset — § 7) also closes the account's WebSockets opened under it, with `1008` ("the
-  session has ended"); a reconnect with its token is refused `401`.
+- **Ending one** (`/logout`, `/revoke`, a replacement, a reuse, a revoked device, a sign-out
+  elsewhere, a password reset — § 7) also closes the account's WebSockets opened under it, with
+  `1008` ("the session has ended"); a reconnect with its token is refused `401`. **Ending a
+  browser session ends every web app's session under it**, in the same write and for the same
+  reason, their sockets closed too; an app session is never under one. A web app's session and
+  an app session are opened under the account's lock, as every ending takes it
+  (`Sessions::open_under`, `Sessions::open_app`), the browser session read again there: a code
+  exchanged while its browser signs out, its password is reset or the account signs out
+  elsewhere either finds the browser session ended (`invalid_grant`) or is ended with it.
 - **Swept** by the hourly sign-up sweep (§ 2) a month after it ended: revoked then, or idle past its
-  90 days. Its refresh tokens go with it.
+  90 days. Its refresh tokens go with it, and a browser session's web apps' sessions.
 
 The cookie is what lets `/authorize` skip the login page — **for the apps the account signed in to
 with its password only**.
@@ -334,8 +377,11 @@ shares another's key, and a new secret signs everyone out.
 
 ### Sessions and devices
 
-A session is tied to the E2EE device it signed in (`identity-provider/specs/e2ee.md § 3.1`), so
-revoking a device signs it out, and the Devices screen tells which devices are signed in.
+A web app's session and an app session are tied to the E2EE device they signed in
+(`identity-provider/specs/e2ee.md § 3.1`), so revoking a device signs it out, and the Devices
+screen tells which devices are signed in. A browser session names no device: each web app signed
+in through it names its own on its own session, so two web apps in one browser are two devices,
+each signed in once.
 
 ```mermaid
 sequenceDiagram
@@ -347,7 +393,7 @@ sequenceDiagram
     O->>I: GET /api/keys/devices
     I-->>O: … signed_in, last_active_at
     O->>I: POST /api/keys/devices/:id/revoke
-    I->>I: the device's sessions end (device_revoked), then its directory flag
+    I->>I: its directory flag, then the device's sessions end (device_revoked) — a web app's with the browser session above it
     I-->>D: its sockets close (1008); its tokens and refresh tokens refused
 ```
 
@@ -355,7 +401,8 @@ sequenceDiagram
   The client sends it right after registering the device (`POST /api/keys/devices`), before it
   sets, reports or approves with the history key (`identity-provider/specs/e2ee.md § 6.1`). `204`;
   `403 access_denied` "Not one of your devices, or revoked" for a device that isn't the
-  account's, is revoked, or is unknown.
+  account's, is revoked, or is unknown; `401 invalid_token` for a session that ended since its
+  token was checked. Whether a session may name a device is `domain::auth::may_link`.
 - **A session is limited to the device it declared.** Once it names one, it is never pointed at
   another: `PUT /api/sessions/current/device` naming any other device is `403 device_mismatch`
   "This session signed in another device" (naming the same one again is `204`), and `POST
@@ -365,23 +412,62 @@ sequenceDiagram
   take part in an approval request, share the passphrase or read a share: each takes a session
   that has named its device (`403 device_required`, `identity-provider/specs/e2ee.md § 3.6`,
   § 3.9, § 3.10 and § 3.11), so the key records the device that set it, an approval the device
-  that gave it, a share the device that sent it, and a device speaks only for itself. A device
-  whose local storage was wiped registers as a new device from a new session: a browser signs out
-  (`GET /logout`) and signs in again with the password — signing in while its session lives keeps
-  that session —, and the desktop app's sign-in opens an app session of its own.
+  that gave it, a share the device that sent it, and a device speaks only for itself.
+- **A device whose local storage was wiped** comes back as a new device from a new session. A web
+  app revokes its own session (`POST /revoke`, its refresh token) and signs in again: silently
+  while the browser session lives — its next exchange opens a new session under it — so no
+  password is asked and no other app of the browser is signed out. The desktop app's sign-in opens
+  an app session of its own.
 - **A device is signed in once at a time.** Linking a session ends the device's other live
   sessions (`replaced`): signing in again on a device — after the browser lost its cookie, or a
   desktop app its refresh token — leaves no session behind.
 - **`GET /api/keys/devices`** answers each device's `signed_in` (a live session of it) and
-  `last_active_at` (that session's last use: a sign-in, a silent `/authorize` or a refresh), null
-  when signed out (`last_active`).
-- **Revoking a device** (`POST /api/keys/devices/:device_id/revoke`) ends its sessions
-  (`device_revoked`) — their tokens, refresh tokens and sockets — then sets the directory flag.
-  The sessions go first: if the flag fails, the device is out all the same, and revoking again
-  finishes. A revoked device can't link a new session.
+  `last_active_at` (that session's last use: its code exchange or a refresh — a silent
+  `/authorize` stamps the browser session, the exchange after it the web app's), null when
+  signed out (`last_active`). A browser session is no device and is listed nowhere: its use is
+  its web apps', which the devices show.
+- **Revoking a device** (`POST /api/keys/devices/:device_id/revoke`) sets the directory flag,
+  then ends its sessions (`device_revoked`) — their tokens, refresh tokens and sockets. For a web
+  app's session it also ends the browser session above it, and so that browser's other web apps
+  (`domain::auth::ending_with_device`): the cookie left there would otherwise sign the device in
+  again, silently, as a new one, so coming back takes the password. Revoking the device of
+  another web app in the caller's own browser therefore signs the caller out too. A desktop app's
+  device ends its app session only. Naming a device on a session takes the device's row, then
+  the account's lock, as the revoke takes the row to flag it: a device revoked meanwhile is
+  refused (`403`), and one revoked just after finds the session naming it and ends it. Should the
+  sessions fail to end once the flag is set, revoking again — answered as for a device revoked
+  already — ends them.
+- **Only the sessions of the device not revoked yet count** — idle ones included —, and the
+  browser sessions above them. A web app recovering from wiped storage revokes the session that
+  named its old device before signing in as the new one (above); revoking that old device later
+  finds no session of it, and so leaves alone the browser session now running the new device.
+  That browser's new device came back without the password, but as a device nobody approved
+  (`identity-provider/specs/e2ee.md § 3.9`): it joins no conversation, gets no passphrase and no
+  history, and is announced on the account's other devices until one of them approves it.
 - **`DELETE /api/sessions?keep=current`** ends every session of the account but the caller's
-  (`signed_out_elsewhere`): other browsers, other apps, linked to a device or not. The devices
-  stay, and each may sign in again as the same device. `204`; `400` without `keep=current`.
+  browser — the browser session it hangs under and every web app's session there
+  (`signed_out_elsewhere`, `domain::auth::ending_all_but`): other browsers with their web apps,
+  the desktop app, linked to a device or not. This browser's other web apps would sign in again
+  through its cookie anyway. Called from the desktop app, it keeps that app session only. The
+  devices stay, and each may sign in again as the same device. `204`; `400` without
+  `keep=current`.
+
+```mermaid
+sequenceDiagram
+    participant W as web app (storage wiped)
+    participant I as IdP
+    participant B as another web app, same browser
+    W->>I: POST /api/keys/devices { a new device_id } (its session names the old one)
+    I-->>W: 403 device_mismatch
+    W->>I: POST /revoke { client_id, its refresh token }
+    I->>I: its session ends (sign_out); the browser session stays
+    W->>I: GET /authorize (the cookie)
+    I-->>W: 303 callback?code — no password
+    W->>I: POST /token — a new session under the browser session
+    W->>I: POST /api/keys/devices, PUT /api/sessions/current/device
+    I-->>W: 201, 204
+    Note over B: still signed in, its device still named
+```
 
 Both take a recent password (§ "Sensitive actions").
 
@@ -404,8 +490,9 @@ Turning the second factor off and replacing the recovery codes take a current au
 instead (§ 3). Nothing else asks: the profile, the settings, blocking, signing oneself out.
 
 - **What counts** is the password: a sign-in on the login form, the code mailed at sign-up, the
-  second factor. Each dates its session's `authenticated_at`; an app session opened by the code
-  exchange takes its browser session's. A silent `/authorize` and a refresh change nothing.
+  second factor. Each dates its browser session's `authenticated_at`; a web app's session and an
+  app session take their browser session's at each code exchange. A silent `/authorize` and a
+  refresh change nothing.
 - **The access token** carries it as `auth_time` (OpenID Connect Core § 2), so the check reads
   no table: `Bearer::signed_in_recently`. The token keeps it through its renewals.
 - **A refusal** is `401` with `error: "insufficient_user_authentication"` and the challenge of
@@ -413,8 +500,9 @@ instead (§ 3). Nothing else asks: the profile, the settings, blocking, signing 
   max_age="600"`. Nothing was done. The session lives on: the client doesn't renew its token for
   it — a renewal brings no newer password.
 - **The client** tells the user why, sends them to `/authorize` with `prompt=login`, and comes
-  back to the screen they were on, signed in anew on the same session (a new app session on the
-  desktop, replacing the one it held). The user then does it again: nothing is replayed.
+  back to the screen they were on, signed in anew on the same session — a web app's, reused and
+  given the new password; a new app session on the desktop, replacing the one it held. The user
+  then does it again: nothing is replayed.
   "← Another home" brings them back there too, still signed in.
 
 ```mermaid
@@ -446,8 +534,11 @@ fields, and one left out is refused as unusable.
 3. The code must have been issued to this client for this `redirect_uri`, and the verifier must
    meet its challenge: `BASE64URL(SHA256(code_verifier)) = code_challenge`.
 4. The account must still exist, and the browser session the code was issued under still live.
-5. A client staying signed in gets an app session of its own (§ "Sessions"); any other's tokens
-   belong to the browser session.
+5. A client staying signed in gets an app session of its own. Any other gets its session under
+   that browser session: its live one there, else a new one — one idle past its 90 days ends
+   (`replaced`; `domain::auth::web_app_sign_in`) —, used now. Either way its `authenticated_at`
+   is the browser session's, and the browser session is read again under the account's lock as
+   the session opens (§ "Sessions"). The tokens belong to it.
 
 ```json
 { "access_token": "…", "token_type": "Bearer", "expires_in": 3600, "refresh_token": "…", "id_token": "…" }
@@ -497,8 +588,8 @@ CREATE TABLE refresh_tokens (
 );
 ```
 
-Each code exchange starts a **chain** under its session: one per tab of the web client, one per
-desktop sign-in. Every use **rotates** the token — it is answered with its successor, and stops
+Each code exchange starts a **chain** under its session: one per tab or reload of a web app,
+under that app's session, one per desktop sign-in. Every use **rotates** the token — it is answered with its successor, and stops
 working itself. What a presentation comes to is `RefreshLink::presented`:
 
 | The token presented | Answer |
@@ -521,11 +612,13 @@ error="invalid_token"` when one was. One whose password is too old for the actio
 
 ### `POST /revoke`
 
-RFC 7009, how an app holding its own session signs out — the desktop: `client_id`, `token` (its
-refresh token), `token_type_hint` (not read: refresh tokens are the only kind revoked here). The
-token's session ends (`sign_out`) — every token of it, and its WebSockets — whether the token is
-the head of its chain or a rotated one. The browser session its window signed in through is
-left alone.
+RFC 7009, how an app gives up its own session: the desktop signs out with it, and a web app
+whose storage was wiped ends the session naming its old device before signing in again (§
+"Sessions and devices"). `client_id`, `token` (its refresh token), `token_type_hint` (not read:
+refresh tokens are the only kind revoked here). The token's session ends (`sign_out`) — every
+token of it, and its WebSockets — whether the token is the head of its chain or a rotated one.
+That session only: the browser session the app signed in through, and that browser's other web
+apps, are left alone.
 
 `200` with no body for a token unknown here, or another client's, as for a revoked one: the
 endpoint tells nothing of tokens. `400 invalid_request` without a token; `401 invalid_client` for
@@ -549,10 +642,12 @@ again.
 
 ### `GET /logout`
 
-Ends the browser's session (`sign_out`) — every token it led to stops working at once, and its
-WebSockets close — drops the cookie, and redirects to `post_logout_redirect_uri`, but only when the
-request names its client (`client_id`) and that client's document lists the URI exactly. Anything
-else goes to the instance's own `/signed-out` page: the endpoint is never an open redirect.
+Ends the browser's session (`sign_out`) and every web app's session under it — every token they
+led to stops working at once, and their WebSockets close —, drops the cookie, and redirects to
+`post_logout_redirect_uri`, but only when the request names its client (`client_id`) and that
+client's document lists the URI exactly. Anything else goes to the instance's own `/signed-out`
+page: the endpoint is never an open redirect. An app session staying signed in — the desktop's —
+is under no browser session, and lives on.
 
 ### Discovery
 
@@ -576,8 +671,16 @@ same at every start for as long as the key lives, and another one for another ke
   `/authorize` answers with a code at once, and the session's 90 days start over.
 - **Back after four months.** The session went 90 days unused: it is over, and the password is
   asked again. Used every week, it never ends.
-- **Signing out** in one tab ends the session for every tab of that browser: their tokens are
-  refused at their next request, and their WebSockets close with `1008` at once.
+- **Signing out** in one tab ends the browser session for every tab and every web app of that
+  browser: their tokens are refused at their next request, and their WebSockets close with
+  `1008` at once.
+- **Two web apps in one browser** — the official one and an instance's, or the development server
+  and the Docker image. The second asks the password once, as any app's first sign-in does, on the
+  same browser session; then each has a session of its own under it and registers its own device,
+  each signed in. A reload signs each in again silently on the session it held.
+- **A browser whose storage was wiped.** The web app finds its session naming the device it was
+  (`device_mismatch`), revokes that session, and signs in again silently as a new device. The
+  browser's other web apps notice nothing.
 - **A second app.** Signed in through the web client, the user opens the desktop app: the login
   page asks the password once, naming "Pīna'i desktop"; from then on both sign in silently.
 - **A site that only sends the browser to `/authorize`** — its own document, its own callback —
@@ -616,9 +719,11 @@ same at every start for as long as the key lives, and another one for another ke
   password, so another account can be picked.
 - **A lost phone.** From the laptop, Settings → Devices shows the phone "Active 2 hours ago";
   revoking it signs it out at once — its socket closes, its next request and renewal are refused —
-  and takes it out of every group.
+  and takes it out of every group. The phone's browser is signed out with it, its other web apps
+  too: whoever holds the phone needs the password to come back.
 - **"Sign out other devices".** Every other browser and app signs in again with the password;
-  this one stays. The devices aren't revoked: each comes back as itself.
+  this browser stays signed in, its other web apps with it. The devices aren't revoked: each comes
+  back as itself.
 - **Revoking the phone a day after signing in.** The laptop's password is a day old: "Type your
   password again", the login page, and back on Settings → Devices, where revoking it now goes
   through. Within the next 10 minutes, nothing more is asked.
@@ -1586,8 +1691,9 @@ least 8 characters", "The two passwords differ") and nothing that was typed. The
    expires_at > now RETURNING user_id` — the member whose password is set —, and nothing more
    happens when it returns none;
 3. the member's password hash is replaced;
-4. every session of theirs not revoked yet ends — those idle past their 90 days included —,
-   `revoked_reason = 'password_reset'`, and is returned;
+4. every session of theirs not revoked yet ends — those idle past their 90 days included, the
+   web apps' sessions under their browser sessions too, a code exchange taking the same lock
+   (§ 1 "Sessions") —, `revoked_reason = 'password_reset'`, and is returned;
 5. their open second-factor tickets (§ 3) are closed: a sign-in half done with the old password,
    waiting for the authenticator's code, can't finish.
 

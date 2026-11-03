@@ -8,12 +8,15 @@ use domain::auth::testing::{
     InMemoryInstanceMembers, InMemoryPasswordResets, InMemoryRefreshTokens, InMemorySecondFactors,
     InMemorySessions, InMemorySignInAccounts, InMemorySignupCodes, PlainHasher, RecordingMailer,
     RecordingSessionNotifier, RecordingTickets, SignInSeeds, SpelledTokens, StepAuthenticator,
-    signed_up, web_client,
+    another_web_app, signed_up, web_client,
 };
-use domain::auth::{Client, Registrations, SecondFactors, TotpSecret, WebApp, desktop_client};
+use domain::auth::{
+    Client, Registrations, SecondFactors, Sessions, TotpSecret, WebApp, desktop_client,
+};
 use domain::e2ee::testing::InMemoryKeyDirectory;
 use domain::identity::{InstanceOrigin, IntroText};
 use domain::presence::PresenceBoard;
+use domain::{SessionId, UserId};
 use time::OffsetDateTime;
 
 use crate::identity::IntroInForce;
@@ -95,7 +98,11 @@ async fn world_with(registrations: Registrations) -> World {
     let accounts = Arc::new(InMemorySignInAccounts::with([alice.clone()]));
     let origin = InstanceOrigin::parse("http://localhost:8080").unwrap();
     let desktop = desktop_client(&origin);
-    let clients = Arc::new(InMemoryClients::with([web_client(), desktop.clone()]));
+    let clients = Arc::new(InMemoryClients::with([
+        web_client(),
+        another_web_app(),
+        desktop.clone(),
+    ]));
     let codes = Arc::new(InMemoryCodes::default());
     let hasher = Arc::new(PlainHasher::default());
     let tickets = Arc::new(RecordingTickets::default());
@@ -280,6 +287,20 @@ async fn world_with(registrations: Registrations) -> World {
 impl World {
     pub async fn sign_up(&self, account: &SignInAccount) {
         self.accounts.sign_up(account).await;
+    }
+
+    /// `user`'s desktop app session, staying signed in, through a browser session of its window:
+    /// the window's, then the app's.
+    pub async fn on_the_desktop(&self, user: UserId) -> (SessionId, SessionId) {
+        let window = self.sessions.open_browser(user, now()).await.unwrap();
+        let app = self
+            .sessions
+            .open_app(window, &self.desktop.id, now())
+            .await
+            .unwrap()
+            .expect("a live browser session signs apps in")
+            .id;
+        (window, app)
     }
 
     /// An admin of the instance, signed up.
