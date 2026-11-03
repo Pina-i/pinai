@@ -201,7 +201,7 @@ exactly once — the IdP signs an attestation binding it to the user.
 
 The DRK is *long-lived* by default (1-year attestation, silent renewal
 when within 30 days of expiry). It's not used to sign MLS application
-messages directly; that's the per-KeyPackage leaf signing key. The DRK
+messages directly; that's the leaf signing key (§ 3.5). The DRK
 binds the device's IdP-attested identity to whatever leaf signing keys
 that device produces, by signing each one: the leaf binding (§ 3.4).
 
@@ -249,7 +249,8 @@ flowchart LR
 1. The device isn't revoked: `revoked_at` is null.
 2. The instance's key named by `attestation_kid` verifies `attestation_signature` over the
    `IDP-ATTEST-v1` bytes rebuilt from the account's actor URI, the device id, `drk_public_key`,
-   `attestation_expires_at` and `attestation_kid`; `attestation_expires_at` is still ahead.
+   `attestation_expires_at` and `attestation_kid`; `attestation_expires_at` is still ahead, with
+   the 5 minutes of clock skew § 3.4 allows.
 3. `drk_public_key` verifies `hpke_key_signature` over the `PINAI-DEVICE-HPKE-v1` bytes rebuilt
    from the actor URI, the device id and `hpke_public_key`.
 
@@ -296,16 +297,25 @@ leaf under its credential.
 Receivers verify in this order:
 
 1. Parse JSON; reject if `v !== 2`.
-2. `idp_att.issuer` origin must match the origin of `actor_uri` — an
+2. `idp_att.issuer` must be exactly the origin of `actor_uri` — scheme,
+   host and port as browsers write an origin, no path —: an
    attacker-controlled IdP must not be able to attest someone else's
    actor.
 3. `expires_at` must be in the future (5-minute clock-skew slack).
-4. Look up the issuer's JWKS by `kid` (1-hour client-side cache,
-   refresh-on-verify-failure for rotation safety) and verify the
-   signature over the canonical bytes.
+4. Fetch the issuer's JWKS from `<issuer>/.well-known/jwks.json`
+   (10-second timeout, 1-hour client-side cache, refetched on a signature
+   that fails — § 7.4), look the key up by `kid` and verify the signature
+   over the `IDP-ATTEST-v1` bytes rebuilt from the credential.
 5. `drk_pub` verifies `leaf_binding` — Ed25519, strict — over the
    `PINAI-LEAF-BINDING-v1` bytes rebuilt from `actor_uri`, `device_id` and
    the LeafNode's signature key.
+
+A KeyPackage claimed for an actor's device must also name that very actor
+and device; one naming another is refused as a forged one is. An issuer
+that can't be reached settles nothing: a claimed KeyPackage is then not
+added, and a leaf met is left as it is and checked again the next time it
+is met. A verdict holds for the leaf as it stands: an Update over it, or
+another leaf at its index, is checked anew.
 
 Every device runs these checks on every leaf it adds — the KeyPackage's —
 and on every leaf it meets: in a Welcome's ratchet tree, in a commit that
@@ -321,11 +331,22 @@ device holding the current passphrase.
 After verification, the leaf is trusted as "actor X's device Y." MLS's
 own LeafNode self-signature handles per-message integrity.
 
+**Keeping leaves current.** A leaf carries the attestation of the moment
+its credential was made, and a renewal (§ 6.7) doesn't reach it: a member
+joining once that attestation expired would meet an expired leaf. So
+after each registration, a device commits in every group it holds an
+update of its own leaf, over the same signature key, carrying the
+credential of its current attestation — one commit per group and
+renewal, none where its leaf already carries the credential it would
+make. A refresh that fails is tried again at the next sync, and holds
+back nothing else of it: the user's other devices are still added.
+
 ### 3.5 KeyPackage
 
 A single-use bundle the device publishes ahead of time so peers can
-add it to groups without a round-trip. Each KeyPackage contains a
-leaf-signing public key of the device + the device's full credential
+add it to groups without a round-trip. Each KeyPackage contains the
+device's leaf-signing public key — the one it bound, which every
+KeyPackage it makes carries until it binds another — + the device's full credential
 (§ 3.4), its leaf binding signing that very key + MLS protocol fields
 (HPKE init key, capabilities, lifetime). The server stores them in an
 inventory keyed by `(user_id, device_id)`; peers claim one atomically
@@ -994,11 +1015,8 @@ sequenceDiagram
     Web->>IDB: store attestation
     Web->>IdP: PUT /api/sessions/current/device {device_id}
     IdP-->>Web: 204 (the session names its device)
-    Web->>Web: generate initial KeyPackage batch (50)
-    loop per KeyPackage
-        Web->>Web: fresh leaf signing keypair
-        Web->>Web: build credential JSON (DRK pub + IdP attestation + the DRK's leaf binding)
-    end
+    Web->>Web: leaf signing keypair → credential JSON (DRK pub + IdP attestation + the DRK's leaf binding)
+    Web->>Web: generate initial KeyPackage batch (50), each over that key and credential
     Web->>IdP: POST /api/keys/packages {batch}
     IdP->>IdP: persist KeyPackages
     Web->>Web: BIP-39 mnemonic → 24 words
@@ -1294,7 +1312,7 @@ sequenceDiagram
     Web->>IdP: POST /api/keys/devices/:device_id/revoke
     IdP->>IdP: end the device's sessions, then mark user_devices.revoked_at = now(), drop the approvals it signed and its key shares, close its approval requests
     Note over IdP: its tokens and sockets stop at once;<br/>future /api/keys/packages/claim<br/>requests for this device fail
-    loop for each conversation the revoked device is in
+    loop for each leaf naming the revoked device, in each conversation it is in
         Web->>Web: build MLS Remove commit
         Web->>IdP: POST /api/mls/groups/:id/commits
     end
@@ -1309,6 +1327,10 @@ The IdP goes first. It may refuse — a password typed more than 10 minutes ago
 (`identity-provider/specs/auth.md § 1`, "Sensitive actions") — and then nothing
 was done: the user types it again and revokes once more. Once it answered, the
 device is signed out and can read nothing new while the commits go out.
+
+Every leaf whose credential names the device goes, not only the first
+found: a copy of its credential over another key — a forgery a member
+slipped in — would otherwise stay in its place.
 
 MLS Remove commits provide post-compromise security: future epochs use
 a key schedule the revoked leaf was never part of. The directory-level
@@ -1335,9 +1357,10 @@ sequenceDiagram
     Web->>Web: loadDeviceAttestation()
     Web->>Web: expires_at - now() < 30 days?
     alt within renewal window
-        Web->>IdP: POST /api/keys/devices {device_id, drk_pub} (same DRK)
+        Web->>IdP: POST /api/keys/devices {device_id, drk_public_key, hpke_public_key, hpke_key_signature} (same DRK)
         IdP-->>Web: fresh attestation (new expires_at)
         Web->>Web: saveDeviceAttestation
+        Web->>IdP: in each group held: a commit updating its own leaf's credential (§ 3.4)
     else not yet due
         Web->>Web: short-circuit
     end
@@ -1346,7 +1369,10 @@ sequenceDiagram
 Renewal reuses the existing DRK — only the attestation's `expires_at`
 moves forward, and the HPKE key registered stays (§ 3.3). KeyPackages
 already in the server's stash stay valid.
-New KeyPackages built after renewal carry the fresh attestation.
+New KeyPackages built after renewal carry the fresh attestation, and the
+device's leaf in each group it holds is updated to it (§ 3.4, "Keeping
+leaves current"). The check runs when the device enters the app and at
+each 6-hour KeyPackage tick, so a device left open for weeks renews too.
 
 ### 6.8 Someone leaves a group's MLS state with its roster
 
@@ -1361,7 +1387,7 @@ an admin, never the last one):
 - **A leave**, which can't commit the leaver's own devices out, **or a removal that stopped short**:
   an admin's client, on `member_removed` and whenever it opens the group, compares the MLS group's
   leaves (by their credential, § 7.1) with the roster and commits out every device of an actor it
-  doesn't hold. Nothing happens when the roster doesn't hold the admin themselves.
+  doesn't hold, and every leaf whose credential doesn't decode — it can be no member's. Nothing happens when the roster doesn't hold the admin themselves.
 
 Commits race: two admins catching up at once both build a Remove at the same epoch. The second
 gets `409`; its client drops its pending commit, catches up on the DS's log — which may already
@@ -1678,9 +1704,15 @@ The IdP's JWKS at `/.well-known/jwks.json` publishes one or more
 EdDSA keys. Each leaf credential's `idp_att.kid` names which key
 signed it. When a peer fails to verify a signature:
 
-1. The peer invalidates the cached JWKS for that issuer.
+1. The peer invalidates the cached JWKS for that issuer — at most once
+   a minute per issuer, so forged leaves can't make it hammer an honest
+   one.
 2. The peer refetches and retries the verification once.
 3. Permanent failure rejects the leaf.
+
+A fetch gives up after 10 seconds, and an issuer whose fetch failed is not
+asked again for a minute: its leaves are left unchecked meanwhile, and
+checked when next met (§ 3.4).
 
 When the IdP rotates its signing key, the **old key remains in JWKS
 for at least the longest active-attestation lifetime** (1 year by
