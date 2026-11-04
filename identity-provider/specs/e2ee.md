@@ -745,13 +745,16 @@ devices it trusts before it holds the passphrase.
 - **A holder that didn't approve a device** never shares with it.
 
 **The sender's rules.** A device holding the current generation shares with every one of the
-devices it approved itself in a handshake that the device list shows unrevoked and not holding that
-generation, and does so on each refresh of the list and as soon as it comes to hold a new
+devices it approved itself in a handshake that the device list shows unrevoked, not holding that
+generation, and carrying its approval back — an approval of this device by that one, verifying
+under the DRK the exchange gave: a recipient that never approved it back would refuse the share,
+which would then hold the place of a good one, and does so on each refresh of the list and as soon as it comes to hold a new
 generation: the instance keeps the first share and answers the others `204`, so sharing again is
 harmless. It seals for the HPKE key the list shows for that device, once its chain verifies
 (§ 3.3) from the DRK the exchange gave it — never the list's. Should the list show another DRK
-for it, or an HPKE key that DRK didn't sign, it shares nothing and warns, as for a changed
-approval key (§ 3.9).
+for it, no HPKE key, one that DRK didn't sign, or an attestation that doesn't verify, it shares
+nothing and warns, as for a changed approval key (§ 3.9); an issuer out of reach, or an
+attestation that only expired, waits for the next refresh.
 
 **What the instance checks** (`POST /api/history/key-shares`, § 5, "History backup"), each against
 the directory as it stands:
@@ -788,8 +791,9 @@ to the recipient device's sessions only.
 | A device's DRK rotated (`POST /api/keys/devices`, another DRK) | Those it sent — they no longer verify —, and the one it was sent |
 | A device's HPKE key replaced or cleared (`POST /api/keys/devices`) | The one it was sent — sealed for a key it no longer holds |
 
-**Accepting one.** On `history_key_ready`, or whenever it lacks the passphrase, the recipient reads
-its share (`GET /api/history/key-shares`) and keeps the words only when every check holds:
+**Accepting one.** On `history_key_ready`, or whenever it lacks the passphrase — at each start,
+and, while the app hasn't let it in yet and so has no socket, again and again on its waiting
+page —, the recipient reads its share (`GET /api/history/key-shares`) and keeps the words only when every check holds:
 
 1. the sender is one of the devices it approved itself in a code handshake, by the DRK the
    exchange gave it and never the list's (§ 3.9);
@@ -802,7 +806,11 @@ its share (`GET /api/history/key-shares`) and keeps the words only when every ch
 
 It then keeps the words with their generation, approves itself with the approval key, says it
 holds the generation — which deletes the share — and restores the archive (§ 6.4). A share failing
-a check is left unused, and the device warns, as for a changed approval key (§ 3.9).
+a check is left unused, and the device warns, as for a changed approval key (§ 3.9). The instance
+keeps the first share of a recipient and generation, so a bad one it stores stands in the way of
+a good one until a report, a revoke, a DRK or HPKE key change, or a new generation deletes it: a
+lying instance can hold the passphrase back this way — the user can still type the words —, never
+hand over other words.
 
 ---
 
