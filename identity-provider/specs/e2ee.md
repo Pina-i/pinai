@@ -92,7 +92,7 @@ rows below that name the instance don't hold ("What is not protected").
 | A peer instance serves a forged KeyPackage for one of its users | The leaf credential carries the peer's attestation, verified against its JWKS, and the leaf binding, verified against the attested DRK (§ 3.4). A device the peer attests for itself is its users' trust ceiling, as below |
 | The instance slips a device of its own into the user's existing conversations | The user's devices add only devices they approved (§ 3.9): approved with the code, or with the 24 words typed on it. An approval is a signature by an approved device's DRK, or by the passphrase's approval key — the instance holds neither |
 | The instance reads the archive or the passphrase | The HAK derives from the passphrase, which never reaches the instance in the clear: a device shares it only with a device it approved with the code, sealed for that device's HPKE key and signed by its own DRK (§ 3.11) |
-| The instance shows its own device just as the user signs in elsewhere, for the user to approve | Approving takes the 6-digit code the new device shows, the password of a SPAKE2 exchange: without it, the instance gets one guess per exchange — a one-in-a-million chance —, and each guess costs the user a code, asked for or typed: a device draws a new code for each exchange, runs one exchange per code, and opens a request only when the user asks (§ 3.10) |
+| The instance shows its own device just as the user signs in elsewhere, for the user to approve | Approving takes the 6-digit code the new device shows, the password of a SPAKE2 exchange: without it, the instance gets at most two guesses per code — one against each side —, a one-in-five-hundred-thousand chance, and each guess costs the user a code, asked for or typed: a device draws a new code for each exchange, runs one exchange per code, and opens the next by itself only when nobody answered within ten minutes of its own clock (§ 3.10) |
 | The instance changes the approval public key, to approve a device itself | A device holding the passphrase derives the key itself, compares, trusts nothing new and warns on a mismatch (§ 3.9) |
 | A device nobody approved appears on the account | No device of the user's adds it to a conversation or sends it the passphrase; each one holding the current passphrase that sees it in the device list announces it — "Not you? Sign it out." The list is the instance's: a device it leaves out is caught only if met as a leaf in a conversation one of the user's devices is in ("What is not protected", § 3.9) |
 | The instance starts the history over from a device of its own | The new generation's setter isn't a device the others approved: they refuse the generation and warn — "Your history was reset from a device you haven't approved." —, and never approve that setter, which would hand it everything. The way back is a start over from one of the user's own devices (§ 6.11) |
@@ -601,29 +601,72 @@ and never sees the code.
 
 **What the two devices do.** The new device opens a request and shows a 6-digit code; the user
 types it on a device of theirs that is approved. The two run SPAKE2 keyed by the code over the
-request's messages; under its session key, each device then sends the other its device id, DRK and
-HPKE key. An approval signs a device id and a DRK (§ 7.2), so each signs the other's as they came
-out of the exchange, never as the device list shows them: the approved device's approval makes the
-new one approved, and the new device's approval of the other is the one it trusts before it holds
-the passphrase (§ 3.9). Should the instance list another key for either device, the approval
-doesn't verify over it, and is refused. A wrong code fails the exchange, and the device that finds
-it wrong ends the request.
+request's messages, their device ids bound into it as its identities; once each has confirmed the
+other knew the code, each sends the other its DRK and HPKE key sealed under keys of the exchange
+(the bytes below). Each checks what it received against the device list — the device listed once,
+unrevoked, with those very keys, its root chain verifying — and refuses the exchange otherwise. An
+approval signs a device id and a DRK (§ 7.2), so each signs the other's as they came out of the
+exchange, never as the device list shows them: the approved device's approval makes the new one
+approved, and the new device's approval of the other is the one it trusts before it holds the
+passphrase (§ 3.9). The answering device keeps the asking one as its handshake partner, then
+approves it; the asking device approves the answering one only once the list shows that approval
+of itself, verifying under the key the exchange gave — a refused asker approves nothing — and keeps
+it as its partner (§ 8): the partners are whom a share is sent by and taken from (§ 3.11). Should
+the instance list another key for either device, the approval doesn't verify over it, and is
+refused. A wrong code fails the exchange, and the device that finds it wrong ends the request.
 
 **The rules both devices keep:**
 
 - **The code** is 6 digits drawn uniformly at random by the device asking, a new one for each
-  exchange: a device never runs a second exchange on a code, and never shows one again. Without
-  the code, the instance gets one guess per exchange — a one-in-a-million chance.
-- **A request opens only when the user asks.** A device opens one — and shows a new code — only on
-  the user's "Approve from another device", never by itself after a failure, a close or an expiry:
-  each of the instance's guesses then costs the user a code, asked for or typed.
+  exchange: a device never runs a second exchange on a code, never shows one again, and the
+  answering device never tries a code it already failed with. Without the code, the instance gets
+  at most two guesses per code — a man in the middle runs one exchange against each side —, a
+  one-in-five-hundred-thousand chance.
+- **A guess costs the user an action.** A device opens a request — and shows a new code — while the
+  user is on its "Another device" page, or when they ask for a new code. It opens the next one by
+  itself only when no device answered the last and ten minutes passed on its own clock (the relay's
+  `expires_at` is the instance's word); after an answer of any kind — a wrong code, a close, a
+  message refused, an error —, the next code waits for the user's "New code". Each of the
+  instance's guesses is then a code the user asked for or typed.
 - **The answering device holds the current passphrase**, and found the stored approval key to be
   its own derivation, so that it shares the passphrase with the new device right after (§ 3.11) —
   one that doesn't would leave the new device approved through it with no share coming. A device
   that found the approval key changed answers no request. After a start over the old device is
   the one asking, and the new device, which holds the new words, answers it (§ 6.11).
-- **The messages' byte format** — the SPAKE2 messages, then the keys sealed under the session
-  key — is the clients'; the instance never parses it.
+- **The messages' byte format** below is the clients'; the instance never parses it.
+
+**The exchange's bytes.** SPAKE2 as RFC 9382 defines it, suite `SPAKE2-P256-SHA256-HKDF-HMAC`: its
+M and N, A the device asking (it goes first, and uses M), B the device answering (N); shares as
+uncompressed SEC1 points (65 bytes, on the curve), x and y drawn uniformly in [1, p), a shared point
+at the identity refused.
+
+- **w**, the code made memory-hard as the RFC asks: `OS2IP(Argon2id(password = the 6 ASCII digits,
+  salt = "PINAI-APPROVAL-CODE-v1\n" ‖ request id, t = 2, m = 19 MiB, p = 1, 40 bytes)) mod p` —
+  40 bytes, so the reduction is unbiased. Light enough for a phone: a guess is only ever online.
+- **The identities** `idA` / `idB`: `<actor_uri>\n<device_id>` of each side, ids lowercased; the
+  asking device takes the answering one's from the relay's `device_id` on its first message — a
+  false one fails the confirmation.
+- **The transcript and keys** as RFC 9382 § 3.3–3.4: `TT` with 8-byte little-endian lengths;
+  `Ke ‖ Ka = SHA-256(TT)`; `KcA ‖ KcB = HKDF-SHA256(salt = empty, Ka, "ConfirmationKeys" ‖ AAD, 32)`,
+  `AAD = "PINAI-DEVICE-APPROVAL-HANDSHAKE-v1\n" ‖ request id`; `cA` / `cB` = HMAC-SHA256 over `TT`,
+  compared in constant time, A's sent first and B's only once A's verified.
+- **The sealed keys**: each direction's key `HKDF-SHA256(salt = empty, Ke,
+  "PINAI-DEVICE-APPROVAL-HANDSHAKE-v1 keys A->B" | "… B->A", 32)`, AES-256-GCM with a zero nonce —
+  each key seals one message —, the message's 2-byte header as associated data, the DRK (32) then
+  the HPKE key (32) as plaintext.
+- **The messages**, each `0x01` (the version) ‖ its type ‖ its payload, at an exact length:
+
+  | # | Type | From | Payload | Bytes |
+  |---|---|---|---|---|
+  | 1 | `0x01` share | A | A's share | 67 |
+  | 2 | `0x02` share | B | B's share — binds the request | 67 |
+  | 3 | `0x03` confirm | A | `cA` | 34 |
+  | 4 | `0x04` confirm + keys | B | `cB` ‖ B's sealed keys, once `cA` verified | 114 |
+  | 5 | `0x05` keys | A | A's sealed keys, once `cB` verified and B's keys checked | 82 |
+
+  A message out of turn or of the wrong length, a share off the curve or a seal that doesn't open
+  ends the exchange as tampered with; the device finding it ends the request and sends nothing
+  more.
 
 **The relay** (§ 5, "Approvals"):
 
@@ -1497,13 +1540,15 @@ sequenceDiagram
     I-->>P: WS approval_message {request_id, seq: 2}
     Note over I: the account's other devices get approval_closed: their prompt goes
     P->>I: GET …/messages?after=1
-    Note over P,L: under the session key from the code, each sends its device id, DRK and HPKE key, relayed the same way
+    Note over P,L: each confirms the other knew the code, then sends its DRK and HPKE key sealed under the exchange's keys (§ 3.10), relayed the same way
+    L->>L: the phone's keys are the listed ones: kept as its handshake partner
     L->>I: POST /api/keys/devices/:phone/approvals {by: device, signature}
     I-->>P: WS device_approved {device_id: phone}
     I-->>L: WS device_approved {device_id: phone}
+    P->>I: GET /api/keys/devices — the laptop's approval of it verifies under the exchanged key
     P->>I: POST /api/keys/devices/:laptop/approvals {by: device, signature}
-    P->>I: DELETE /api/keys/devices/approval-requests/:id
-    I-->>L: WS approval_closed {request_id}
+    L->>I: DELETE /api/keys/devices/approval-requests/:id
+    I-->>P: WS approval_closed {request_id}
     Note over L: the phone is approved: added to the laptop's conversations (§ 6.2), and sent the passphrase
     L->>L: HPKE-seal the 24 words for the phone's HPKE key (aad PINAI-HISTORY-SHARE-v1), sign with its DRK
     L->>I: POST /api/history/key-shares {recipient_device_id: phone, generation, enc, ciphertext, signature}
