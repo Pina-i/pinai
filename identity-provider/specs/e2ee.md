@@ -399,10 +399,10 @@ one of two ways (`/onboarding/recovery-restore`): approved with the code by a de
 account (§ 3.10), it is sent them by the device that approved it (§ 3.11, § 6.10); or the
 user types them (§ 6.4), which approves it (§ 3.9). Either way it checks them against the
 generation, keeps them, approves itself with them, archives under the same key from then on and
-restores the archive. "Continue without approving" leaves it without a passphrase: it archives
-nothing, the account's devices keep it out of their conversations, and it can be approved later
-from Settings → Devices — or have the words typed there, "Restore history". "I no longer have my
-devices or my words" starts over (§ 6.11). A device's passphrase is stored locally, encrypted
+restores the archive. There is no third way in: a device that is neither approved nor holds the
+words stays on that page, publishes no KeyPackage — so none of the account's devices, nor any
+contact's, adds it to a conversation — and archives nothing, until it is approved, the words are
+typed, or it starts over: "I no longer have my devices or my words" (§ 6.11). A device's passphrase is stored locally, encrypted
 under its AES-GCM key, for revealability in Settings → Devices.
 
 A device says which generation it holds (`PUT /api/keys/devices/:device_id/history-key`), only for
@@ -414,7 +414,8 @@ passphrase when that is the current generation.
 ### 3.7 History Archive Key (HAK)
 
 Derived from the passphrase and its generation's salt via Argon2id
-(`t=3, m=64 MiB, p=4, dkLen=32`). The salt is 16 random bytes, made by the device that sets the
+(`t=3, m=64 MiB, p=4, dkLen=32`). The password is the 24 words, lowercase, joined by single
+spaces, as UTF-8 bytes. The salt is 16 random bytes, made by the device that sets the
 generation and stored with it (`PUT /api/history/key`), so every device holding the passphrase
 derives the same HAK. Each generation has its own salt, so its own HAK.
 
@@ -457,8 +458,10 @@ ids it was sealed with: one the instance moved to another conversation or messag
 
 - An upload names its generation and is refused (`409 stale_history_key`) unless it is the
   current one — and while the account has none: a device that missed a new generation mixes no
-  keys. It reads the key again (`GET /api/history/key`) and keeps its entries until it holds the
-  current passphrase.
+  keys. It reads the key again (`GET /api/history/key`): its entries wait, unsealed and in
+  memory, while it may still hold the current passphrase, and are dropped once it knows it
+  doesn't — nothing is ever sealed under a generation it doesn't hold, and a device that holds
+  none keeps none.
 - A new generation erases the account's archive in the transaction that sets it. An upload under
   way either commits first and is erased with the rest, or is refused.
 - Settings → Devices → Clear history backup (`DELETE /api/history/messages`) erases the entries
@@ -541,8 +544,8 @@ a code handshake, and accepts a share only from one of them (§ 3.11).
 derivation of the approval key matches the stored one, tells approved devices from others: it
 alone adds a device, announces one, or commits one out on these grounds, and it reads the device
 list again first — `device_approved` may arrive after a sibling's add. A device without it — a new
-device before its share, one that continued without approving, an old one refusing a newer
-generation — does none of these. A device that acts:
+device before its share or its words, an old one refusing a newer generation — does none of
+these. A device that acts:
 
 - keeps every sibling it has found approved, by device id and root key (§ 8): a sibling whose root
   key changes is a new device, to approve again;
@@ -570,7 +573,9 @@ then.
 **What a device never takes back from the list.** Each device keeps what it has seen (§ 8):
 
 - **Generations only move forward.** A device never goes back to a generation older than the one
-  it holds or has seen, whatever `GET /api/history/key` answers: it warns instead.
+  it holds or has seen, whatever `GET /api/history/key` answers: it warns instead. Words give one
+  generation only: the words it holds, matching a key served under another generation number,
+  are refused the same way, and so is an account answering no key once one was seen.
 - **A revocation is final.** A device remembers every revocation it saw; a device the list later
   shows unrevoked stays revoked for it — never added, never shared with, its approvals trusted for
   nothing.
@@ -1020,10 +1025,11 @@ sequenceDiagram
     Web->>IdP: POST /api/keys/packages {batch}
     IdP->>IdP: persist KeyPackages
     Web->>Web: BIP-39 mnemonic → 24 words
-    Web->>IDB: save passphrase (sealed)
     Web->>Web: random 16-byte salt → HAK → check value, approval public key
+    Web->>IDB: the words and their key as pending (sealed): never shown, never used
     Web->>IdP: PUT /api/history/key {generation: 1, salt, check_value, approval_public_key}
     IdP-->>Web: 204
+    Web->>IDB: the pending words kept as the device's passphrase
     Web->>Web: sign PINAI-DEVICE-APPROVAL-v1 for itself with the approval key
     Web->>IdP: POST /api/keys/devices/:device_id/approvals {by: passphrase, generation: 1, signature}
     IdP-->>Web: 204
@@ -1035,7 +1041,14 @@ sequenceDiagram
 The session names its device right after registering it: setting
 generation 1, approving the device with its approval key and saying the
 device holds it all take a session that has named its device (§ 3.6,
-§ 3.9). The first device approves itself, so it is the account's first
+§ 3.9). The words are kept and shown only once the account's key is
+theirs: should another device of the account set generation 1 first
+(`409 history_key_conflict`), they are dropped unseen, and this device is a
+second device on an account with a key (§ 6.2). Until then they wait as
+pending, sealed on the device, so an answer lost to a reload loses no
+words: the device's next start settles them — kept when the key in force
+is theirs, sent again when the account has none, dropped when another is
+in force. The first device approves itself, so it is the account's first
 approved device. The user is now able to send and receive E2EE messages.
 The history key's generation 1 and the locally-stored passphrase mean
 every future decrypted message will be archived to `/api/history/messages`
@@ -1056,12 +1069,12 @@ sequenceDiagram
     IdP-->>Mobile: attestation
     Mobile->>IdP: PUT /api/sessions/current/device {device_id}
     IdP-->>Mobile: 204 (the session names its device)
-    Mobile->>IdP: POST /api/keys/packages (initial batch)
     Mobile->>IdP: GET /api/history/key
     IdP-->>Mobile: the history key (the account has one)
     IdP-->>Laptop: WS device_joined {actor, new_device_id, drk_pub}
     Note over Laptop: the mobile is announced: not approved yet
     Note over Mobile: is approved with a code (§ 6.10),<br/>or with the account's 24 words (§ 6.4)
+    Mobile->>IdP: POST /api/keys/packages (initial batch), once approved
     IdP-->>Laptop: WS device_approved {device_id: mobile}
     Laptop->>IdP: GET /api/keys/devices
     Laptop->>Laptop: the mobile's chain verifies, and it is approved (§ 3.9)
@@ -1079,9 +1092,10 @@ sequenceDiagram
 
 The mobile can now decrypt *future* messages in every conversation; past
 ones come back from the archive once it holds the passphrase (§ 6.4,
-§ 6.10). A device that continues without approving reads no conversation
-the account's devices hold: none of them adds it, and it is announced on
-each until one approves it or it is signed out.
+§ 6.10). Until it is approved it stays on the new-device page and
+publishes no KeyPackage: nobody adds it to a conversation, and it is
+announced on each of the account's devices until one approves it, the
+words are typed on it, or it is signed out.
 
 **Offline case** — if every other device of the user is offline at the
 moment of registration, the WS push lands nowhere. The reconcile-on-WS-
@@ -1679,7 +1693,7 @@ PINAI-HISTORY-SHARE-v1\n
   "generation": 2,
   "entries": [
     {
-      "id": "<uuid; matches direct_messages.id>",
+      "id": "<uuid; a message's direct_messages.id, an edit's derived from its ciphertext>",
       "conversation_id": "<uuid>",
       "ciphertext": "<base64-std>",
       "nonce": "<base64-std, 12 bytes>",
@@ -1688,6 +1702,10 @@ PINAI-HISTORY-SHARE-v1\n
   ]
 }
 ```
+
+An edit is an entry of its own: its `id` is a UUID (version 8) made of the
+SHA-256 of the edit's MLS ciphertext, the bytes every device holding it
+sees, so each device archives an edit under the same id, once.
 
 `generation` names the history key's generation the entries were sealed
 under: an upload under any other generation is `409 stale_history_key`
@@ -1735,9 +1753,8 @@ flowchart LR
         IDB --- meta["meta:<br/>device_id + AES-GCM key"]
         IDB --- ident["mls_snapshot:<br/>openmls KV state +<br/>leaf signing keys"]
         IDB --- att["device_attestation:<br/>DRK and HPKE private halves<br/>+ IdP signature"]
-        IDB --- pass["recovery_passphrase:<br/>24 words + the generation held"]
-        IDB --- trust["device_trust:<br/>handshake partners (device id,<br/>DRK, HPKE key), devices seen,<br/>devices found approved<br/>(device id, root key),<br/>newest generation seen,<br/>revocations seen"]
-        IDB --- hist["history_archive:<br/>cached HAK (in-memory<br/>only via this slot)"]
+        IDB --- pass["recovery_passphrase:<br/>24 words + the generation held<br/>+ the HAK derived for its salt,<br/>words pending, newest generation seen"]
+        IDB --- trust["device_trust:<br/>handshake partners (device id,<br/>DRK, HPKE key), devices seen,<br/>devices found approved<br/>(device id, root key),<br/>revocations seen"]
     end
     subgraph server ["Server (Postgres)"]
         UD["user_devices:<br/>+ attestation and HPKE key cols"]
