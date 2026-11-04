@@ -123,6 +123,9 @@ rows below that name the instance don't hold ("What is not protected").
   revoked device that held the words keeps them, as does anyone who saw them. Cutting them off is
   starting over (§ 6.11) from one of the user's devices: it becomes the account's new root of
   trust, the other devices are approved again from it, and the archive is erased.
+- **Who set a generation.** `set_by_device` is the instance's word: naming a device the user
+  approved, it hides a reset from the warning on every device. A device catches only the lie about
+  itself — a generation said to be its own while it set none.
 - **Someone with only the password.** Their device is announced and kept out of the existing
   conversations and the passphrase, but they can erase the archive — Settings → Devices → Clear
   history backup, or a start over —, and their device gets into the conversations contacts open
@@ -321,7 +324,14 @@ Every device runs these checks on every leaf it adds — the KeyPackage's —
 and on every leaf it meets: in a Welcome's ratchet tree, in a commit that
 adds one, and a leaf replaced by an Update or by a commit's path. A leaf
 failing them is never added, and one met in a group is warned of and
-committed out — if the instance carries the commit. A contact's leaf is
+committed out — if the instance carries the commit — by any device of the
+group, holding the passphrase or not: the checks need no approval. An
+attestation that only expired is no forgery: such a leaf is warned of and
+left in place — its device brings it current when it renews (Keeping
+leaves current) — so a member away for a year isn't shut out of groups
+nobody would add them back to; a malformed credential, an issuer that
+isn't the actor's, an attestation or a binding that doesn't verify are
+committed out. A contact's leaf is
 trusted on its attestation and leaf binding; a leaf of the device's own
 account also needs the device list to list its device with the
 credential's `drk_pub`, approved over that root key (§ 3.9) — one that
@@ -522,7 +532,10 @@ flowchart LR
 ```
 
 A device is approved when it carries an approval by the current approval key, or by an unrevoked
-device that carries one: two links at most. A device holding the current passphrase approves
+device that carries one: two links at most, each link matched by device id **and** root key. Its
+chain JWKS → attestation → DRK must verify; its HPKE key matters only to sharing (§ 3.11), so a
+device registered without one is announced and approved all the same. A list naming a device id
+more than once is refused whole: the device decides nothing from it, and warns. A device holding the current passphrase approves
 itself with the approval key, so its chain is one link from then on — and again whenever its own
 DRK changes, which drops its approvals.
 
@@ -1403,7 +1416,8 @@ an admin, never the last one):
 - **A leave**, which can't commit the leaver's own devices out, **or a removal that stopped short**:
   an admin's client, on `member_removed` and whenever it opens the group, compares the MLS group's
   leaves (by their credential, § 7.1) with the roster and commits out every device of an actor it
-  doesn't hold, and every leaf whose credential doesn't decode — it can be no member's. Nothing happens when the roster doesn't hold the admin themselves.
+  doesn't hold, every leaf whose credential doesn't decode — it can be no member's —, and every leaf
+  whose credential fails its checks though it names a member (§ 3.4). Nothing happens when the roster doesn't hold the admin themselves.
 
 Commits race: two admins catching up at once both build a Remove at the same epoch. The second
 gets `409`; its client drops its pending commit, catches up on the DS's log — which may already
@@ -1572,6 +1586,11 @@ holds it, answers. The two approve each other's DRK: N's approval makes the tabl
 generation 2 — what the instance checks before it carries the share —, and the tablet's own
 approval of N is what it accepts the share by. Typing the new words on the tablet does the same
 without a share (§ 6.4).
+
+Until then, the new device treats the tablet as any device it hasn't approved: in a conversation
+both are in — one a contact started since — it commits the tablet's leaf out (§ 3.4), and adds it
+back once it is approved again; the messages in between come back from the archive once the
+tablet holds the new words.
 
 A reset the user didn't make reads the same on the tablet, and is answered the other way: the
 setter isn't the user's, so it is never approved — that would hand it the account's
