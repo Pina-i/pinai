@@ -412,7 +412,10 @@ generation, keeps them, approves itself with them, archives under the same key f
 restores the archive. There is no third way in: a device that is neither approved nor holds the
 words stays on that page, publishes no KeyPackage — so none of the account's devices, nor any
 contact's, adds it to a conversation — and archives nothing, until it is approved, the words are
-typed, or it starts over: "I no longer have my devices or my words" (§ 6.11). A device's passphrase is stored locally, encrypted
+typed, or it starts over: "I no longer have my devices or my words" (§ 6.11). A device that held
+an older generation, or whose words no longer give the key in force, waits the same way on a
+reset page that says so — "Your history was reset from another device", or a change none of the
+user's devices made. A device's passphrase is stored locally, encrypted
 under its AES-GCM key, for revealability in Settings → Devices.
 
 A device says which generation it holds (`PUT /api/keys/devices/:device_id/history-key`), only for
@@ -628,8 +631,9 @@ refused. A wrong code fails the exchange, and the device that finds it wrong end
   `expires_at` is the instance's word); after an answer of any kind — a wrong code, a close, a
   message refused, an error —, the next code waits for the user's "New code". Each of the
   instance's guesses is then a code the user asked for or typed.
-- **The answering device holds the current passphrase**, and found the stored approval key to be
-  its own derivation, so that it shares the passphrase with the new device right after (§ 3.11) —
+- **The answering device holds the current passphrase**, found the stored approval key to be
+  its own derivation, and has said it holds that generation (`PUT …/history-key`) — what the new
+  device checks of it in the list, so that it shares the passphrase with the new device right after (§ 3.11) —
   one that doesn't would leave the new device approved through it with no share coming. A device
   that found the approval key changed answers no request. After a start over the old device is
   the one asking, and the new device, which holds the new words, answers it (§ 6.11).
@@ -1624,7 +1628,9 @@ Setting generation 2 takes a password typed in the last 10 minutes, and erases t
 (§ 3.8): what was saved under the lost words could no longer be opened. The new device becomes the
 account's new root of trust — its new words approve it — and every approval made under
 generation 1's key goes with that generation, so no old device is approved any more, and none can
-take a share. The old tablet can't confirm generation 2's approval key, and sees a generation set
+take a share — until a device holding generation 2 vouches for it: an approval one device gave
+another by its DRK outlives the generation, so an old device whose handshake partner is approved
+again is approved through it. The old tablet can't confirm generation 2's approval key, and sees a generation set
 by a device it never approved: it refuses the generation and warns. Putting it back follows the
 usual rule (§ 3.10): the tablet, which lacks the current passphrase, asks; the new device, which
 holds it, answers. The two approve each other's DRK: N's approval makes the tablet approved under
