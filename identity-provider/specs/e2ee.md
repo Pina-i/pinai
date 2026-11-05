@@ -128,8 +128,9 @@ rows below that name the instance don't hold ("What is not protected").
   carried by the instance: "held by N devices" is shown as the list says, among the devices found
   approved.
 - **Who set a generation.** `set_by_device` is the instance's word: naming a device the user
-  approved, it hides a reset from the warning on every device. A device catches only the lie about
-  itself — a generation said to be its own while it set none.
+  approved, it hides a reset from the warning on every device, and sends them to the reset page
+  as after a replacement of the words. A device catches only the lie about itself — a generation
+  said to be its own while it set none.
 - **Someone with only the password.** Their device is announced and kept out of the existing
   conversations and the passphrase, but they can erase the archive — Settings → Devices → Clear
   history backup, or a start over —, and their device gets into the conversations contacts open
@@ -421,9 +422,13 @@ restores the archive. There is no third way in: a device that is neither approve
 words stays on that page, publishes no KeyPackage — so none of the account's devices, nor any
 contact's, adds it to a conversation — and archives nothing, until it is approved, the words are
 typed, or it starts over: "I no longer have my devices or my words" (§ 6.11). A device that held
-an older generation, or whose words no longer give the key in force, waits the same way on a
-reset page that says so — "Your history was reset from another device", or a change none of the
-user's devices made. A device's passphrase is stored locally, encrypted
+words of this account and finds them no longer the key in force is not pushed out: it keeps its
+conversations and its own copy, saves nothing and decides nothing, under a banner that says what
+happened — a generation set by a device it doesn't know, or a change none of the user's devices
+made — and offers the way back: approved with a code or the new words ("It was me"), or a start
+over from it once the password is changed ("It wasn't me"). Only words replaced from a device it
+found approved (§ 6.12) send it to a reset page that waits the same way: then the user replaced
+them, and it comes back with a code or the new words. A device's passphrase is stored locally, encrypted
 under its AES-GCM key, for revealability in Settings → Devices.
 
 A device says which generation it holds (`PUT /api/keys/devices/:device_id/history-key`), only for
@@ -573,7 +578,9 @@ these. A device that acts:
 
 - keeps every sibling it has found approved, by device id and root key (§ 8): a sibling whose root
   key changes is a new device, to approve again;
-- announces, once per device, a device that appears with no approval — "New device not approved:
+- announces, once per device, a device that appears with no approval after it began acting — the
+  devices listed when it began acting (its first generation, the words typed or shared, a start
+  over, a replacement) are its baseline, never announced as new —: "New device not approved:
   Chrome on Linux. Not you? Sign it out." — and keeps it waiting in Settings → Devices with "Not
   mine", which revokes it; the code field comes only while that device asks to be approved
   (§ 3.10): the code is the new device's to show, so one that asks nothing can't be approved from
@@ -588,7 +595,18 @@ reset from a device you haven't approved." —, and of a stored approval public 
 from its own derivation, worded for an unknown change. When the user didn't start over, the
 setter isn't theirs: it is never approved — approving it would hand it the account's
 conversations and its new words —, and the way back is a start over from one of the user's own
-devices (§ 6.11).
+devices (§ 6.11), the password changed first, or the thief starts over again. Such a reset pushes
+none of the user's devices out of the app: each that held words stays, under a banner, in its
+conversations, with its own copy, saving and deciding nothing until it holds the words in force. It still publishes KeyPackages,
+so a conversation a contact opens from then on adds it, and the device that started over commits
+it out there (§ 6.11).
+After a start over, the devices listed when it was made are "from before": the new device shows
+them so, with "Sign out" and the way back by a code, and names them as it shows the new words —
+never as new devices. The device a "It wasn't me" refuses is never among them: it waits, named as
+the one that reset the history and not the user's, with "Sign out" and no code. A device from
+before that the user lost is still signed in, still holds the conversations it was in, and still
+receives what is sent there, until it is signed out: the new device, in none of them, can't
+commit it out, and only ending its sessions cuts it off.
 
 **A device of the account met as a leaf.** The device list is the instance's: a device it leaves
 out of it, or shows unapproved, can still be in a conversation someone else added the user to — a
@@ -1657,7 +1675,10 @@ generation 1's key goes with that generation, so no old device is approved any m
 take a share — until a device holding generation 2 vouches for it: an approval one device gave
 another by its DRK outlives the generation, so an old device whose handshake partner is approved
 again is approved through it. The old tablet can't confirm generation 2's approval key, and sees a generation set
-by a device it never approved: it refuses the generation and warns. Putting it back follows the
+by a device it never approved: it refuses the generation and warns — staying in the app, its
+conversations and its own copy kept, saving and deciding nothing, under a banner offering the
+code, the new words, or a start over of its own. On the new device it is "from before", never a
+new device. Putting it back follows the
 usual rule (§ 3.10): the tablet, which lacks the current passphrase, asks; the new device, which
 holds it, answers. The two approve each other's DRK: N's approval makes the tablet approved under
 generation 2 — what the instance checks before it carries the share —, and the tablet's own
