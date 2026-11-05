@@ -140,7 +140,11 @@ rows below that name the instance don't hold ("What is not protected").
   reads the passphrase, approves a device. The desktop app runs the code it was installed with
   (`app://pinai`), never code an instance serves.
 - **The instance erasing what it stores.** It controls the database: it can drop the archive, a
-  key share, an approval or a message — never read or forge one it stores. A dropped archive loses
+  key share, an approval or a message — never read or forge one it stores. It can go back on the
+  account's history key, too: the user's devices refuse a generation below one they have seen
+  and save nothing meanwhile (§ 3.9), a start over can't move past it — the instance takes only
+  the generation after its current one, and a device never sets one it has seen —, and only the
+  instance putting the key back restores saving. A dropped archive loses
   past messages on new devices; the devices that read them keep them.
 - **Metadata.** The instance knows who is in each conversation, when commits happen, message
   ordering and sizes, the sender device of each message, and which devices share the passphrase
@@ -1116,7 +1120,10 @@ second device on an account with a key (§ 6.2). Until then they wait as
 pending, sealed on the device, so an answer lost to a reload loses no
 words: the device's next start settles them — kept when the key in force
 is theirs, sent again when the account has none, dropped when another is
-in force. The first device approves itself, so it is the account's first
+in force. Only a first device's generation 1 is ever sent again by
+itself: a later generation's pending words — a start over's — are kept
+when they are in force and dropped otherwise, never sent without the
+user's own "Erase and start over". The first device approves itself, so it is the account's first
 approved device. The user is now able to send and receive E2EE messages.
 The history key's generation 1 and the locally-stored passphrase mean
 every future decrypted message will be archived to `/api/history/messages`
@@ -1609,7 +1616,7 @@ sequenceDiagram
     participant N as New device
     participant I as IdP
     participant T as Old tablet (generation 1)
-    Note over N: "Your saved history will be erased; your other devices, if any, will need to approve this one"
+    Note over N: "Your saved history will be erased. A device you still have will warn you, and can come back with a code typed here"
     N->>N: the password typed again; 24 new words → a salt, HAK, check value, approval key
     N->>I: PUT /api/history/key {generation: 2, salt, check_value, approval_public_key}
     I->>I: one write: the key replaced, the archive erased, generation 1's passphrase approvals and every key share dropped
