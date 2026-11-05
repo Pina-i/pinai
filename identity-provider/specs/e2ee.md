@@ -123,6 +123,9 @@ rows below that name the instance don't hold ("What is not protected").
   revoked device that held the words keeps them, as does anyone who saw them. Cutting them off is
   starting over (§ 6.11) from one of the user's devices: it becomes the account's new root of
   trust, the other devices are approved again from it, and the archive is erased.
+- **Who holds the passphrase.** Each device's `history_generation` is that device's own report,
+  carried by the instance: "held by N devices" is shown as the list says, among the devices found
+  approved.
 - **Who set a generation.** `set_by_device` is the instance's word: naming a device the user
   approved, it hides a reset from the warning on every device. A device catches only the lie about
   itself — a generation said to be its own while it set none.
@@ -570,7 +573,13 @@ these. A device that acts:
 - keeps every sibling it has found approved, by device id and root key (§ 8): a sibling whose root
   key changes is a new device, to approve again;
 - announces, once per device, a device that appears with no approval — "New device not approved:
-  Chrome on Linux. Not you? Sign it out.", with "Approve", which opens the code entry.
+  Chrome on Linux. Not you? Sign it out." — and keeps it waiting in Settings → Devices with "Not
+  mine", which revokes it; the code field comes only while that device asks to be approved
+  (§ 3.10): the code is the new device's to show, so one that asks nothing can't be approved from
+  here until it is opened and asks;
+- names, for each device it found approved, what approved it: a device whose approval of it is
+  older than its own approval of that device — a handshake leaves one each way —, else the
+  passphrase; what it counts by now, not necessarily what first brought it in.
 
 **A reset the user didn't make.** Any device warns of a generation newer than the one it holds or
 has seen, set by a device it hasn't approved or with no chain it can check — "Your history was
