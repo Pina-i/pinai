@@ -121,8 +121,9 @@ rows below that name the instance don't hold ("What is not protected").
 - **Anyone holding the 24 words and a session.** Approving a device by the passphrase, they have
   it added to every existing conversation by the user's devices, and restore the archive. A
   revoked device that held the words keeps them, as does anyone who saw them. Cutting them off is
-  starting over (§ 6.11) from one of the user's devices: it becomes the account's new root of
-  trust, the other devices are approved again from it, and the archive is erased.
+  replacing the words (§ 6.12) from one of the user's devices holding them — or, with none left,
+  starting over (§ 6.11): a new generation, the old words opening nothing; the replacement
+  re-saves the history the device holds under the new words, a start over erases it.
 - **Who holds the passphrase.** Each device's `history_generation` is that device's own report,
   carried by the instance: "held by N devices" is shown as the list says, among the devices found
   approved.
@@ -1441,10 +1442,11 @@ Every other device of the user's remembers the revocation (§ 3.9).
 
 A revoked device that held the 24 words keeps them: with them and a session
 it could still open the archive and approve a device by the passphrase.
-Cutting it off takes a start over (§ 6.11) from one of the user's devices:
-that device sets the next generation and becomes the account's new root of
-trust, the user's other devices are approved again from it, and the
-archive is erased — the old words approve nothing any more.
+Cutting it off takes replacing the words (§ 6.12) from one of the user's
+devices that holds them: that device sets the next generation, re-saves
+the history it holds under the new words, and the old words approve and
+open nothing any more. With no such device left, a start over (§ 6.11)
+does the same, and the archive is lost.
 
 ### 6.7 Silent attestation renewal
 
@@ -1674,6 +1676,65 @@ devices, which then becomes the root of trust in its place.
 
 ---
 
+### 6.12 Replacing the words
+
+A device holding the current passphrase replaces it — Settings → Devices, "Replace my words" —
+when a revoked device, or someone the user no longer trusts, saw the words. It is a start over's
+first half (§ 6.11) from a device the account already trusts, followed by a re-archive: the
+history this device holds is saved again under the new words, so it isn't lost as a start over
+loses it.
+
+```mermaid
+sequenceDiagram
+    participant D as Device holding generation n
+    participant I as IdP
+    participant P as A handshake partner
+    participant O as Another device of the account
+    Note over D: "Replace my words": what changes, what can't come back; the password, typed in the last minutes
+    D->>D: 24 new words → salt, HAK, check value, approval key; kept as pending, marked for a re-archive
+    D->>I: PUT /api/history/key {generation: n+1, …}
+    I->>I: one write: the key replaced, the archive erased, older passphrase approvals and every share dropped
+    D->>D: the pending words kept, a re-archive due; the new words shown
+    D->>I: POST approvals {by: passphrase, generation: n+1} · PUT …/history-key {generation: n+1}
+    D->>I: POST /api/history/key-shares (to P, § 3.11)
+    I-->>P: history_key_ready — P holds n+1 by itself
+    loop the local copy, a conversation at a time, 50 entries a batch
+        D->>D: each message as one entry (its latest text, its attachments' keys), its reactions; sealed under n+1 (§ 7.3)
+        D->>I: POST /api/history/messages {generation: n+1, entries}
+        D->>D: the cursor moves past what was taken
+    end
+    Note over O: holds n: "Your words were replaced on <D>" — a code typed on D, or the new words
+```
+
+The words, the generation and the erasing write are a start over's, under the same rules: the
+password typed in the last minutes before anything is minted, the words pending until the IdP
+took them, a conflict or a refusal leaving nothing behind, generations only moving forward — and
+only over the generation this device holds: another device's replacement landing first is a
+conflict, never a generation replaced unread. What it adds:
+
+- **The archive is brought onto this device first.** Before anything is minted, the device
+  restores the current generation's archive into its own copy — refusing while its copy isn't
+  read back yet, or a restore under that generation is still due —, so what is erased is what it
+  now holds: only what never reached the archive can be lost.
+
+- **The re-archive** is due from the moment the new key is the account's — recorded with it, so
+  a reload or a lost answer resumes it — and runs in the background, one tab of the device at a
+  time, a conversation at a time, paced, each batch an idempotent upsert, a cursor kept after
+  each one the IdP takes. Each message is one entry — its latest text, its attachments' keys, an
+  `edited` mark —, and its reactions one snapshot entry (§ 7.3): the counts as this device holds
+  them, its own reaction marked, no other reactor named. It stops
+  for good once another generation is in force; it never uploads under one the device doesn't
+  hold. It saves what this device holds: a message only another device read doesn't come back,
+  nor an edit's history beyond the message's latest text.
+- **The other devices**: a handshake partner of the replacing device receives the new words as
+  any share (§ 3.11). Any other holds generation n, refuses n+1 and waits on its reset page,
+  told the words were replaced on that device when it is one it found approved — "reset from
+  another device" otherwise —, and comes back with a code typed on it, or the new words. The
+  setter's name is the instance's word (§ 2): a lie gets nothing approved, as no device holding
+  n+1 answers for a setter that didn't set it.
+- **The old words** give no key in force: they open no entry — the archive holds only n+1's —,
+  and approve nothing, as the IdP dropped the older passphrase approvals.
+
 ## 7. Wire formats
 
 ### 7.1 MLS leaf credential
@@ -1803,12 +1864,25 @@ sees, so each device archives an edit under the same id, once.
 
 `generation` names the history key's generation the entries were sealed
 under: an upload under any other generation is `409 stale_history_key`
-(§ 3.8). `ciphertext` is the AES-256-GCM encryption of the JSON-serialised
-`ApplicationMessage` under HAK with `nonce`, its associated data the
+(§ 3.8). `ciphertext` is the AES-256-GCM encryption, under HAK with `nonce`, of
+the client's archive entry as JSON — a message (its text, its attachments' keys, an `edited` mark),
+an edit or a reaction —, its associated data the
 `PINAI-ARCHIVE-v1` bytes of § 7.2 for the entry's `conversation_id` and
 `id`. A restore rebuilds them from the ids the entry comes back under and
 files the entry there only: an entry the instance moved to other ids
-fails its tag and is skipped as damaged (§ 6.4). The JSON includes a
+fails its tag and is skipped as damaged (§ 6.4).
+
+**A reaction snapshot** (a replacement's re-archive, § 6.12) is an entry of its own, one per
+message with reactions: `kind: "reaction-snapshot"`, its `target_message_id`, and
+`[{ emoji, count, reacted }]` — the counts the device held, `reacted` its own user's reaction,
+no other reactor named. Its `id` is keyed, so the instance can't recompute it from what it sees:
+a version-8 UUID made of the first 16 bytes of `HMAC-SHA256(key, "<conversation_id>\n<message_id>\nreactions")`
+(ids lowercased), `key = HKDF-SHA256(ikm = HAK, info = "pinai/rearchive-entry-id/v1")`, no salt,
+32 bytes — stable under one generation, another under the next. A restore takes it as the base
+of that message's reactions, the latest one by the entry's own `created_at` when there are
+several; named reaction entries dated after that `created_at` apply on top, those dated at or
+before it are counted already — only their ids are kept, so a later decrypt adds nothing. A
+message the restoring device holds decrypted keeps its own reactions. The JSON includes a
 domain-specific replacer for `Uint8Array` fields (attachment AES keys
 + nonces) so they round-trip through serialization.
 
@@ -1911,12 +1985,6 @@ threat model as the rest of the IDB content.
   state, so the security-critical path is covered; server-side
   validation is defense-in-depth and requires pulling `openmls` into
   the server crate.
-- **Reactions and edits in restored history.** The MVP restore path
-  handles `kind: "text"` application messages. Reactions (which apply
-  as deltas to an existing message) and edits (which replace the
-  ciphertext of an existing message) are skipped — they'd need
-  ordering guarantees against the restored target message that the
-  current implementation doesn't provide.
 - **Background streaming of large archives.** The restore page pulls
   pages serially. For users with very large histories this is
   noticeable; a progressive streaming UI is a future enhancement.
