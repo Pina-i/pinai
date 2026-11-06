@@ -61,9 +61,10 @@ use domain::auth::{
     RESEND_WINDOW, Registration, RevokedReason, SIGNUP_CODE_TTL, Session, SessionNotifier,
     Sessions, SignInAccount, SignInAccounts, SignUps, SignupCodes, SignupMailer,
 };
+use domain::e2ee::{DeviceApprovals, DeviceTrust};
 use domain::identity::{Bearer, Handle, InstanceOrigin, UsernameChoice};
 use domain::profile::DisplayName;
-use domain::{InvitationId, SessionId, UserId};
+use domain::{DeviceId, InvitationId, SessionId, UserId};
 use time::OffsetDateTime;
 
 /// Suffixes drawn for one chosen name before giving up: 36⁵ of them make a second a rarity.
@@ -175,6 +176,17 @@ pub(crate) async fn calling_session(
         .find(bearer.session)
         .await?
         .ok_or_else(|| AuthError::Unexpected(anyhow::anyhow!("the calling session is gone")))
+}
+
+/// The device the calling session named, and the account's devices, approvals and generation as
+/// they stand now: what `domain::e2ee::may_act_beyond_the_password` decides on.
+pub(crate) async fn calling_trust(
+    sessions: &dyn Sessions,
+    approvals: &dyn DeviceApprovals,
+    bearer: &Bearer,
+) -> anyhow::Result<(Option<DeviceId>, DeviceTrust)> {
+    let named = calling_session(sessions, bearer).await?.device;
+    Ok((named, approvals.trust(bearer.user).await?))
 }
 
 /// Closes what hangs on each of the sessions just ended.

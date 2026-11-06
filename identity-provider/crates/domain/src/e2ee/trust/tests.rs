@@ -161,25 +161,64 @@ fn an_account_with_no_history_key_keeps_the_rule_of_any_device_of_its_own() {
 }
 
 #[test]
-fn only_an_approved_device_turns_the_second_factor_on_once_the_account_has_a_key() {
+fn an_approved_device_acts_beyond_the_password_once_the_account_has_a_key() {
     let a = account();
-    let mut without_a_key = account();
-    without_a_key.trust.current = None;
+
+    for device in [&a.laptop, &a.phone] {
+        assert_eq!(
+            may_act_beyond_the_password(Some(device.id), &a.trust),
+            Ok(()),
+            "{:?}",
+            device.id
+        );
+    }
+}
+
+#[test]
+fn a_device_not_approved_or_a_session_naming_none_does_not_once_the_account_has_a_key() {
+    let a = account();
+
+    for named in [Some(a.fresh.id), Some(a.tablet.id), None] {
+        assert_eq!(
+            may_act_beyond_the_password(named, &a.trust),
+            Err(ApprovalRequired),
+            "{named:?}"
+        );
+    }
+}
+
+#[test]
+fn a_revoked_device_no_longer_acts_beyond_the_password() {
+    let mut a = account();
+    let laptop = a
+        .trust
+        .devices
+        .iter_mut()
+        .find(|device| device.id == a.laptop.id)
+        .unwrap();
+    laptop.revoked_at = Some(laptop.paired_at);
 
     assert_eq!(
-        may_turn_on_second_factor(Some(a.phone.id), &a.trust),
-        Ok(())
-    );
-    assert_eq!(
-        may_turn_on_second_factor(Some(a.fresh.id), &a.trust),
+        may_act_beyond_the_password(Some(a.laptop.id), &a.trust),
         Err(ApprovalRequired)
     );
     assert_eq!(
-        may_turn_on_second_factor(None, &a.trust),
-        Err(ApprovalRequired)
+        may_act_beyond_the_password(Some(a.phone.id), &a.trust),
+        Err(ApprovalRequired),
+        "approved through the laptop only"
     );
-    assert_eq!(
-        may_turn_on_second_factor(None, &without_a_key.trust),
-        Ok(())
-    );
+}
+
+#[test]
+fn an_account_with_no_history_key_lets_any_session_act_beyond_the_password() {
+    let mut a = account();
+    a.trust.current = None;
+
+    for named in [Some(a.fresh.id), Some(a.laptop.id), None] {
+        assert_eq!(
+            may_act_beyond_the_password(named, &a.trust),
+            Ok(()),
+            "{named:?}"
+        );
+    }
 }

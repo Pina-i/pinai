@@ -23,7 +23,7 @@ async fn set_key(app: &TestApp, who: &Account, body: Value) -> (reqwest::StatusC
 }
 
 /// A group of `who`'s with another account, for entries to be archived from.
-async fn a_conversation(app: &TestApp, who: &Account) -> String {
+pub(crate) async fn a_conversation(app: &TestApp, who: &Account) -> String {
     let bob = app.sign_up("bob").await;
     let (opened, body) = app
         .send(
@@ -46,7 +46,7 @@ async fn a_conversation(app: &TestApp, who: &Account) -> String {
     group["conversationId"].as_str().unwrap().to_owned()
 }
 
-async fn upload(
+pub(crate) async fn upload(
     app: &TestApp,
     who: &Account,
     generation: i64,
@@ -67,7 +67,7 @@ async fn upload(
     .await
 }
 
-async fn archived(app: &TestApp, who: &Account) -> usize {
+pub(crate) async fn archived(app: &TestApp, who: &Account) -> usize {
     let (status, page) = app.get(who, "/api/history/messages").await;
     assert_eq!(status, 200, "{page}");
     page["entries"].as_array().unwrap().len()

@@ -19,7 +19,7 @@ pub use approval::{InMemoryApprovalRequests, RecordingDeviceTrustNotifier, SentT
 pub use key_share::sealed_share;
 
 use super::{
-    Append, ArchiveCursor, ArchiveEntry, ArchiveStoreError, Archived, HeldHistoryKey,
+    Append, ArchiveCursor, ArchiveEntry, ArchiveStoreError, Archived, Cleared, HeldHistoryKey,
     HistoryArchive, HistoryGeneration, HistoryKey, HistoryKeys, Holding, KeyReplace,
     NewArchiveEntry, check_history_generation,
 };
@@ -930,11 +930,18 @@ impl HistoryArchive for InMemoryArchive {
         Ok(entries)
     }
 
-    async fn clear(&self, owner: UserId) -> Result<usize, ArchiveStoreError> {
+    async fn clear(
+        &self,
+        owner: UserId,
+        generation: HistoryGeneration,
+    ) -> Result<Cleared, ArchiveStoreError> {
         let mut state = self.state.lock().unwrap();
+        if state.generation(owner) != Some(generation) {
+            return Ok(Cleared::Stale);
+        }
         let before = state.entries.len();
         state.entries.retain(|(o, _)| *o != owner);
-        Ok(before - state.entries.len())
+        Ok(Cleared::Erased(before - state.entries.len()))
     }
 }
 
@@ -2052,9 +2059,9 @@ pub mod contract {
         .await;
         archive_under(archive, bob, bobs, &[archived(conversation, 3)]).await;
 
-        let cleared = archive.clear(alice).await.unwrap();
+        let cleared = archive.clear(alice, alices).await.unwrap();
 
-        assert_eq!(cleared, 2);
+        assert_eq!(cleared, Cleared::Erased(2));
         assert!(archive.page(alice, None, 10).await.unwrap().is_empty());
         assert_eq!(archive.page(bob, None, 10).await.unwrap().len(), 1);
         assert_eq!(
@@ -2067,6 +2074,42 @@ pub mod contract {
             1,
             "and is saved under still"
         );
+    }
+
+    pub async fn a_clear_erases_only_under_the_generation_it_was_decided_on(
+        archive: &dyn HistoryArchive,
+        keys: &dyn HistoryKeys,
+        devices: &dyn Devices,
+        approvals: &dyn DeviceApprovals,
+        alice: UserId,
+        bob: UserId,
+        conversation: ConversationId,
+    ) {
+        let generation = |raw| HistoryGeneration::parse(raw).unwrap();
+        let first = first_key(keys, devices, alice).await;
+        let device = a_device(devices, alice).await;
+        approve_by_its_words(devices, approvals, alice, device, &history_key(1, 1)).await;
+        keys.replace(
+            alice,
+            &history_key(2, 2),
+            device,
+            time::OffsetDateTime::now_utc(),
+        )
+        .await
+        .unwrap();
+        archive_under(archive, alice, generation(2), &[archived(conversation, 1)]).await;
+
+        let replaced = archive.clear(alice, first).await.unwrap();
+        let ahead = archive.clear(alice, generation(3)).await.unwrap();
+        let none_set = archive.clear(bob, first).await.unwrap();
+        let kept = archive.page(alice, None, 10).await.unwrap().len();
+        let current = archive.clear(alice, generation(2)).await.unwrap();
+
+        for refused in [replaced, ahead, none_set] {
+            assert_eq!(refused, Cleared::Stale);
+        }
+        assert_eq!(kept, 1, "the new generation's entry stays");
+        assert_eq!(current, Cleared::Erased(1));
     }
 
     pub async fn an_upload_is_stored_only_under_the_current_generation(

@@ -424,6 +424,7 @@ impl TestApp {
             )),
             sign_out_others: Arc::new(SignOutOthers::new(
                 sign_in.sessions.clone(),
+                keys.clone(),
                 sign_in.ended.clone(),
             )),
             login_attempts: crate::LoginAttempts::new(),
@@ -958,7 +959,11 @@ impl TestApp {
                 archive.clone(),
             )),
             read_archive: Arc::new(ReadArchive::new(archive.clone())),
-            clear_archive: Arc::new(ClearArchive::new(archive.clone())),
+            clear_archive: Arc::new(ClearArchive::new(
+                sign_in.sessions.clone(),
+                keys.clone(),
+                archive.clone(),
+            )),
             load_history_key: Arc::new(LoadHistoryKey::new(archive.clone())),
             set_history_key: Arc::new(SetHistoryKey::new(
                 sign_in.sessions.clone(),
@@ -1184,6 +1189,25 @@ impl TestApp {
             )
             .await;
         assert_eq!(status, StatusCode::NO_CONTENT, "{answer}");
+    }
+
+    /// `owner`'s first history key — salt `[1; 16]`, check value `[1; 32]`, approval public key
+    /// `[2; 32]` — set from `token`, the session naming `device`, which its words approve.
+    pub async fn keyed_from(&self, owner: &Account, token: &str, device: uuid::Uuid) {
+        use base64::Engine;
+        let b64 = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        let body = serde_json::json!({
+            "generation": 1,
+            "salt": b64(&[1; 16]),
+            "check_value": b64(&[1; 32]),
+            "approval_public_key": b64(&[2; 32]),
+        });
+        let (status, answer) = self
+            .call_in(token, Method::PUT, "/api/history/key", Some(body))
+            .await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{answer}");
+        self.approved_by_words(owner, token, device, 1, [2; 32])
+            .await;
     }
 
     /// A request another instance signed, as `peer`, with the `Digest` of its body.

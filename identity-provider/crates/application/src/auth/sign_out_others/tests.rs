@@ -1,6 +1,6 @@
 use domain::UserId;
 use domain::auth::testing::{another_web_app, web_client};
-use domain::auth::{ClientId, RevokedReason, Sessions};
+use domain::auth::{AuthError, ClientId, RevokedReason, Sessions};
 use domain::identity::Bearer;
 
 use crate::auth::world::{now, world};
@@ -89,5 +89,53 @@ async fn signing_out_elsewhere_from_the_desktop_keeps_its_own_session_only() {
             .unwrap()
             .unwrap()
             .is_live(now())
+    );
+}
+
+#[tokio::test]
+async fn only_an_approved_device_signs_the_others_out_once_the_account_has_a_key() {
+    let w = world().await;
+    let (laptop, on_the_laptop) = w.on_a_device().await;
+    let (_, on_a_fresh_one) = w.on_a_device().await;
+    w.keyed_from(laptop).await;
+    let unnamed = w.bearer_of(w.alice.id);
+
+    let by_the_fresh_one = w.sign_out_others.execute(on_a_fresh_one, now()).await;
+    let unnamed_signs_out = w.sign_out_others.execute(unnamed, now()).await;
+    let nobody_signed_out = w.ended.ended();
+    let by_the_laptop = w.sign_out_others.execute(on_the_laptop, now()).await;
+
+    for refused in [by_the_fresh_one, unnamed_signs_out] {
+        assert!(
+            matches!(refused, Err(AuthError::ApprovalRequired(_))),
+            "{refused:?}"
+        );
+    }
+    assert_eq!(nobody_signed_out, Vec::new());
+    assert_eq!(
+        by_the_laptop.unwrap(),
+        4,
+        "the fresh device's and the unnamed web apps, with their browsers"
+    );
+    for gone in [on_a_fresh_one.session, unnamed.session] {
+        assert_eq!(
+            w.sessions.reason(gone),
+            Some(RevokedReason::SignedOutElsewhere)
+        );
+    }
+}
+
+#[tokio::test]
+async fn without_a_history_key_a_device_nobody_approved_signs_the_others_out() {
+    let w = world().await;
+    let (_, on_a_device) = w.on_a_device().await;
+    let other = w.bearer_of(w.alice.id);
+
+    let ended = w.sign_out_others.execute(on_a_device, now()).await;
+
+    assert_eq!(ended.unwrap(), 2, "the other web app and its browser");
+    assert_eq!(
+        w.sessions.reason(other.session),
+        Some(RevokedReason::SignedOutElsewhere)
     );
 }

@@ -822,6 +822,7 @@ impl Application {
             )),
             sign_out_others: Arc::new(application::auth::SignOutOthers::new(
                 Arc::clone(&sessions),
+                Arc::clone(&approvals),
                 Arc::clone(&session_notifier),
             )),
             login_attempts: api::LoginAttempts::new(),
@@ -1162,7 +1163,11 @@ impl Application {
                 Arc::clone(&archive),
             )),
             read_archive: Arc::new(application::e2ee::ReadArchive::new(Arc::clone(&archive))),
-            clear_archive: Arc::new(application::e2ee::ClearArchive::new(archive)),
+            clear_archive: Arc::new(application::e2ee::ClearArchive::new(
+                Arc::clone(&sessions),
+                Arc::clone(&approvals),
+                archive,
+            )),
             load_history_key: Arc::new(application::e2ee::LoadHistoryKey::new(Arc::clone(
                 &history_keys,
             ))),

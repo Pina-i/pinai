@@ -252,6 +252,57 @@ async fn signing_out_elsewhere_keeps_the_callers_session_only() {
 }
 
 #[tokio::test]
+async fn signing_out_elsewhere_takes_an_approved_device_once_the_account_has_a_key() {
+    let w = world();
+    let (laptop_session, laptop) = w.app.on_a_device(w.alice.id).await;
+    let (fresh, _) = w.app.on_a_device(w.alice.id).await;
+    let unnamed = w.app.sign_in.sessions.live(w.alice.id);
+    w.app
+        .keyed_from(
+            &w.alice,
+            &w.app.token_in(w.alice.id, laptop_session),
+            laptop,
+        )
+        .await;
+    let sign_out = async |session| {
+        w.as_session(
+            &w.alice,
+            session,
+            Method::DELETE,
+            "/api/sessions?keep=current",
+            None,
+        )
+        .await
+    };
+
+    let by_the_fresh_one = sign_out(fresh).await;
+    let by_the_unnamed = sign_out(unnamed).await;
+    let still = w.app.sign_in.sessions.reason(laptop_session);
+    let by_the_laptop = sign_out(laptop_session).await;
+
+    for refused in [by_the_fresh_one, by_the_unnamed] {
+        assert_eq!(
+            refused,
+            (
+                StatusCode::FORBIDDEN,
+                json!({
+                    "error": "approval_required",
+                    "error_description": "This takes a device approved under the current history key",
+                })
+            )
+        );
+    }
+    assert_eq!(still, None, "the laptop stays signed in");
+    assert_eq!(by_the_laptop, (StatusCode::NO_CONTENT, Value::Null));
+    for ended in [fresh, unnamed] {
+        assert_eq!(
+            w.app.sign_in.sessions.reason(ended),
+            Some(RevokedReason::SignedOutElsewhere)
+        );
+    }
+}
+
+#[tokio::test]
 async fn naming_a_device_without_its_root_keys_proof_is_refused() {
     let w = world();
     let laptop = w.device_of(&w.alice).await;

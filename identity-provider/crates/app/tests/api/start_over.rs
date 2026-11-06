@@ -1,5 +1,5 @@
-//! Starting the history over from a device not approved, and revoking approved devices —
-//! identity-provider/specs/e2ee.md § 3.12.
+//! Starting the history over from a device not approved, revoking approved devices, and the other
+//! actions only an approved device takes — identity-provider/specs/e2ee.md § 3.12.
 
 use ed25519_dalek::SigningKey;
 use reqwest::{Method, StatusCode};
@@ -12,6 +12,7 @@ use crate::helpers::{
     Account, TestApp, another_browser, naming_proof, next_event, open_socket, signed_in_long_ago,
     spawn_app,
 };
+use crate::history::{a_conversation, archived, upload};
 use crate::key_shares::{first_device, holding, set_generation};
 
 pub(crate) async fn ask_to_start_over(app: &TestApp, device: &Device) -> (StatusCode, Value) {
@@ -405,5 +406,79 @@ async fn only_an_approved_device_turns_the_second_factor_on() {
     );
     assert_eq!(by_the_laptop.0, StatusCode::OK, "{}", by_the_laptop.1);
     assert!(by_the_laptop.1["secret_base32"].is_string());
+    app.stop().await.unwrap();
+}
+
+async fn clear(app: &TestApp, by: &Account) -> (StatusCode, Value) {
+    app.send(Method::DELETE, by, "/api/history/messages", Value::Null)
+        .await
+}
+
+async fn sign_out_others(app: &TestApp, by: &Account) -> (StatusCode, Value) {
+    app.send(
+        Method::DELETE,
+        by,
+        "/api/sessions?keep=current",
+        Value::Null,
+    )
+    .await
+}
+
+fn approval_required() -> (StatusCode, Value) {
+    (
+        StatusCode::FORBIDDEN,
+        json!({
+            "error": "approval_required",
+            "error_description": "This takes a device approved under the current history key",
+        }),
+    )
+}
+
+/// Someone with only the password, its recent sign-in and all, can neither erase the history
+/// backup a device added later restores from, nor sign the user's devices out.
+#[tokio::test]
+async fn a_password_only_session_neither_clears_the_history_backup_nor_signs_the_laptop_out() {
+    let app = spawn_app().await;
+    let (laptop, _) = first_device(&app).await;
+    let conversation = a_conversation(&app, &laptop.session).await;
+    let (uploaded, body) = upload(&app, &laptop.session, 1, &conversation).await;
+    assert_eq!(uploaded, StatusCode::OK, "{body}");
+    let thief = another_browser(&app, &laptop.session).await;
+
+    let cleared = clear(&app, &thief).await;
+    let kept = archived(&app, &laptop.session).await;
+    let signed_out = sign_out_others(&app, &thief).await;
+    let (still, _) = app.get(&laptop.session, "/userinfo").await;
+
+    assert_eq!(cleared, approval_required());
+    assert_eq!(kept, 1, "the archive is intact");
+    assert_eq!(signed_out, approval_required());
+    assert_eq!(still, StatusCode::OK, "the laptop stays signed in");
+    app.stop().await.unwrap();
+}
+
+/// The laptop, approved, clears the history backup and signs the other devices out.
+#[tokio::test]
+async fn the_approved_laptop_clears_the_history_backup_and_signs_the_others_out() {
+    let app = spawn_app().await;
+    let (laptop, _) = first_device(&app).await;
+    let conversation = a_conversation(&app, &laptop.session).await;
+    upload(&app, &laptop.session, 1, &conversation).await;
+    let elsewhere = another_browser(&app, &laptop.session).await;
+
+    let cleared = clear(&app, &laptop.session).await;
+    let left = archived(&app, &laptop.session).await;
+    let signed_out = sign_out_others(&app, &laptop.session).await;
+    let (gone, _) = app.get(&elsewhere, "/userinfo").await;
+    let (kept, _) = app.get(&laptop.session, "/userinfo").await;
+
+    assert_eq!(cleared, (StatusCode::OK, json!({ "deleted": 1 })));
+    assert_eq!(left, 0);
+    assert_eq!(signed_out, (StatusCode::NO_CONTENT, Value::Null));
+    assert_eq!(
+        (gone, kept),
+        (StatusCode::UNAUTHORIZED, StatusCode::OK),
+        "the other browser signed out, the laptop not"
+    );
     app.stop().await.unwrap();
 }

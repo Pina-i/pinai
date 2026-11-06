@@ -14,10 +14,14 @@ use domain::auth::{
     Client, Registrations, SecondFactors, Sessions, TotpSecret, WebApp, desktop_client,
 };
 use domain::e2ee::testing::{InMemoryArchive, InMemoryKeyDirectory, PlainEd25519Verifier};
+use domain::e2ee::{
+    ApprovalPublicKey, Attestation, DeviceLabel, DeviceRootKey, Devices, HistoryCheckValue,
+    HistoryGeneration, HistoryKey, HistoryKeys, HistorySalt, HpkeKeyWrite,
+};
 use domain::identity::testing::InMemoryAccounts;
 use domain::identity::{Account, ActorUri, Bearer, InstanceOrigin, IntroText};
 use domain::presence::PresenceBoard;
-use domain::{SessionId, UserId};
+use domain::{DeviceId, SessionId, UserId};
 use time::OffsetDateTime;
 
 use crate::identity::IntroInForce;
@@ -212,7 +216,7 @@ async fn world_with(registrations: Registrations) -> World {
             sessions.clone(),
             ended.clone(),
         ),
-        sign_out_others: SignOutOthers::new(sessions.clone(), ended.clone()),
+        sign_out_others: SignOutOthers::new(sessions.clone(), devices.clone(), ended.clone()),
         revoke_token: RevokeToken::new(refresh_tokens.clone(), sessions.clone(), ended.clone()),
         log_out: LogOut::new(clients.clone(), sessions.clone(), ended.clone()),
         register: Register::new(
@@ -350,6 +354,52 @@ impl World {
         };
         self.sign_up(&admin).await;
         admin
+    }
+
+    /// A device of Alice's, its root key registered, and a session naming it.
+    pub async fn on_a_device(&self) -> (DeviceId, Bearer) {
+        let device = DeviceId::generate();
+        let attestation = Attestation {
+            root_key: DeviceRootKey::parse(&[1; 32]).unwrap(),
+            signature: vec![1; 64],
+            kid: "key-1".to_owned(),
+            issued_at: now(),
+            expires_at: now() + time::Duration::days(365),
+        };
+        self.devices
+            .attest(
+                self.alice.id,
+                device,
+                &DeviceLabel::unknown(),
+                None,
+                &attestation,
+                &HpkeKeyWrite::Clear,
+            )
+            .await
+            .unwrap();
+        let bearer = self.bearer_of(self.alice.id);
+        self.sessions
+            .link(self.alice.id, bearer.session, device, now())
+            .await
+            .unwrap();
+        (device, bearer)
+    }
+
+    /// Alice's first history key, set from `device`, which its words approve.
+    pub async fn keyed_from(&self, device: DeviceId) {
+        let first = HistoryKey {
+            generation: HistoryGeneration::FIRST,
+            salt: HistorySalt::parse(&[1; 16]).unwrap(),
+            check_value: HistoryCheckValue::parse(&[1; 32]).unwrap(),
+            approval_public_key: ApprovalPublicKey::parse(&[1; 32]).unwrap(),
+        };
+        self.archive
+            .replace(self.alice.id, &first, device, now())
+            .await
+            .unwrap();
+        self.devices
+            .approved_by_words(self.alice.id, device, &first)
+            .await;
     }
 
     /// Turns the account's second factor on with a known secret: the codes of its app come from

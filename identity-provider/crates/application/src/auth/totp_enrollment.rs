@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
 use domain::auth::{AuthError, Authenticator, Enrollment, SecondFactors, Sessions, SignInAccounts};
-use domain::e2ee::{DeviceApprovals, may_turn_on_second_factor};
+use domain::e2ee::{DeviceApprovals, may_act_beyond_the_password};
 use domain::identity::{Bearer, InstanceOrigin};
 use time::OffsetDateTime;
 
-use super::calling_session;
+use super::calling_trust;
 
 /// The second factor goes on only from an approved device once the account has a history key:
 /// identity-provider/specs/auth.md § 3.
@@ -14,12 +14,8 @@ async fn may_turn_on(
     approvals: &dyn DeviceApprovals,
     bearer: &Bearer,
 ) -> Result<(), AuthError> {
-    let named = calling_session(sessions, bearer).await?.device;
-    let trust = approvals
-        .trust(bearer.user)
-        .await
-        .map_err(|e| AuthError::Unexpected(e.into()))?;
-    Ok(may_turn_on_second_factor(named, &trust)?)
+    let (named, trust) = calling_trust(sessions, approvals, bearer).await?;
+    Ok(may_act_beyond_the_password(named, &trust)?)
 }
 
 /// `POST /api/totp/enroll`: a fresh secret for the account's authenticator app, kept aside until

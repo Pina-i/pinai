@@ -22,7 +22,9 @@ use uuid::Uuid;
 
 use crate::ApiError;
 use crate::auth::{Authenticated, RecentlySignedIn, SignedIn};
-use crate::e2ee::{base64_field, device_required, stale_history_key, start_over_refused};
+use crate::e2ee::{
+    approval_required, base64_field, device_required, stale_history_key, start_over_refused,
+};
 
 #[derive(Deserialize)]
 pub struct UploadRequest {
@@ -234,7 +236,7 @@ pub async fn clear(
     State(clear): State<Arc<ClearArchive>>,
     RecentlySignedIn(bearer): RecentlySignedIn,
 ) -> Result<Json<ClearedBody>, ApiError> {
-    let deleted = clear.execute(bearer.user).await?;
+    let deleted = clear.execute(&bearer).await?;
     Ok(Json(ClearedBody { deleted }))
 }
 
@@ -283,6 +285,7 @@ impl From<ArchiveError> for ApiError {
             }
             ArchiveError::StartOver(refusal) => start_over_refused(refusal),
             ArchiveError::DeviceRequired(_) => device_required(),
+            ArchiveError::ApprovalRequired(_) => approval_required(),
             ArchiveError::Unexpected(e) => ApiError::internal(e),
         }
     }

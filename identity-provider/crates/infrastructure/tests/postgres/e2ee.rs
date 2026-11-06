@@ -1,6 +1,6 @@
 use domain::e2ee::testing::contract;
 use domain::e2ee::{
-    ApprovalPublicKey, ArchiveNonce, Archived, HistoryArchive, HistoryCheckValue,
+    ApprovalPublicKey, ArchiveNonce, Archived, Cleared, HistoryArchive, HistoryCheckValue,
     HistoryGeneration, HistoryKey, HistoryKeys, HistorySalt, KeyReplace, NewArchiveEntry,
 };
 use infrastructure::postgres::{
@@ -330,6 +330,23 @@ async fn clearing_an_archive_deletes_its_owners_entries_and_keeps_the_key(pool: 
 }
 
 #[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn a_clear_erases_only_under_the_generation_it_was_decided_on(pool: PgPool) {
+    let (alice, bob) = (a_user(&pool).await, a_user(&pool).await);
+    let conversation = a_conversation(&pool).await;
+    let (archive, keys, devices) = history(&pool);
+    contract::a_clear_erases_only_under_the_generation_it_was_decided_on(
+        &archive,
+        &keys,
+        &devices,
+        &PgDeviceApprovals::new(pool.clone()),
+        alice,
+        bob,
+        conversation,
+    )
+    .await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
 async fn an_upload_is_stored_only_under_the_current_generation(pool: PgPool) {
     let alice = a_user(&pool).await;
     let conversation = a_conversation(&pool).await;
@@ -519,6 +536,65 @@ async fn an_upload_racing_a_new_generation_is_erased_or_refused(pool: PgPool) {
             Archived::Stale => assert_eq!(erased, 0, "refused"),
         }
         assert!(archive.page(alice, None, 50).await.unwrap().is_empty());
+    }
+}
+
+/// A clear decided under the replaced generation erases before the replacement, or nothing: what
+/// is saved under the new one stays.
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn a_clear_racing_a_new_generation_never_erases_what_is_saved_under_it(pool: PgPool) {
+    let archive = PgHistoryArchive::new(pool.clone());
+    let stores = super::start_over::Stores::of(&pool);
+    let (s, keys) = (stores.view(), &stores.keys);
+    let conversation = a_conversation(&pool).await;
+    let (first, second) = (
+        HistoryGeneration::FIRST,
+        HistoryGeneration::parse(2).unwrap(),
+    );
+
+    for _ in 0..20 {
+        let alice = a_user(&pool).await;
+        let device = contract::a_new_device(s, alice, 1).await;
+        keys.replace(
+            alice,
+            &history_key(1, 1),
+            device,
+            time::OffsetDateTime::now_utc(),
+        )
+        .await
+        .unwrap();
+        contract::approved_by_words(s, alice, device, &history_key(1, 1)).await;
+        let old: Vec<_> = (0..5).map(|_| entry(conversation)).collect();
+        archive.store(alice, first, &old).await.unwrap();
+        let new: Vec<_> = (0..5).map(|_| entry(conversation)).collect();
+
+        let (cleared, (replaced, saved)) = tokio::join!(archive.clear(alice, first), async {
+            let replaced = keys
+                .replace(
+                    alice,
+                    &history_key(2, 2),
+                    device,
+                    time::OffsetDateTime::now_utc(),
+                )
+                .await;
+            (replaced, archive.store(alice, second, &new).await)
+        });
+
+        let erased_by_the_key = match replaced.unwrap() {
+            KeyReplace::Replaced { erased, .. } => erased,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(saved.unwrap(), Archived::Stored(new.len()));
+        match cleared.unwrap() {
+            Cleared::Erased(erased) => {
+                assert_eq!((erased, erased_by_the_key), (old.len(), 0), "cleared first");
+            }
+            Cleared::Stale => assert_eq!(erased_by_the_key, old.len(), "replaced first"),
+        }
+        assert_eq!(
+            archive.page(alice, None, 50).await.unwrap().len(),
+            new.len()
+        );
     }
 }
 

@@ -264,8 +264,14 @@ pub trait HistoryArchive: Send + Sync {
         after: Option<ArchiveCursor>,
         limit: usize,
     ) -> Result<Vec<ArchiveEntry>, ArchiveStoreError>;
-    /// Delete the owner's whole archive; its key stays. How many entries went.
-    async fn clear(&self, owner: UserId) -> Result<usize, ArchiveStoreError>;
+    /// Delete the owner's whole archive while `generation` — the one the clear was decided on — is
+    /// still the owner's current one, checked as [`Self::store`] checks it: a new generation set
+    /// meanwhile keeps what was saved under it. The key stays.
+    async fn clear(
+        &self,
+        owner: UserId,
+        generation: HistoryGeneration,
+    ) -> Result<Cleared, ArchiveStoreError>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -273,6 +279,14 @@ pub enum Archived {
     /// How many entries were new.
     Stored(usize),
     /// The generation named is not the owner's current one: nothing was stored.
+    Stale,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cleared {
+    /// How many entries went.
+    Erased(usize),
+    /// The generation named is not the owner's current one: nothing was erased.
     Stale,
 }
 

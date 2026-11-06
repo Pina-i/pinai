@@ -16,7 +16,7 @@ use domain::e2ee::Ed25519Signature;
 
 use crate::ApiError;
 use crate::auth::{RecentlySignedIn, SignedIn};
-use crate::e2ee::base64_field;
+use crate::e2ee::{approval_required, base64_field};
 
 #[derive(Deserialize)]
 pub struct DeviceBody {
@@ -84,7 +84,10 @@ pub async fn sign_out_others(
     sign_out
         .execute(bearer, OffsetDateTime::now_utc())
         .await
-        .map_err(|e| ApiError::internal(anyhow::Error::from(e)))?;
+        .map_err(|e| match e {
+            AuthError::ApprovalRequired(_) => approval_required(),
+            other => ApiError::internal(anyhow::Error::from(other)),
+        })?;
     Ok(StatusCode::NO_CONTENT)
 }
 

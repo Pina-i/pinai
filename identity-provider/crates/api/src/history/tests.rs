@@ -39,15 +39,8 @@ async fn world() -> World {
         laptops,
         laptop,
     };
-    assert_eq!(w.set_key(key_body(1, 1)).await.0, StatusCode::NO_CONTENT);
     w.app
-        .approved_by_words(
-            &w.alice,
-            &w.app.token_in(w.alice.id, w.laptops),
-            w.laptop,
-            1,
-            [2; 32],
-        )
+        .keyed_from(&w.alice, &w.laptop_token(), w.laptop)
         .await;
     w
 }
@@ -100,9 +93,13 @@ impl World {
 
     /// From the laptop's session.
     async fn set_key(&self, body: Value) -> (StatusCode, Value) {
-        let token = self.app.token_in(self.alice.id, self.laptops);
         self.app
-            .call_in(&token, Method::PUT, "/api/history/key", Some(body))
+            .call_in(
+                &self.laptop_token(),
+                Method::PUT,
+                "/api/history/key",
+                Some(body),
+            )
             .await
     }
 
@@ -110,6 +107,17 @@ impl World {
         self.app
             .call(Method::GET, "/api/history/key", Some(self.alice.id), None)
             .await
+    }
+
+    /// `DELETE /api/history/messages` from `token`'s session.
+    async fn clear(&self, token: &str) -> (StatusCode, Value) {
+        self.app
+            .call_in(token, Method::DELETE, "/api/history/messages", None)
+            .await
+    }
+
+    fn laptop_token(&self) -> String {
+        self.app.token_in(self.alice.id, self.laptops)
     }
 
     async fn page(&self, query: &str) -> (StatusCode, Value) {
@@ -286,18 +294,53 @@ async fn clearing_answers_how_many_entries_went() {
     w.upload(json!([entry(&w.group, 1), entry(&w.group, 2)]))
         .await;
 
-    let cleared = w
-        .app
+    let cleared = w.clear(&w.laptop_token()).await;
+
+    assert_eq!(cleared, (StatusCode::OK, json!({ "deleted": 2 })));
+    assert_eq!(w.page("").await.1["entries"], json!([]));
+}
+
+#[tokio::test]
+async fn clearing_takes_an_approved_device_once_the_account_has_a_key() {
+    let w = world().await;
+    w.upload(json!([entry(&w.group, 1)])).await;
+    let (fresh, _) = w.app.on_a_device(w.alice.id).await;
+    let unnamed = w.app.token(w.alice.id);
+
+    let by_the_fresh_one = w.clear(&w.app.token_in(w.alice.id, fresh)).await;
+    let by_the_unnamed = w.clear(&unnamed).await;
+    let kept = w.page("").await.1["entries"].as_array().unwrap().len();
+
+    for refused in [by_the_fresh_one, by_the_unnamed] {
+        assert_eq!(
+            refused,
+            (
+                StatusCode::FORBIDDEN,
+                refusal(
+                    "approval_required",
+                    "This takes a device approved under the current history key"
+                )
+            )
+        );
+    }
+    assert_eq!(kept, 1, "a refusal erases nothing");
+}
+
+#[tokio::test]
+async fn an_account_with_no_history_key_clears_from_any_session() {
+    let alice = account("alice");
+    let app = TestApp::with([alice.clone()], []);
+
+    let cleared = app
         .call(
             Method::DELETE,
             "/api/history/messages",
-            Some(w.alice.id),
+            Some(alice.id),
             None,
         )
         .await;
 
-    assert_eq!(cleared, (StatusCode::OK, json!({ "deleted": 2 })));
-    assert_eq!(w.page("").await.1["entries"], json!([]));
+    assert_eq!(cleared, (StatusCode::OK, json!({ "deleted": 0 })));
 }
 
 #[tokio::test]
@@ -517,15 +560,9 @@ async fn clearing_keeps_the_key() {
     let w = world().await;
     w.upload(json!([entry(&w.group, 1)])).await;
 
-    w.app
-        .call(
-            Method::DELETE,
-            "/api/history/messages",
-            Some(w.alice.id),
-            None,
-        )
-        .await;
+    let (cleared, _) = w.clear(&w.laptop_token()).await;
 
+    assert_eq!(cleared, StatusCode::OK);
     assert_eq!(w.key().await, (StatusCode::OK, held_body(1, 1, w.laptop)));
     assert_eq!(
         w.upload(json!([entry(&w.group, 2)])).await,

@@ -250,6 +250,8 @@ pub enum ArchiveError {
     #[error(transparent)]
     DeviceRequired(#[from] DeviceRequired),
     #[error(transparent)]
+    ApprovalRequired(#[from] ApprovalRequired),
+    #[error(transparent)]
     Unexpected(#[from] anyhow::Error),
 }
 

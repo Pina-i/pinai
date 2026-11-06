@@ -4,13 +4,16 @@
 use std::sync::Arc;
 
 use domain::UserId;
+use domain::auth::Sessions;
 use domain::e2ee::{
-    ArchiveCursor, ArchiveEntry, ArchiveError, Archived, HistoryArchive, HistoryGeneration,
-    HistoryKeys, NewArchiveEntry, StaleHistoryKey, archive_page_size, check_archive_batch,
-    check_history_generation,
+    ArchiveCursor, ArchiveEntry, ArchiveError, Archived, Cleared, DeviceApprovals, HistoryArchive,
+    HistoryGeneration, HistoryKeys, NewArchiveEntry, StaleHistoryKey, archive_page_size,
+    check_archive_batch, check_history_generation, may_act_beyond_the_password,
 };
-use domain::identity::Accounts;
+use domain::identity::{Accounts, Bearer};
 use domain::messaging::Conversations;
+
+use crate::auth::calling_trust;
 
 /// `POST /api/history/messages`: archive a batch sealed under the account's current history key,
 /// for conversations the account is or was in — leaving a group keeps the history one already
@@ -107,19 +110,40 @@ impl ReadArchive {
 }
 
 /// `DELETE /api/history/messages`: Settings → Clear. The key stays, and every device goes on
-/// saving under it.
+/// saving under it. Once the account has a history key, only from an approved device: a device
+/// added later restores from what this erases.
 pub struct ClearArchive {
+    sessions: Arc<dyn Sessions>,
+    approvals: Arc<dyn DeviceApprovals>,
     archive: Arc<dyn HistoryArchive>,
 }
 
 impl ClearArchive {
-    pub fn new(archive: Arc<dyn HistoryArchive>) -> Self {
-        Self { archive }
+    pub fn new(
+        sessions: Arc<dyn Sessions>,
+        approvals: Arc<dyn DeviceApprovals>,
+        archive: Arc<dyn HistoryArchive>,
+    ) -> Self {
+        Self {
+            sessions,
+            approvals,
+            archive,
+        }
     }
 
-    /// How many entries went.
-    pub async fn execute(&self, owner: UserId) -> Result<usize, ArchiveError> {
-        Ok(self.archive.clear(owner).await?)
+    /// How many entries went. The erase happens only under the generation decided on: one set
+    /// since is `Stale`, its entries kept.
+    pub async fn execute(&self, bearer: &Bearer) -> Result<usize, ArchiveError> {
+        let (named, trust) = calling_trust(&*self.sessions, &*self.approvals, bearer).await?;
+        may_act_beyond_the_password(named, &trust)?;
+        // Nothing is archived without a history key.
+        let Some(generation) = trust.current else {
+            return Ok(0);
+        };
+        match self.archive.clear(bearer.user, generation).await? {
+            Cleared::Erased(erased) => Ok(erased),
+            Cleared::Stale => Err(StaleHistoryKey.into()),
+        }
     }
 }
 

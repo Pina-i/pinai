@@ -1,9 +1,9 @@
 use anyhow::Context;
 use domain::e2ee::{
     ApprovalPublicKey, ArchiveCursor, ArchiveEntry, ArchiveError, ArchiveNonce, ArchiveStoreError,
-    Archived, HeldHistoryKey, HistoryArchive, HistoryCheckValue, HistoryGeneration, HistoryKey,
-    HistoryKeys, HistorySalt, KeyGate, KeyReplace, NewArchiveEntry, check_history_generation,
-    may_replace_history_key,
+    Archived, Cleared, HeldHistoryKey, HistoryArchive, HistoryCheckValue, HistoryGeneration,
+    HistoryKey, HistoryKeys, HistorySalt, KeyGate, KeyReplace, NewArchiveEntry,
+    check_history_generation, may_replace_history_key,
 };
 use domain::{DeviceId, UserId};
 use sqlx::{PgConnection, PgPool};
@@ -117,12 +117,22 @@ impl HistoryArchive for PgHistoryArchive {
             .collect::<Result<_, _>>()?)
     }
 
-    async fn clear(&self, owner: UserId) -> Result<usize, ArchiveStoreError> {
-        Ok(erase(
-            &mut *self.pool.acquire().await.context("clear an archive")?,
-            owner,
-        )
-        .await?)
+    async fn clear(
+        &self,
+        owner: UserId,
+        generation: HistoryGeneration,
+    ) -> Result<Cleared, ArchiveStoreError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .context("begin an archive's clear")?;
+        if locked_generation(&mut tx, owner).await? != Some(generation) {
+            return Ok(Cleared::Stale);
+        }
+        let erased = erase(&mut tx, owner).await?;
+        tx.commit().await.context("commit an archive's clear")?;
+        Ok(Cleared::Erased(erased))
     }
 }
 

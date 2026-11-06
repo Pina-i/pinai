@@ -42,7 +42,8 @@ pub(crate) fn device_required() -> ApiError {
 }
 
 /// What only a device approved under the current generation does: revoke an approved device,
-/// read or cancel another device's start over.
+/// read or cancel another device's start over, turn the second factor on, clear the history
+/// backup, sign the other devices out.
 pub(crate) fn approval_required() -> ApiError {
     ApiError::new(
         StatusCode::FORBIDDEN,

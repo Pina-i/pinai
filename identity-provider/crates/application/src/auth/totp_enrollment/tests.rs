@@ -103,87 +103,34 @@ async fn a_confirmation_the_store_fails_part_way_never_leaves_the_factor_on_with
     assert!(consistent(state), "{state:?}");
 }
 
-mod with_a_history_key {
-    use domain::DeviceId;
-    use domain::e2ee::{
-        ApprovalPublicKey, Attestation, DeviceLabel, DeviceRootKey, Devices, HistoryCheckValue,
-        HistoryGeneration, HistoryKey, HistoryKeys, HistorySalt, HpkeKeyWrite,
-    };
-    use domain::identity::Bearer;
+#[tokio::test]
+async fn only_an_approved_device_turns_the_second_factor_on_once_the_account_has_a_key() {
+    let w = world().await;
+    let (laptop, on_the_laptop) = w.on_a_device().await;
+    let (_, on_a_fresh_one) = w.on_a_device().await;
+    w.keyed_from(laptop).await;
+    let unnamed = w.bearer_of(w.alice.id);
 
-    use super::*;
-    use crate::auth::world::World;
+    let fresh_enrolls = w.enroll.execute(&on_a_fresh_one).await;
+    let unnamed_enrolls = w.enroll.execute(&unnamed).await;
+    w.enroll.execute(&on_the_laptop).await.unwrap();
+    let pending = w.factors.pending(w.alice.id).await.unwrap().unwrap();
+    let code = StepAuthenticator::code_at(&pending, now());
+    let fresh_confirms = w.confirm.execute(&on_a_fresh_one, &code, now()).await;
+    let still_off = w.factors.state_of(w.alice.id);
+    let laptop_confirms = w.confirm.execute(&on_the_laptop, &code, now()).await;
 
-    /// A device of Alice's, its root key registered, and a session naming it.
-    async fn on_a_device(w: &World) -> (DeviceId, Bearer) {
-        let device = DeviceId::generate();
-        let attestation = Attestation {
-            root_key: DeviceRootKey::parse(&[1; 32]).unwrap(),
-            signature: vec![1; 64],
-            kid: "key-1".to_owned(),
-            issued_at: now(),
-            expires_at: now() + time::Duration::days(365),
-        };
-        w.devices
-            .attest(
-                w.alice.id,
-                device,
-                &DeviceLabel::unknown(),
-                None,
-                &attestation,
-                &HpkeKeyWrite::Clear,
-            )
-            .await
-            .unwrap();
-        let bearer = w.bearer_of(w.alice.id);
-        w.sessions
-            .link(w.alice.id, bearer.session, device, now())
-            .await
-            .unwrap();
-        (device, bearer)
-    }
-
-    #[tokio::test]
-    async fn only_an_approved_device_turns_the_second_factor_on() {
-        let w = world().await;
-        let first = HistoryKey {
-            generation: HistoryGeneration::FIRST,
-            salt: HistorySalt::parse(&[1; 16]).unwrap(),
-            check_value: HistoryCheckValue::parse(&[1; 32]).unwrap(),
-            approval_public_key: ApprovalPublicKey::parse(&[1; 32]).unwrap(),
-        };
-        let (laptop, on_the_laptop) = on_a_device(&w).await;
-        let (_, on_a_fresh_one) = on_a_device(&w).await;
-        w.archive
-            .replace(w.alice.id, &first, laptop, now())
-            .await
-            .unwrap();
-        w.devices
-            .approved_by_words(w.alice.id, laptop, &first)
-            .await;
-        let unnamed = w.bearer_of(w.alice.id);
-
-        let fresh_enrolls = w.enroll.execute(&on_a_fresh_one).await;
-        let unnamed_enrolls = w.enroll.execute(&unnamed).await;
-        w.enroll.execute(&on_the_laptop).await.unwrap();
-        let pending = w.factors.pending(w.alice.id).await.unwrap().unwrap();
-        let code = StepAuthenticator::code_at(&pending, now());
-        let fresh_confirms = w.confirm.execute(&on_a_fresh_one, &code, now()).await;
-        let still_off = w.factors.state_of(w.alice.id);
-        let laptop_confirms = w.confirm.execute(&on_the_laptop, &code, now()).await;
-
-        for refused in [fresh_enrolls.map(|_| ()), unnamed_enrolls.map(|_| ())] {
-            assert!(
-                matches!(refused, Err(AuthError::ApprovalRequired(_))),
-                "{refused:?}"
-            );
-        }
+    for refused in [fresh_enrolls.map(|_| ()), unnamed_enrolls.map(|_| ())] {
         assert!(
-            matches!(fresh_confirms, Err(AuthError::ApprovalRequired(_))),
-            "{fresh_confirms:?}"
+            matches!(refused, Err(AuthError::ApprovalRequired(_))),
+            "{refused:?}"
         );
-        assert_eq!(still_off, (false, 0, true));
-        assert!(laptop_confirms.is_ok(), "{laptop_confirms:?}");
-        assert!(w.factors.state_of(w.alice.id).0);
     }
+    assert!(
+        matches!(fresh_confirms, Err(AuthError::ApprovalRequired(_))),
+        "{fresh_confirms:?}"
+    );
+    assert_eq!(still_off, (false, 0, true));
+    assert!(laptop_confirms.is_ok(), "{laptop_confirms:?}");
+    assert!(w.factors.state_of(w.alice.id).0);
 }

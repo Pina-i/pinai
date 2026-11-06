@@ -474,8 +474,14 @@ sequenceDiagram
   (`signed_out_elsewhere`, `domain::auth::ending_all_but`): other browsers with their web apps,
   the desktop app, linked to a device or not. This browser's other web apps would sign in again
   through its cookie anyway. Called from the desktop app, it keeps that app session only. The
-  devices stay, and each may sign in again as the same device. `204`; `400` without
-  `keep=current`.
+  devices stay, and each may sign in again as the same device. Once the account has a history
+  key, it takes a session whose device is approved under it
+  (`identity-provider/specs/e2ee.md § 3.12`, "What else takes an approved device"): someone
+  with only the password would otherwise sign the user's devices out at will. Checked in this
+  order: a live session (`401`), a password typed in the last 10 minutes
+  (`401 insufficient_user_authentication`), `keep=current` (`400`), then the approved device
+  (`403 approval_required`, nothing ended); `204`. Without an approved device at hand, what signs
+  every device out is a new password (§ 7, "Changing the password").
 
 ```mermaid
 sequenceDiagram
@@ -505,9 +511,9 @@ taken from it, must not be enough to lock the owner out or erase their history.
 | Action | Route |
 |---|---|
 | Revoke a device — an approved one only from an approved device too (§ "Sessions and devices") | `POST /api/keys/devices/:device_id/revoke` |
-| Sign out every other device | `DELETE /api/sessions?keep=current` |
+| Sign out every other device — from an approved device once the account has a history key (§ "Sessions and devices") | `DELETE /api/sessions?keep=current` |
 | Turn the second factor on — from an approved device once the account has a history key (§ 3) | `POST /api/totp/enroll` |
-| Clear the history backup | `DELETE /api/history/messages` |
+| Clear the history backup — from an approved device once the account has a history key (`identity-provider/specs/e2ee.md § 3.8`) | `DELETE /api/history/messages` |
 | Replace the history key — any generation past the first, which erases the backup (`identity-provider/specs/e2ee.md § 3.6`); from a device not approved, through its matured start over request too (`identity-provider/specs/e2ee.md § 3.12`) | `PUT /api/history/key` |
 | Give a member a password reset link (§ 7) | `POST /api/admin/members/{id}/password-reset` |
 
@@ -750,7 +756,8 @@ same at every start for as long as the key lives, and another one for another ke
   too: whoever holds the phone needs the password to come back.
 - **"Sign out other devices".** Every other browser and app signs in again with the password;
   this browser stays signed in, its other web apps with it. The devices aren't revoked: each comes
-  back as itself.
+  back as itself. Once the account has a history key, only an approved device signs the others
+  out; on any other, a new password does (§ 7, "Changing the password").
 - **Revoking the phone a day after signing in.** The laptop's password is a day old: "Type your
   password again", the login page, and back on Settings → Devices, where revoking it now goes
   through. Within the next 10 minutes, nothing more is asked.
@@ -986,12 +993,11 @@ sequenceDiagram
 **Only an approved device turns the second factor on.** Once the account has a history key
 (`identity-provider/specs/e2ee.md § 3.6`), starting an enrollment and confirming it each take a
 session whose device is approved under the current generation, by the stored approvals'
-structure (`identity-provider/specs/e2ee.md § 3.11`, `domain::e2ee::may_turn_on_second_factor`):
-`403 approval_required` "This takes a device approved under the current history key" otherwise,
-nothing kept. Someone with only the password would otherwise turn it on, sign the user's other
-sessions out, and lock the user's devices out of signing in — and a week without an approved
-device in use lets their start over through (`identity-provider/specs/e2ee.md § 3.12`). An
-account with no history key has no approved device, and turns it on from any session. Turning it
+structure (`identity-provider/specs/e2ee.md § 3.12`, "What else takes an approved device"):
+`403 approval_required` otherwise, nothing kept. Someone with only the password would otherwise
+turn it on and lock the user's devices out of their next sign-in — and a week without an
+approved device in use lets their start over through. An account with no history key has no
+approved device, and turns it on from any session. Turning it
 off and replacing the recovery codes take a current code, as before: whoever can't sign in can't
 give one either.
 
@@ -1509,6 +1515,23 @@ comes one of two ways:
 Either way, setting the password ends every session of the account and signs nobody in: a link
 forwarded by its owner must not sign anyone into the owner's account. Which way it came
 (`ResetBy`) only changes what its page says.
+
+### Changing the password
+
+No app changes the password: a reset link does, and which one an account can have depends on the
+instance and the account.
+
+| Who | How |
+|---|---|
+| Anyone on an open instance, admins included | "Forgot password?" on the sign-in page (§ "Forgot your password?") |
+| A member of an invite-only instance | A reset link an admin makes (§ "The admin API") |
+| An admin of an invite-only instance | No reset link (`409 admin_account`): where the instance is run, through `ADMIN_EMAIL` and `ADMIN_PASSWORD` (§ 4 "Admin access lost"), which creates another admin account and leaves this one, its sessions included, as it is |
+
+A new password set through a link ends every session of the account: that is what signs every
+device out from a device the account's devices haven't approved, which can't sign the others out
+(`identity-provider/specs/e2ee.md § 3.12`, "What else takes an approved device"). The admin's way
+sets no password on the account and ends none of its sessions. Which row applies is public:
+`openRegistrations` in NodeInfo (§ 6 "What the instance tells") and `admin` in `/userinfo` (§ 4).
 
 ### Data model
 

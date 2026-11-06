@@ -1,7 +1,7 @@
 //! Which of the account's devices the instance counts as approved — [`approval_chain`]'s structure
 //! over the stored approvals, identity-provider/specs/e2ee.md § 3.11 — and what that gates on the
 //! instance itself: revoking an approved device, starting over (§ 3.12), turning the second factor
-//! on.
+//! on, clearing the history backup, signing the other devices out.
 
 use crate::DeviceId;
 
@@ -54,7 +54,7 @@ pub struct ApprovalRequired;
 
 /// Whether the session whose device is `by` may revoke `target`, one of the account's: anything
 /// while the account has no history key; otherwise itself, a device not approved, or — from an
-/// approved device only — an approved one. A password alone then signs nothing approved out.
+/// approved device only — an approved one. A password alone then revokes nothing approved.
 pub fn may_revoke(
     target: DeviceId,
     by: Option<DeviceId>,
@@ -63,16 +63,15 @@ pub fn may_revoke(
     if trust.current.is_none() || by == Some(target) || !trust.is_approved(target) {
         return Ok(());
     }
-    if by.is_some_and(|by| trust.is_approved(by)) {
-        return Ok(());
-    }
-    Err(ApprovalRequired)
+    may_act_beyond_the_password(by, trust)
 }
 
-/// Whether a session whose device is `named` may turn the second factor on: with a history key,
-/// only from an approved device — a thief turning it on would lock the user's devices out of
-/// signing in, and a week unused lets a start over through.
-pub fn may_turn_on_second_factor(
+/// Whether a session whose device is `named` may do what a password alone must not: turn the
+/// second factor on, which would lock the user's devices out of signing in until a start over
+/// matures; clear the history backup, which a device added later restores from; sign the other
+/// devices out. With a history key, only from an approved device; with none, no device is approved
+/// and any session may.
+pub fn may_act_beyond_the_password(
     named: Option<DeviceId>,
     trust: &DeviceTrust,
 ) -> Result<(), ApprovalRequired> {

@@ -242,6 +242,21 @@ async fn clearing_an_archive_deletes_its_owners_entries_and_keeps_the_key() {
 }
 
 #[tokio::test]
+async fn a_clear_erases_only_under_the_generation_it_was_decided_on() {
+    let (archive, devices) = history();
+    contract::a_clear_erases_only_under_the_generation_it_was_decided_on(
+        &*archive,
+        &*archive,
+        &devices,
+        &devices,
+        UserId::generate(),
+        UserId::generate(),
+        ConversationId::generate(),
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn an_upload_is_stored_only_under_the_current_generation() {
     let (archive, devices) = history();
     contract::an_upload_is_stored_only_under_the_current_generation(

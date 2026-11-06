@@ -44,12 +44,7 @@ async fn world() -> World {
         app.token_in(alice.id, laptop_session),
         app.token_in(alice.id, fresh_session),
     );
-    let (set, body) = app
-        .call_in(&laptops, Method::PUT, "/api/history/key", Some(key_body(1)))
-        .await;
-    assert_eq!(set, StatusCode::NO_CONTENT, "{body}");
-    app.approved_by_words(&alice, &laptops, laptop, 1, [2; 32])
-        .await;
+    app.keyed_from(&alice, &laptops, laptop).await;
     World {
         app,
         alice,

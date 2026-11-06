@@ -1,9 +1,11 @@
 use std::sync::Arc;
 
+use domain::auth::testing::InMemorySessions;
 use domain::e2ee::testing::{InMemoryArchive, InMemoryKeyDirectory};
 use domain::e2ee::{
-    ApprovalPublicKey, ArchiveNonce, Attestation, BatchSize, DeviceLabel, DeviceRootKey, Devices,
-    HistoryCheckValue, HistoryKey, HistorySalt, HpkeKeyWrite, KeyReplace, StaleHistoryKey,
+    ApprovalPublicKey, ApprovalRequired, ArchiveNonce, ArchiveStoreError, Attestation, BatchSize,
+    DeviceLabel, DeviceRootKey, Devices, HistoryCheckValue, HistoryKey, HistorySalt, HpkeKeyWrite,
+    KeyReplace, StaleHistoryKey,
 };
 use domain::identity::Account;
 use domain::identity::testing::{InMemoryAccounts, account};
@@ -20,8 +22,12 @@ struct World {
     left: ConversationId,
     elsewhere: ConversationId,
     archive: Arc<InMemoryArchive>,
+    devices: Arc<InMemoryKeyDirectory>,
+    sessions: Arc<InMemorySessions>,
     /// Alice's device, approved under the first generation: it may set the next.
     laptop: DeviceId,
+    /// A session of Alice's naming her laptop.
+    on_the_laptop: Bearer,
     store: ArchiveMessages,
     read: ReadArchive,
     clear: ClearArchive,
@@ -68,7 +74,8 @@ async fn world() -> World {
         .await
         .unwrap();
     let archive = Arc::new(InMemoryArchive::default());
-    let devices = InMemoryKeyDirectory::keyed_by(archive.clone());
+    let devices = Arc::new(InMemoryKeyDirectory::keyed_by(archive.clone()));
+    let sessions = Arc::new(InMemorySessions::default());
     let laptop = DeviceId::generate();
     for owner in [alice.id, bob.id] {
         let device = if owner == alice.id {
@@ -76,23 +83,7 @@ async fn world() -> World {
         } else {
             DeviceId::generate()
         };
-        devices
-            .attest(
-                owner,
-                device,
-                &DeviceLabel::unknown(),
-                None,
-                &Attestation {
-                    root_key: DeviceRootKey::parse(&[1; 32]).unwrap(),
-                    signature: vec![1; 64],
-                    kid: "key-1".to_owned(),
-                    issued_at: time::OffsetDateTime::now_utc(),
-                    expires_at: time::OffsetDateTime::now_utc() + time::Duration::days(365),
-                },
-                &HpkeKeyWrite::Clear,
-            )
-            .await
-            .unwrap();
+        registered(&devices, owner, device).await;
         archive
             .replace(
                 owner,
@@ -106,6 +97,7 @@ async fn world() -> World {
             .approved_by_words(owner, device, &history_key(1))
             .await;
     }
+    let on_the_laptop = naming(&sessions, alice.id, laptop).await;
     World {
         store: ArchiveMessages::new(
             Arc::new(InMemoryAccounts::with([alice.clone(), bob.clone(), carol])),
@@ -114,15 +106,63 @@ async fn world() -> World {
             archive.clone(),
         ),
         read: ReadArchive::new(archive.clone()),
-        clear: ClearArchive::new(archive.clone()),
+        clear: ClearArchive::new(sessions.clone(), devices.clone(), archive.clone()),
         alice,
         bob,
         dm,
         left,
         elsewhere,
         archive,
+        devices,
+        sessions,
         laptop,
+        on_the_laptop,
     }
+}
+
+async fn registered(devices: &InMemoryKeyDirectory, owner: UserId, device: DeviceId) {
+    devices
+        .attest(
+            owner,
+            device,
+            &DeviceLabel::unknown(),
+            None,
+            &Attestation {
+                root_key: DeviceRootKey::parse(&[1; 32]).unwrap(),
+                signature: vec![1; 64],
+                kid: "key-1".to_owned(),
+                issued_at: time::OffsetDateTime::now_utc(),
+                expires_at: time::OffsetDateTime::now_utc() + time::Duration::days(365),
+            },
+            &HpkeKeyWrite::Clear,
+        )
+        .await
+        .unwrap();
+}
+
+/// A live session of `owner`'s, naming no device.
+fn session_of(sessions: &InMemorySessions, owner: UserId) -> Bearer {
+    let now = time::OffsetDateTime::now_utc();
+    Bearer {
+        user: owner,
+        session: sessions.live_at(owner, now),
+        authenticated_at: now,
+    }
+}
+
+/// The same, naming `device`.
+async fn naming(sessions: &InMemorySessions, owner: UserId, device: DeviceId) -> Bearer {
+    let bearer = session_of(sessions, owner);
+    sessions
+        .link(
+            owner,
+            bearer.session,
+            device,
+            time::OffsetDateTime::now_utc(),
+        )
+        .await
+        .unwrap();
+    bearer
 }
 
 fn entry(conversation: ConversationId, byte: u8) -> NewArchiveEntry {
@@ -263,10 +303,132 @@ async fn clearing_empties_the_callers_archive() {
         .await
         .unwrap();
 
-    let cleared = w.clear.execute(w.alice.id).await.unwrap();
+    let cleared = w.clear.execute(&w.on_the_laptop).await.unwrap();
 
     assert_eq!(cleared, 2);
     assert_eq!(w.archive.page(w.bob.id, None, 10).await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn only_an_approved_device_clears_once_the_account_has_a_key() {
+    let w = world().await;
+    w.store
+        .execute(w.alice.id, generation(1), vec![entry(w.dm, 1)])
+        .await
+        .unwrap();
+    let fresh = DeviceId::generate();
+    registered(&w.devices, w.alice.id, fresh).await;
+    let on_the_fresh_one = naming(&w.sessions, w.alice.id, fresh).await;
+    let unnamed = session_of(&w.sessions, w.alice.id);
+
+    let by_the_fresh_one = w.clear.execute(&on_the_fresh_one).await;
+    let by_the_unnamed = w.clear.execute(&unnamed).await;
+    let kept = w.archive.page(w.alice.id, None, 10).await.unwrap().len();
+    let by_the_laptop = w.clear.execute(&w.on_the_laptop).await;
+
+    for refused in [by_the_fresh_one, by_the_unnamed] {
+        assert!(
+            matches!(
+                refused,
+                Err(ArchiveError::ApprovalRequired(ApprovalRequired))
+            ),
+            "{refused:?}"
+        );
+    }
+    assert_eq!(kept, 1, "a refusal erases nothing");
+    assert_eq!(by_the_laptop.unwrap(), 1);
+}
+
+/// The archive as a replacement landing between the clear's decision and its erase leaves it: the
+/// next generation set, and `saved` archived under it.
+struct ReplacedMeanwhile {
+    inner: Arc<InMemoryArchive>,
+    laptop: DeviceId,
+    saved: NewArchiveEntry,
+}
+
+#[async_trait::async_trait]
+impl HistoryArchive for ReplacedMeanwhile {
+    async fn store(
+        &self,
+        owner: UserId,
+        generation: HistoryGeneration,
+        entries: &[NewArchiveEntry],
+    ) -> Result<Archived, ArchiveStoreError> {
+        self.inner.store(owner, generation, entries).await
+    }
+
+    async fn page(
+        &self,
+        owner: UserId,
+        after: Option<ArchiveCursor>,
+        limit: usize,
+    ) -> Result<Vec<ArchiveEntry>, ArchiveStoreError> {
+        self.inner.page(owner, after, limit).await
+    }
+
+    async fn clear(
+        &self,
+        owner: UserId,
+        generation: HistoryGeneration,
+    ) -> Result<Cleared, ArchiveStoreError> {
+        let now = time::OffsetDateTime::now_utc();
+        self.inner
+            .replace(owner, &history_key(2), self.laptop, now)
+            .await
+            .unwrap();
+        self.inner
+            .store(
+                owner,
+                history_key(2).generation,
+                std::slice::from_ref(&self.saved),
+            )
+            .await
+            .unwrap();
+        self.inner.clear(owner, generation).await
+    }
+}
+
+#[tokio::test]
+async fn a_clear_erases_nothing_of_a_generation_set_since_it_was_decided() {
+    let w = world().await;
+    w.store
+        .execute(w.alice.id, generation(1), vec![entry(w.dm, 1)])
+        .await
+        .unwrap();
+    let saved = entry(w.dm, 2);
+    let clear = ClearArchive::new(
+        w.sessions.clone(),
+        w.devices.clone(),
+        Arc::new(ReplacedMeanwhile {
+            inner: w.archive.clone(),
+            laptop: w.laptop,
+            saved: saved.clone(),
+        }),
+    );
+
+    let cleared = clear.execute(&w.on_the_laptop).await;
+
+    assert!(
+        matches!(cleared, Err(ArchiveError::Stale(StaleHistoryKey))),
+        "{cleared:?}"
+    );
+    let left = w.archive.page(w.alice.id, None, 10).await.unwrap();
+    assert_eq!(
+        left.iter().map(|e| e.id).collect::<Vec<_>>(),
+        vec![saved.id],
+        "the new generation's entry stays"
+    );
+}
+
+#[tokio::test]
+async fn an_account_with_no_history_key_clears_from_any_session() {
+    let w = world().await;
+    let carol = UserId::generate();
+
+    let cleared = w.clear.execute(&session_of(&w.sessions, carol)).await;
+
+    assert_eq!(cleared.unwrap(), 0);
 }
 
 #[tokio::test]
@@ -319,7 +481,7 @@ async fn clearing_keeps_the_key_and_the_next_upload_is_saved_under_it() {
         .await
         .unwrap();
 
-    w.clear.execute(w.alice.id).await.unwrap();
+    w.clear.execute(&w.on_the_laptop).await.unwrap();
     let after = w
         .store
         .execute(w.alice.id, generation(1), vec![entry(w.dm, 2)])
