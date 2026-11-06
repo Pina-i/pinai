@@ -3,7 +3,8 @@ use domain::e2ee::{
     ApprovalBy, ApprovalFacts, ApprovalMessageBody, ApprovalPublicKey, ApprovalRequest,
     ApprovalRequests, Approve, Attestation, CheckedApproval, Device, DeviceApprovals, DeviceLabel,
     DeviceRootKey, Devices, HistoryCheckValue, HistoryGeneration, HistoryKey, HistoryKeys,
-    HistorySalt, HpkeKeyWrite, Opened, Post, RequestRefusal, approval_bytes, may_approve,
+    HistorySalt, HpkeKeyWrite, KeyReplace, Opened, Post, RequestRefusal, approval_bytes,
+    may_approve,
 };
 use domain::identity::ActorUri;
 use domain::{DeviceId, UserId};
@@ -427,9 +428,15 @@ async fn a_passphrase_approval_racing_a_new_generation_is_never_kept(pool: PgPoo
 
     for _ in 0..10 {
         let alice = a_user(&pool).await;
-        let laptop = a_device(&devices, alice, 1).await;
+        let (laptop, phone) = (
+            a_device(&devices, alice, 1).await,
+            a_device(&devices, alice, 2).await,
+        );
         let first = history_key(1, 1);
-        keys.replace(alice, &first, laptop, time::OffsetDateTime::now_utc())
+        keys.replace(alice, &first, phone, now()).await.unwrap();
+        // Approved: an unapproved setter is refused, and the approval rightly stays.
+        approvals
+            .approve(alice, &by_passphrase(&devices, phone, &first).await)
             .await
             .unwrap();
         let checked = by_passphrase(&devices, laptop, &first).await;
@@ -437,12 +444,22 @@ async fn a_passphrase_approval_racing_a_new_generation_is_never_kept(pool: PgPoo
 
         let (approved, replaced) = tokio::join!(
             approvals.approve(alice, &checked),
-            keys.replace(alice, &second, laptop, time::OffsetDateTime::now_utc()),
+            keys.replace(alice, &second, phone, now()),
         );
-        approved.unwrap();
-        replaced.unwrap();
+        let replaced = replaced.unwrap();
 
-        assert_eq!(approvals_of(&approvals, alice, laptop).await, 0);
+        assert!(
+            matches!(replaced, KeyReplace::Replaced { .. }),
+            "{replaced:?}"
+        );
+        let held = approvals_of(&approvals, alice, laptop).await;
+        match approved.unwrap() {
+            Approve::Recorded { .. } => {
+                assert_eq!(held, 0, "written, then dropped with generation 1")
+            }
+            Approve::Stale => assert_eq!(held, 0, "refused under generation 2"),
+            Approve::AlreadyHeld => panic!("approved once"),
+        }
     }
 }
 
