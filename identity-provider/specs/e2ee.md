@@ -541,11 +541,13 @@ session.
 **A device saves once it is approved.** A device keeps its words, then approves itself with them
 — the first device once generation 1 is set, words typed, a share from its partner, a start over,
 a replacement — and saves nothing until that approval by the passphrase has landed and it has
-reported the generation: what it decrypts meanwhile waits, unsealed and in memory. An approval
-that fails is tried again at the device's next check of the key — at each start, as it moves
-through the app, and when its socket comes back —, so nothing is lost while the app stays open. A
-refusal (`403 approval_required`) keeps the batch, and the device sends nothing more until a
-check of the key or a `device_approved` push, never on a timer. A re-archive (§ 6.12) waits the
+reported the generation, stricter than the instance, which also takes a device approved by an
+approved device: what it decrypts meanwhile waits, unsealed and in memory, 1000 entries at most,
+the oldest dropped. An approval that fails is tried again at the device's next check of the key —
+at each start, as it moves through the app, and when its socket comes back —, so nothing is lost
+while the app stays open. A refusal (`403 approval_required`) keeps the batch, and the device
+sends nothing more until a check of the key or a `device_approved` push, never on a timer; one
+landing while the refusal was on its way leaves nothing held. A re-archive (§ 6.12) waits the
 same way, paused at its cursor with nothing skipped, and starts again at each start and when the
 socket comes back. What waited in memory is lost to the archive if the app closes or reloads
 first, as entries waiting on a stale key are: the device keeps those messages, and a device added
