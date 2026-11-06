@@ -80,12 +80,18 @@ impl World {
         self.upload_under(1, entries).await
     }
 
+    /// From the laptop's session.
     async fn upload_under(&self, generation: i64, entries: Value) -> (StatusCode, Value) {
+        self.upload_in(&self.laptop_token(), generation, entries)
+            .await
+    }
+
+    async fn upload_in(&self, token: &str, generation: i64, entries: Value) -> (StatusCode, Value) {
         self.app
-            .call(
+            .call_in(
+                token,
                 Method::POST,
                 "/api/history/messages",
-                Some(self.alice.id),
                 Some(json!({ "generation": generation, "entries": entries })),
             )
             .await
@@ -327,6 +333,36 @@ async fn clearing_takes_an_approved_device_once_the_account_has_a_key() {
 }
 
 #[tokio::test]
+async fn an_upload_takes_an_approved_device_once_the_account_has_a_key() {
+    let w = world().await;
+    let (fresh, _) = w.app.on_a_device(w.alice.id).await;
+    let unnamed = w.app.token(w.alice.id);
+    let batch = json!([entry(&w.group, 1)]);
+
+    let by_the_fresh_one = w
+        .upload_in(&w.app.token_in(w.alice.id, fresh), 1, batch.clone())
+        .await;
+    let by_the_unnamed = w.upload_in(&unnamed, 1, batch.clone()).await;
+    let stored = w.page("").await.1["entries"].as_array().unwrap().len();
+    let by_the_laptop = w.upload(batch).await;
+
+    for refused in [by_the_fresh_one, by_the_unnamed] {
+        assert_eq!(
+            refused,
+            (
+                StatusCode::FORBIDDEN,
+                refusal(
+                    "approval_required",
+                    "This takes a device approved under the current history key"
+                )
+            )
+        );
+    }
+    assert_eq!(stored, 0, "a refusal stores nothing");
+    assert_eq!(by_the_laptop, (StatusCode::OK, json!({ "inserted": 1 })));
+}
+
+#[tokio::test]
 async fn an_account_with_no_history_key_clears_from_any_session() {
     let alice = account("alice");
     let app = TestApp::with([alice.clone()], []);
@@ -530,6 +566,9 @@ async fn a_later_generation_asks_for_the_password_again_and_then_erases_the_arch
 async fn an_upload_under_any_generation_but_the_current_one_is_stale() {
     let w = world().await;
     w.set_key(key_body(2, 2)).await;
+    w.app
+        .approved_by_words(&w.alice, &w.laptop_token(), w.laptop, 2, [3; 32])
+        .await;
 
     let replaced = w.upload_under(1, json!([entry(&w.group, 1)])).await;
     let ahead = w.upload_under(3, json!([entry(&w.group, 1)])).await;
@@ -575,6 +614,7 @@ async fn the_archive_needs_a_signed_in_user() {
     let w = world().await;
 
     for (method, uri) in [
+        (Method::POST, "/api/history/messages"),
         (Method::GET, "/api/history/messages"),
         (Method::DELETE, "/api/history/messages"),
         (Method::GET, "/api/history/key"),

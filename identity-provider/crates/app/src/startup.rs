@@ -1159,7 +1159,8 @@ impl Application {
             archive_messages: Arc::new(application::e2ee::ArchiveMessages::new(
                 Arc::clone(&accounts),
                 Arc::clone(&conversations),
-                Arc::clone(&history_keys),
+                Arc::clone(&sessions),
+                Arc::clone(&approvals),
                 Arc::clone(&archive),
             )),
             read_archive: Arc::new(application::e2ee::ReadArchive::new(Arc::clone(&archive))),

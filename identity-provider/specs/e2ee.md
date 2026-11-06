@@ -101,7 +101,7 @@ rows below that name the instance don't hold ("What is not protected").
 | Someone with only the password signs the user's devices out for good | An approved device is revoked only from an approved device (§ 3.12): a device nobody approved revokes only devices nobody approved, and itself |
 | Someone with only the password speaks as one of the user's devices | A session speaks only for a device whose root key it holds: naming a device on a session takes that key's signature over the session, and so does giving the device another root key, which would drop its approvals (`identity-provider/specs/auth.md § 1`, "Sessions and devices") |
 | Someone with only the password turns the second factor on, to lock the user's devices out of signing in until a start over matures | Once the account has a history key, only an approved device turns it on (`identity-provider/specs/auth.md § 3`) |
-| Someone with only the password erases the history backup a device added later restores from, or signs the user's devices out | Once the account has a history key, only an approved device clears the backup (§ 3.8) or signs the other devices out (`identity-provider/specs/auth.md § 1`, "Sessions and devices") |
+| Someone with only the password erases the history backup a device added later restores from, fills it ahead of the user's devices, or signs the user's devices out | Once the account has a history key, only an approved device saves to the backup or clears it (§ 3.8), or signs the other devices out (`identity-provider/specs/auth.md § 1`, "Sessions and devices") |
 | A device is lost or stolen | Revoke it from an approved device — MLS Remove commits leave it out of every later epoch, the approvals it signed and the key shares it sent or was sent are dropped, the directory hands out no KeyPackage of it (§ 6.6) — and, if it held the 24 words, replace them from one of the user's devices holding them (§ 6.12): only a new generation cuts its words off |
 | A member removed from a group, or gone from it, keeps reading | Every device of theirs is committed out by MLS Remove commits (§ 6.8): nothing sent from the next epoch on decrypts for them, whatever reaches them |
 | Replay / reorder / forging by transport | MLS application-message authentication + epoch ordering — handled inside the protocol |
@@ -139,14 +139,14 @@ rows below that name the instance don't hold ("What is not protected").
   said to be its own while it set none.
 - **Someone with only the password.** Their device is announced and kept out of the existing
   conversations and the passphrase. It speaks for no device of the user's — naming one takes its
-  root key —, turns no second factor on, erases no history backup, and signs out none of the
-  user's approved devices but through a browser they share: it can't sign the other devices out
-  nor revoke an approved one, yet it still revokes the devices nobody approved — a new device
-  waiting for its approval, the devices from before a start over —, a web app's with its browser
-  and that browser's other web apps, an approved one's included (§ 3.12). Their device still gets
-  into the conversations contacts open with the user from then on (above). A start over from it
-  is only a request: every approved device is told and may cancel it, and it waits while any
-  approved device is in use (§ 3.12). What that leaves:
+  root key —, turns no second factor on, saves nothing to the history backup and erases nothing
+  of it, and signs out none of the user's approved devices but through a browser they share: it
+  can't sign the other devices out nor revoke an approved one, yet it still revokes the devices
+  nobody approved — a new device waiting for its approval, the devices from before a start
+  over —, a web app's with its browser and that browser's other web apps, an approved one's
+  included (§ 3.12). Their device still gets into the conversations contacts open with the user
+  from then on (above). A start over from it is only a request: every approved device is told and
+  may cancel it, and it waits while any approved device is in use (§ 3.12). What that leaves:
   - **An account none of whose approved devices is used for 7 days** — lost, or simply left
     alone. The thief's request matures: their device becomes the account's root of trust, the
     existing conversations out of the user's reach. The way back is a password reset
@@ -157,14 +157,6 @@ rows below that name the instance don't hold ("What is not protected").
     signed in at that moment; the others learn of it when they next load (§ 3.12). A device
     signed out, for whatever reason, is told once the user signs in on it again, which is a use
     and pushes the request a week further.
-  - **An archive filled ahead of the user's devices.** An upload keeps the first entry stored
-    under each message id (§ 5, `POST /api/history/messages`). With a session, they read the
-    current generation and the conversations' message ids, and upload entries of their own under
-    those ids first: the user's devices' entries for the same messages are then stored nowhere,
-    and a device added later restores nothing of those messages — what it finds opens under no
-    key it holds. It bites hardest right after a replacement of the words or a start over, which
-    leaves the archive empty for the devices to fill again, and for messages that arrive while
-    every device of the user's is offline. The devices that read the messages keep them.
   - **An account that lost every device.** The user's new device is not approved either, so the
     thief may revoke it, which cancels its request, and race it to the next generation once their
     own request matures. A password change ends the thief's sessions, after which the user's
@@ -535,12 +527,29 @@ ids it was sealed with: one the instance moved to another conversation or messag
   upload's is: a new generation set in between makes it `409 stale_history_key`, and what was
   saved under that one stays.
 
-**Clearing takes an approved device** once the account has a history key (§ 3.12, "What else
-takes an approved device"): the backup is what a device added later restores. The decision reads
-the account's devices, approvals and generation; the erase then checks the generation only, so a
-device revoked in between, approved when the clear was decided, still erases — as it would have a
-moment earlier. An account with no history key has nothing archived, and its clear erases
-nothing, from any session.
+**Saving and clearing take an approved device** once the account has a history key (§ 3.12,
+"What else takes an approved device"): the backup is what a device added later restores, and the
+first entry stored under a message id is the one kept — one saved first from a session with only
+the password would leave the user's devices' entries for that message stored nowhere. Each
+decision reads the account's devices, approvals and generation together; the write then checks
+the generation only, under the key's row lock — what that leaves to a device revoked in between
+is in § 3.12, "Races". An upload's generation is checked before its device: a device that missed
+a new generation is told `409 stale_history_key`, and reads the key again, before anything else.
+An account with no history key has nothing archived, and its clear erases nothing, from any
+session.
+
+**A device saves once it is approved.** A device keeps its words, then approves itself with them
+— the first device once generation 1 is set, words typed, a share from its partner, a start over,
+a replacement — and saves nothing until that approval by the passphrase has landed and it has
+reported the generation: what it decrypts meanwhile waits, unsealed and in memory. An approval
+that fails is tried again at the device's next check of the key — at each start, as it moves
+through the app, and when its socket comes back —, so nothing is lost while the app stays open. A
+refusal (`403 approval_required`) keeps the batch, and the device sends nothing more until a
+check of the key or a `device_approved` push, never on a timer. A re-archive (§ 6.12) waits the
+same way, paused at its cursor with nothing skipped, and starts again at each start and when the
+socket comes back. What waited in memory is lost to the archive if the app closes or reloads
+first, as entries waiting on a stale key are: the device keeps those messages, and a device added
+later restores none of them.
 
 ### 3.9 Approvals
 
@@ -549,8 +558,8 @@ device of the account approves it, or once the passphrase is typed on it. The in
 lists the approvals and refuses malformed ones, but never decides whom to trust: each device checks
 them itself. It reads their structure (§ 3.11) for what it does itself, never for what a device
 decides: a key share, which it refuses to and from a device that isn't approved, and from a device
-that didn't approve its recipient; revoking an approved device, starting the history over and
-turning the second factor on, which take an approved device (§ 3.12) — a backstop behind each
+that didn't approve its recipient; revoking an approved device, starting the history over, and
+the actions § 3.12 lists under "What else takes an approved device" — a backstop behind each
 device's check, never one in its place.
 
 **An approval** is an Ed25519 signature over the `PINAI-DEVICE-APPROVAL-v1` canonical bytes of
@@ -1054,32 +1063,33 @@ approved device, and any of its devices revokes any other. The recent password s
 `domain::e2ee::may_revoke` decides it on the account's devices, approvals and generation as they
 stand under the devices' row locks.
 
-**What else takes an approved device.** Once the account has a history key, three actions a
-password alone would turn against the user's devices take a session whose device is approved
+**What else takes an approved device.** Once the account has a history key, these actions, which
+a password alone would turn against the user's devices, take a session whose device is approved
 under the current generation, by one rule, `domain::e2ee::may_act_beyond_the_password`:
 
 - turning the second factor on (`identity-provider/specs/auth.md § 3`), which would lock the
   user's devices out of their next sign-in;
-- clearing the history backup (§ 3.8), which a device added later restores from;
+- saving to the history backup or clearing it (§ 3.8), which a device added later restores from;
 - signing the other devices out (`identity-provider/specs/auth.md § 1`, "Sessions and devices").
 
 A device not approved, or a session that named none, is refused `403 approval_required` "This
-takes a device approved under the current history key", and nothing is done. The recent password
-each asks is checked first. An account with no history key has no approved device, and does all
-three from any session. Without an approved device at hand, what signs every device out is a new
-password, the way the instance gives one (`identity-provider/specs/auth.md § 7`, "Changing the
-password").
+takes a device approved under the current history key", and nothing is done. What each checks
+before is its own: the recent password the second factor, the clear and the sign-out ask; an
+upload's generation (§ 3.8). An account with no history key has no approved device: any session
+turns the second factor on, clears the backup and signs the others out; an upload is answered as
+§ 3.8 says. Without an approved device at hand, what signs every device out is a new password,
+the way the instance gives one (`identity-provider/specs/auth.md § 7`, "Changing the password").
 
 **What it holds against.** A thief with the password asks: the user's devices are told, and one tap
 cancels it; while the user uses any approved device, it never matures. Revoking the approved
 devices first is refused. Speaking as an approved device is too: naming a device on a session takes
 its root key's signature over that session, and so does giving it another root key
 (`identity-provider/specs/auth.md § 1`, "Sessions and devices"). So are turning the second
-factor on, clearing the backup and signing the other devices out (above). A device signed out
-keeps its last uses, and the user signing in again on it uses it. What it doesn't hold against:
-an account none of whose approved devices is used for 7 days, and the instance, which keeps this
-rule and could set a generation or revoke a device as it likes (§ 2) — its own reset is still
-caught by the devices (§ 3.9).
+factor on, saving to the backup or clearing it, and signing the other devices out (above). A
+device signed out keeps its last uses, and the user signing in again on it uses it. What it
+doesn't hold against: an account none of whose approved devices is used for 7 days, and the
+instance, which keeps this rule and could set a generation or revoke a device as it likes (§ 2)
+— its own reset is still caught by the devices (§ 3.9).
 
 **Races.** Every write takes the rows it decides on in one order — the history key's row, the
 devices', the account's, then the request's —, so these queue:
@@ -1107,6 +1117,10 @@ devices', the account's, then the request's —, so these queue:
   erases first — the replacement then finds nothing left — or finds the new generation and is
   `409 stale_history_key`, what was saved under it kept. The clear locks no device: one revoked
   after the clear was decided still erases, as it would have a moment earlier.
+- **An upload and a revoke.** The upload is decided on the devices and approvals as read, and its
+  write takes the generation's share lock only: a device revoked after its upload was decided — or
+  no longer approved, its approver revoked — still saves that batch, as it would have a moment
+  earlier, and its next upload is refused. A revoke erases nothing of the archive either way.
 - **A sign-out and the sessions it ends.** It is decided on the devices and approvals as read,
   then ends the account's sessions as they stand under the account's lock: a session opened in
   between — a sign-in elsewhere — ends with the others, as it would have a moment later, and a
@@ -1340,7 +1354,7 @@ and they hold for what peers deliver as much as for local clients.
 | `POST /api/history/start-over` | No body. From a session that named its device (`403 device_required`), unrevoked (`403`), with a DRK (`409 no_root_key`), on an account with a history key (`409 no_history_key`), the device not approved under it (`409 already_approved`): it asks to set the next generation (§ 3.12). `201 { id, created_at, ready_at }`; the same device asking while its request is open gets it back, `200`; another device's open request is `409 start_over_pending`; 3 an account a day (`429 too_many_requests`). Pushes `start_over_requested { request_id, device_id, display_name, ready_at }` to the approved devices' sessions |
 | `GET /api/history/start-over` | The account's open request, for its device and for the approved devices (`403 approval_required` for any other, its own ended request or not); with none open, the device's own latest one, until it is deleted: `{ id, device_id, display_name, created_at, ready_at, ended }` — `device_id` the device asking, `ready_at` as of now, `ended` `{ reason, at }` or `null` while open. `404` when there is none of either (§ 3.12) |
 | `DELETE /api/history/start-over/:id` | No recent password. A device approved under the generation it would replace cancels it; the device asking withdraws it; any other `403 approval_required` — decided again under the request's lock. `204`, and `start_over_cancelled { request_id, reason }` to the sessions of the device asking and of the approved devices. One ended `410 start_over_ended`; another account's or unknown `404`. Ended requests are deleted a week after they ended |
-| `POST /api/history/messages` | `{ generation, entries }`: a batch of 1 to 50 entries (`400` otherwise; a nonce is 12 bytes), sealed under `generation` — the current one only (`409 stale_history_key`, also while none is set; § 3.8). Every `conversation_id` must be one the caller is or was a member of — leaving a group keeps the history already read — or the batch is refused whole (`403`). Idempotent upsert on `(user_id, id)` — first decryptor of a message wins; subsequent uploads from the user's other devices no-op. Answers `{ inserted }`, how many were new |
+| `POST /api/history/messages` | `{ generation, entries }`: a batch of 1 to 50 entries (`400` otherwise; a nonce is 12 bytes), sealed under `generation` — the current one only (`409 stale_history_key`, also while none is set; § 3.8). Then from a session whose device is approved under it (`403 approval_required`, nothing stored; § 3.12, "What else takes an approved device"). Every `conversation_id` must be one the caller is or was a member of — leaving a group keeps the history already read — or the batch is refused whole (`403`). Idempotent upsert on `(user_id, id)` — the first entry stored under a message id stays; the user's other devices' uploads of it no-op. No recent password. Answers `{ inserted }`, how many were new |
 | `GET /api/history/messages?after_id=&after_created_at=&limit=` | Keyset pagination over `(created_at DESC, id DESC)`, limit clamped 1..=500, default 100. `next_cursor` names the page's last entry, and is `null` only on an empty page; `after_id` and `after_created_at` (RFC 3339) go together (`400`) |
 | `DELETE /api/history/messages` | Erase the user's archive: Settings → Devices → Clear history backup. The history key and its generation stay: every device goes on saving under it. Takes a password typed in the last 10 minutes (`identity-provider/specs/auth.md § 1`, "Sensitive actions") and, once the account has a history key, a session whose device is approved under it (`403 approval_required`; § 3.12, "What else takes an approved device"). Erases only under the generation it was decided on: one set since is `409 stale_history_key`, and what was saved under it stays (§ 3.8). An account with no history key erases nothing. Answers `{ deleted }`, how many entries went |
 | `POST /api/history/key-shares` | `{ recipient_device_id, generation, enc, ciphertext, signature }` — `enc` 32 bytes, `ciphertext` 1 to 1024, `signature` 64, standard base64 (`400` otherwise): the session's device shares the passphrase of `generation` with `recipient_device_id`, sealed for its HPKE key and signed by the sender's DRK over the `PINAI-HISTORY-SHARE-v1` bytes of § 7.2 (§ 3.11). From a session that named its device, the sender; under the current generation, which the sender holds and is approved under; to another unrevoked device of the account with an HPKE key, approved under it, approved by the sender itself (`by: "device"`, over the root key it holds), and not holding it. `204`; a share held already for the recipient and generation — this one or another approver's — is kept and answered `204` too. Only a new share pushes `history_key_ready { device_id }` to the recipient device's sessions |
@@ -1355,7 +1369,7 @@ and they hold for what peers deliver as much as for local clients.
 | A generation past the first, the password not typed in the last 10 minutes | `401` | `insufficient_user_authentication` |
 | A generation past the first from a device not approved, with no open request of its own | `403` | `start_over_required` |
 | The same, its request not matured yet | `403` | `start_over_not_ready`, with `ready_at` |
-| Reading another device's request, or ending it, from a device not approved; revoking an approved device, or clearing the backup, from a device not approved or a session naming none | `403` | `approval_required` |
+| Reading another device's request, or ending it, from a device not approved; revoking an approved device, or saving to the backup or clearing it, from a device not approved or a session naming none | `403` | `approval_required` |
 | Asking to start over on an account with no history key | `409` | `no_history_key` |
 | Asking to start over from an approved device | `409` | `already_approved` |
 | Asking while another device's request is open | `409` | `start_over_pending` |
@@ -2094,7 +2108,7 @@ sequenceDiagram
     I-->>X: 403 start_over_not_ready {ready_at}
     X->>I: POST /api/keys/devices/:L/revoke
     I-->>X: 403 approval_required
-    X->>I: DELETE /api/history/messages · DELETE /api/sessions?keep=current
+    X->>I: POST · DELETE /api/history/messages · DELETE /api/sessions?keep=current
     I-->>X: 403 approval_required, each
     Note over L: "Someone asked to start your history over from Chrome on Windows" — "Cancel — it wasn't me"
     L->>I: DELETE /api/history/start-over/:id — no password asked

@@ -7,8 +7,8 @@ use domain::UserId;
 use domain::auth::Sessions;
 use domain::e2ee::{
     ArchiveCursor, ArchiveEntry, ArchiveError, Archived, Cleared, DeviceApprovals, HistoryArchive,
-    HistoryGeneration, HistoryKeys, NewArchiveEntry, StaleHistoryKey, archive_page_size,
-    check_archive_batch, check_history_generation, may_act_beyond_the_password,
+    HistoryGeneration, NewArchiveEntry, StaleHistoryKey, archive_page_size, check_archive_batch,
+    check_history_generation, may_act_beyond_the_password,
 };
 use domain::identity::{Accounts, Bearer};
 use domain::messaging::Conversations;
@@ -17,11 +17,13 @@ use crate::auth::calling_trust;
 
 /// `POST /api/history/messages`: archive a batch sealed under the account's current history key,
 /// for conversations the account is or was in — leaving a group keeps the history one already
-/// read.
+/// read. Only from a device approved under that key: the first entry stored under a message id is
+/// the one a device added later restores.
 pub struct ArchiveMessages {
     accounts: Arc<dyn Accounts>,
     conversations: Arc<dyn Conversations>,
-    keys: Arc<dyn HistoryKeys>,
+    sessions: Arc<dyn Sessions>,
+    approvals: Arc<dyn DeviceApprovals>,
     archive: Arc<dyn HistoryArchive>,
 }
 
@@ -29,42 +31,44 @@ impl ArchiveMessages {
     pub fn new(
         accounts: Arc<dyn Accounts>,
         conversations: Arc<dyn Conversations>,
-        keys: Arc<dyn HistoryKeys>,
+        sessions: Arc<dyn Sessions>,
+        approvals: Arc<dyn DeviceApprovals>,
         archive: Arc<dyn HistoryArchive>,
     ) -> Self {
         Self {
             accounts,
             conversations,
-            keys,
+            sessions,
+            approvals,
             archive,
         }
     }
 
-    /// How many entries were new.
+    /// How many entries were new. A generation not the current one is `Stale` before any
+    /// approval is asked: the device must learn of the new key first. The write then checks the
+    /// generation only, as a clear's does.
     pub async fn execute(
         &self,
-        owner: UserId,
+        bearer: &Bearer,
         generation: HistoryGeneration,
         entries: Vec<NewArchiveEntry>,
     ) -> Result<usize, ArchiveError> {
         check_archive_batch(entries.len())?;
-        let current = self
-            .keys
-            .current(owner)
-            .await?
-            .map(|held| held.key.generation);
-        check_history_generation(generation, current)?;
+        let owner = bearer.user;
+        let (named, trust) = calling_trust(&*self.sessions, &*self.approvals, bearer).await?;
+        check_history_generation(generation, trust.current)?;
+        may_act_beyond_the_password(named, &trust)?;
         let account = self.accounts.find(owner).await?.ok_or_else(|| {
             ArchiveError::Unexpected(anyhow::anyhow!("the archiving account is gone"))
         })?;
-        let mut named: Vec<_> = entries.iter().map(|e| e.conversation).collect();
-        named.sort();
-        named.dedup();
+        let mut conversations: Vec<_> = entries.iter().map(|e| e.conversation).collect();
+        conversations.sort();
+        conversations.dedup();
         let held = self
             .conversations
-            .ever_held(&account.actor_uri, &named)
+            .ever_held(&account.actor_uri, &conversations)
             .await?;
-        if held.len() != named.len() {
+        if held.len() != conversations.len() {
             return Err(ArchiveError::NotAMember);
         }
         match self.archive.store(owner, generation, &entries).await? {

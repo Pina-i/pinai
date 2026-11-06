@@ -955,7 +955,8 @@ impl TestApp {
             archive_messages: Arc::new(ArchiveMessages::new(
                 accounts.clone(),
                 store.clone(),
-                archive.clone(),
+                sign_in.sessions.clone(),
+                keys.clone(),
                 archive.clone(),
             )),
             read_archive: Arc::new(ReadArchive::new(archive.clone())),

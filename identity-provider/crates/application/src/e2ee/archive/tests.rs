@@ -4,8 +4,8 @@ use domain::auth::testing::InMemorySessions;
 use domain::e2ee::testing::{InMemoryArchive, InMemoryKeyDirectory};
 use domain::e2ee::{
     ApprovalPublicKey, ApprovalRequired, ArchiveNonce, ArchiveStoreError, Attestation, BatchSize,
-    DeviceLabel, DeviceRootKey, Devices, HistoryCheckValue, HistoryKey, HistorySalt, HpkeKeyWrite,
-    KeyReplace, StaleHistoryKey,
+    DeviceLabel, DeviceRootKey, Devices, HistoryCheckValue, HistoryKey, HistoryKeys, HistorySalt,
+    HpkeKeyWrite, KeyReplace, StaleHistoryKey,
 };
 use domain::identity::Account;
 use domain::identity::testing::{InMemoryAccounts, account};
@@ -102,7 +102,8 @@ async fn world() -> World {
         store: ArchiveMessages::new(
             Arc::new(InMemoryAccounts::with([alice.clone(), bob.clone(), carol])),
             conversations,
-            archive.clone(),
+            sessions.clone(),
+            devices.clone(),
             archive.clone(),
         ),
         read: ReadArchive::new(archive.clone()),
@@ -182,12 +183,12 @@ async fn an_account_archives_what_it_read_in_conversations_it_is_or_was_in() {
 
     let stored = w
         .store
-        .execute(w.alice.id, generation(1), batch.clone())
+        .execute(&w.on_the_laptop, generation(1), batch.clone())
         .await
         .unwrap();
     let again = w
         .store
-        .execute(w.alice.id, generation(1), batch)
+        .execute(&w.on_the_laptop, generation(1), batch)
         .await
         .unwrap();
 
@@ -201,7 +202,7 @@ async fn an_upload_naming_a_conversation_the_account_never_held_stores_nothing()
     let refused = w
         .store
         .execute(
-            w.alice.id,
+            &w.on_the_laptop,
             generation(1),
             vec![entry(w.dm, 1), entry(w.elsewhere, 2)],
         )
@@ -224,11 +225,14 @@ async fn an_upload_naming_a_conversation_the_account_never_held_stores_nothing()
 async fn an_upload_holds_one_to_fifty_entries() {
     let w = world().await;
 
-    let empty = w.store.execute(w.alice.id, generation(1), Vec::new()).await;
+    let empty = w
+        .store
+        .execute(&w.on_the_laptop, generation(1), Vec::new())
+        .await;
     let too_many = w
         .store
         .execute(
-            w.alice.id,
+            &w.on_the_laptop,
             generation(1),
             (0..51).map(|b| entry(w.dm, b)).collect(),
         )
@@ -247,14 +251,14 @@ async fn the_archive_reads_newest_first_a_page_at_a_time() {
     let w = world().await;
     w.store
         .execute(
-            w.alice.id,
+            &w.on_the_laptop,
             generation(1),
             vec![entry(w.dm, 1), entry(w.dm, 2)],
         )
         .await
         .unwrap();
     w.store
-        .execute(w.alice.id, generation(1), vec![entry(w.dm, 3)])
+        .execute(&w.on_the_laptop, generation(1), vec![entry(w.dm, 3)])
         .await
         .unwrap();
 
@@ -292,14 +296,14 @@ async fn clearing_empties_the_callers_archive() {
     let w = world().await;
     w.store
         .execute(
-            w.alice.id,
+            &w.on_the_laptop,
             generation(1),
             vec![entry(w.dm, 1), entry(w.dm, 2)],
         )
         .await
         .unwrap();
-    w.store
-        .execute(w.bob.id, generation(1), vec![entry(w.dm, 3)])
+    w.archive
+        .store(w.bob.id, generation(1), &[entry(w.dm, 3)])
         .await
         .unwrap();
 
@@ -313,7 +317,7 @@ async fn clearing_empties_the_callers_archive() {
 async fn only_an_approved_device_clears_once_the_account_has_a_key() {
     let w = world().await;
     w.store
-        .execute(w.alice.id, generation(1), vec![entry(w.dm, 1)])
+        .execute(&w.on_the_laptop, generation(1), vec![entry(w.dm, 1)])
         .await
         .unwrap();
     let fresh = DeviceId::generate();
@@ -393,7 +397,7 @@ impl HistoryArchive for ReplacedMeanwhile {
 async fn a_clear_erases_nothing_of_a_generation_set_since_it_was_decided() {
     let w = world().await;
     w.store
-        .execute(w.alice.id, generation(1), vec![entry(w.dm, 1)])
+        .execute(&w.on_the_laptop, generation(1), vec![entry(w.dm, 1)])
         .await
         .unwrap();
     let saved = entry(w.dm, 2);
@@ -447,15 +451,19 @@ async fn an_upload_under_another_generation_than_the_current_one_stores_nothing(
 
     let replaced = w
         .store
-        .execute(w.alice.id, generation(1), vec![entry(w.dm, 1)])
+        .execute(&w.on_the_laptop, generation(1), vec![entry(w.dm, 1)])
         .await;
     let ahead = w
         .store
-        .execute(w.alice.id, generation(3), vec![entry(w.dm, 1)])
+        .execute(&w.on_the_laptop, generation(3), vec![entry(w.dm, 1)])
         .await;
     let none_set = w
         .store
-        .execute(carol, generation(1), vec![entry(w.dm, 1)])
+        .execute(
+            &session_of(&w.sessions, carol),
+            generation(1),
+            vec![entry(w.dm, 1)],
+        )
         .await;
 
     for refused in [replaced, ahead, none_set] {
@@ -474,17 +482,74 @@ async fn an_upload_under_another_generation_than_the_current_one_stores_nothing(
 }
 
 #[tokio::test]
+async fn only_an_approved_device_archives_once_the_account_has_a_key() {
+    let w = world().await;
+    let fresh = DeviceId::generate();
+    registered(&w.devices, w.alice.id, fresh).await;
+    let on_the_fresh_one = naming(&w.sessions, w.alice.id, fresh).await;
+    let unnamed = session_of(&w.sessions, w.alice.id);
+    let batch = vec![entry(w.dm, 1)];
+
+    let by_the_fresh_one = w
+        .store
+        .execute(&on_the_fresh_one, generation(1), batch.clone())
+        .await;
+    let by_the_unnamed = w
+        .store
+        .execute(&unnamed, generation(1), batch.clone())
+        .await;
+    let stored = w.archive.page(w.alice.id, None, 10).await.unwrap().len();
+    let by_the_laptop = w
+        .store
+        .execute(&w.on_the_laptop, generation(1), batch)
+        .await;
+
+    for refused in [by_the_fresh_one, by_the_unnamed] {
+        assert!(
+            matches!(
+                refused,
+                Err(ArchiveError::ApprovalRequired(ApprovalRequired))
+            ),
+            "{refused:?}"
+        );
+    }
+    assert_eq!(stored, 0, "a refusal stores nothing");
+    assert_eq!(by_the_laptop.unwrap(), 1, "the ids are still the laptop's");
+}
+
+#[tokio::test]
+async fn a_generation_not_the_current_one_is_stale_before_any_approval_is_asked() {
+    let w = world().await;
+    let fresh = DeviceId::generate();
+    registered(&w.devices, w.alice.id, fresh).await;
+    let on_the_fresh_one = naming(&w.sessions, w.alice.id, fresh).await;
+    let unnamed = session_of(&w.sessions, w.alice.id);
+
+    for bearer in [on_the_fresh_one, unnamed] {
+        let refused = w
+            .store
+            .execute(&bearer, generation(2), vec![entry(w.dm, 1)])
+            .await;
+
+        assert!(
+            matches!(refused, Err(ArchiveError::Stale(StaleHistoryKey))),
+            "{refused:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn clearing_keeps_the_key_and_the_next_upload_is_saved_under_it() {
     let w = world().await;
     w.store
-        .execute(w.alice.id, generation(1), vec![entry(w.dm, 1)])
+        .execute(&w.on_the_laptop, generation(1), vec![entry(w.dm, 1)])
         .await
         .unwrap();
 
     w.clear.execute(&w.on_the_laptop).await.unwrap();
     let after = w
         .store
-        .execute(w.alice.id, generation(1), vec![entry(w.dm, 2)])
+        .execute(&w.on_the_laptop, generation(1), vec![entry(w.dm, 2)])
         .await
         .unwrap();
 

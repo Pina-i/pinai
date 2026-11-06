@@ -180,7 +180,7 @@ impl TryFrom<ArchiveEntry> for EntryBody {
 /// `POST /api/history/messages`
 pub async fn upload(
     State(archive): State<Arc<ArchiveMessages>>,
-    Authenticated(user): Authenticated,
+    SignedIn(bearer): SignedIn,
     Json(body): Json<UploadRequest>,
 ) -> Result<Json<UploadedBody>, ApiError> {
     let generation = HistoryGeneration::parse(body.generation)?;
@@ -189,7 +189,7 @@ pub async fn upload(
         .into_iter()
         .map(NewArchiveEntry::try_from)
         .collect::<Result<Vec<_>, _>>()?;
-    let inserted = archive.execute(user, generation, entries).await?;
+    let inserted = archive.execute(&bearer, generation, entries).await?;
     Ok(Json(UploadedBody { inserted }))
 }
 

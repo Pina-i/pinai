@@ -4,9 +4,12 @@ use reqwest::Method;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+use crate::approvals::Device;
 use crate::helpers::{
     Account, TestApp, another_browser, naming_proof, signed_in_long_ago, spawn_app,
 };
+use crate::key_shares::{holding, set_generation};
+use crate::start_over::unused_for_a_week;
 
 /// A history key of generation `generation`, its bytes made of `byte`s, as a client sends it.
 fn key(generation: i64, byte: u8) -> Value {
@@ -52,11 +55,23 @@ pub(crate) async fn upload(
     generation: i64,
     conversation: &str,
 ) -> (reqwest::StatusCode, Value) {
+    upload_entry(app, who, generation, conversation, Uuid::new_v4(), 1).await
+}
+
+/// One entry for message `id`, its ciphertext made of `byte`s.
+pub(crate) async fn upload_entry(
+    app: &TestApp,
+    who: &Account,
+    generation: i64,
+    conversation: &str,
+    id: Uuid,
+    byte: u8,
+) -> (reqwest::StatusCode, Value) {
     let entry = json!({
-        "id": Uuid::new_v4(),
+        "id": id,
         "conversation_id": conversation,
-        "ciphertext": B64.encode([1; 16]),
-        "nonce": B64.encode([1; 12]),
+        "ciphertext": B64.encode([byte; 16]),
+        "nonce": B64.encode([byte; 12]),
     });
     app.send(
         Method::POST,
@@ -107,12 +122,17 @@ async fn the_first_key_takes_no_recent_password_and_starting_over_takes_one_and_
     let app = spawn_app().await;
     let alice = app.sign_up("alice").await;
     let conversation = a_conversation(&app, &alice).await;
-    a_device(&app, &alice).await;
+    let laptop = Device::on(&app, alice.clone()).await;
     let long_ago = signed_in_long_ago(&app, &alice).await;
+    let laptop = Device {
+        session: long_ago.clone(),
+        ..laptop
+    };
+    let words = ed25519_dalek::SigningKey::from_bytes(&rand::random());
 
     let (none_yet, _) = app.get(&long_ago, "/api/history/key").await;
-    let (first, body) = set_key(&app, &long_ago, key(1, 1)).await;
-    assert_eq!(first, 204, "{body}");
+    set_generation(&app, &laptop, 1, &words).await;
+    holding(&app, &laptop, 1, &words).await;
     let (uploaded, body) = upload(&app, &long_ago, 1, &conversation).await;
     assert_eq!(uploaded, 200, "{body}");
     let refused = app
@@ -126,7 +146,6 @@ async fn the_first_key_takes_no_recent_password_and_starting_over_takes_one_and_
     let kept = archived(&app, &alice).await;
     let recent = another_browser(&app, &alice).await;
     let phone = a_device(&app, &recent).await;
-    // No device is approved: the request is ready as it opens.
     let (asked, request) = app
         .send(
             Method::POST,
@@ -136,6 +155,7 @@ async fn the_first_key_takes_no_recent_password_and_starting_over_takes_one_and_
         )
         .await;
     assert_eq!(asked, 201, "{request}");
+    unused_for_a_week(&app, &[&laptop]).await;
     let (started_over, _) = set_key(&app, &recent, key(2, 2)).await;
     let (stale, refusal) = upload(&app, &long_ago, 1, &conversation).await;
     let (current, held) = app.get(&long_ago, "/api/history/key").await;

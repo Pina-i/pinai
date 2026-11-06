@@ -12,7 +12,7 @@ use crate::helpers::{
     Account, TestApp, another_browser, naming_proof, next_event, open_socket, signed_in_long_ago,
     spawn_app,
 };
-use crate::history::{a_conversation, archived, upload};
+use crate::history::{a_conversation, archived, upload, upload_entry};
 use crate::key_shares::{first_device, holding, set_generation};
 
 pub(crate) async fn ask_to_start_over(app: &TestApp, device: &Device) -> (StatusCode, Value) {
@@ -454,6 +454,40 @@ async fn a_password_only_session_neither_clears_the_history_backup_nor_signs_the
     assert_eq!(kept, 1, "the archive is intact");
     assert_eq!(signed_out, approval_required());
     assert_eq!(still, StatusCode::OK, "the laptop stays signed in");
+    app.stop().await.unwrap();
+}
+
+/// Someone with only the password can't fill the history backup ahead of the user's devices — the
+/// first entry stored under a message id is the one kept: neither their session nor a device of
+/// theirs saves anything, and the laptop then saves that very message.
+#[tokio::test]
+async fn a_password_only_session_saves_nothing_and_the_laptop_then_saves_the_same_message() {
+    let app = spawn_app().await;
+    let (laptop, _) = first_device(&app).await;
+    let conversation = a_conversation(&app, &laptop.session).await;
+    let thief = another_browser(&app, &laptop.session).await;
+    let thiefs_device = Device::on(&app, another_browser(&app, &laptop.session).await).await;
+    let message = uuid::Uuid::new_v4();
+
+    let by_the_thief = upload_entry(&app, &thief, 1, &conversation, message, 9).await;
+    let by_their_device =
+        upload_entry(&app, &thiefs_device.session, 1, &conversation, message, 9).await;
+    let stored = archived(&app, &laptop.session).await;
+    let by_the_laptop = upload_entry(&app, &laptop.session, 1, &conversation, message, 1).await;
+    let (_, page) = app.get(&laptop.session, "/api/history/messages").await;
+
+    assert_eq!(by_the_thief, approval_required());
+    assert_eq!(by_their_device, approval_required());
+    assert_eq!(stored, 0, "nothing saved");
+    assert_eq!(by_the_laptop, (StatusCode::OK, json!({ "inserted": 1 })));
+    let entries = page["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["id"], json!(message));
+    assert_eq!(
+        entries[0]["ciphertext"],
+        json!(base64(&[1; 16])),
+        "the laptop's entry"
+    );
     app.stop().await.unwrap();
 }
 

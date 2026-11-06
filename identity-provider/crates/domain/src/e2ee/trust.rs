@@ -1,7 +1,7 @@
 //! Which of the account's devices the instance counts as approved — [`approval_chain`]'s structure
 //! over the stored approvals, identity-provider/specs/e2ee.md § 3.11 — and what that gates on the
 //! instance itself: revoking an approved device, starting over (§ 3.12), turning the second factor
-//! on, clearing the history backup, signing the other devices out.
+//! on, saving to and clearing the history backup, signing the other devices out.
 
 use crate::DeviceId;
 
@@ -68,9 +68,9 @@ pub fn may_revoke(
 
 /// Whether a session whose device is `named` may do what a password alone must not: turn the
 /// second factor on, which would lock the user's devices out of signing in until a start over
-/// matures; clear the history backup, which a device added later restores from; sign the other
-/// devices out. With a history key, only from an approved device; with none, no device is approved
-/// and any session may.
+/// matures; save to the history backup, whose first entry under a message id is the one kept, or
+/// clear it — a device added later restores from it; sign the other devices out. With a history
+/// key, only from an approved device; with none, no device is approved and any session may.
 pub fn may_act_beyond_the_password(
     named: Option<DeviceId>,
     trust: &DeviceTrust,
