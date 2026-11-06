@@ -631,6 +631,31 @@ async fn the_asker_reads_how_its_request_ended_and_the_approved_devices_see_none
 }
 
 #[tokio::test]
+async fn another_devices_open_request_hides_the_askers_ended_one() {
+    let w = world();
+    let t = now();
+    let laptop = w.laptop(t).await;
+    let fresh = w.device(2, t).await;
+    let other = w.device(3, t).await;
+    let asked = w.ask.execute(&fresh.bearer, t).await.unwrap();
+    w.end
+        .execute(&laptop.bearer, asked.request.id, t)
+        .await
+        .unwrap();
+    w.ask.execute(&other.bearer, t).await.unwrap();
+
+    let by_the_first_asker = w.load.execute(&fresh.bearer).await;
+
+    assert!(
+        matches!(
+            by_the_first_asker,
+            Err(KeyDirectoryError::ApprovalRequired(_))
+        ),
+        "{by_the_first_asker:?}"
+    );
+}
+
+#[tokio::test]
 async fn approving_the_asker_with_a_code_ends_its_request_and_tells_both_sides() {
     let w = world();
     let t = now();

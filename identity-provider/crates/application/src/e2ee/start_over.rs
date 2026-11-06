@@ -7,9 +7,9 @@ use std::sync::Arc;
 use domain::StartOverRequestId;
 use domain::auth::Sessions;
 use domain::e2ee::{
-    ApprovalRequired, Audience, DeviceApprovals, DeviceTrust, DeviceTrustNotifier, Devices,
-    KeyDirectoryError, StartOverEnded, StartOverOpened, StartOverRefusal, StartOverRequest,
-    StartOverRequests, start_over_sweep_before,
+    Audience, DeviceApprovals, DeviceTrust, DeviceTrustNotifier, Devices, KeyDirectoryError,
+    StartOverEnded, StartOverOpened, StartOverRefusal, StartOverRequest, StartOverRequests,
+    start_over_sweep_before,
 };
 use domain::identity::Bearer;
 use time::OffsetDateTime;
@@ -157,13 +157,17 @@ impl LoadStartOver {
         let device = the_callers_device(&*self.sessions, &*self.devices, bearer).await?;
         let trust = self.approvals.trust(owner).await?;
         let open = self.start_overs.open_of(owner).await?;
+        // Another device's open request comes first: the asker's own ended one would hide it.
         let request = match open {
-            Some(open) if open.may_read(device.id, &trust).is_ok() => open,
-            open => match self.start_overs.latest_of(owner, device.id).await? {
-                Some(mine) => mine,
-                None if open.is_some() => return Err(ApprovalRequired.into()),
-                None => return Err(StartOverRefusal::NotFound.into()),
-            },
+            Some(open) => {
+                open.may_read(device.id, &trust)?;
+                open
+            }
+            None => self
+                .start_overs
+                .latest_of(owner, device.id)
+                .await?
+                .ok_or(StartOverRefusal::NotFound)?,
         };
         let sessions = sessions_of(&*self.sessions, owner).await?;
         Ok(PendingStartOver {

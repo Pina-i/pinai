@@ -968,9 +968,9 @@ that ended is `410 start_over_ended` until it is deleted, a week after it ended
 (`api::background::sweep_start_over_requests`) — past the day it counts against the limit.
 
 **Reading it** (`GET /api/history/start-over`): the account's open request, for the device asking
-and the approved devices; for the device asking, once its request ended, its latest request with
-how it ended, until it is deleted — so it learns the outcome after a reload; `404` when there is
-none of either, `403 approval_required` for any other device while one is open. The answer is
+and the approved devices — `403 approval_required` for any other device while one is open, even
+one with an ended request of its own; with none open, the device's own latest request with how it
+ended, until it is deleted — so it learns the outcome after a reload —, else `404`. The answer is
 `{ id, device_id, display_name, created_at, ready_at, ended }`, `ended` being
 `{ reason, at }` — `reason` one of `cancelled`, `withdrawn`, `used`, `superseded`, `revoked`,
 `approved` — or `null` while open.
@@ -983,6 +983,43 @@ whose sessions are all signed out hears nothing, and reads the request at its ne
 - `start_over_cancelled { request_id, reason }` to the sessions of the device asking and of the
   approved devices when it ends unused — cancelled, withdrawn, its device approved or revoked, or
   superseded —: the asker learns how, and the other approved devices' prompts go.
+
+**What the devices show.**
+
+- **The device asking.** "Erase and start over" asks — the device registered and named first — and
+  erases nothing. While its request is open, the device shows when it may finish, `ready_at` in the
+  reader's own words, read again as the screen opens, when the page comes back to the foreground,
+  every 5 minutes, and at `ready_at`: nothing is pushed when a use moves it. A request ready as it
+  opens — no approved device to wait for — goes straight on; a matured one offers "Finish starting
+  over": the start over of § 6.11, the password typed in the last 10 minutes asked first.
+  `start_over_not_ready` says when it may finish, and the device waits until that date has passed
+  on its own clock, as far ahead of the instance's as the access token shows it, or a read moves
+  the date: a press the refusal answered sends nothing. `start_over_required` offers asking again.
+  How its latest request ended is read the same way, after a reload too: cancelled — said plainly,
+  and it may ask again; after "It wasn't me", whoever holds the device that reset the history has
+  the password, so it is changed first —; superseded — said, and the device goes where its own
+  check sends it —; approved — the same, said only while seen open —; withdrawn, used or revoked —
+  nothing to say. `already_approved` or `no_history_key` on asking: it sets the next generation
+  itself. `start_over_pending`, or `403 approval_required` on reading: another device asked first —
+  explained, never asked again by itself. While it waits, a device the user still holds is the
+  better way: approving this one with a code keeps the history, and ends the request. After
+  "It wasn't me", the password comes first: the device that reset the history is the approved one,
+  and as long as its holder uses it, the request never matures and may be cancelled.
+- **The devices the instance shows the request to** — those approved under its generation, the
+  ones it lets cancel (above) — read it at each load, on `start_over_requested` and when their
+  socket comes back, and show it whatever they last found of themselves: a stale check must never
+  hide the warning. "Someone asked to start your history over from <device>", what a week unused
+  would let it do — erase the history backup and set new words —, then "Cancel — it wasn't me" (no
+  password; then that the request is cancelled but may be asked again, and how to change the
+  password: "Forgot password?" on an open instance, an admin's reset link on an invite-only one,
+  where the instance is run for an admin there), "It's me — approve with a code instead" on a
+  device that can answer a code (§ 3.10), or "Not now", until the next load or a new request's
+  push. `start_over_cancelled` closes it.
+- **A device the instance doesn't count approved** withholds "Revoke", in Settings → Devices, on
+  each device it counts approved — the instance's own rule (§ 3.12), the approvals verified under
+  the approval key it stores: what it refuses, never a trust decision —, saying why. A device not
+  approved by its own last check explains, instead of offering it, that only an approved device
+  turns the second factor on; one that can't tell lets the instance decide.
 
 **Revoking an approved device** (`POST /api/keys/devices/:device_id/revoke`) takes a session whose
 device is approved under the current generation (`403 approval_required`): a device nobody
@@ -1137,7 +1174,8 @@ All Bearer-auth except where noted. Cross-IdP paths use HTTP Signatures — see
   says a device holds it, approves a device, takes part in an approval request, shares the
   passphrase, reads a share nor asks to start over: `403 device_required` "Name this session's
   device first"; and, being no approved device, it revokes none and turns no second factor on
-  (§ 3.12).
+  (§ 3.12). A device whose proof is refused (`403 device_proof_invalid`) registers again, the same
+  keys, and names itself once more; a second refusal stands.
 - **A device's HPKE key is its DRK's.** A registration bringing one is refused (`400`) when only
   one of `hpke_public_key` and `hpke_key_signature` is sent, or when the DRK sent with it doesn't
   verify the signature over the key's canonical bytes for this device of this account; nothing is
@@ -1250,7 +1288,7 @@ and they hold for what peers deliver as much as for local clients.
 | `GET /api/history/key` | The account's history key (§ 3.6–3.7): `{ generation, salt, check_value, approval_public_key, set_by_device }`, bytes in standard base64; `set_by_device` is the device whose session set the generation (`null` only once that device's row is gone). `404` before its first device sets one |
 | `PUT /api/history/key` | `{ generation, salt, check_value, approval_public_key }` — 16, 32 and 32 bytes, standard base64 (`400` otherwise). From a session that has named its device (`403 device_required` otherwise), which the key records as `set_by_device`. Set only for the generation right after the current one, 1 when there is none: a compare-and-set, so two devices setting the same generation make one, and the other is answered `409 history_key_conflict` with `current_generation` (`0` for none). The very key held already — the same generation, salt, check value and approval key — is a retry: `204`, nothing written. Generation 1 takes no recent password; any later one does, as it erases the archive (`identity-provider/specs/auth.md § 1`, "Sensitive actions"), and is set at once from a device approved under the current generation, otherwise only through that device's own matured start over request (`403 start_over_required`, `403 start_over_not_ready` with `ready_at`) — the checks in the order of § 3.12. In one transaction: the key replaced, the account's archive erased, the passphrase approvals of older generations dropped (§ 3.9), the account's key shares deleted (§ 3.11), its open start over requests ended — the setter's used, any other superseded (§ 3.12). `204` |
 | `POST /api/history/start-over` | No body. From a session that named its device (`403 device_required`), unrevoked (`403`), with a DRK (`409 no_root_key`), on an account with a history key (`409 no_history_key`), the device not approved under it (`409 already_approved`): it asks to set the next generation (§ 3.12). `201 { id, created_at, ready_at }`; the same device asking while its request is open gets it back, `200`; another device's open request is `409 start_over_pending`; 3 an account a day (`429 too_many_requests`). Pushes `start_over_requested { request_id, device_id, display_name, ready_at }` to the approved devices' sessions |
-| `GET /api/history/start-over` | The account's open request, for its device and for the approved devices (`403 approval_required` for any other); for the device asking, once its request ended, its latest one, until it is deleted: `{ id, device_id, display_name, created_at, ready_at, ended }` — `device_id` the device asking, `ready_at` as of now, `ended` `{ reason, at }` or `null` while open. `404` when there is none of either (§ 3.12) |
+| `GET /api/history/start-over` | The account's open request, for its device and for the approved devices (`403 approval_required` for any other, its own ended request or not); with none open, the device's own latest one, until it is deleted: `{ id, device_id, display_name, created_at, ready_at, ended }` — `device_id` the device asking, `ready_at` as of now, `ended` `{ reason, at }` or `null` while open. `404` when there is none of either (§ 3.12) |
 | `DELETE /api/history/start-over/:id` | No recent password. A device approved under the generation it would replace cancels it; the device asking withdraws it; any other `403 approval_required` — decided again under the request's lock. `204`, and `start_over_cancelled { request_id, reason }` to the sessions of the device asking and of the approved devices. One ended `410 start_over_ended`; another account's or unknown `404`. Ended requests are deleted a week after they ended |
 | `POST /api/history/messages` | `{ generation, entries }`: a batch of 1 to 50 entries (`400` otherwise; a nonce is 12 bytes), sealed under `generation` — the current one only (`409 stale_history_key`, also while none is set; § 3.8). Every `conversation_id` must be one the caller is or was a member of — leaving a group keeps the history already read — or the batch is refused whole (`403`). Idempotent upsert on `(user_id, id)` — first decryptor of a message wins; subsequent uploads from the user's other devices no-op. Answers `{ inserted }`, how many were new |
 | `GET /api/history/messages?after_id=&after_created_at=&limit=` | Keyset pagination over `(created_at DESC, id DESC)`, limit clamped 1..=500, default 100. `next_cursor` names the page's last entry, and is `null` only on an empty page; `after_id` and `after_created_at` (RFC 3339) go together (`400`) |
