@@ -6,10 +6,16 @@ use serde_json::{Value, json};
 
 use crate::approvals::{Device, approve};
 use crate::helpers::{TestApp, another_browser, next_event, open_socket, spawn_app};
+use crate::start_over::{ask_to_start_over, unused_for_a_week};
 
 /// Sets `generation` from `device`'s session, its approval key `key`'s public half — what a
 /// client derives from the HAK by HKDF; any seed stands in for it here.
-async fn set_generation(app: &TestApp, device: &Device, generation: i64, key: &SigningKey) {
+pub(crate) async fn set_generation(
+    app: &TestApp,
+    device: &Device,
+    generation: i64,
+    key: &SigningKey,
+) {
     let (set, body) = app
         .send(
             Method::PUT,
@@ -28,7 +34,7 @@ async fn set_generation(app: &TestApp, device: &Device, generation: i64, key: &S
 
 /// `device` approved by the words typed on it — `key`, their approval key — and saying it holds
 /// `generation`.
-async fn holding(app: &TestApp, device: &Device, generation: i64, key: &SigningKey) {
+pub(crate) async fn holding(app: &TestApp, device: &Device, generation: i64, key: &SigningKey) {
     for (method, path, body) in [
         (
             Method::POST,
@@ -98,7 +104,7 @@ async fn share(app: &TestApp, from: &Device, body: &Value) -> (StatusCode, Value
 
 /// The account's first device, which set generation 1 and holds it, and the generation's
 /// approval key.
-async fn first_device(app: &TestApp) -> (Device, SigningKey) {
+pub(crate) async fn first_device(app: &TestApp) -> (Device, SigningKey) {
     let alice = app.sign_up("alice").await;
     let laptop = Device::on(app, alice).await;
     let key = SigningKey::from_bytes(&rand::random());
@@ -179,10 +185,10 @@ async fn an_approved_device_receives_the_passphrase_and_its_report_ends_the_shar
     );
 }
 
-/// After a start over (identity-provider/specs/e2ee.md § 6.11): a new device sets generation 2 and
-/// approves itself with its new words; the old tablet, which holds generation 1, and the new
-/// device approve each other; the new device shares the new words with it, and the tablet takes
-/// generation 2 on.
+/// After a start over (identity-provider/specs/e2ee.md § 6.11): a new device asks to start over,
+/// and once the laptop and the tablet went a week unused sets generation 2 and approves itself
+/// with its new words; the old tablet, which holds generation 1, and the new device approve each
+/// other; the new device shares the new words with it, and the tablet takes generation 2 on.
 #[tokio::test]
 async fn after_a_start_over_the_new_device_shares_the_new_words_with_an_old_one() {
     let app = spawn_app().await;
@@ -190,6 +196,9 @@ async fn after_a_start_over_the_new_device_shares_the_new_words_with_an_old_one(
     let tablet = Device::on(&app, another_browser(&app, &laptop.session).await).await;
     holding(&app, &tablet, 1, &first_key).await;
     let fresh = Device::on(&app, another_browser(&app, &laptop.session).await).await;
+    let (asked, request) = ask_to_start_over(&app, &fresh).await;
+    assert_eq!(asked, StatusCode::CREATED, "{request}");
+    unused_for_a_week(&app, &[&laptop, &tablet]).await;
     let second_key = SigningKey::from_bytes(&rand::random());
     set_generation(&app, &fresh, 2, &second_key).await;
     holding(&app, &fresh, 2, &second_key).await;

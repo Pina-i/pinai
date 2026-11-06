@@ -880,3 +880,44 @@ fn plain_text(data: &str) -> Option<String> {
     };
     Some(text)
 }
+
+/// The session `who`'s access token belongs to: its `sid` claim.
+pub fn sid_of(who: &Account) -> String {
+    let payload = who.token.split('.').nth(1).expect("a JWT");
+    let claims: Value = serde_json::from_slice(
+        &base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(payload)
+            .unwrap(),
+    )
+    .unwrap();
+    claims["sid"].as_str().expect("a sid").to_owned()
+}
+
+/// `root`'s signature naming `device` on `who`'s session, as a client holding that device's root
+/// key makes it (identity-provider/specs/auth.md § 1, "Sessions and devices").
+pub fn naming_proof(who: &Account, device: Uuid, root: &SigningKey) -> String {
+    use ed25519_dalek::Signer;
+    let signed = format!(
+        "PINAI-SESSION-DEVICE-v1\n{}\n{device}\n{}",
+        who.actor_uri,
+        sid_of(who)
+    );
+    base64::engine::general_purpose::STANDARD.encode(root.sign(signed.as_bytes()).to_bytes())
+}
+
+/// `who` on the same session, the password typed there eleven minutes ago — as the token renewed
+/// next carries it.
+pub async fn signed_in_long_ago(app: &TestApp, who: &Account) -> Account {
+    app.execute(&format!(
+        "UPDATE sessions SET authenticated_at = now() - interval '11 minutes' WHERE id = '{}'",
+        sid_of(who)
+    ))
+    .await;
+    let (renewed, tokens) = app.refresh(&who.refresh_token).await;
+    assert_eq!(renewed, 200, "{tokens}");
+    Account {
+        token: tokens["access_token"].as_str().unwrap().to_owned(),
+        refresh_token: tokens["refresh_token"].as_str().unwrap().to_owned(),
+        ..who.clone()
+    }
+}

@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
-use domain::e2ee::testing::InMemoryArchive;
+use domain::e2ee::testing::{InMemoryArchive, InMemoryKeyDirectory};
 use domain::e2ee::{
-    ApprovalPublicKey, ArchiveNonce, BatchSize, HistoryCheckValue, HistoryKey, HistorySalt,
-    KeyReplace, StaleHistoryKey,
+    ApprovalPublicKey, ArchiveNonce, Attestation, BatchSize, DeviceLabel, DeviceRootKey, Devices,
+    HistoryCheckValue, HistoryKey, HistorySalt, HpkeKeyWrite, KeyReplace, StaleHistoryKey,
 };
 use domain::identity::Account;
 use domain::identity::testing::{InMemoryAccounts, account};
@@ -20,6 +20,8 @@ struct World {
     left: ConversationId,
     elsewhere: ConversationId,
     archive: Arc<InMemoryArchive>,
+    /// Alice's device, approved under the first generation: it may set the next.
+    laptop: DeviceId,
     store: ArchiveMessages,
     read: ReadArchive,
     clear: ClearArchive,
@@ -66,11 +68,43 @@ async fn world() -> World {
         .await
         .unwrap();
     let archive = Arc::new(InMemoryArchive::default());
+    let devices = InMemoryKeyDirectory::keyed_by(archive.clone());
+    let laptop = DeviceId::generate();
     for owner in [alice.id, bob.id] {
-        archive
-            .replace(owner, &history_key(1), DeviceId::generate())
+        let device = if owner == alice.id {
+            laptop
+        } else {
+            DeviceId::generate()
+        };
+        devices
+            .attest(
+                owner,
+                device,
+                &DeviceLabel::unknown(),
+                None,
+                &Attestation {
+                    root_key: DeviceRootKey::parse(&[1; 32]).unwrap(),
+                    signature: vec![1; 64],
+                    kid: "key-1".to_owned(),
+                    issued_at: time::OffsetDateTime::now_utc(),
+                    expires_at: time::OffsetDateTime::now_utc() + time::Duration::days(365),
+                },
+                &HpkeKeyWrite::Clear,
+            )
             .await
             .unwrap();
+        archive
+            .replace(
+                owner,
+                &history_key(1),
+                device,
+                time::OffsetDateTime::now_utc(),
+            )
+            .await
+            .unwrap();
+        devices
+            .approved_by_words(owner, device, &history_key(1))
+            .await;
     }
     World {
         store: ArchiveMessages::new(
@@ -87,6 +121,7 @@ async fn world() -> World {
         left,
         elsewhere,
         archive,
+        laptop,
     }
 }
 
@@ -239,7 +274,12 @@ async fn an_upload_under_another_generation_than_the_current_one_stores_nothing(
     let w = world().await;
     let carol = UserId::generate();
     w.archive
-        .replace(w.alice.id, &history_key(2), DeviceId::generate())
+        .replace(
+            w.alice.id,
+            &history_key(2),
+            w.laptop,
+            time::OffsetDateTime::now_utc(),
+        )
         .await
         .unwrap();
 
@@ -297,10 +337,18 @@ async fn clearing_keeps_the_key_and_the_next_upload_is_saved_under_it() {
     assert_eq!(after, 1);
     assert_eq!(
         w.archive
-            .replace(w.alice.id, &history_key(2), DeviceId::generate())
+            .replace(
+                w.alice.id,
+                &history_key(2),
+                w.laptop,
+                time::OffsetDateTime::now_utc()
+            )
             .await
             .unwrap(),
-        KeyReplace::Replaced { erased: 1 },
+        KeyReplace::Replaced {
+            erased: 1,
+            closed: vec![]
+        },
         "the generation is still the first"
     );
 }

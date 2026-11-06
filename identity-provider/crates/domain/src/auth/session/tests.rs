@@ -321,3 +321,139 @@ fn a_web_apps_live_session_is_reused_an_idle_one_replaced_and_none_opened() {
     );
     assert_eq!(web_app_sign_in(None, at), WebAppSignIn::Open);
 }
+
+mod naming {
+    use super::*;
+    use crate::e2ee::testing::{PlainEd25519Verifier, plain_signature};
+    use crate::e2ee::{
+        ATTESTATION_LIFETIME, Attestation, DeviceLabel, DeviceRootKey, Ed25519Signature,
+    };
+
+    fn actor() -> ActorUri {
+        ActorUri::parse("https://idp.alice.test/users/alice_xk9mp").unwrap()
+    }
+
+    fn device(owner: UserId, root: Option<u8>) -> Device {
+        let at = OffsetDateTime::from_unix_timestamp(1_788_000_000).unwrap();
+        Device {
+            id: DeviceId::generate(),
+            owner,
+            label: DeviceLabel::unknown(),
+            paired_at: at,
+            last_seen_at: at,
+            revoked_at: None,
+            attestation: root.map(|byte| Attestation {
+                root_key: DeviceRootKey::parse(&[byte; 32]).unwrap(),
+                signature: vec![7; 64],
+                kid: "key-1".into(),
+                issued_at: at,
+                expires_at: at + ATTESTATION_LIFETIME,
+            }),
+            hpke_key: None,
+            history_generation: None,
+        }
+    }
+
+    fn proof(device: &Device, session: SessionId) -> Ed25519Signature {
+        let root = &device.attestation.as_ref().unwrap().root_key;
+        plain_signature(root, &naming_bytes(&actor(), device.id, session))
+    }
+
+    fn name(
+        caller: UserId,
+        device: Option<&Device>,
+        session: SessionId,
+        proof: Option<&Ed25519Signature>,
+    ) -> Result<(), AuthError> {
+        may_name_device(
+            caller,
+            device,
+            &actor(),
+            session,
+            proof,
+            &PlainEd25519Verifier,
+        )
+    }
+
+    #[test]
+    fn a_session_names_its_device_with_its_root_keys_signature_over_this_session() {
+        let alice = UserId::generate();
+        let laptop = device(alice, Some(1));
+        let session = SessionId::generate();
+
+        assert!(
+            name(
+                alice,
+                Some(&laptop),
+                session,
+                Some(&proof(&laptop, session))
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn the_naming_bytes_are_the_account_the_device_and_the_session() {
+        let device =
+            DeviceId::from(uuid::Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap());
+        let session =
+            SessionId::from(uuid::Uuid::parse_str("6ba7b810-9dad-11d1-80b4-00c04fd430c8").unwrap());
+
+        assert_eq!(
+            String::from_utf8(naming_bytes(&actor(), device, session)).unwrap(),
+            "PINAI-SESSION-DEVICE-v1\n\
+             https://idp.alice.test/users/alice_xk9mp\n\
+             550e8400-e29b-41d4-a716-446655440000\n\
+             6ba7b810-9dad-11d1-80b4-00c04fd430c8"
+        );
+    }
+
+    #[test]
+    fn a_proof_missing_for_another_session_or_by_another_key_names_nothing() {
+        let alice = UserId::generate();
+        let (laptop, other) = (device(alice, Some(1)), device(alice, Some(2)));
+        let session = SessionId::generate();
+
+        for proof in [
+            None,
+            Some(proof(&laptop, SessionId::generate())),
+            Some(proof(&other, session)),
+        ] {
+            assert!(
+                matches!(
+                    name(alice, Some(&laptop), session, proof.as_ref()),
+                    Err(AuthError::DeviceProofInvalid)
+                ),
+                "{proof:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_device_with_no_root_key_has_nothing_to_prove_with() {
+        let alice = UserId::generate();
+        let keyless = device(alice, None);
+        let any = Ed25519Signature::parse("signature", &[1; 64]).unwrap();
+
+        assert!(matches!(
+            name(alice, Some(&keyless), SessionId::generate(), Some(&any)),
+            Err(AuthError::DeviceProofInvalid)
+        ));
+    }
+
+    #[test]
+    fn another_accounts_device_a_revoked_one_or_none_is_refused_before_any_proof() {
+        let alice = UserId::generate();
+        let bobs = device(UserId::generate(), Some(1));
+        let mut revoked = device(alice, Some(2));
+        revoked.revoked_at = Some(revoked.paired_at);
+        let session = SessionId::generate();
+
+        for found in [Some(&bobs), Some(&revoked), None] {
+            assert!(matches!(
+                name(alice, found, session, None),
+                Err(AuthError::DeviceRefused)
+            ));
+        }
+    }
+}

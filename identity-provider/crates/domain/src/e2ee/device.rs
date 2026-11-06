@@ -8,7 +8,7 @@ use time::{Duration, OffsetDateTime, UtcOffset};
 use crate::identity::ActorUri;
 use crate::{DeviceId, UserId, ValidationError};
 
-use super::{Ed25519Verifier, HistoryGeneration, KeyDirectoryError};
+use super::{DeviceRequired, Ed25519Verifier, HistoryGeneration, KeyDirectoryError};
 
 /// How long an attestation holds; clients renew it silently within its last 30 days.
 pub const ATTESTATION_LIFETIME: Duration = Duration::days(365);
@@ -437,6 +437,20 @@ impl Registration {
                 Some(_) => Self::Rotation,
             },
         )
+    }
+
+    /// Another root key drops the device's approvals: only a session that named this very device
+    /// brings one, so a password alone can't un-approve a device. A first key or the same one
+    /// again comes from any session of the owner's.
+    pub fn may_come_from(
+        self,
+        named: Option<DeviceId>,
+        device: DeviceId,
+    ) -> Result<(), KeyDirectoryError> {
+        if self == Self::Rotation && named != Some(device) {
+            return Err(DeviceRequired.into());
+        }
+        Ok(())
     }
 
     /// A key held is kept on a renewal only, since the old root key alone signed it.

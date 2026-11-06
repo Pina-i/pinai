@@ -24,7 +24,9 @@ use uuid::Uuid;
 
 use crate::ApiError;
 use crate::auth::{Authenticated, CallerJson, RecentlySignedIn, SignedIn};
-use crate::e2ee::{base64_field, device_required, stale_history_key};
+use crate::e2ee::{
+    approval_required, base64_field, device_required, stale_history_key, start_over_refused,
+};
 use crate::rate_limit::RateLimiter;
 
 #[derive(Serialize)]
@@ -286,7 +288,7 @@ pub async fn revoke(
     Path(device_id): Path<Uuid>,
 ) -> Result<StatusCode, ApiError> {
     revoke
-        .execute(bearer.user, device_id.into(), OffsetDateTime::now_utc())
+        .execute(&bearer, device_id.into(), OffsetDateTime::now_utc())
         .await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -535,6 +537,8 @@ impl From<KeyDirectoryError> for ApiError {
             }
             KeyDirectoryError::NoKeyShare => ApiError::not_found("No key share for this device"),
             KeyDirectoryError::Request(refusal) => request_refused(refusal),
+            KeyDirectoryError::StartOver(refusal) => start_over_refused(refusal),
+            KeyDirectoryError::ApprovalRequired(_) => approval_required(),
             KeyDirectoryError::DeviceRequired(_) => device_required(),
             KeyDirectoryError::StaleHistoryKey(_) => stale_history_key(),
             KeyDirectoryError::UserNotFound => ApiError::not_found("User not found"),

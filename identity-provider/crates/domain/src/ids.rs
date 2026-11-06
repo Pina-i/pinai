@@ -53,6 +53,7 @@ id!(GroupEventId);
 id!(InvitationId);
 id!(MessageId);
 id!(SessionId);
+id!(StartOverRequestId);
 id!(TicketId);
 id!(UserId);
 id!(WelcomeId);

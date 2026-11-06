@@ -4,7 +4,9 @@ use reqwest::Method;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::helpers::{Account, TestApp, another_browser, spawn_app};
+use crate::helpers::{
+    Account, TestApp, another_browser, naming_proof, signed_in_long_ago, spawn_app,
+};
 
 /// A history key of generation `generation`, its bytes made of `byte`s, as a client sends it.
 fn key(generation: i64, byte: u8) -> Value {
@@ -74,6 +76,7 @@ async fn archived(app: &TestApp, who: &Account) -> usize {
 /// `who`'s session registers a device and names it.
 async fn a_device(app: &TestApp, who: &Account) -> Uuid {
     let device = Uuid::new_v4();
+    let root = ed25519_dalek::SigningKey::from_bytes(&rand::random());
     let (registered, body) = app
         .send(
             Method::POST,
@@ -81,7 +84,7 @@ async fn a_device(app: &TestApp, who: &Account) -> Uuid {
             "/api/keys/devices",
             json!({
                 "device_id": device,
-                "drk_public_key": B64.encode(rand::random::<[u8; 32]>()),
+                "drk_public_key": B64.encode(root.verifying_key().as_bytes()),
             }),
         )
         .await;
@@ -91,29 +94,11 @@ async fn a_device(app: &TestApp, who: &Account) -> Uuid {
             Method::PUT,
             who,
             "/api/sessions/current/device",
-            json!({ "device_id": device }),
+            json!({ "device_id": device, "signature": naming_proof(who, device, &root) }),
         )
         .await;
     assert_eq!(linked, 204, "{body}");
     device
-}
-
-/// `who` on the same session, the password typed there eleven minutes ago — as the token renewed
-/// next carries it.
-async fn signed_in_long_ago(app: &TestApp, who: &Account) -> Account {
-    app.execute(&format!(
-        "UPDATE sessions SET authenticated_at = now() - interval '11 minutes' \
-         WHERE user_id = (SELECT id FROM users WHERE email = '{}')",
-        who.email
-    ))
-    .await;
-    let (renewed, tokens) = app.refresh(&who.refresh_token).await;
-    assert_eq!(renewed, 200, "{tokens}");
-    Account {
-        token: tokens["access_token"].as_str().unwrap().to_owned(),
-        refresh_token: tokens["refresh_token"].as_str().unwrap().to_owned(),
-        ..who.clone()
-    }
 }
 
 #[tokio::test]
@@ -141,6 +126,16 @@ async fn the_first_key_takes_no_recent_password_and_starting_over_takes_one_and_
     let kept = archived(&app, &alice).await;
     let recent = another_browser(&app, &alice).await;
     let phone = a_device(&app, &recent).await;
+    // No device is approved: the request is ready as it opens.
+    let (asked, request) = app
+        .send(
+            Method::POST,
+            &recent,
+            "/api/history/start-over",
+            Value::Null,
+        )
+        .await;
+    assert_eq!(asked, 201, "{request}");
     let (started_over, _) = set_key(&app, &recent, key(2, 2)).await;
     let (stale, refusal) = upload(&app, &long_ago, 1, &conversation).await;
     let (current, held) = app.get(&long_ago, "/api/history/key").await;

@@ -18,7 +18,8 @@ struct World {
     laptop: Uuid,
 }
 
-/// Alice in a group, her account's history key at generation 1, set from her laptop.
+/// Alice in a group, her account's history key at generation 1, set from her laptop, which its
+/// words approve.
 async fn world() -> World {
     let (alice, bob) = (account("alice"), account("bob"));
     let app = TestApp::with([alice.clone(), bob.clone()], []);
@@ -39,6 +40,15 @@ async fn world() -> World {
         laptop,
     };
     assert_eq!(w.set_key(key_body(1, 1)).await.0, StatusCode::NO_CONTENT);
+    w.app
+        .approved_by_words(
+            &w.alice,
+            &w.app.token_in(w.alice.id, w.laptops),
+            w.laptop,
+            1,
+            [2; 32],
+        )
+        .await;
     w
 }
 

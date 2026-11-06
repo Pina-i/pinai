@@ -10,11 +10,12 @@ use application::auth::{
     ShowSignIn, SignOutOthers, StartTotpEnrollment, VerifyEmail,
 };
 use application::e2ee::{
-    AppendCommit, ApproveDevice, ArchiveMessages, CatchUpCommits, ClaimKeyPackage, ClaimWelcomes,
-    ClearArchive, CloseApprovalRequest, KeyPackageStatus, ListApprovalRequests, ListDevices,
-    LoadHistoryKey, LoadKeyShare, OpenApprovalRequest, PostApprovalMessage, ReadApprovalMessages,
-    ReadArchive, ReceiveCommit, ReceiveWelcome, RegisterDevice, ReportHistoryKey, RevokeDevice,
-    SendWelcome, SetHistoryKey, ShareHistoryKey, UploadKeyPackages,
+    AppendCommit, ApproveDevice, ArchiveMessages, AskToStartOver, CatchUpCommits, ClaimKeyPackage,
+    ClaimWelcomes, ClearArchive, CloseApprovalRequest, EndStartOver, KeyPackageStatus,
+    ListApprovalRequests, ListDevices, LoadHistoryKey, LoadKeyShare, LoadStartOver,
+    OpenApprovalRequest, PostApprovalMessage, ReadApprovalMessages, ReadArchive, ReceiveCommit,
+    ReceiveWelcome, RegisterDevice, ReportHistoryKey, RevokeDevice, SendWelcome, SetHistoryKey,
+    ShareHistoryKey, UploadKeyPackages,
 };
 use application::identity::{
     DescribeInstance, EditIntro, FindAccount, IntroInForce, SearchAccounts, ShowIntro, WebFinger,
@@ -162,6 +163,8 @@ pub struct TestApp {
     /// The reset links asked for, waiting for [`Self::serve_reset_requests`]: the background's work.
     reset_queue: tokio::sync::Mutex<ResetRequestQueue>,
     request_reset: Arc<RequestPasswordReset>,
+    /// Whose actor URIs a device's naming proof signs.
+    identities: Arc<dyn Accounts>,
 }
 
 impl TestApp {
@@ -413,7 +416,9 @@ impl TestApp {
                 sign_in.ended.clone(),
             )),
             link_device: Arc::new(LinkDevice::new(
+                accounts.clone(),
                 keys.clone(),
+                Arc::new(PlainEd25519Verifier),
                 sign_in.sessions.clone(),
                 sign_in.ended.clone(),
             )),
@@ -509,10 +514,14 @@ impl TestApp {
                 sign_in.accounts.clone(),
                 sign_in.factors.clone(),
                 authenticator.clone(),
+                sign_in.sessions.clone(),
+                keys.clone(),
             )),
             confirm_totp_enrollment: Arc::new(ConfirmTotpEnrollment::new(
                 sign_in.factors.clone(),
                 authenticator.clone(),
+                sign_in.sessions.clone(),
+                keys.clone(),
             )),
             disable_totp: Arc::new(DisableTotp::new(
                 sign_in.accounts.clone(),
@@ -831,6 +840,7 @@ impl TestApp {
             revoke_device: Arc::new(RevokeDevice::new(
                 keys.clone(),
                 sign_in.sessions.clone(),
+                keys.clone(),
                 sign_in.ended.clone(),
                 trust_notifier.clone(),
             )),
@@ -884,13 +894,33 @@ impl TestApp {
                 keys.clone(),
                 keys.clone(),
                 Arc::new(PlainEd25519Verifier),
-                trust_notifier,
+                trust_notifier.clone(),
             )),
             load_key_share: Arc::new(LoadKeyShare::new(
                 sign_in.sessions.clone(),
                 keys.clone(),
                 archive.clone(),
                 keys.clone(),
+            )),
+            ask_to_start_over: Arc::new(AskToStartOver::new(
+                sign_in.sessions.clone(),
+                keys.clone(),
+                keys.clone(),
+                keys.clone(),
+                trust_notifier.clone(),
+            )),
+            load_start_over: Arc::new(LoadStartOver::new(
+                sign_in.sessions.clone(),
+                keys.clone(),
+                keys.clone(),
+                keys.clone(),
+            )),
+            end_start_over: Arc::new(EndStartOver::new(
+                sign_in.sessions.clone(),
+                keys.clone(),
+                keys.clone(),
+                keys.clone(),
+                trust_notifier.clone(),
             )),
             upload_key_packages: Arc::new(UploadKeyPackages::new(
                 key_policy,
@@ -906,7 +936,7 @@ impl TestApp {
                 reach.clone(),
                 device_notifier,
             )),
-            key_package_status: Arc::new(KeyPackageStatus::new(key_policy, keys)),
+            key_package_status: Arc::new(KeyPackageStatus::new(key_policy, keys.clone())),
             claim_limiter: Arc::new(RateLimiter::new(60, 1.0)),
             append_commit: Arc::new(AppendCommit::new(
                 accounts.clone(),
@@ -930,7 +960,12 @@ impl TestApp {
             read_archive: Arc::new(ReadArchive::new(archive.clone())),
             clear_archive: Arc::new(ClearArchive::new(archive.clone())),
             load_history_key: Arc::new(LoadHistoryKey::new(archive.clone())),
-            set_history_key: Arc::new(SetHistoryKey::new(sign_in.sessions.clone(), archive)),
+            set_history_key: Arc::new(SetHistoryKey::new(
+                sign_in.sessions.clone(),
+                archive,
+                keys.clone(),
+                trust_notifier,
+            )),
             hub: Arc::new(connections::Hub::new()),
             missed_events: Arc::new(InMemoryMissedEvents::default()),
             connect: Arc::new(Connect::new(accounts.clone(), tracker.clone(), bus.clone())),
@@ -983,6 +1018,7 @@ impl TestApp {
             board,
             reset_queue: tokio::sync::Mutex::new(reset_queue),
             request_reset,
+            identities: accounts,
         }
     }
 
@@ -1066,11 +1102,36 @@ impl TestApp {
         self.tokens.issue_signed_in_at(user, session, at)
     }
 
+    /// What a client holding root key `[7; 32]` signs to name `device` on `user`'s `session`.
+    pub async fn naming_proof(
+        &self,
+        user: UserId,
+        session: domain::SessionId,
+        device: uuid::Uuid,
+    ) -> String {
+        let actor = self
+            .identities
+            .find(user)
+            .await
+            .unwrap()
+            .expect("an account here")
+            .actor_uri;
+        let signature = domain::e2ee::testing::plain_signature(
+            &domain::e2ee::DeviceRootKey::parse(&[7; 32]).unwrap(),
+            &domain::auth::naming_bytes(&actor, device.into(), session),
+        );
+        base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            signature.as_bytes(),
+        )
+    }
+
     /// A session of `user`'s that registered a new device and named it: the session, the device.
     pub async fn on_a_device(&self, user: UserId) -> (domain::SessionId, uuid::Uuid) {
         let (session, device) = (self.sign_in.sessions.live(user), uuid::Uuid::new_v4());
         let token = self.token_in(user, session);
         let drk = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [7; 32]);
+        let proof = self.naming_proof(user, session, device).await;
         for (method, uri, body) in [
             (
                 Method::POST,
@@ -1080,13 +1141,49 @@ impl TestApp {
             (
                 Method::PUT,
                 "/api/sessions/current/device",
-                serde_json::json!({ "device_id": device }),
+                serde_json::json!({ "device_id": device, "signature": proof }),
             ),
         ] {
             let (status, answer) = self.call_in(&token, method, uri, Some(body)).await;
             assert!(status.is_success(), "{uri}: {answer}");
         }
         (session, device)
+    }
+
+    /// `device`, registered by [`Self::on_a_device`], approved by the words of `generation`, whose
+    /// approval public key is `approval_key`, from `token`, a session naming it.
+    pub async fn approved_by_words(
+        &self,
+        owner: &Account,
+        token: &str,
+        device: uuid::Uuid,
+        generation: i64,
+        approval_key: [u8; 32],
+    ) {
+        use base64::Engine;
+        use domain::e2ee::{ApprovalPublicKey, DeviceRootKey, approval_bytes};
+        let signature = domain::e2ee::testing::plain_signature(
+            &ApprovalPublicKey::parse(&approval_key).unwrap(),
+            &approval_bytes(
+                &owner.actor_uri,
+                device.into(),
+                &DeviceRootKey::parse(&[7; 32]).unwrap(),
+            ),
+        );
+        let body = serde_json::json!({
+            "by": "passphrase",
+            "generation": generation,
+            "signature": base64::engine::general_purpose::STANDARD.encode(signature.as_bytes()),
+        });
+        let (status, answer) = self
+            .call_in(
+                token,
+                Method::POST,
+                &format!("/api/keys/devices/{device}/approvals"),
+                Some(body),
+            )
+            .await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{answer}");
     }
 
     /// A request another instance signed, as `peer`, with the `Digest` of its body.

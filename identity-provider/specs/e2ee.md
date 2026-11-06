@@ -39,7 +39,8 @@ Three properties define the system:
    device that approves a new one with the code shares the words with it,
    sealed (§ 3.11), so a device approved with the code restores past messages
    by itself. An account that lost every device and the words loses its
-   archive and starts over with a new passphrase — the explicit
+   archive and starts over with a new passphrase, once none of its approved
+   devices has been used for a week (§ 3.12) — the explicit
    security/usability trade-off this system accepts.
 
 ```mermaid
@@ -96,7 +97,11 @@ rows below that name the instance don't hold ("What is not protected").
 | The instance changes the approval public key, to approve a device itself | A device holding the passphrase derives the key itself, compares, trusts nothing new and warns on a mismatch (§ 3.9) |
 | A device nobody approved appears on the account | No device of the user's adds it to a conversation or sends it the passphrase; each one holding the current passphrase that sees it in the device list announces it — "Not you? Sign it out." The list is the instance's: a device it leaves out is caught only if met as a leaf in a conversation one of the user's devices is in ("What is not protected", § 3.9) |
 | The instance starts the history over from a device of its own | The new generation's setter isn't a device the others approved: they refuse the generation and warn — "Your history was reset from a device you haven't approved." —, and never approve that setter, which would hand it everything. The way back is a start over from one of the user's own devices (§ 6.11) |
-| A device is lost or stolen | Revoke it — MLS Remove commits leave it out of every later epoch, the approvals it signed and the key shares it sent or was sent are dropped, the directory hands out no KeyPackage of it (§ 6.6) — and, if it held the 24 words, start over from one of the user's devices (§ 6.11): only a new generation cuts its words off |
+| Someone with only the password starts the history over from a device of their own | A device the account's devices haven't approved starts over only through a request (§ 3.12): every approved device is told, any of them cancels it at once, and it matures only once no approved device has been used for 7 days — never while the user uses any of their devices (§ 6.13) |
+| Someone with only the password signs the user's devices out for good | An approved device is revoked only from an approved device (§ 3.12): a device nobody approved revokes only devices nobody approved, and itself |
+| Someone with only the password speaks as one of the user's devices | A session speaks only for a device whose root key it holds: naming a device on a session takes that key's signature over the session, and so does giving the device another root key, which would drop its approvals (`identity-provider/specs/auth.md § 1`, "Sessions and devices") |
+| Someone with only the password turns the second factor on, to lock the user's devices out of signing in until a start over matures | Once the account has a history key, only an approved device turns it on (`identity-provider/specs/auth.md § 3`) |
+| A device is lost or stolen | Revoke it from an approved device — MLS Remove commits leave it out of every later epoch, the approvals it signed and the key shares it sent or was sent are dropped, the directory hands out no KeyPackage of it (§ 6.6) — and, if it held the 24 words, replace them from one of the user's devices holding them (§ 6.12): only a new generation cuts its words off |
 | A member removed from a group, or gone from it, keeps reading | Every device of theirs is committed out by MLS Remove commits (§ 6.8): nothing sent from the next epoch on decrypts for them, whatever reaches them |
 | Replay / reorder / forging by transport | MLS application-message authentication + epoch ordering — handled inside the protocol |
 
@@ -132,11 +137,29 @@ rows below that name the instance don't hold ("What is not protected").
   as after a replacement of the words. A device catches only the lie about itself — a generation
   said to be its own while it set none.
 - **Someone with only the password.** Their device is announced and kept out of the existing
-  conversations and the passphrase, but they can erase the archive — Settings → Devices → Clear
-  history backup, or a start over —, and their device gets into the conversations contacts open
-  with the user from then on (above). With a recent sign-in they can sign the other sessions out,
-  revoke every device and start over: their device then becomes the account's root of trust, and
-  the existing conversations are out of the user's reach.
+  conversations and the passphrase. It speaks for no device of the user's — naming one takes its
+  root key —, revokes no approved device, and turns no second factor on (§ 3.12). They can still
+  erase the archive — Settings → Devices → Clear history backup —, and their device gets into the
+  conversations contacts open with the user from then on (above). With a recent sign-in they can
+  sign the user's other sessions out: the user signs in again with the password, and a device
+  used again counts as used. A start over from their device is only a request: every approved
+  device is told and may cancel it, and it waits while any approved device is in use (§ 3.12).
+  What that leaves:
+  - **An account none of whose approved devices is used for 7 days** — lost, or simply left
+    alone. The thief's request matures: their device becomes the account's root of trust, the
+    existing conversations out of the user's reach. The way back is a password reset, which ends
+    every session, the thief's too, then a start over from one of the user's devices, which waits
+    a week after the thief's device was last used (§ 6.13).
+  - **A request told to live sessions only.** `start_over_requested` reaches the approved devices
+    signed in at that moment; the others learn of it when they next load (§ 3.12). A device
+    signed out — the thief signed it out — is told once the user signs in on it again, which is a
+    use and pushes the request a week further.
+  - **An account that lost every device.** The user's new device is not approved either, so the
+    thief may revoke it, which cancels its request, and race it to the next generation once their
+    own request matures. A password change ends the thief's sessions, after which the user's
+    request is the only one left to mature.
+  - Beyond that, the instance's own powers: the rule is the instance's to keep ("Trust
+    ceiling").
 - **The user approving a device that isn't theirs.** The code proves that the two devices speak to
   each other, not whose the new one is: the prompt names the device ("New sign-in on Chrome on
   Android"), and "Not me" signs it out.
@@ -157,9 +180,11 @@ rows below that name the instance don't hold ("What is not protected").
 
 ### Lost everything
 
-An account that lost every device and the 24 words starts over (§ 6.11): a new device sets the next
-generation — a recent password, the archive erased — and becomes the account's new root of trust,
-approved by its own new words. It joins none of the account's existing conversations: only the
+An account that lost every device and the 24 words starts over (§ 6.11): a new device asks, waits
+until none of the account's approved devices has been used for 7 days — they are lost, so none is
+—, then sets the next generation — a recent password, the archive erased — and becomes the
+account's new root of trust, approved by its own new words; the lost devices, approved under no
+generation any more, are revoked from it. It joins none of the account's existing conversations: only the
 user's own devices add a sibling, and none is left (§ 9). Devices that still exist hold the old
 passphrase: they refuse the new generation, as one set by a device they never approved, and warn,
 until the user puts one back — it asks to be approved and its code is typed on the new device (the
@@ -402,14 +427,16 @@ It belongs to the account, not to a device, and the account has one at a time, i
 **generations**: the first device makes generation 1, and a new passphrase — the next
 generation — is made only when the current one is lost (no device holds it and the words are
 gone) or must be replaced (a revoked device, or someone the user no longer trusts, holds it):
-a start over, § 6.11. A new generation erases the archive (§ 3.8): what was saved under the old
-passphrase could no longer be opened.
+a replacement from a device approved under it, at once (§ 6.12), or a start over from any other,
+through a request that waits until no approved device is in use (§ 3.12, § 6.11). A new
+generation erases the archive (§ 3.8): what was saved under the old passphrase could no longer be
+opened.
 
 ```mermaid
 stateDiagram-v2
     [*] --> None: the account is created
     None --> G1: its first device sets generation 1
-    G1 --> G2: the passphrase lost or replaced — generation 2 (a recent password), the archive erased
+    G1 --> G2: the passphrase lost or replaced — generation 2 (a recent password; from a device not approved, a matured request), the archive erased
     G2 --> Gn: lost again — the next one, the same way
 ```
 
@@ -421,7 +448,8 @@ generation, keeps them, approves itself with them, archives under the same key f
 restores the archive. There is no third way in: a device that is neither approved nor holds the
 words stays on that page, publishes no KeyPackage — so none of the account's devices, nor any
 contact's, adds it to a conversation — and archives nothing, until it is approved, the words are
-typed, or it starts over: "I no longer have my devices or my words" (§ 6.11). A device that held
+typed, or it starts over: "I no longer have my devices or my words" (§ 6.11), a request that
+matures once no approved device has been used for a week (§ 3.12). A device that held
 words of this account and finds them no longer the key in force is not pushed out: it keeps its
 conversations and its own copy, saves nothing and decides nothing, under a banner that says what
 happened — a generation set by a device it doesn't know, or a change none of the user's devices
@@ -498,9 +526,11 @@ ids it was sealed with: one the instance moved to another conversation or messag
 The user's own devices decide which devices belong to the account. A device counts once another
 device of the account approves it, or once the passphrase is typed on it. The instance stores and
 lists the approvals and refuses malformed ones, but never decides whom to trust: each device checks
-them itself. It reads their structure for one thing only, a key share, which it refuses to and from
-a device that isn't approved, and from a device that didn't approve its recipient (§ 3.11) — a
-backstop behind each device's check, never one in its place.
+them itself. It reads their structure (§ 3.11) for what it does itself, never for what a device
+decides: a key share, which it refuses to and from a device that isn't approved, and from a device
+that didn't approve its recipient; revoking an approved device, starting the history over and
+turning the second factor on, which take an approved device (§ 3.12) — a backstop behind each
+device's check, never one in its place.
 
 **An approval** is an Ed25519 signature over the `PINAI-DEVICE-APPROVAL-v1` canonical bytes of
 § 7.2 — the account's actor URI, the approved device's id and its DRK —, made either:
@@ -595,8 +625,10 @@ reset from a device you haven't approved." —, and of a stored approval public 
 from its own derivation, worded for an unknown change. When the user didn't start over, the
 setter isn't theirs: it is never approved — approving it would hand it the account's
 conversations and its new words —, and the way back is a start over from one of the user's own
-devices (§ 6.11), the password changed first, or the thief starts over again. Such a reset pushes
-none of the user's devices out of the app: each that held words stays, under a banner, in its
+devices (§ 6.11), the password changed first, or the thief starts over again. The setter is then
+the only approved device: the user's start over is a request it is told of, and it matures once
+the setter — signed out by the password change — has gone a week unused (§ 3.12, § 6.13). Such a
+reset pushes none of the user's devices out of the app: each that held words stays, under a banner, in its
 conversations, with its own copy, saving and deciding nothing until it holds the words in force. It still publishes KeyPackages,
 so a conversation a contact opens from then on adds it, and the device that started over commits
 it out there (§ 6.11).
@@ -844,6 +876,155 @@ a good one until a report, a revoke, a DRK or HPKE key change, or a new generati
 lying instance can hold the passphrase back this way — the user can still type the words —, never
 hand over other words.
 
+### 3.12 Start over requests
+
+Setting the next generation erases the archive and makes the device that sets it the account's
+root of trust (§ 3.6). From a device the account's devices haven't approved, that is all a
+password thief needs. So such a device starts over only through a request every approved device
+hears of and may cancel, and only once none of them is in use — the registration lock of Signal,
+for the history. A device approved under the current generation replaces the words at once
+(§ 6.12); a device that lost everything waits a week.
+
+**Approved** is the structural rule of § 3.11: approved under the current generation by the stored
+approvals' structure (`domain::e2ee::approval_chain`) — an approval by that generation's approval
+key, or by an unrevoked device carrying one, two links at most, each binding the root key its
+device holds —, and unrevoked. `domain::e2ee::DeviceTrust` holds the account's devices, approvals
+and generation, read together, and answers it; the instance's backstop, never a device's own
+check (§ 3.9).
+
+**Asking** (`POST /api/history/start-over`): a session that named its device, unrevoked, with a
+DRK — the generation it sets records that device, and its new words approve it. The account has a
+history key (`409 no_history_key`: the first generation needs no request), and the device isn't
+approved under it (`409 already_approved`: it replaces the words itself). One request is open an
+account: the device asking again gets its own back (`200`), another device is refused
+(`409 start_over_pending`). An account opens 3 a day (`429 too_many_requests`): each one tells
+every approved device. Counted, and the one open checked, under the account's lock. No recent
+password: asking erases nothing — finishing does, and asks it.
+
+**When it matures**, computed at each read and never stored, from the sessions of the devices
+approved under the generation it would replace:
+
+```
+ready_at = max(created_at, the latest last_used_at of a session of any approved device) + 7 days
+ready_at = created_at                     when no device is approved under that generation
+```
+
+A session's use is its sign-in, a code exchange or a refresh (`identity-provider/specs/auth.md
+§ 1`, "Sessions") — an app left open refreshes its token every hour —, and it counts signed out
+since or not. Each use of an approved device pushes the request a week further.
+
+> A request opens on Monday at 10:00. The laptop, approved, refreshed its token at 9:40 — ready
+> next Monday at 10:00. The user opens the laptop on Wednesday at 18:00 — next Wednesday at 18:00.
+> The laptop is never used again: on that Wednesday the device asking sets the next generation,
+> its password typed in the last 10 minutes.
+
+**Setting the next generation** (`PUT /api/history/key`, generation n + 1 with n ≥ 1), checked in
+this order — `domain::e2ee::may_set_history_key`, then `may_replace_history_key`:
+
+1. a session that named its device (`403 device_required`);
+2. a password typed in the last 10 minutes (`401 insufficient_user_authentication`);
+3. the very key held already: a retry, `204`, nothing written;
+4. the generation right after the current one (`409 history_key_conflict`);
+5. the setter approved under n: written at once, a replacement of the words (§ 6.12);
+6. otherwise the setter's own open request for n — none is `403 start_over_required`, one not
+   matured `403 start_over_not_ready` with its `ready_at`;
+7. written, the request used in the same write.
+
+Generation 1 takes none of 2, 5 and 6. Checks 3 to 7 are made by the write itself, under the
+history key's lock, on the devices, approvals, request and sessions as they stand then: a setter
+revoked meanwhile, or whose approver was, writes nothing. The write ends every open request of the
+account: used by its own device, superseded by any other write.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Open: a device not approved asks
+    Open --> Open: an approved device is used — ready a week later
+    Open --> Used: matured, its device sets the next generation
+    Open --> Cancelled: an approved device cancels it
+    Open --> Withdrawn: its device withdraws it
+    Open --> Approved: its device is approved under the generation, by a code or the words
+    Open --> Revoked: its device is revoked
+    Open --> Superseded: an approved device replaces the words
+    Used --> [*]: deleted a week after it ended
+    Cancelled --> [*]
+    Withdrawn --> [*]
+    Approved --> [*]
+    Revoked --> [*]
+    Superseded --> [*]
+```
+
+**A request stays open** until it is used, cancelled, withdrawn, superseded, revoked or its device
+approved — it never expires. Every approved device reads the account's open request
+(`GET /api/history/start-over`) at each load, and shows it until someone resolves it.
+
+**Ending it** (`DELETE /api/history/start-over/:id`): a session whose device is approved under the
+generation it would replace cancels it, with no recent password — "Cancel — it wasn't me" must take
+one tap —; the device asking withdraws it; any other device is refused (`403 approval_required`).
+The end is decided again under the request's lock, so a device revoked or no longer approved
+meanwhile ends nothing. An approval that makes the device asking approved under that generation —
+a code typed on an approved device, or its own words — ends its request in the same write
+(`approved`): it needs none any more. A revoke of the device asking cancels it (`revoked`). One
+that ended is `410 start_over_ended` until it is deleted, a week after it ended
+(`api::background::sweep_start_over_requests`) — past the day it counts against the limit.
+
+**Reading it** (`GET /api/history/start-over`): the account's open request, for the device asking
+and the approved devices; for the device asking, once its request ended, its latest request with
+how it ended, until it is deleted — so it learns the outcome after a reload; `404` when there is
+none of either, `403 approval_required` for any other device while one is open. The answer is
+`{ id, device_id, display_name, created_at, ready_at, ended }`, `ended` being
+`{ reason, at }` — `reason` one of `cancelled`, `withdrawn`, `used`, `superseded`, `revoked`,
+`approved` — or `null` while open.
+
+**Pushes**, to the sessions of devices only — a session that named none hears none, and a device
+whose sessions are all signed out hears nothing, and reads the request at its next load:
+
+- `start_over_requested { request_id, device_id, display_name, ready_at }` to the approved
+  devices' sessions as the request opens;
+- `start_over_cancelled { request_id, reason }` to the sessions of the device asking and of the
+  approved devices when it ends unused — cancelled, withdrawn, its device approved or revoked, or
+  superseded —: the asker learns how, and the other approved devices' prompts go.
+
+**Revoking an approved device** (`POST /api/keys/devices/:device_id/revoke`) takes a session whose
+device is approved under the current generation (`403 approval_required`): a device nobody
+approved revokes only devices nobody approved, and itself. An account with no history key has no
+approved device, and any of its devices revokes any other. The recent password still applies.
+`domain::e2ee::may_revoke` decides it on the account's devices, approvals and generation as they
+stand under the devices' row locks.
+
+**What it holds against.** A thief with the password asks: the user's devices are told, and one tap
+cancels it; while the user uses any approved device, it never matures. Revoking the approved
+devices first is refused. Speaking as an approved device is too: naming a device on a session takes
+its root key's signature over that session, and so does giving it another root key
+(`identity-provider/specs/auth.md § 1`, "Sessions and devices"). Turning the second factor on,
+which would lock the user's devices out of signing in, takes an approved device
+(`identity-provider/specs/auth.md § 3`). Signing the sessions out (`DELETE /api/sessions?keep=current`)
+signs the devices out, nothing more: their last uses stay, and the user signing in again on one of
+them uses it. What it doesn't hold against: an account none of whose approved devices is used for
+7 days, and the instance, which keeps this rule and could set a generation or revoke a device as
+it likes (§ 2) — its own reset is still caught by the devices (§ 3.9).
+
+**Races.** Every write takes the rows it decides on in one order — the history key's row, the
+devices', the account's, then the request's —, so the five that meet here queue:
+
+- **A cancel and the write it would stop.** The write takes the request's row and decides on it;
+  a cancel either ends it first — the write is refused, `start_over_required` — or finds it used
+  (`410`).
+- **A request maturing as an approved device is used.** The write reads the sessions' last uses
+  again under the key's lock: a use committed before that read counts, and the write is refused
+  (`start_over_not_ready`); one committed after it follows the write. A sign-in that names an
+  approved device, a code exchange and a refresh all count the same way.
+- **Two requests at once.** Decided one after the other under the account's lock, and one open
+  request an account is a unique index too: one opens, the other is `409` — or, from the same
+  device, answered with it.
+- **A revoke and a request.** A request opens under its device's share lock while the device is
+  unrevoked, and a revoke takes the row first: the revoke cancels a request opened before it, and
+  one asked after it is refused. A revoke racing the write a matured request allows lets one
+  through: the request is cancelled and the write refused, or the write lands and the revoke finds
+  no request.
+- **A revoke and a replacement.** The revoke reads the generation under its share lock, the
+  replacement writes it: an approved device revoked as it replaces the words either writes first,
+  or is no longer approved when its write decides, and writes nothing.
+
 ---
 
 ## 4. Schema
@@ -902,6 +1083,12 @@ history_key_shares       — PRIMARY KEY (recipient_device_id, generation): one 
                             generation, the recipient's report, a revoke of
                             either device, a DRK rotation of either, and a new
                             HPKE key of the recipient
+start_over_requests      — id, user_id, device_id (asking), generation (the one it
+                            would replace), created_at, ended_at, ended_reason
+                            (cancelled | withdrawn | used | superseded | revoked
+                            | approved); one open an account; when it matures is
+                            computed at each read, never stored; deleted a week
+                            after ended_at
 
 mls_commits              — per-conversation commit log
                             UNIQUE (conversation_id, epoch)
@@ -920,10 +1107,10 @@ All Bearer-auth except where noted. Cross-IdP paths use HTTP Signatures — see
 
 | Endpoint | Description |
 |---|---|
-| `POST /api/keys/devices` | Register/renew/rotate the caller's DRK attestation: `{ device_id, drk_public_key, hpke_public_key?, hpke_key_signature? }`, keys and signature in standard base64. Idempotent on `(device_id, drk_public_key)`. The device's HPKE key comes with the DRK's signature over its canonical bytes, both or neither (§ 3.3). A session that declared its device (`PUT /api/sessions/current/device`) registers that device only. A device seen for the first time is named from the request's `User-Agent` ("Chrome on Linux"); one recorded unnamed takes the name of its first KeyPackage upload that says. First-time mint emits a `DeviceJoined` WS event to the user's other live sessions; a rotation drops, in the same write, the device's approvals and those it signed (§ 3.9), and the key shares it sent or was sent; a new HPKE key, or one cleared, the share it was sent (§ 3.11). Returns the signature, kid, issued_at, expires_at, and the canonical bytes the IdP signed so the client can re-verify locally |
+| `POST /api/keys/devices` | Register/renew/rotate the caller's DRK attestation: `{ device_id, drk_public_key, hpke_public_key?, hpke_key_signature? }`, keys and signature in standard base64. Idempotent on `(device_id, drk_public_key)`. The device's HPKE key comes with the DRK's signature over its canonical bytes, both or neither (§ 3.3). A session that declared its device (`PUT /api/sessions/current/device`) registers that device only; a session that named none registers a new device, or the same root key again, and another root key only from a session that named that very device (`403 device_required`, "Key directory rules"). A device seen for the first time is named from the request's `User-Agent` ("Chrome on Linux"); one recorded unnamed takes the name of its first KeyPackage upload that says. First-time mint emits a `DeviceJoined` WS event to the user's other live sessions; a rotation drops, in the same write, the device's approvals and those it signed (§ 3.9), and the key shares it sent or was sent; a new HPKE key, or one cleared, the share it was sent (§ 3.11). Returns the signature, kid, issued_at, expires_at, and the canonical bytes the IdP signed so the client can re-verify locally |
 | `GET /api/keys/devices` | List the caller's devices with their attestation expiry (the client uses this to schedule silent renewals), and whether each is signed in: `signed_in`, `last_active_at`. With each device, what another device needs to verify its keys itself (§ 3.3): `drk_public_key`, `attestation_signature`, `attestation_kid`, `attestation_expires_at` — the text the attestation signed —, `hpke_public_key`, `hpke_key_signature`; `null` where the device has registered no DRK, or no HPKE key. And `history_generation`, the history key's generation the device says it holds (§ 3.6), `null` until it says: the client compares it with the current generation. And `approvals`, oldest first, those binding the device's `drk_public_key` (§ 3.9): `{ by: "device", device_id, signature, created_at }` — `device_id` the approver — or `{ by: "passphrase", generation, signature, created_at }`, the signature in standard base64 |
 | `PUT /api/keys/devices/:device_id/history-key` | `{ generation }`: the device says it holds that generation of the account's history key (§ 3.6). Only from the device's own session: one that has named this very device (`403 device_required` when it named none, `403 device_mismatch` when another; below). The current generation only (`409 stale_history_key`, none set yet included, checked again as it is written); an unrevoked device of the caller's only (`403` revoked, `404` another account's or unknown). The key share the device was sent is deleted in the same write (§ 3.11). `204` |
-| `POST /api/keys/devices/:device_id/revoke` | Sets the directory-level revocation flag, clears the device's HPKE key, drops the approvals it signed (§ 3.9), deletes the key shares it sent or was sent (§ 3.11) and closes the approval requests it asks or answers (§ 3.10, `approval_closed` to the other side) in one write, then signs the device out — its sessions end, a web app's with the browser session it signed in through and that browser's other web apps (`identity-provider/specs/auth.md § 1`, "Sessions and devices"); the MLS Remove commits follow. Takes a password typed in the last 10 minutes (`identity-provider/specs/auth.md § 1`, "Sensitive actions"). Idempotent; `404` for a device that is not the caller's |
+| `POST /api/keys/devices/:device_id/revoke` | Sets the directory-level revocation flag, clears the device's HPKE key, drops the approvals it signed (§ 3.9), deletes the key shares it sent or was sent (§ 3.11) and closes the approval requests it asks or answers (§ 3.10, `approval_closed` to the other side) and cancels its start over request (§ 3.12, `start_over_cancelled`) in one write, then signs the device out — its sessions end, a web app's with the browser session it signed in through and that browser's other web apps (`identity-provider/specs/auth.md § 1`, "Sessions and devices"); the MLS Remove commits follow. Takes a password typed in the last 10 minutes (`identity-provider/specs/auth.md § 1`, "Sensitive actions"). A device approved under the current generation only from a session whose device is approved too (`403 approval_required`): a device nobody approved revokes only devices nobody approved, and itself; an account with no history key, any of its devices (§ 3.12). Idempotent; `404` for a device that is not the caller's |
 | `POST /api/keys/packages` | Upload a batch of KeyPackages for one of the caller's devices — refused whole (`400`) when a package is empty or not base64, or would take the device past the cap. An `expires_at` already past or beyond the lifetime (`E2EE_KEYPACKAGE_LIFETIME_SECS`) is the device's clock being off, not a bad package: the IdP stores it as now + the lifetime, by its own clock |
 | `POST /api/keys/packages/claim` | Atomically reserve one KeyPackage for `actor_uri` — of `device_id`, or of any device with some left. Bearer or HTTP-Sig (peer IdPs); for remote `actor_uri` the local IdP proxies to the target IdP via HTTP-Sig |
 | `POST /api/keys/packages/claim/devices` | One KeyPackage of each of `actor_uri`'s unrevoked devices that has any, as `{ claims: [...] }` — a contact's first add brings all their devices in (§ 6.5). Asked, proxied, limited and refused as a single claim is; none at all → 409 |
@@ -938,10 +1125,19 @@ All Bearer-auth except where noted. Cross-IdP paths use HTTP Signatures — see
   (`identity-provider/specs/auth.md § 1`, "Sessions and devices"), registering any other device
   id from it — attested or not, new or not —, or saying another device holds the history key, is
   refused with `403 device_mismatch` "This session signed in another device", and changes
-  nothing: a stolen token can't take a device over. A session that names no device yet registers
-  any device of the account, but neither sets the history key nor says a device holds it, approves
-  a device, takes part in an approval request, shares the passphrase nor reads a share:
-  `403 device_required` "Name this session's device first".
+  nothing: a stolen token can't take a device over.
+- **A session speaks only for a device whose key it holds.** Naming a device on a session takes
+  that device's root key's signature over the session (`identity-provider/specs/auth.md § 1`,
+  "Sessions and devices"): a password alone names none. A session that names no device yet
+  registers a device id the account doesn't have yet, or the same root key again for one it has
+  — a renewal: only the expiry moves, and an HPKE key it brings still carries that root key's
+  signature —; another root key for a device already registered, which drops its approvals,
+  takes a session that named that very device (`403 device_required`,
+  `domain::e2ee::Registration::may_come_from`). Such a session neither sets the history key nor
+  says a device holds it, approves a device, takes part in an approval request, shares the
+  passphrase, reads a share nor asks to start over: `403 device_required` "Name this session's
+  device first"; and, being no approved device, it revokes none and turns no second factor on
+  (§ 3.12).
 - **A device's HPKE key is its DRK's.** A registration bringing one is refused (`400`) when only
   one of `hpke_public_key` and `hpke_key_signature` is sent, or when the DRK sent with it doesn't
   verify the signature over the key's canonical bytes for this device of this account; nothing is
@@ -1052,7 +1248,10 @@ and they hold for what peers deliver as much as for local clients.
 | Endpoint | Description |
 |---|---|
 | `GET /api/history/key` | The account's history key (§ 3.6–3.7): `{ generation, salt, check_value, approval_public_key, set_by_device }`, bytes in standard base64; `set_by_device` is the device whose session set the generation (`null` only once that device's row is gone). `404` before its first device sets one |
-| `PUT /api/history/key` | `{ generation, salt, check_value, approval_public_key }` — 16, 32 and 32 bytes, standard base64 (`400` otherwise). From a session that has named its device (`403 device_required` otherwise), which the key records as `set_by_device`. Set only for the generation right after the current one, 1 when there is none: a compare-and-set, so two devices setting the same generation make one, and the other is answered `409 history_key_conflict` with `current_generation` (`0` for none). The very key held already — the same generation, salt, check value and approval key — is a retry: `204`, nothing written. Generation 1 takes no recent password; any later one does, as it erases the archive (`identity-provider/specs/auth.md § 1`, "Sensitive actions"). In one transaction: the key replaced, the account's archive erased, the passphrase approvals of older generations dropped (§ 3.9), the account's key shares deleted (§ 3.11). `204` |
+| `PUT /api/history/key` | `{ generation, salt, check_value, approval_public_key }` — 16, 32 and 32 bytes, standard base64 (`400` otherwise). From a session that has named its device (`403 device_required` otherwise), which the key records as `set_by_device`. Set only for the generation right after the current one, 1 when there is none: a compare-and-set, so two devices setting the same generation make one, and the other is answered `409 history_key_conflict` with `current_generation` (`0` for none). The very key held already — the same generation, salt, check value and approval key — is a retry: `204`, nothing written. Generation 1 takes no recent password; any later one does, as it erases the archive (`identity-provider/specs/auth.md § 1`, "Sensitive actions"), and is set at once from a device approved under the current generation, otherwise only through that device's own matured start over request (`403 start_over_required`, `403 start_over_not_ready` with `ready_at`) — the checks in the order of § 3.12. In one transaction: the key replaced, the account's archive erased, the passphrase approvals of older generations dropped (§ 3.9), the account's key shares deleted (§ 3.11), its open start over requests ended — the setter's used, any other superseded (§ 3.12). `204` |
+| `POST /api/history/start-over` | No body. From a session that named its device (`403 device_required`), unrevoked (`403`), with a DRK (`409 no_root_key`), on an account with a history key (`409 no_history_key`), the device not approved under it (`409 already_approved`): it asks to set the next generation (§ 3.12). `201 { id, created_at, ready_at }`; the same device asking while its request is open gets it back, `200`; another device's open request is `409 start_over_pending`; 3 an account a day (`429 too_many_requests`). Pushes `start_over_requested { request_id, device_id, display_name, ready_at }` to the approved devices' sessions |
+| `GET /api/history/start-over` | The account's open request, for its device and for the approved devices (`403 approval_required` for any other); for the device asking, once its request ended, its latest one, until it is deleted: `{ id, device_id, display_name, created_at, ready_at, ended }` — `device_id` the device asking, `ready_at` as of now, `ended` `{ reason, at }` or `null` while open. `404` when there is none of either (§ 3.12) |
+| `DELETE /api/history/start-over/:id` | No recent password. A device approved under the generation it would replace cancels it; the device asking withdraws it; any other `403 approval_required` — decided again under the request's lock. `204`, and `start_over_cancelled { request_id, reason }` to the sessions of the device asking and of the approved devices. One ended `410 start_over_ended`; another account's or unknown `404`. Ended requests are deleted a week after they ended |
 | `POST /api/history/messages` | `{ generation, entries }`: a batch of 1 to 50 entries (`400` otherwise; a nonce is 12 bytes), sealed under `generation` — the current one only (`409 stale_history_key`, also while none is set; § 3.8). Every `conversation_id` must be one the caller is or was a member of — leaving a group keeps the history already read — or the batch is refused whole (`403`). Idempotent upsert on `(user_id, id)` — first decryptor of a message wins; subsequent uploads from the user's other devices no-op. Answers `{ inserted }`, how many were new |
 | `GET /api/history/messages?after_id=&after_created_at=&limit=` | Keyset pagination over `(created_at DESC, id DESC)`, limit clamped 1..=500, default 100. `next_cursor` names the page's last entry, and is `null` only on an empty page; `after_id` and `after_created_at` (RFC 3339) go together (`400`) |
 | `DELETE /api/history/messages` | Erase the user's archive: Settings → Devices → Clear history backup. The history key and its generation stay: every device goes on saving under it. Takes a password typed in the last 10 minutes (`identity-provider/specs/auth.md § 1`, "Sensitive actions") |
@@ -1066,6 +1265,15 @@ and they hold for what peers deliver as much as for local clients.
 | Saying another device than the session's holds the key | `403` | `device_mismatch` |
 | A generation that isn't the one right after the current one | `409` | `history_key_conflict`, with `current_generation` |
 | A generation past the first, the password not typed in the last 10 minutes | `401` | `insufficient_user_authentication` |
+| A generation past the first from a device not approved, with no open request of its own | `403` | `start_over_required` |
+| The same, its request not matured yet | `403` | `start_over_not_ready`, with `ready_at` |
+| Reading another device's request, or ending it, from a device not approved; revoking an approved device from a device not approved, or a session naming none | `403` | `approval_required` |
+| Asking to start over on an account with no history key | `409` | `no_history_key` |
+| Asking to start over from an approved device | `409` | `already_approved` |
+| Asking while another device's request is open | `409` | `start_over_pending` |
+| A fourth request within the day | `429` | `too_many_requests` |
+| Ending a request that ended | `410` | `start_over_ended` |
+| No open request (`GET /api/history/start-over`), or ending one not the account's | `404` | `not_found` |
 | An upload, a device's report or a share naming a generation that isn't the current one, or while none is set | `409` | `stale_history_key` |
 | A share malformed: `enc`, `ciphertext` or `signature` not base64 or not their size | `400` | `invalid_request` |
 | A share to the sending device itself | `400` | `invalid_request`, "A device shares the history key with another device" |
@@ -1095,6 +1303,8 @@ and they hold for what peers deliver as much as for local clients.
 | `approval_message` | `{ request_id, seq }`: the other side of a request posted; the device reads `…/messages?after=`. To the other side's sessions — while nobody answers, every device's but the asking one's |
 | `approval_closed` | `{ request_id }`: a request ended — closed by a side, replaced by its device's next one, or a side revoked —, to both sides' sessions (every device's while nobody answers); or another device answered it, to the devices left out. Sessions that named no device hear none of the `approval_*` pushes |
 | `history_key_ready` | `{ device_id }`: a key share waits for the device (§ 3.11), which reads `GET /api/history/key-shares`. To that device's sessions only; a device that missed it reads its share when it next lacks the passphrase |
+| `start_over_requested` | `{ request_id, device_id, display_name, ready_at }`: a device of *this user* not approved asks to start the history over (§ 3.12). To the approved devices' sessions; one that missed it reads `GET /api/history/start-over` |
+| `start_over_cancelled` | `{ request_id, reason }`: a start over request ended unused — `cancelled`, `withdrawn`, its device `approved` or `revoked`, or `superseded` by an approved device's replacement. To the sessions of the device asking and of the approved devices |
 | `dm_delivery_failed`, `friend_request`, `friend_accepted`, `friend_removed`, `presence_update`, `typing`, `heartbeat_ack` | (Out of scope for this spec — see other specs) |
 
 ---
@@ -1118,7 +1328,7 @@ sequenceDiagram
     IdP->>IdP: sign canonical(actor, device, drk_pub, expires_at, kid)
     IdP-->>Web: {signature, kid, issued_at, expires_at, signed_message}
     Web->>IDB: store attestation
-    Web->>IdP: PUT /api/sessions/current/device {device_id}
+    Web->>IdP: PUT /api/sessions/current/device {device_id, signature: its root key's, over this session}
     IdP-->>Web: 204 (the session names its device)
     Web->>Web: leaf signing keypair → credential JSON (DRK pub + IdP attestation + the DRK's leaf binding)
     Web->>Web: generate initial KeyPackage batch (50), each over that key and credential
@@ -1170,7 +1380,7 @@ sequenceDiagram
     Mobile->>Mobile: gen DRK and HPKE key, store locally (sealed)
     Mobile->>IdP: POST /api/keys/devices {device_id, drk_public_key, hpke_public_key, hpke_key_signature}
     IdP-->>Mobile: attestation
-    Mobile->>IdP: PUT /api/sessions/current/device {device_id}
+    Mobile->>IdP: PUT /api/sessions/current/device {device_id, signature: its root key's, over this session}
     IdP-->>Mobile: 204 (the session names its device)
     Mobile->>IdP: GET /api/history/key
     IdP-->>Mobile: the history key (the account has one)
@@ -1422,7 +1632,7 @@ it (§ 6.2), or the other side does.
 ```mermaid
 sequenceDiagram
     participant U as User
-    participant Web as Other device
+    participant Web as Other device (approved)
     participant IdP
 
     U->>Web: Settings → Devices → Revoke
@@ -1436,13 +1646,17 @@ sequenceDiagram
 ```
 
 The flag, the HPKE key cleared, the approvals the device signed dropped, the key shares it sent or
-was sent deleted and its approval requests closed are one write: a device approved through it alone
-needs another approval (it normally holds the passphrase by then and approves itself), a share it
-signed is never read, and the other side of a request it took part in gets `approval_closed`.
+was sent deleted, its approval requests closed and its start over request cancelled are one write:
+a device approved through it alone needs another approval (it normally holds the passphrase by
+then and approves itself), a share it signed is never read, the other side of a request it took
+part in gets `approval_closed`, and the approved devices get `start_over_cancelled` for its start
+over (§ 3.12).
 
 The IdP goes first. It may refuse — a password typed more than 10 minutes ago
-(`identity-provider/specs/auth.md § 1`, "Sensitive actions") — and then nothing
-was done: the user types it again and revokes once more. Once it answered, the
+(`identity-provider/specs/auth.md § 1`, "Sensitive actions"), or an approved
+device revoked from a device nobody approved (`403 approval_required`,
+§ 3.12) — and then nothing was done: the user types it again and revokes
+once more, or revokes from an approved device. Once it answered, the
 device is signed out and can read nothing new while the commits go out.
 
 Every leaf whose credential names the device goes, not only the first
@@ -1637,8 +1851,9 @@ are gone — or must be replaced — a revoked device, or someone the user no lo
 it. The device that starts over sets the next generation and becomes the account's new root of
 trust; the user's other devices, if any, are approved again from it; the archive is erased.
 
-Here the user lost every device and the 24 words, and signs in on a new device: "I no longer have
-my devices or my words". Later they find an old tablet, which still holds generation 1.
+Here the user's laptop was stolen, the old tablet is nowhere to be found, and the 24 words are
+lost; they sign in on a new device: "I no longer have my devices or my words". Later they find the
+tablet, which still holds generation 1.
 
 ```mermaid
 sequenceDiagram
@@ -1646,12 +1861,18 @@ sequenceDiagram
     participant I as IdP
     participant T as Old tablet (generation 1)
     Note over N: "Your saved history will be erased. A device you still have will warn you, and can come back with a code typed here"
+    N->>I: POST /api/history/start-over
+    I-->>N: 201 {id, created_at, ready_at}
+    Note over I: the laptop and the tablet, approved, are told (start_over_requested) — nobody answers
+    Note over N: "If none of your devices is used for 7 days, you can finish here on <ready_at>"
+    Note over N,I: a week in which neither the laptop nor the tablet is used
     N->>N: the password typed again; 24 new words → a salt, HAK, check value, approval key
     N->>I: PUT /api/history/key {generation: 2, salt, check_value, approval_public_key}
-    I->>I: one write: the key replaced, the archive erased, generation 1's passphrase approvals and every key share dropped
+    I->>I: one write: the key replaced, the archive erased, generation 1's passphrase approvals and every key share dropped, the request used
     N->>I: POST /api/keys/devices/:N/approvals {by: passphrase, generation: 2, signature}
     N->>I: PUT /api/keys/devices/:N/history-key {generation: 2}
     Note over N: shows the 24 new words
+    N->>I: POST /api/keys/devices/:laptop/revoke — N is approved, the laptop no longer is
     T->>I: GET /api/history/key
     I-->>T: {generation: 2, …, set_by_device: N}
     Note over T: N is no device it approved: it refuses generation 2, saves nothing,<br/>and warns "Your history was reset from a device you haven't approved."
@@ -1668,8 +1889,18 @@ sequenceDiagram
     Note over T: N approved from here on: added to the tablet's conversations (§ 6.2)
 ```
 
+The new device isn't approved under generation 1, so it starts over through a request (§ 3.12):
+the laptop and the tablet, approved, are told, and the request waits until neither has been used
+for a week. Whoever stole the laptop and goes on using it keeps the request waiting — the date the
+new device shows keeps moving — and could cancel it: a password change ends every session, the
+laptop's with them, and it can then neither be used nor cancel anything. Should the tablet turn up
+during that week, it is told too, and it is the better way back: approve the new device from it
+with a code (§ 6.10), which keeps the history, and withdraw the request.
+
 Setting generation 2 takes a password typed in the last 10 minutes, and erases the archive
-(§ 3.8): what was saved under the lost words could no longer be opened. The new device becomes the
+(§ 3.8): what was saved under the lost words could no longer be opened. Once its new words
+approve it, the new device is the account's one approved device: it revokes the stolen laptop,
+which no generation approves any more. The new device becomes the
 account's new root of trust — its new words approve it — and every approval made under
 generation 1's key goes with that generation, so no old device is approved any more, and none can
 take a share — until a device holding generation 2 vouches for it: an approval one device gave
@@ -1727,8 +1958,10 @@ sequenceDiagram
     Note over O: holds n: "Your words were replaced on <D>" — a code typed on D, or the new words
 ```
 
-The words, the generation and the erasing write are a start over's, under the same rules: the
-password typed in the last minutes before anything is minted, the words pending until the IdP
+The words, the generation and the erasing write are a start over's, but with no request and no
+wait — the device is approved under the generation it replaces, so the instance sets the next one
+at once, and ends any other device's open start over request with it (§ 3.12) —, under the same
+rules: the password typed in the last minutes before anything is minted, the words pending until the IdP
 took them, a conflict or a refusal leaving nothing behind, generations only moving forward — and
 only over the generation this device holds: another device's replacement landing first is a
 conflict, never a generation replaced unread. What it adds:
@@ -1756,6 +1989,42 @@ conflict, never a generation replaced unread. What it adds:
 - **The old words** give no key in force: they open no entry — the archive holds only n+1's —,
   and approve nothing, as the IdP dropped the older passphrase approvals.
 
+### 6.13 A start over someone else asked
+
+Someone who has the user's password signs in on a device of their own and asks to start the
+history over. The user's laptop, approved and in use, is told, and cancels it.
+
+```mermaid
+sequenceDiagram
+    participant X as Thief's device
+    participant I as IdP
+    participant L as Laptop (approved)
+    X->>I: POST /api/history/start-over
+    I-->>X: 201 {id, created_at, ready_at: a week after the laptop's last use}
+    I-->>L: WS start_over_requested {request_id, device_id: X, display_name: "Chrome on Windows", ready_at}
+    X->>I: PUT /api/history/key {generation: n+1, …}
+    I-->>X: 403 start_over_not_ready {ready_at}
+    X->>I: POST /api/keys/devices/:L/revoke
+    I-->>X: 403 approval_required
+    Note over L: "Someone asked to start your history over from Chrome on Windows" — "Cancel — it wasn't me"
+    L->>I: DELETE /api/history/start-over/:id — no password asked
+    I-->>L: 204
+    I-->>X: WS start_over_cancelled {request_id, reason: cancelled}
+    X->>I: PUT /api/history/key {generation: n+1, …}
+    I-->>X: 403 start_over_required
+```
+
+Each refresh of the laptop's token pushed the request a week further anyway; the cancel ends it.
+The thief can ask again, 3 times a day, each told to the user's devices. What ends it is a new
+password: a reset link (`identity-provider/specs/auth.md § 7`) ends every session of the account,
+the thief's with them, and the laptop then revokes the thief's device.
+
+An account none of whose approved devices is used for 7 days is the thief's to start over (§ 2):
+their device becomes the one approved device, and the user's devices find their history reset by a
+device they never approved (§ 3.9). The way back is the same password change — the thief's device
+is signed out and can't sign in again —, then a start over from one of the user's devices, a
+request that matures a week after the thief's device was last used.
+
 ## 7. Wire formats
 
 ### 7.1 MLS leaf credential
@@ -1765,9 +2034,9 @@ Inside every leaf's `BasicCredential` (Section 3.4 JSON).
 ### 7.2 Canonical signed bytes
 
 The IdP's attestation of a DRK (§ 3.2), a DRK's signatures over its
-device's HPKE key (§ 3.3) and over each of its leaf keys (§ 3.4), an
-approval of a device (§ 3.9), a key share (§ 3.11) and an archive
-entry's associated data (§ 7.3) are all over UTF-8 lines, each ended by
+device's HPKE key (§ 3.3), over each of its leaf keys (§ 3.4) and over the
+session naming it, an approval of a device (§ 3.9), a key share (§ 3.11)
+and an archive entry's associated data (§ 7.3) are all over UTF-8 lines, each ended by
 `\n` (a literal newline, 0x0A) but the last. Every field is written
 exactly so:
 
@@ -1816,6 +2085,18 @@ PINAI-LEAF-BINDING-v1\n
 <actor_uri>\n
 <device_id>\n
 <base64(leaf_signature_public_key)>
+```
+
+What a device's DRK signs to name it on a session
+(`PUT /api/sessions/current/device`, `identity-provider/specs/auth.md § 1`,
+"Sessions and devices"), `sid` the session's id as the access token's
+`sid` claim carries it — a lowercase hyphenated UUID:
+
+```
+PINAI-SESSION-DEVICE-v1\n
+<actor_uri>\n
+<device_id>\n
+<sid>
 ```
 
 What an approval signs — by another device's DRK, or by the generation's
@@ -1956,6 +2237,7 @@ flowchart LR
         DA["device_approvals:<br/>signatures over root keys"]
         AR["approval_requests:<br/>the handshake's opaque messages"]
         KS["history_key_shares:<br/>the words sealed for<br/>one device each"]
+        SO["start_over_requests:<br/>a device not approved asking<br/>to set the next generation"]
     end
     att -.->|attests| KP
     pass -.->|derives| hist

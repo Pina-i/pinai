@@ -1,10 +1,12 @@
 //! What the history and key-directory routes share: their base64 fields, and the refusals both
-//! give about the account's history key.
+//! give about the account's history key and starting it over.
 
 use axum::http::StatusCode;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use domain::ValidationError;
+use domain::e2ee::StartOverRefusal;
+use time::format_description::well_known::Rfc3339;
 
 use crate::ApiError;
 
@@ -37,4 +39,61 @@ pub(crate) fn device_required() -> ApiError {
         "device_required",
         "Name this session's device first",
     )
+}
+
+/// What only a device approved under the current generation does: revoke an approved device,
+/// read or cancel another device's start over.
+pub(crate) fn approval_required() -> ApiError {
+    ApiError::new(
+        StatusCode::FORBIDDEN,
+        "approval_required",
+        "This takes a device approved under the current history key",
+    )
+}
+
+pub(crate) fn start_over_refused(refusal: StartOverRefusal) -> ApiError {
+    match refusal {
+        StartOverRefusal::NoHistoryKey => ApiError::new(
+            StatusCode::CONFLICT,
+            "no_history_key",
+            "The account has no history key to start over from",
+        ),
+        StartOverRefusal::AlreadyApproved => ApiError::new(
+            StatusCode::CONFLICT,
+            "already_approved",
+            "An approved device replaces the history key itself",
+        ),
+        StartOverRefusal::Pending => ApiError::new(
+            StatusCode::CONFLICT,
+            "start_over_pending",
+            "Another device of the account is starting over",
+        ),
+        StartOverRefusal::TooMany => ApiError::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "too_many_requests",
+            "Too many start over requests in the last day",
+        ),
+        StartOverRefusal::NotFound => ApiError::not_found("Start over request not found"),
+        StartOverRefusal::Ended => ApiError::new(
+            StatusCode::GONE,
+            "start_over_ended",
+            "The start over request has ended",
+        ),
+        StartOverRefusal::Required => ApiError::new(
+            StatusCode::FORBIDDEN,
+            "start_over_required",
+            "A device not approved starts over through a request",
+        ),
+        StartOverRefusal::NotReady { ready_at } => {
+            let refused = ApiError::new(
+                StatusCode::FORBIDDEN,
+                "start_over_not_ready",
+                "No approved device may be used for a week first",
+            );
+            match ready_at.format(&Rfc3339) {
+                Ok(at) => refused.with("ready_at", at),
+                Err(e) => ApiError::internal(e.into()),
+            }
+        }
+    }
 }

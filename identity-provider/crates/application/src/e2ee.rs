@@ -1,7 +1,7 @@
 //! Devices, their attestations, and the KeyPackages peers claim to add them to MLS groups; the
 //! approvals the account's devices give each other, and the requests relaying their handshake;
-//! the Delivery Service's commits and Welcomes; each account's history archive, its key, and the
-//! passphrase shared between its devices.
+//! the Delivery Service's commits and Welcomes; each account's history archive, its key, the
+//! passphrase shared between its devices, and the requests to start it over.
 
 mod approval;
 mod archive;
@@ -13,6 +13,7 @@ mod key_share;
 mod list_devices;
 mod register_device;
 mod revoke_device;
+mod start_over;
 mod sweep_key_packages;
 #[cfg(test)]
 mod tests;
@@ -34,5 +35,9 @@ pub use key_share::{LoadKeyShare, ShareHistoryKey};
 pub use list_devices::{ListDevices, ListedDevice};
 pub use register_device::{RegisterDevice, Registered};
 pub use revoke_device::RevokeDevice;
+pub use start_over::{
+    AskToStartOver, EndStartOver, LoadStartOver, PendingStartOver, StartOverAsked,
+    SweepStartOverRequests,
+};
 pub use sweep_key_packages::SweepKeyPackages;
 pub use upload_key_packages::{UploadKeyPackages, Uploaded};

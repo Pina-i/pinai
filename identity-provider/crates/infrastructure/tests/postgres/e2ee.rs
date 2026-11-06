@@ -4,7 +4,8 @@ use domain::e2ee::{
     HistoryGeneration, HistoryKey, HistoryKeys, HistorySalt, KeyReplace, NewArchiveEntry,
 };
 use infrastructure::postgres::{
-    PgCommitLog, PgDevices, PgHistoryArchive, PgHistoryKeys, PgKeyPackages, PgWelcomes,
+    PgCommitLog, PgDeviceApprovals, PgDevices, PgHistoryArchive, PgHistoryKeys, PgKeyPackages,
+    PgWelcomes,
 };
 use sqlx::PgPool;
 
@@ -58,6 +59,7 @@ async fn a_device_records_the_current_history_generation_while_unrevoked(pool: P
     let (alice, bob) = (a_user(&pool).await, a_user(&pool).await);
     contract::a_device_records_the_current_history_generation_while_unrevoked(
         &PgDevices::new(pool.clone()),
+        &PgDeviceApprovals::new(pool.clone()),
         &PgHistoryKeys::new(pool),
         alice,
         bob,
@@ -336,6 +338,7 @@ async fn an_upload_is_stored_only_under_the_current_generation(pool: PgPool) {
         &archive,
         &keys,
         &devices,
+        &PgDeviceApprovals::new(pool.clone()),
         alice,
         conversation,
     )
@@ -347,7 +350,11 @@ async fn a_key_is_set_only_for_the_generation_after_the_current_one(pool: PgPool
     let (alice, bob) = (a_user(&pool).await, a_user(&pool).await);
     let (_, keys, devices) = history(&pool);
     contract::a_key_is_set_only_for_the_generation_after_the_current_one(
-        &keys, &devices, alice, bob,
+        &keys,
+        &devices,
+        &PgDeviceApprovals::new(pool.clone()),
+        alice,
+        bob,
     )
     .await;
 }
@@ -361,6 +368,7 @@ async fn setting_the_key_held_again_is_a_retry_that_writes_nothing(pool: PgPool)
         &archive,
         &keys,
         &devices,
+        &PgDeviceApprovals::new(pool.clone()),
         alice,
         conversation,
     )
@@ -376,6 +384,7 @@ async fn a_new_generation_erases_its_owners_archive_in_the_same_write(pool: PgPo
         &archive,
         &keys,
         &devices,
+        &PgDeviceApprovals::new(pool.clone()),
         alice,
         bob,
         conversation,
@@ -419,21 +428,39 @@ fn entry(conversation: domain::ConversationId) -> NewArchiveEntry {
 
 #[sqlx::test(migrator = "infrastructure::MIGRATOR")]
 async fn two_devices_setting_the_same_generation_at_once_make_one(pool: PgPool) {
-    let keys = PgHistoryKeys::new(pool.clone());
+    let stores = super::start_over::Stores::of(&pool);
+    let (s, keys) = (stores.view(), &stores.keys);
 
     for generation in 1..=10 {
         let alice = a_user(&pool).await;
-        let (laptop, phone) = (a_device(&pool, alice).await, a_device(&pool, alice).await);
+        let (laptop, phone) = (
+            contract::a_new_device(s, alice, 1).await,
+            contract::a_new_device(s, alice, 2).await,
+        );
         for earlier in 1..generation {
-            keys.replace(alice, &history_key(earlier, 0), laptop)
-                .await
-                .unwrap();
+            if earlier > 1 {
+                contract::approved_by_words(s, alice, laptop, &history_key(earlier - 1, 0)).await;
+            }
+            keys.replace(
+                alice,
+                &history_key(earlier, 0),
+                laptop,
+                time::OffsetDateTime::now_utc(),
+            )
+            .await
+            .unwrap();
+        }
+        if generation > 1 {
+            for device in [laptop, phone] {
+                contract::approved_by_words(s, alice, device, &history_key(generation - 1, 0))
+                    .await;
+            }
         }
         let (one, other) = (history_key(generation, 1), history_key(generation, 2));
 
         let (first, second) = tokio::join!(
-            keys.replace(alice, &one, laptop),
-            keys.replace(alice, &other, phone),
+            keys.replace(alice, &one, laptop, time::OffsetDateTime::now_utc()),
+            keys.replace(alice, &other, phone, time::OffsetDateTime::now_utc()),
         );
 
         let mut outcomes = [first.unwrap(), second.unwrap()];
@@ -442,7 +469,10 @@ async fn two_devices_setting_the_same_generation_at_once_make_one(pool: PgPool) 
         assert_eq!(
             outcomes,
             [
-                KeyReplace::Replaced { erased: 0 },
+                KeyReplace::Replaced {
+                    erased: 0,
+                    closed: vec![]
+                },
                 KeyReplace::Conflict(Some(made))
             ]
         );
@@ -454,29 +484,34 @@ async fn two_devices_setting_the_same_generation_at_once_make_one(pool: PgPool) 
 /// Whichever commits first, no entry of the replaced generation survives the new one.
 #[sqlx::test(migrator = "infrastructure::MIGRATOR")]
 async fn an_upload_racing_a_new_generation_is_erased_or_refused(pool: PgPool) {
-    let (archive, keys) = (
-        PgHistoryArchive::new(pool.clone()),
-        PgHistoryKeys::new(pool.clone()),
-    );
+    let archive = PgHistoryArchive::new(pool.clone());
+    let stores = super::start_over::Stores::of(&pool);
+    let (s, keys) = (stores.view(), &stores.keys);
     let conversation = a_conversation(&pool).await;
     let first = HistoryGeneration::FIRST;
 
     for _ in 0..20 {
         let alice = a_user(&pool).await;
-        let device = a_device(&pool, alice).await;
-        keys.replace(alice, &history_key(1, 1), device)
-            .await
-            .unwrap();
+        let device = contract::a_new_device(s, alice, 1).await;
+        keys.replace(
+            alice,
+            &history_key(1, 1),
+            device,
+            time::OffsetDateTime::now_utc(),
+        )
+        .await
+        .unwrap();
+        contract::approved_by_words(s, alice, device, &history_key(1, 1)).await;
         let batch: Vec<_> = (0..20).map(|_| entry(conversation)).collect();
         let next = history_key(2, 2);
 
         let (uploaded, replaced) = tokio::join!(
             archive.store(alice, first, &batch),
-            keys.replace(alice, &next, device),
+            keys.replace(alice, &next, device, time::OffsetDateTime::now_utc()),
         );
 
         let erased = match replaced.unwrap() {
-            KeyReplace::Replaced { erased } => erased,
+            KeyReplace::Replaced { erased, .. } => erased,
             other => panic!("{other:?}"),
         };
         match uploaded.unwrap() {
@@ -499,9 +534,14 @@ async fn two_uploads_of_the_same_entries_at_once_never_deadlock(pool: PgPool) {
     for _ in 0..10 {
         let alice = a_user(&pool).await;
         let device = a_device(&pool, alice).await;
-        keys.replace(alice, &history_key(1, 1), device)
-            .await
-            .unwrap();
+        keys.replace(
+            alice,
+            &history_key(1, 1),
+            device,
+            time::OffsetDateTime::now_utc(),
+        )
+        .await
+        .unwrap();
         let batch: Vec<_> = (0..50).map(|_| entry(conversation)).collect();
         let reversed: Vec<_> = batch.iter().rev().cloned().collect();
 

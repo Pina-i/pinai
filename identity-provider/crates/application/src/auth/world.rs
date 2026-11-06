@@ -13,8 +13,9 @@ use domain::auth::testing::{
 use domain::auth::{
     Client, Registrations, SecondFactors, Sessions, TotpSecret, WebApp, desktop_client,
 };
-use domain::e2ee::testing::InMemoryKeyDirectory;
-use domain::identity::{InstanceOrigin, IntroText};
+use domain::e2ee::testing::{InMemoryArchive, InMemoryKeyDirectory, PlainEd25519Verifier};
+use domain::identity::testing::InMemoryAccounts;
+use domain::identity::{Account, ActorUri, Bearer, InstanceOrigin, IntroText};
 use domain::presence::PresenceBoard;
 use domain::{SessionId, UserId};
 use time::OffsetDateTime;
@@ -45,6 +46,10 @@ pub struct World {
     pub ended: Arc<RecordingSessionNotifier>,
     pub refresh_tokens: Arc<InMemoryRefreshTokens>,
     pub devices: Arc<InMemoryKeyDirectory>,
+    /// The history keys the devices are approved under.
+    pub archive: Arc<InMemoryArchive>,
+    /// Alice's actor URI, which a device's naming proof signs.
+    pub actor: ActorUri,
     pub resets: Arc<InMemoryPasswordResets>,
     /// Named Aotearoa.
     pub intro: Arc<IntroInForce>,
@@ -112,7 +117,17 @@ async fn world_with(registrations: Registrations) -> World {
     let sessions = Arc::new(InMemorySessions::default());
     let ended = Arc::new(RecordingSessionNotifier::default());
     let refresh_tokens = Arc::new(InMemoryRefreshTokens::default());
-    let devices = Arc::new(InMemoryKeyDirectory::default());
+    let archive = Arc::new(InMemoryArchive::default());
+    let devices = Arc::new(InMemoryKeyDirectory::keyed_by(archive.clone()));
+    let actor =
+        ActorUri::parse(&format!("http://localhost:8080/users/{}", alice.username)).unwrap();
+    let actors = Arc::new(InMemoryAccounts::with([Account {
+        id: alice.id,
+        actor_uri: actor.clone(),
+        username: alice.username.clone(),
+        display_name: alice.display_name.clone(),
+        avatar_url: None,
+    }]));
     let resets = Arc::new(InMemoryPasswordResets::over(
         accounts.clone(),
         sessions.clone(),
@@ -143,8 +158,15 @@ async fn world_with(registrations: Registrations) -> World {
             accounts.clone(),
             factors.clone(),
             authenticator.clone(),
+            sessions.clone(),
+            devices.clone(),
         ),
-        confirm: ConfirmTotpEnrollment::new(factors.clone(), authenticator.clone()),
+        confirm: ConfirmTotpEnrollment::new(
+            factors.clone(),
+            authenticator.clone(),
+            sessions.clone(),
+            devices.clone(),
+        ),
         disable: DisableTotp::new(accounts.clone(), factors.clone(), authenticator.clone()),
         regenerate: RegenerateRecoveryCodes::new(
             accounts.clone(),
@@ -183,7 +205,13 @@ async fn world_with(registrations: Registrations) -> World {
             accounts.clone(),
             Arc::new(SpelledTokens),
         ),
-        link: LinkDevice::new(devices.clone(), sessions.clone(), ended.clone()),
+        link: LinkDevice::new(
+            actors,
+            devices.clone(),
+            Arc::new(PlainEd25519Verifier),
+            sessions.clone(),
+            ended.clone(),
+        ),
         sign_out_others: SignOutOthers::new(sessions.clone(), ended.clone()),
         revoke_token: RevokeToken::new(refresh_tokens.clone(), sessions.clone(), ended.clone()),
         log_out: LogOut::new(clients.clone(), sessions.clone(), ended.clone()),
@@ -278,6 +306,8 @@ async fn world_with(registrations: Registrations) -> World {
         ended,
         refresh_tokens,
         devices,
+        archive,
+        actor,
         resets,
         intro,
         board,
@@ -285,6 +315,15 @@ async fn world_with(registrations: Registrations) -> World {
 }
 
 impl World {
+    /// A live session of `user`'s, naming no device, its password just typed.
+    pub fn bearer_of(&self, user: UserId) -> Bearer {
+        Bearer {
+            user,
+            session: self.sessions.live_at(user, now()),
+            authenticated_at: now(),
+        }
+    }
+
     pub async fn sign_up(&self, account: &SignInAccount) {
         self.accounts.sign_up(account).await;
     }

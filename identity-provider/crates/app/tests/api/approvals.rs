@@ -5,7 +5,7 @@ use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::helpers::{Account, TestApp, another_browser, spawn_app};
+use crate::helpers::{Account, TestApp, another_browser, naming_proof, spawn_app};
 
 /// A device as a client makes it: its root key and HPKE key registered, its session named.
 pub(crate) struct Device {
@@ -48,7 +48,7 @@ impl Device {
                 Method::PUT,
                 &session,
                 "/api/sessions/current/device",
-                json!({ "device_id": id }),
+                json!({ "device_id": id, "signature": naming_proof(&session, id, &root) }),
             )
             .await;
         assert_eq!(named, StatusCode::NO_CONTENT, "{body}");

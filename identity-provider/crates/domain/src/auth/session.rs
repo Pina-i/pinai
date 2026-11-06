@@ -1,5 +1,7 @@
 use time::{Duration, OffsetDateTime};
 
+use crate::e2ee::{Device, Ed25519Signature, Ed25519Verifier};
+use crate::identity::ActorUri;
 use crate::{DeviceId, SessionId, UserId};
 
 use super::{AuthError, ClientId};
@@ -109,6 +111,39 @@ pub fn ending_all_but(sessions: &[Session], keep: SessionId) -> Vec<SessionId> {
         })
         .map(|session| session.id)
         .collect()
+}
+
+/// What a session signs to name its device, with that device's root key: bound to the account,
+/// the device and this very session, so a proof is good for one naming only. The
+/// `PINAI-SESSION-DEVICE-v1` tag keeps it from verifying as any other use of the key.
+pub fn naming_bytes(actor: &ActorUri, device: DeviceId, session: SessionId) -> Vec<u8> {
+    format!("PINAI-SESSION-DEVICE-v1\n{actor}\n{device}\n{session}").into_bytes()
+}
+
+/// Whether `caller`'s session `session` may name `found`, the device under the id it names: the
+/// caller's, unrevoked, and `proof` its root key's signature over [`naming_bytes`]. A device with
+/// no root key has nothing to prove with.
+pub fn may_name_device(
+    caller: UserId,
+    found: Option<&Device>,
+    actor: &ActorUri,
+    session: SessionId,
+    proof: Option<&Ed25519Signature>,
+    verifier: &dyn Ed25519Verifier,
+) -> Result<(), AuthError> {
+    let device = found
+        .filter(|device| device.usable_by(caller).is_ok())
+        .ok_or(AuthError::DeviceRefused)?;
+    let root = device
+        .attestation
+        .as_ref()
+        .map(|attestation| &attestation.root_key)
+        .ok_or(AuthError::DeviceProofInvalid)?;
+    let proof = proof.ok_or(AuthError::DeviceProofInvalid)?;
+    if !verifier.verifies(root, &naming_bytes(actor, device.id, session), proof) {
+        return Err(AuthError::DeviceProofInvalid);
+    }
+    Ok(())
 }
 
 /// Whether `session` may name `device` now: live, a web app's or an app's — a browser session

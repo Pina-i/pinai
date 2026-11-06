@@ -123,6 +123,7 @@ fn world() -> World {
         revoke: RevokeDevice::new(
             store.clone(),
             sessions.clone(),
+            store.clone(),
             ended.clone(),
             Arc::new(RecordingDeviceTrustNotifier::default()),
         ),
@@ -178,6 +179,28 @@ impl World {
         at: OffsetDateTime,
     ) -> Result<Registered, KeyDirectoryError> {
         let bearer = self.signed_in(who, None).await;
+        self.register
+            .execute(
+                &bearer,
+                device,
+                key(root),
+                brought,
+                &DeviceLabel::unknown(),
+                at,
+            )
+            .await
+    }
+
+    /// The same from a session that named `device`: what a rotation takes.
+    async fn rotate_as(
+        &self,
+        who: &Account,
+        device: DeviceId,
+        root: u8,
+        brought: Option<UnverifiedHpkeKey>,
+        at: OffsetDateTime,
+    ) -> Result<Registered, KeyDirectoryError> {
+        let bearer = self.signed_in(who, Some(device)).await;
         self.register
             .execute(
                 &bearer,
@@ -282,9 +305,7 @@ async fn registering_again_renews_or_rotates_the_key_without_telling_anyone() {
         .await
         .unwrap();
     let renewed = w.store.find(device).await.unwrap().unwrap();
-    w.register_as(&w.alice, device, 2, None, now())
-        .await
-        .unwrap();
+    w.rotate_as(&w.alice, device, 2, None, now()).await.unwrap();
     let rotated = w.store.find(device).await.unwrap().unwrap();
 
     assert_eq!(
@@ -293,6 +314,31 @@ async fn registering_again_renews_or_rotates_the_key_without_telling_anyone() {
     );
     assert_eq!(rotated.attestation.unwrap().root_key, key(2));
     assert_eq!(w.notifier.joined().len(), 1, "only the first registration");
+}
+
+#[tokio::test]
+async fn another_root_key_from_a_session_that_named_no_device_is_refused_and_changes_nothing() {
+    let w = world();
+    let device = DeviceId::generate();
+    w.register_as(
+        &w.alice,
+        device,
+        1,
+        Some(hpke(&w.alice, device, 1, 9)),
+        now(),
+    )
+    .await
+    .unwrap();
+    let before = w.store.find(device).await.unwrap().unwrap();
+
+    let refused = w.register_as(&w.alice, device, 2, None, now()).await;
+
+    assert!(
+        matches!(refused, Err(KeyDirectoryError::DeviceRequired(_))),
+        "{:?}",
+        refused.err()
+    );
+    assert_eq!(w.store.find(device).await.unwrap().unwrap(), before);
 }
 
 #[tokio::test]
@@ -404,11 +450,11 @@ async fn a_renewal_keeps_the_hpke_key_and_a_rotation_drops_it_unless_it_brings_o
 
     w.register_as(&w.alice, kept, 1, None, now()).await.unwrap();
     let renewed = w.held_key(kept).await;
-    w.register_as(&w.alice, kept, 2, Some(hpke(&w.alice, kept, 2, 7)), now())
+    w.rotate_as(&w.alice, kept, 2, Some(hpke(&w.alice, kept, 2, 7)), now())
         .await
         .unwrap();
     let rotated_with_one = w.held_key(kept).await;
-    w.register_as(&w.alice, dropped, 2, None, now())
+    w.rotate_as(&w.alice, dropped, 2, None, now())
         .await
         .unwrap();
     let rotated_without = w.held_key(dropped).await;
@@ -573,7 +619,9 @@ impl Devices for Racing {
         };
         match meanwhile {
             Some(Meanwhile::Revoke) => {
-                self.store.revoke(owner, id).await?;
+                self.store
+                    .revoke(owner, id, Some(id), time::OffsetDateTime::now_utc())
+                    .await?;
             }
             Some(Meanwhile::RegisterKey(key)) => {
                 let current = self.store.find(id).await?;
@@ -600,8 +648,10 @@ impl Devices for Racing {
         &self,
         owner: domain::UserId,
         id: DeviceId,
+        by: Option<DeviceId>,
+        now: time::OffsetDateTime,
     ) -> Result<Revocation, KeyStoreError> {
-        self.store.revoke(owner, id).await
+        self.store.revoke(owner, id, by, now).await
     }
 
     async fn hold_history_key(
@@ -612,7 +662,9 @@ impl Devices for Racing {
     ) -> Result<Holding, KeyStoreError> {
         let meanwhile = self.meanwhile.lock().unwrap().take();
         if let Some(Meanwhile::Revoke) = meanwhile {
-            self.store.revoke(owner, id).await?;
+            self.store
+                .revoke(owner, id, Some(id), time::OffsetDateTime::now_utc())
+                .await?;
         }
         self.store.hold_history_key(owner, id, generation).await
     }
@@ -637,9 +689,14 @@ async fn a_device_revoked_while_it_reports_its_history_key_is_refused() {
         .await
         .unwrap();
     let bearer = w.signed_in(&w.alice, Some(device)).await;
-    keys.replace(w.alice.id, &first_history_key(), device)
-        .await
-        .unwrap();
+    keys.replace(
+        w.alice.id,
+        &first_history_key(),
+        device,
+        time::OffsetDateTime::now_utc(),
+    )
+    .await
+    .unwrap();
     let report = ReportHistoryKey::new(
         w.sessions.clone(),
         Racing::new(store.clone(), Meanwhile::Revoke),
@@ -798,7 +855,10 @@ async fn revoking_a_device_signs_it_out() {
         .await
         .unwrap();
 
-    let by_bob = w.revoke.execute(w.bob.id, device, now()).await;
+    let by_bob = w
+        .revoke
+        .execute(&w.signed_in(&w.bob, None).await, device, now())
+        .await;
     let still = w
         .sessions
         .find(session)
@@ -806,7 +866,10 @@ async fn revoking_a_device_signs_it_out() {
         .unwrap()
         .unwrap()
         .is_live(now());
-    w.revoke.execute(w.alice.id, device, now()).await.unwrap();
+    w.revoke
+        .execute(&w.signed_in(&w.alice, None).await, device, now())
+        .await
+        .unwrap();
 
     assert!(matches!(by_bob, Err(KeyDirectoryError::DeviceNotFound)));
     assert!(still, "another account's revoke ends nothing");
@@ -827,14 +890,25 @@ async fn revoking_a_device_again_ends_what_a_revoke_cut_short_left_signed_in() {
     let w = world();
     let device = DeviceId::generate();
     w.upload(&w.alice, device, batch(1)).await;
-    w.store.revoke(w.alice.id, device).await.unwrap();
+    w.store
+        .revoke(
+            w.alice.id,
+            device,
+            Some(device),
+            time::OffsetDateTime::now_utc(),
+        )
+        .await
+        .unwrap();
     let session = w.signed_in(&w.alice, None).await.session;
     w.sessions
         .link(w.alice.id, session, device, now())
         .await
         .unwrap();
 
-    w.revoke.execute(w.alice.id, device, now()).await.unwrap();
+    w.revoke
+        .execute(&w.signed_in(&w.alice, None).await, device, now())
+        .await
+        .unwrap();
 
     assert_eq!(
         w.sessions.reason(session),
@@ -865,7 +939,10 @@ async fn revoking_a_web_apps_device_signs_out_the_browser_it_signed_in_through()
         .unwrap();
     let elsewhere = w.signed_in(&w.alice, None).await.session;
 
-    w.revoke.execute(w.alice.id, device, now()).await.unwrap();
+    w.revoke
+        .execute(&w.signed_in(&w.alice, None).await, device, now())
+        .await
+        .unwrap();
 
     for ended in [on_device, browser, beside] {
         assert_eq!(
@@ -888,13 +965,26 @@ async fn a_device_is_revoked_by_its_owner_and_not_found_by_anyone_else() {
     let device = DeviceId::generate();
     w.upload(&w.alice, device, batch(1)).await;
 
-    let by_bob = w.revoke.execute(w.bob.id, device, now()).await;
+    let by_bob = w
+        .revoke
+        .execute(&w.signed_in(&w.bob, None).await, device, now())
+        .await;
     let unknown = w
         .revoke
-        .execute(w.alice.id, DeviceId::generate(), now())
+        .execute(
+            &w.signed_in(&w.alice, None).await,
+            DeviceId::generate(),
+            now(),
+        )
         .await;
-    w.revoke.execute(w.alice.id, device, now()).await.unwrap();
-    let again = w.revoke.execute(w.alice.id, device, now()).await;
+    w.revoke
+        .execute(&w.signed_in(&w.alice, None).await, device, now())
+        .await
+        .unwrap();
+    let again = w
+        .revoke
+        .execute(&w.signed_in(&w.alice, None).await, device, now())
+        .await;
 
     assert!(
         matches!(by_bob, Err(KeyDirectoryError::DeviceNotFound)),
@@ -1187,7 +1277,10 @@ async fn a_revoked_device_neither_renews_its_attestation_nor_publishes_key_packa
     w.register_as(&w.alice, device, 1, None, now())
         .await
         .unwrap();
-    w.revoke.execute(w.alice.id, device, now()).await.unwrap();
+    w.revoke
+        .execute(&w.signed_in(&w.alice, None).await, device, now())
+        .await
+        .unwrap();
     let revoked = w.store.find(device).await.unwrap();
 
     let renewal = w.register_as(&w.alice, device, 1, None, now()).await;

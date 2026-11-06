@@ -86,6 +86,7 @@ impl RegisterDevice {
         for _ in 0..ATTEMPTS {
             let existing = self.devices.find(device).await?;
             let registration = Registration::of(existing.as_ref(), owner, &attestation.root_key)?;
+            registration.may_come_from(session.device, device)?;
             let hpke_key = registration.hpke_key(brought.clone());
             let written = self
                 .devices

@@ -1,15 +1,18 @@
 use anyhow::Context;
 use domain::e2ee::{
     Approval, ApprovalMessage, ApprovalMessageBody, ApprovalRequest, ApprovalRequests, Approve,
-    Approver, CheckedApproval, Close, Device, DeviceApprovals, DeviceRootKey, Ed25519Signature,
-    HistoryGeneration, KeyStoreError, MessageSeq, Opened, Post, Read, RequestRefusal,
-    check_history_generation, may_open_request, window_start,
+    Approver, CheckedApproval, Close, Device, DeviceApprovals, DeviceRootKey, DeviceTrust,
+    Ed25519Signature, HistoryGeneration, KeyStoreError, MessageSeq, Opened, Post, Read,
+    RequestRefusal, check_history_generation, may_open_request, window_start,
 };
 use domain::{ApprovalRequestId, DeviceId, UserId};
 use sqlx::{PgConnection, PgPool};
 use time::OffsetDateTime;
 
-use super::archive::locked_generation;
+use super::archive::{current_generation, locked_generation};
+use super::key_directory::devices_of;
+use super::lock_account;
+use super::start_over::end_with_approval;
 
 /// `device_approvals`, whose rows the revoke and the root-key rotation of `user_devices` and a new
 /// generation of `history_keys` drop.
@@ -115,31 +118,63 @@ impl DeviceApprovals for PgDeviceApprovals {
         .await
         .context("record an approval")?
         .rows_affected();
+        if recorded == 0 {
+            return Ok(Approve::AlreadyHeld);
+        }
+        let start_over = end_with_approval(&mut tx, owner, approval.device()).await?;
         tx.commit().await.context("commit an approval")?;
-        Ok(if recorded == 0 {
-            Approve::AlreadyHeld
-        } else {
-            Approve::Recorded
-        })
+        Ok(Approve::Recorded { start_over })
     }
 
     async fn of_owner(&self, owner: UserId) -> Result<Vec<Approval>, KeyStoreError> {
-        let rows: Vec<ApprovalRow> = sqlx::query_as(
-            "SELECT a.device_id, a.drk_public_key, a.approver_device_id, a.generation, \
-                 a.signature, a.created_at \
-             FROM device_approvals a JOIN user_devices d ON d.device_id = a.device_id \
-             WHERE d.user_id = $1 \
-             ORDER BY a.created_at, a.device_id, a.approver_device_id NULLS FIRST, a.generation",
-        )
-        .bind(owner.as_uuid())
-        .fetch_all(&self.pool)
-        .await
-        .context("list an account's approvals")?;
-        Ok(rows
-            .into_iter()
-            .map(Approval::try_from)
-            .collect::<Result<_, _>>()?)
+        let mut c = self
+            .pool
+            .acquire()
+            .await
+            .context("list an account's approvals")?;
+        Ok(approvals_of(&mut c, owner).await?)
     }
+
+    async fn trust(&self, owner: UserId) -> Result<DeviceTrust, KeyStoreError> {
+        // Unlike every other read here, three statements that must agree: one snapshot.
+        let mut tx = self.pool.begin().await.context("begin a trust read")?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+            .execute(&mut *tx)
+            .await
+            .context("make a trust read one snapshot")?;
+        let current = current_generation(&mut tx, owner).await?;
+        let trust = trust_facts(&mut tx, owner, current).await?;
+        tx.commit().await.context("end a trust read")?;
+        Ok(trust)
+    }
+}
+
+async fn approvals_of(c: &mut PgConnection, owner: UserId) -> anyhow::Result<Vec<Approval>> {
+    let rows: Vec<ApprovalRow> = sqlx::query_as(
+        "SELECT a.device_id, a.drk_public_key, a.approver_device_id, a.generation, \
+             a.signature, a.created_at \
+         FROM device_approvals a JOIN user_devices d ON d.device_id = a.device_id \
+         WHERE d.user_id = $1 \
+         ORDER BY a.created_at, a.device_id, a.approver_device_id NULLS FIRST, a.generation",
+    )
+    .bind(owner.as_uuid())
+    .fetch_all(c)
+    .await
+    .context("list an account's approvals")?;
+    rows.into_iter().map(Approval::try_from).collect()
+}
+
+/// The owner's devices and approvals under `current`, as the connection's transaction reads them.
+pub(super) async fn trust_facts(
+    c: &mut PgConnection,
+    owner: UserId,
+    current: Option<HistoryGeneration>,
+) -> anyhow::Result<DeviceTrust> {
+    Ok(DeviceTrust {
+        devices: devices_of(c, owner).await?,
+        approvals: approvals_of(c, owner).await?,
+        current,
+    })
 }
 
 /// The approvals a device signed, which its revoke, or a new root key, leaves unverifiable.
@@ -173,15 +208,17 @@ pub(super) async fn close_requests_of(
     c: &mut PgConnection,
     owner: UserId,
     device: DeviceId,
+    now: OffsetDateTime,
 ) -> anyhow::Result<Vec<ApprovalRequest>> {
     let closed: Vec<RequestRow> = sqlx::query_as(&format!(
-        "UPDATE approval_requests SET closed_at = now() \
+        "UPDATE approval_requests SET closed_at = $3 \
          WHERE user_id = $1 AND closed_at IS NULL \
              AND (device_id = $2 OR approver_device_id = $2) \
-         RETURNING {REQUEST_COLUMNS}, expires_at > now() AS was_open"
+         RETURNING {REQUEST_COLUMNS}, expires_at > $3 AS was_open"
     ))
     .bind(owner.as_uuid())
     .bind(device.as_uuid())
+    .bind(now)
     .fetch_all(c)
     .await
     .context("close a device's requests")?;
@@ -274,7 +311,7 @@ impl TryFrom<MessageRow> for ApprovalMessage {
 
 /// Share-locks the owner's device while it is unrevoked: a revoke, which takes the row first too,
 /// waits for the write, then closes what it opened or bound. `false` when it is revoked already.
-async fn lock_unrevoked(
+pub(super) async fn lock_unrevoked(
     c: &mut PgConnection,
     owner: UserId,
     device: DeviceId,
@@ -317,11 +354,7 @@ impl ApprovalRequests for PgApprovalRequests {
             return Ok(Opened::Stale);
         }
         // The account's lock: two opening at once are counted one after the other.
-        sqlx::query("SELECT 1 FROM users WHERE id = $1 FOR NO KEY UPDATE")
-            .bind(request.owner.as_uuid())
-            .execute(&mut *tx)
-            .await
-            .context("lock an account to open a request")?;
+        lock_account(&mut tx, request.owner).await?;
         let opened: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM approval_requests WHERE user_id = $1 AND created_at > $2",
         )

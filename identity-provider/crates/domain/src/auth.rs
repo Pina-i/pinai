@@ -105,7 +105,8 @@ pub use second_factor::{
 };
 pub use session::{
     RevokedReason, SESSION_IDLE, SESSION_RETENTION, Session, SessionKind, WebAppSignIn, ending,
-    ending_all_but, ending_with_device, last_active, may_link, web_app_sign_in,
+    ending_all_but, ending_with_device, last_active, may_link, may_name_device, naming_bytes,
+    web_app_sign_in,
 };
 pub use signup::{
     CODE_ATTEMPTS, CodeAttempt, Email, NewAccount, RESEND_LIMIT, RESEND_WINDOW, Registration,

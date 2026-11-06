@@ -22,7 +22,7 @@ use uuid::Uuid;
 
 use crate::ApiError;
 use crate::auth::{Authenticated, RecentlySignedIn, SignedIn};
-use crate::e2ee::{base64_field, device_required, stale_history_key};
+use crate::e2ee::{base64_field, device_required, stale_history_key, start_over_refused};
 
 #[derive(Deserialize)]
 pub struct UploadRequest {
@@ -281,6 +281,7 @@ impl From<ArchiveError> for ApiError {
             ArchiveError::RecentSignInRequired => {
                 ApiError::insufficient_user_authentication(RECENT_SIGN_IN)
             }
+            ArchiveError::StartOver(refusal) => start_over_refused(refusal),
             ArchiveError::DeviceRequired(_) => device_required(),
             ArchiveError::Unexpected(e) => ApiError::internal(e),
         }

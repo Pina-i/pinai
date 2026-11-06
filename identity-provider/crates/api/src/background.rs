@@ -9,7 +9,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use application::auth::{RequestPasswordReset, SweepSignups};
-use application::e2ee::{SweepApprovalRequests, SweepKeyPackages, SweepWelcomes};
+use application::e2ee::{
+    SweepApprovalRequests, SweepKeyPackages, SweepStartOverRequests, SweepWelcomes,
+};
 use application::messaging::{SweepOrphanAttachments, SweepStaleDeliveries};
 use application::presence::{
     ApplyPresence, DeliverTyping, PollPeers, ReceivePeerSignal, SweepIdle,
@@ -101,6 +103,21 @@ pub async fn sweep_approval_requests(sweep: Arc<SweepApprovalRequests>, stop: Ca
             Ok(0) => {}
             Ok(deleted) => tracing::info!(deleted, "approval requests swept"),
             Err(e) => tracing::warn!(error = ?e, "approval request sweep failed"),
+        }
+    })
+    .await
+}
+
+/// Every hour: delete the start over requests that ended, once past the day they count in.
+pub async fn sweep_start_over_requests(
+    sweep: Arc<SweepStartOverRequests>,
+    stop: CancellationToken,
+) {
+    every(Duration::from_secs(3600), stop, || async {
+        match sweep.execute(OffsetDateTime::now_utc()).await {
+            Ok(0) => {}
+            Ok(deleted) => tracing::info!(deleted, "start over requests swept"),
+            Err(e) => tracing::warn!(error = ?e, "start over request sweep failed"),
         }
     })
     .await

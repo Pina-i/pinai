@@ -1,18 +1,22 @@
 use std::sync::Arc;
 
 use connections::Hub;
-use domain::e2ee::{ApprovalRequest, DeviceTrustNotifier, MessageSeq};
-use domain::{ApprovalRequestId, DeviceId, SessionId, UserId};
+use domain::e2ee::{
+    ApprovalRequest, DeviceTrustNotifier, MessageSeq, StartOverEnd, StartOverRequest,
+};
+use domain::{ApprovalRequestId, DeviceId, SessionId, StartOverRequestId, UserId};
+use time::OffsetDateTime;
 use uuid::Uuid;
 
 use super::events::{
     ApprovalClosedPayload, ApprovalMessagePayload, ApprovalRequestedPayload, DeviceApprovedPayload,
-    HistoryKeyReadyPayload, WsEvent,
+    HistoryKeyReadyPayload, StartOverCancelledPayload, StartOverRequestedPayload, WsEvent,
 };
 
 /// Pushes approvals to the account's live sessions, a request's news to the sessions of the
-/// devices taking part, and a key share to its recipient's; a device that missed one reads the
-/// device list, the open requests or its share when it connects.
+/// devices taking part, a key share to its recipient's, and a start over to the approved devices'
+/// and its asker's; a device that missed one reads the device list, the open requests, its share
+/// or the start over when it connects.
 pub struct HubDeviceTrustNotifier {
     hub: Arc<Hub>,
 }
@@ -91,6 +95,43 @@ impl DeviceTrustNotifier for HubDeviceTrustNotifier {
             to,
             WsEvent::HistoryKeyReady(HistoryKeyReadyPayload {
                 device_id: device.as_uuid(),
+            }),
+        );
+    }
+
+    fn start_over_requested(
+        &self,
+        owner: UserId,
+        to: &[SessionId],
+        request: &StartOverRequest,
+        display_name: &str,
+        ready_at: OffsetDateTime,
+    ) {
+        self.push_to(
+            owner,
+            to,
+            WsEvent::StartOverRequested(StartOverRequestedPayload {
+                request_id: request.id.as_uuid(),
+                device_id: request.device.as_uuid(),
+                display_name: display_name.to_owned(),
+                ready_at,
+            }),
+        );
+    }
+
+    fn start_over_cancelled(
+        &self,
+        owner: UserId,
+        to: &[SessionId],
+        request: StartOverRequestId,
+        reason: StartOverEnd,
+    ) {
+        self.push_to(
+            owner,
+            to,
+            WsEvent::StartOverCancelled(StartOverCancelledPayload {
+                request_id: request.as_uuid(),
+                reason: reason.as_str(),
             }),
         );
     }

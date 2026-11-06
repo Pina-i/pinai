@@ -4,7 +4,7 @@ use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
-use crate::helpers::{Account, TestApp, another_browser, spawn_app};
+use crate::helpers::{Account, TestApp, another_browser, naming_proof, spawn_app};
 
 /// A device's root key, and the HPKE key it signs — made as a client makes them.
 struct DeviceKeys {
@@ -176,12 +176,17 @@ async fn another_device_verifies_the_whole_chain_from_the_device_list_until_it_i
     app.stop().await.unwrap();
 }
 
-async fn link(app: &TestApp, who: &Account, device: Uuid) -> (reqwest::StatusCode, Value) {
+async fn link(
+    app: &TestApp,
+    who: &Account,
+    device: Uuid,
+    root: &SigningKey,
+) -> (reqwest::StatusCode, Value) {
     app.send(
         reqwest::Method::PUT,
         who,
         "/api/sessions/current/device",
-        json!({ "device_id": device }),
+        json!({ "device_id": device, "signature": naming_proof(who, device, root) }),
     )
     .await
 }
@@ -201,7 +206,7 @@ async fn a_session_is_limited_to_the_device_it_declared() {
         let (registered, body) =
             register(&app, session, device, &[("drk_public_key", keys.drk())]).await;
         assert_eq!(registered, 201, "{body}");
-        let (linked, body) = link(&app, session, device).await;
+        let (linked, body) = link(&app, session, device, &keys.root).await;
         assert_eq!(linked, 204, "{body}");
     }
 
@@ -226,8 +231,8 @@ async fn a_session_is_limited_to_the_device_it_declared() {
         &[("drk_public_key", DeviceKeys::new().drk())],
     )
     .await;
-    let repointed = link(&app, &phone, laptops).await;
-    let (named_again, _) = link(&app, &phone, phones).await;
+    let repointed = link(&app, &phone, laptops, &laptop_keys.root).await;
+    let (named_again, _) = link(&app, &phone, phones, &phone_keys.root).await;
     let (renewed, _) = register(
         &app,
         &laptop,

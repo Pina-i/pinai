@@ -114,25 +114,7 @@ async fn revoking_a_device_from_another_signs_it_out_and_closes_its_socket() {
     let app = spawn_app().await;
     let laptop = app.sign_up("alice").await;
     let device = uuid::Uuid::new_v4();
-    let (registered, _) = app
-        .send(
-            reqwest::Method::POST,
-            &laptop,
-            "/api/keys/devices",
-            serde_json::json!({
-                "device_id": device,
-                "drk_public_key": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=",
-            }),
-        )
-        .await;
-    let (linked, _) = app
-        .send(
-            reqwest::Method::PUT,
-            &laptop,
-            "/api/sessions/current/device",
-            serde_json::json!({ "device_id": device }),
-        )
-        .await;
+    let (registered, linked, _) = sign_in_device(&app, &laptop, device, 7).await;
     let mut socket = open_socket(&app, &laptop.token).await.unwrap();
     let phone = another_browser(&app, &laptop).await;
     let (_, listed) = app.get(&phone, "/api/keys/devices").await;
@@ -312,20 +294,32 @@ async fn sign_in_device(
             "/api/keys/devices",
             json!({
                 "device_id": device,
-                "drk_public_key": base64::engine::general_purpose::STANDARD.encode([seed; 32]),
+                "drk_public_key": base64::engine::general_purpose::STANDARD
+                    .encode(device_key(seed).verifying_key().as_bytes()),
             }),
         )
         .await;
-    let (linked, _) = name_device(app, who, device).await;
+    let (linked, _) = name_device(app, who, device, seed).await;
     (registered, linked, answer)
 }
 
-async fn name_device(app: &TestApp, who: &Account, device: Uuid) -> (reqwest::StatusCode, Value) {
+/// The root key of the device registered with `seed`.
+fn device_key(seed: u8) -> ed25519_dalek::SigningKey {
+    ed25519_dalek::SigningKey::from_bytes(&[seed; 32])
+}
+
+async fn name_device(
+    app: &TestApp,
+    who: &Account,
+    device: Uuid,
+    seed: u8,
+) -> (reqwest::StatusCode, Value) {
+    let proof = crate::helpers::naming_proof(who, device, &device_key(seed));
     app.send(
         reqwest::Method::PUT,
         who,
         "/api/sessions/current/device",
-        json!({ "device_id": device }),
+        json!({ "device_id": device, "signature": proof }),
     )
     .await
 }
@@ -387,10 +381,10 @@ async fn two_web_apps_in_one_browser_each_sign_in_a_device_of_their_own() {
     let theirs = instances.sign_in(&app, &official).await;
     let they_sign_in = sign_in_device(&app, &theirs, instances_device, 8).await;
     let reloaded = signed_in_again(&app, &official).await;
-    let (named_again, _) = name_device(&app, &reloaded, officials_device).await;
-    let (repointed, refusal) = name_device(&app, &reloaded, instances_device).await;
+    let (named_again, _) = name_device(&app, &reloaded, officials_device, 7).await;
+    let (repointed, refusal) = name_device(&app, &reloaded, instances_device, 8).await;
     let they_reload = instances.sign_in_again(&app, &official).await;
-    let (they_name_again, _) = name_device(&app, &they_reload, instances_device).await;
+    let (they_name_again, _) = name_device(&app, &they_reload, instances_device, 8).await;
     let (_, listed) = app.get(&they_reload, "/api/keys/devices").await;
 
     assert_eq!(
@@ -667,7 +661,7 @@ async fn the_password_typed_again_signs_the_web_app_in_anew_on_its_own_session()
         refresh_token: tokens["refresh_token"].as_str().unwrap().to_owned(),
         ..stale.clone()
     };
-    let (named_again, _) = name_device(&app, &fresh, device).await;
+    let (named_again, _) = name_device(&app, &fresh, device, 7).await;
     let allowed = sign_out_others(&fresh).await;
 
     assert_eq!(refused, 401, "insufficient_user_authentication");

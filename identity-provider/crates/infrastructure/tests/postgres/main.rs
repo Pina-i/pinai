@@ -11,6 +11,7 @@ mod profile;
 mod reach;
 mod settings;
 mod social;
+mod start_over;
 
 use domain::UserId;
 use domain::identity::{Account, ActorUri};

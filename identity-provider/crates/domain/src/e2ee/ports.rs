@@ -2,15 +2,16 @@ use time::OffsetDateTime;
 
 use crate::identity::{ActorUri, RemoteActor};
 use crate::messaging::GroupSnapshot;
-use crate::{ApprovalRequestId, ConversationId, DeviceId, SessionId, UserId};
+use crate::{ApprovalRequestId, ConversationId, DeviceId, SessionId, StartOverRequestId, UserId};
 
 use super::{
-    Append, Approval, ApprovalMessage, ApprovalMessageBody, ApprovalRequest, ArchiveCursor,
-    ArchiveEntry, ArchiveStoreError, Attestation, AttestationExpiry, CheckedApproval, CheckedShare,
-    Claim, ClaimedKeyPackage, Commit, DeliveryStoreError, Device, DeviceLabel, DeviceRootKey,
-    Ed25519PublicKey, Ed25519Signature, Epoch, HeldHistoryKey, HistoryGeneration, HistoryKey,
-    HpkeKeyWrite, KeyShare, KeyStoreError, MessageSeq, NewArchiveEntry, NewCommit, NewKeyPackage,
-    NewWelcome, RemoteClaimError, RequestRefusal, Welcome, WelcomeBlob,
+    Append, Approval, ApprovalMessage, ApprovalMessageBody, ApprovalRequest, ApprovalRequired,
+    ArchiveCursor, ArchiveEntry, ArchiveStoreError, Attestation, AttestationExpiry,
+    CheckedApproval, CheckedShare, Claim, ClaimedKeyPackage, Commit, DeliveryStoreError, Device,
+    DeviceLabel, DeviceRootKey, DeviceTrust, Ed25519PublicKey, Ed25519Signature, Epoch,
+    HeldHistoryKey, HistoryGeneration, HistoryKey, HpkeKeyWrite, KeyShare, KeyStoreError,
+    MessageSeq, NewArchiveEntry, NewCommit, NewKeyPackage, NewWelcome, RemoteClaimError,
+    RequestRefusal, StartOverEnd, StartOverRefusal, StartOverRequest, Welcome, WelcomeBlob,
 };
 
 /// The devices accounts registered, and their attestations.
@@ -33,10 +34,18 @@ pub trait Devices: Send + Sync {
         attestation: &Attestation,
         hpke_key: &HpkeKeyWrite,
     ) -> Result<Attest, KeyStoreError>;
-    /// Revoke the device, drop its HPKE key, the approvals it signed and the key shares it sent or
-    /// was sent, and close the approval requests it asks or answers, in one write: nothing
-    /// encrypts to it again, nothing is approved through it, and nobody waits on it.
-    async fn revoke(&self, owner: UserId, id: DeviceId) -> Result<Revocation, KeyStoreError>;
+    /// Revoke the device for a session whose device is `by`, as [`super::may_revoke`] decides on
+    /// the account's devices, approvals and generation as they stand under the device's lock: drop
+    /// its HPKE key, the approvals it signed and the key shares it sent or was sent, close the
+    /// approval requests it asks or answers and cancel its start over request, in one write —
+    /// nothing encrypts to it again, nothing is approved through it, and nobody waits on it.
+    async fn revoke(
+        &self,
+        owner: UserId,
+        id: DeviceId,
+        by: Option<DeviceId>,
+        now: OffsetDateTime,
+    ) -> Result<Revocation, KeyStoreError>;
     /// Record that the device holds `generation` of its owner's history key, dropping the share it
     /// was sent; only while that is the owner's current generation (`check_history_generation`),
     /// and the device the owner's and unrevoked.
@@ -66,13 +75,17 @@ pub enum Holding {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Revocation {
-    /// With the requests it closed that were still open.
+    /// With the approval requests it closed that were still open, and its start over request
+    /// cancelled.
     Revoked {
         closed: Vec<ApprovalRequest>,
+        start_over: Option<StartOverRequest>,
     },
     AlreadyRevoked,
     /// No such device of the owner's.
     NotFound,
+    /// An approved device, and `by` isn't one: nothing was written.
+    Refused(ApprovalRequired),
 }
 
 /// The KeyPackages devices publish ahead of time, each handed out once.
@@ -271,25 +284,33 @@ pub trait HistoryKeys: Send + Sync {
     /// ([`HistoryGeneration::follows`]), erasing the owner's archive, the approvals made with older
     /// generations' approval keys and the key shares in the same write: the archive only ever holds
     /// the current generation, only its approval key approves, and only its passphrase is shared.
-    /// `set_by` is the device whose session set it. The very key held already is a retry: nothing
-    /// is written.
+    /// `set_by` is the device whose session set it. Decided by [`super::may_replace_history_key`]
+    /// on the account as it stands under the key's lock, so nothing it relied on changes before
+    /// the write; the owner's open start over requests end with it.
     async fn replace(
         &self,
         owner: UserId,
         key: &HistoryKey,
         set_by: DeviceId,
+        now: OffsetDateTime,
     ) -> Result<KeyReplace, ArchiveStoreError>;
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeyReplace {
-    /// How many archive entries went with the generation replaced.
-    Replaced { erased: usize },
+    /// How many archive entries went with the generation replaced, and the start over requests
+    /// another device had open, superseded.
+    Replaced {
+        erased: usize,
+        closed: Vec<StartOverRequest>,
+    },
     /// `key` is the one held: a retry of the write that set it.
     AlreadySet,
     /// The key doesn't follow `current` (`None`: none set) — another device got there first, say.
     /// Nothing was written.
     Conflict(Option<HistoryGeneration>),
+    /// The setter is not approved, and has no matured request of its own: nothing was written.
+    Refused(StartOverRefusal),
 }
 
 /// The approvals of each account's devices.
@@ -297,7 +318,8 @@ pub enum KeyReplace {
 pub trait DeviceApprovals: Send + Sync {
     /// Store the approval while what it was checked on holds: the approved device unrevoked with
     /// the root key it binds, an approving device unrevoked with the root key that signed it, a
-    /// passphrase's generation still the current one. One per approved device and approver.
+    /// passphrase's generation still the current one. One per approved device and approver. A
+    /// device it makes approved needs its start over request no more: it ends in the same write.
     async fn approve(
         &self,
         owner: UserId,
@@ -305,11 +327,17 @@ pub trait DeviceApprovals: Send + Sync {
     ) -> Result<Approve, KeyStoreError>;
     /// The approvals of the owner's devices, oldest first.
     async fn of_owner(&self, owner: UserId) -> Result<Vec<Approval>, KeyStoreError>;
+    /// The owner's devices, their approvals and current generation, in one read: what
+    /// [`DeviceTrust`] decides on.
+    async fn trust(&self, owner: UserId) -> Result<DeviceTrust, KeyStoreError>;
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Approve {
-    Recorded,
+    /// With the approved device's start over request, ended.
+    Recorded {
+        start_over: Option<StartOverRequest>,
+    },
     /// The approver had approved the device already: nothing was written.
     AlreadyHeld,
     /// A device or the generation changed since it was read: nothing was written.
@@ -428,6 +456,63 @@ pub enum Deposit {
     Stale,
 }
 
+/// Each account's start over requests.
+#[async_trait::async_trait]
+pub trait StartOverRequests: Send + Sync {
+    /// Open `request` as [`super::may_open_start_over`] decides on the account's open request and
+    /// the requests it opened since [`super::start_over_window`] — under the account's lock, so two
+    /// at once are decided one after the other —, while its device is unrevoked and the account's
+    /// generation the one it names.
+    async fn open(&self, request: &StartOverRequest) -> Result<StartOverOpened, KeyStoreError>;
+    /// The account's open request.
+    async fn open_of(&self, owner: UserId) -> Result<Option<StartOverRequest>, KeyStoreError>;
+    /// The latest request `device` asked, ended or not, until swept.
+    async fn latest_of(
+        &self,
+        owner: UserId,
+        device: DeviceId,
+    ) -> Result<Option<StartOverRequest>, KeyStoreError>;
+    /// The owner's request `id`, ended or not, until swept.
+    async fn request(
+        &self,
+        owner: UserId,
+        id: StartOverRequestId,
+    ) -> Result<Option<StartOverRequest>, KeyStoreError>;
+    /// End the owner's request `id` as `how`, for the device `by`: while it is open, under its
+    /// lock, `by` unrevoked, and [`StartOverRequest::may_end`] still saying `how`.
+    async fn end(
+        &self,
+        owner: UserId,
+        id: StartOverRequestId,
+        by: DeviceId,
+        how: StartOverEnd,
+        now: OffsetDateTime,
+    ) -> Result<StartOverEnded, KeyStoreError>;
+    /// Delete the requests that ended before `cutoff`.
+    async fn delete_ended_before(&self, cutoff: OffsetDateTime) -> Result<usize, KeyStoreError>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StartOverOpened {
+    /// The request as stored.
+    Opened(StartOverRequest),
+    /// The device's own open request: nothing was written.
+    Existing(StartOverRequest),
+    Refused(StartOverRefusal),
+    /// The device was revoked, or the generation moved on, since it was read: nothing was
+    /// written.
+    Stale,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StartOverEnded {
+    /// The request as it ended.
+    Ended(StartOverRequest),
+    Refused(StartOverRefusal),
+    /// The ending device was revoked, or is no longer approved: nothing was written.
+    Stale,
+}
+
 /// Tells an account's live sessions about approvals, the requests relayed between its devices,
 /// and the passphrase shared to them.
 pub trait DeviceTrustNotifier: Send + Sync {
@@ -450,4 +535,21 @@ pub trait DeviceTrustNotifier: Send + Sync {
     fn approval_closed(&self, owner: UserId, to: &[SessionId], request: ApprovalRequestId);
     /// To the recipient device's sessions: a share waits for it.
     fn history_key_ready(&self, owner: UserId, to: &[SessionId], device: DeviceId);
+    /// To the approved devices' sessions: a device asks to start the history over.
+    fn start_over_requested(
+        &self,
+        owner: UserId,
+        to: &[SessionId],
+        request: &StartOverRequest,
+        display_name: &str,
+        ready_at: OffsetDateTime,
+    );
+    /// To the asking device's and the approved devices' sessions: a request ended unused.
+    fn start_over_cancelled(
+        &self,
+        owner: UserId,
+        to: &[SessionId],
+        request: StartOverRequestId,
+        reason: StartOverEnd,
+    );
 }

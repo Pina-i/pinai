@@ -1,11 +1,16 @@
 use domain::ConversationId;
 use domain::auth::Sessions;
 use domain::auth::testing::InMemorySessions;
-use domain::e2ee::testing::{InMemoryArchive, InMemoryKeyDirectory};
-use domain::e2ee::{
-    ApprovalPublicKey, ArchiveNonce, Archived, Attestation, DeviceLabel, DeviceRequired,
-    DeviceRootKey, HistoryArchive, HistoryCheckValue, HistorySalt, HpkeKeyWrite, NewArchiveEntry,
+use domain::e2ee::testing::{
+    InMemoryArchive, InMemoryKeyDirectory, PlainEd25519Verifier, RecordingDeviceTrustNotifier,
+    plain_signature,
 };
+use domain::e2ee::{
+    ApprovalBy, ApprovalFacts, ApprovalPublicKey, ArchiveNonce, Archived, Attestation,
+    DeviceApprovals, DeviceLabel, DeviceRequired, DeviceRootKey, HistoryArchive, HistoryCheckValue,
+    HistorySalt, HpkeKeyWrite, NewArchiveEntry, approval_bytes, may_approve,
+};
+use domain::identity::ActorUri;
 use time::Duration;
 
 use super::*;
@@ -46,7 +51,12 @@ fn world() -> World {
         alice: UserId::generate(),
         bob: UserId::generate(),
         load: LoadHistoryKey::new(archive.clone()),
-        set: SetHistoryKey::new(sessions.clone(), archive.clone()),
+        set: SetHistoryKey::new(
+            sessions.clone(),
+            archive.clone(),
+            devices.clone(),
+            Arc::new(RecordingDeviceTrustNotifier::default()),
+        ),
         report: ReportHistoryKey::new(sessions.clone(), devices.clone(), archive.clone()),
         sessions,
         devices,
@@ -115,9 +125,37 @@ impl World {
             .unwrap()
     }
 
+    /// `device` approved by `key`'s words, as a device holding them approves itself.
+    async fn approved_by_words(&self, who: UserId, device: DeviceId, key: &HistoryKey) {
+        let actor = ActorUri::parse("https://idp.test/users/alice_t3st0").unwrap();
+        let signer = Devices::find(&*self.devices, device)
+            .await
+            .unwrap()
+            .unwrap();
+        let root = signer.attestation.as_ref().unwrap().root_key.clone();
+        let signature = plain_signature(
+            &key.approval_public_key,
+            &approval_bytes(&actor, device, &root),
+        );
+        let facts = ApprovalFacts {
+            actor: &actor,
+            signer: &signer,
+            approved: None,
+            current: Some(key),
+        };
+        let checked = may_approve(
+            device,
+            ApprovalBy::Passphrase(key.generation),
+            signature,
+            facts,
+            &PlainEd25519Verifier,
+        )
+        .unwrap();
+        self.devices.approve(who, &checked).await.unwrap();
+    }
+
     async fn held(&self, device: DeviceId) -> Option<HistoryGeneration> {
-        self.devices
-            .find(device)
+        Devices::find(&*self.devices, device)
             .await
             .unwrap()
             .unwrap()
@@ -187,6 +225,8 @@ async fn a_later_generation_takes_a_recent_password_and_erases_the_archive() {
         .execute(&first, history_key(1, 1), now())
         .await
         .unwrap();
+    w.approved_by_words(w.alice, laptop, &history_key(1, 1))
+        .await;
     w.archived(w.alice, generation(1)).await;
     let (long_ago, recent) = (
         w.signed_in(w.alice, Some(laptop), 11).await,

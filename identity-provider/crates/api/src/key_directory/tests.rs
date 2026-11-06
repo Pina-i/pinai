@@ -599,8 +599,9 @@ impl World {
         (self.app.token_in(who.id, session), device)
     }
 
-    /// `who`'s history key at `generation`, set as generation after generation from `token`.
-    async fn history_key_at(&self, token: &str, generation: i64) {
+    /// Alice's history key at `generation`, set as generation after generation from `token`, the
+    /// session of `device`, which each one's words approve.
+    async fn history_key_at(&self, token: &str, device: Uuid, generation: i64) {
         for g in 1..=generation {
             let (status, body) = self
                 .app
@@ -617,6 +618,9 @@ impl World {
                 )
                 .await;
             assert_eq!(status, StatusCode::NO_CONTENT, "{body}");
+            self.app
+                .approved_by_words(&self.alice, token, device, g, [3; 32])
+                .await;
         }
     }
 
@@ -637,7 +641,7 @@ async fn a_device_says_it_holds_the_current_history_key_and_the_list_shows_it() 
     let w = world();
     let (laptops, laptop) = w.on_a_device(&w.alice).await;
     let (_, phone) = w.on_a_device(&w.alice).await;
-    w.history_key_at(&laptops, 2).await;
+    w.history_key_at(&laptops, laptop, 2).await;
 
     let held = w.hold(&laptops, laptop, 2).await;
 
@@ -662,7 +666,7 @@ async fn a_report_is_refused_with_the_documented_errors() {
     let unnamed = w.app.token(w.alice.id);
 
     let none_set = w.hold(&laptops, laptop, 1).await;
-    w.history_key_at(&laptops, 2).await;
+    w.history_key_at(&laptops, laptop, 2).await;
     let replaced = w.hold(&laptops, laptop, 1).await;
     let not_one = w.hold(&laptops, laptop, 0).await;
     let for_another = w.hold(&laptops, phone, 2).await;

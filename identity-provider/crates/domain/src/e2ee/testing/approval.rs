@@ -5,7 +5,7 @@ use crate::e2ee::{
     CheckedApproval, Close, DeviceApprovals, DeviceTrustNotifier, MessageSeq, Opened, Post, Read,
     RequestRefusal, may_open_request, window_start,
 };
-use crate::{ApprovalRequestId, SessionId};
+use crate::{ApprovalRequestId, SessionId, StartOverRequestId};
 
 use super::*;
 
@@ -45,23 +45,36 @@ impl DeviceApprovals for InMemoryKeyDirectory {
         if !signer_holds || !holds(approval.device(), approval.root_key()) {
             return Ok(Approve::Stale);
         }
-        let mut approvals = self.approvals.lock().unwrap();
-        if approvals.iter().any(|(_, held)| {
-            held.device == approval.device() && held.approver == approval.approver()
-        }) {
-            return Ok(Approve::AlreadyHeld);
+        drop(state);
+        {
+            let mut approvals = self.approvals.lock().unwrap();
+            if approvals.iter().any(|(_, held)| {
+                held.device == approval.device() && held.approver == approval.approver()
+            }) {
+                return Ok(Approve::AlreadyHeld);
+            }
+            approvals.push((
+                owner,
+                Approval {
+                    device: approval.device(),
+                    root_key: approval.root_key().clone(),
+                    approver: approval.approver(),
+                    signature: approval.signature().clone(),
+                    created_at: OffsetDateTime::now_utc(),
+                },
+            ));
         }
-        approvals.push((
-            owner,
-            Approval {
-                device: approval.device(),
-                root_key: approval.root_key().clone(),
-                approver: approval.approver(),
-                signature: approval.signature().clone(),
-                created_at: OffsetDateTime::now_utc(),
-            },
-        ));
-        Ok(Approve::Recorded)
+        let trust = self.trust_of(owner);
+        let start_over = end_open(&self.start_overs, OffsetDateTime::now_utc(), |request| {
+            (request.owner == owner
+                && request.device == approval.device()
+                && trust
+                    .chain_under(request.device, request.generation)
+                    .is_some())
+            .then_some(StartOverEnd::Approved)
+        })
+        .pop();
+        Ok(Approve::Recorded { start_over })
     }
 
     async fn of_owner(&self, owner: UserId) -> Result<Vec<Approval>, KeyStoreError> {
@@ -73,6 +86,46 @@ impl DeviceApprovals for InMemoryKeyDirectory {
             .filter(|(of, _)| *of == owner)
             .map(|(_, approval)| approval.clone())
             .collect())
+    }
+
+    async fn trust(&self, owner: UserId) -> Result<DeviceTrust, KeyStoreError> {
+        let mut trust = self.trust_of(owner);
+        trust
+            .devices
+            .sort_by_key(|d| (d.revoked_at.is_some(), std::cmp::Reverse(d.last_seen_at)));
+        Ok(trust)
+    }
+}
+
+impl InMemoryKeyDirectory {
+    /// `device`, attested here, approved by `key`'s words — what a device holding them does — so
+    /// it may set the generation after `key`'s.
+    pub async fn approved_by_words(&self, owner: UserId, device: DeviceId, key: &HistoryKey) {
+        let actor = ActorUri::parse("https://idp.test/users/a_t3st0").unwrap();
+        let signer = Devices::find(self, device)
+            .await
+            .unwrap()
+            .expect("attested");
+        let root = &signer.attestation.as_ref().expect("a root key").root_key;
+        let signature = plain_signature(
+            &key.approval_public_key,
+            &crate::e2ee::approval_bytes(&actor, device, root),
+        );
+        let facts = crate::e2ee::ApprovalFacts {
+            actor: &actor,
+            signer: &signer,
+            approved: None,
+            current: Some(key),
+        };
+        let approval = crate::e2ee::may_approve(
+            device,
+            crate::e2ee::ApprovalBy::Passphrase(key.generation),
+            signature,
+            facts,
+            &PlainEd25519Verifier,
+        )
+        .expect("a well-made approval");
+        self.approve(owner, &approval).await.unwrap();
     }
 }
 
@@ -279,6 +332,20 @@ pub enum SentTrust {
         to: Vec<SessionId>,
         device: DeviceId,
     },
+    StartOverRequested {
+        owner: UserId,
+        to: Vec<SessionId>,
+        request: StartOverRequestId,
+        device: DeviceId,
+        display_name: String,
+        ready_at: OffsetDateTime,
+    },
+    StartOverCancelled {
+        owner: UserId,
+        to: Vec<SessionId>,
+        request: StartOverRequestId,
+        reason: StartOverEnd,
+    },
 }
 
 #[derive(Default)]
@@ -345,6 +412,39 @@ impl DeviceTrustNotifier for RecordingDeviceTrustNotifier {
             owner,
             to: to.to_vec(),
             device,
+        });
+    }
+
+    fn start_over_requested(
+        &self,
+        owner: UserId,
+        to: &[SessionId],
+        request: &StartOverRequest,
+        display_name: &str,
+        ready_at: OffsetDateTime,
+    ) {
+        self.record(SentTrust::StartOverRequested {
+            owner,
+            to: to.to_vec(),
+            request: request.id,
+            device: request.device,
+            display_name: display_name.to_owned(),
+            ready_at,
+        });
+    }
+
+    fn start_over_cancelled(
+        &self,
+        owner: UserId,
+        to: &[SessionId],
+        request: StartOverRequestId,
+        reason: StartOverEnd,
+    ) {
+        self.record(SentTrust::StartOverCancelled {
+            owner,
+            to: to.to_vec(),
+            request,
+            reason,
         });
     }
 }
@@ -462,7 +562,9 @@ pub mod contract {
             a_device(devices, bob, 4).await,
         );
         let first = history_key(1, 1);
-        keys.replace(alice, &first, laptop).await.unwrap();
+        keys.replace(alice, &first, laptop, time::OffsetDateTime::now_utc())
+            .await
+            .unwrap();
         let laptop_for_phone = by_device(devices, laptop, phone).await;
 
         let recorded = approvals.approve(alice, &laptop_for_phone).await.unwrap();
@@ -482,10 +584,10 @@ pub mod contract {
         assert_eq!(
             (recorded, again, back, by_words, typed_again),
             (
-                Approve::Recorded,
+                Approve::Recorded { start_over: None },
                 Approve::AlreadyHeld,
-                Approve::Recorded,
-                Approve::Recorded,
+                Approve::Recorded { start_over: None },
+                Approve::Recorded { start_over: None },
                 Approve::AlreadyHeld
             )
         );
@@ -526,20 +628,34 @@ pub mod contract {
             a_device(devices, alice, 5).await,
         );
         let first = history_key(1, 1);
-        keys.replace(alice, &first, laptop).await.unwrap();
+        keys.replace(alice, &first, laptop, time::OffsetDateTime::now_utc())
+            .await
+            .unwrap();
         let of_revoked = by_device(devices, laptop, phone).await;
         let by_revoked = by_device(devices, tablet, laptop).await;
         let of_rotated = by_device(devices, laptop, watch).await;
         let by_rotated = by_device(devices, tv, laptop).await;
         let under_the_first = by_passphrase(devices, laptop, &first).await;
 
-        devices.revoke(alice, phone).await.unwrap();
-        devices.revoke(alice, tablet).await.unwrap();
-        register(devices, alice, watch, &attestation(9), HpkeKeyWrite::Clear).await;
-        register(devices, alice, tv, &attestation(9), HpkeKeyWrite::Clear).await;
-        keys.replace(alice, &history_key(2, 2), laptop)
+        devices
+            .revoke(alice, phone, Some(phone), time::OffsetDateTime::now_utc())
             .await
             .unwrap();
+        devices
+            .revoke(alice, tablet, Some(tablet), time::OffsetDateTime::now_utc())
+            .await
+            .unwrap();
+        register(devices, alice, watch, &attestation(9), HpkeKeyWrite::Clear).await;
+        register(devices, alice, tv, &attestation(9), HpkeKeyWrite::Clear).await;
+        approvals.approve(alice, &under_the_first).await.unwrap();
+        keys.replace(
+            alice,
+            &history_key(2, 2),
+            laptop,
+            time::OffsetDateTime::now_utc(),
+        )
+        .await
+        .unwrap();
 
         for stale in [
             of_revoked,
@@ -577,7 +693,10 @@ pub mod contract {
             approvals.approve(alice, &approval).await.unwrap();
         }
 
-        devices.revoke(alice, laptop).await.unwrap();
+        devices
+            .revoke(alice, laptop, Some(laptop), time::OffsetDateTime::now_utc())
+            .await
+            .unwrap();
 
         assert_eq!(
             held(approvals, alice).await,
@@ -632,8 +751,12 @@ pub mod contract {
         );
         let bobs = a_device(devices, bob, 3).await;
         let (first, second) = (history_key(1, 1), history_key(2, 2));
-        keys.replace(alice, &first, laptop).await.unwrap();
-        keys.replace(bob, &first, bobs).await.unwrap();
+        keys.replace(alice, &first, laptop, time::OffsetDateTime::now_utc())
+            .await
+            .unwrap();
+        keys.replace(bob, &first, bobs, time::OffsetDateTime::now_utc())
+            .await
+            .unwrap();
         for approval in [
             by_passphrase(devices, laptop, &first).await,
             by_passphrase(devices, phone, &first).await,
@@ -646,7 +769,9 @@ pub mod contract {
             .await
             .unwrap();
 
-        keys.replace(alice, &second, phone).await.unwrap();
+        keys.replace(alice, &second, phone, time::OffsetDateTime::now_utc())
+            .await
+            .unwrap();
         let after = held(approvals, alice).await;
         let anew = approvals
             .approve(alice, &by_passphrase(devices, laptop, &second).await)
@@ -654,7 +779,7 @@ pub mod contract {
             .unwrap();
 
         assert_eq!(after, vec![(phone, Approver::Device(laptop))]);
-        assert_eq!(anew, Approve::Recorded);
+        assert_eq!(anew, Approve::Recorded { start_over: None });
         assert_eq!(
             held(approvals, bob).await,
             vec![(bobs, Approver::Passphrase(first.generation))]
@@ -969,9 +1094,12 @@ pub mod contract {
         post(requests, devices, &answered, laptop, 1, now).await;
         let (unrelated, _) = opened(requests, devices, phone, now).await;
 
-        let revoked = devices.revoke(alice, laptop).await.unwrap();
+        let revoked = devices
+            .revoke(alice, laptop, Some(laptop), time::OffsetDateTime::now_utc())
+            .await
+            .unwrap();
 
-        let Revocation::Revoked { closed } = revoked else {
+        let Revocation::Revoked { closed, .. } = revoked else {
             panic!("{revoked:?}");
         };
         assert_eq!(ids(&closed), ids(&[asked.clone(), answered.clone()]));

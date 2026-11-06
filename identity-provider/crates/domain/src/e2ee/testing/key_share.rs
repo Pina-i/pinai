@@ -153,7 +153,10 @@ pub mod contract {
     /// `owner`'s laptop, which set `first`, holds it and is approved by it.
     async fn an_account(s: ShareStores<'_>, owner: UserId, first: &HistoryKey) -> DeviceId {
         let laptop = a_device(s, owner, 1).await;
-        s.keys.replace(owner, first, laptop).await.unwrap();
+        s.keys
+            .replace(owner, first, laptop, time::OffsetDateTime::now_utc())
+            .await
+            .unwrap();
         holding(s, owner, laptop, first).await;
         laptop
     }
@@ -381,7 +384,15 @@ pub mod contract {
         ];
         let before_the_new_generation = checked(s, alice, laptop, last, 1).await;
 
-        s.devices.revoke(alice, revoked).await.unwrap();
+        s.devices
+            .revoke(
+                alice,
+                revoked,
+                Some(revoked),
+                time::OffsetDateTime::now_utc(),
+            )
+            .await
+            .unwrap();
         s.devices
             .hold_history_key(alice, reporting, first.generation)
             .await
@@ -402,8 +413,14 @@ pub mod contract {
             HpkeKeyWrite::Set(hpke_key(7)),
         )
         .await;
-        s.devices.revoke(alice, tablet).await.unwrap();
-        s.devices.revoke(alice, watch).await.unwrap();
+        s.devices
+            .revoke(alice, tablet, Some(tablet), time::OffsetDateTime::now_utc())
+            .await
+            .unwrap();
+        s.devices
+            .revoke(alice, watch, Some(watch), time::OffsetDateTime::now_utc())
+            .await
+            .unwrap();
 
         for share in &stale {
             assert_eq!(deposit(s, alice, share).await, Deposit::Stale, "{share:?}");
@@ -413,7 +430,12 @@ pub mod contract {
             );
         }
         s.keys
-            .replace(alice, &history_key(2, 2), laptop)
+            .replace(
+                alice,
+                &history_key(2, 2),
+                laptop,
+                time::OffsetDateTime::now_utc(),
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -437,7 +459,12 @@ pub mod contract {
         deposit(s, bob, &for_bob).await;
 
         s.keys
-            .replace(alice, &history_key(2, 2), laptop)
+            .replace(
+                alice,
+                &history_key(2, 2),
+                laptop,
+                time::OffsetDateTime::now_utc(),
+            )
             .await
             .unwrap();
 
@@ -465,8 +492,14 @@ pub mod contract {
         let kept = checked(s, alice, laptop, tv, 1).await;
         deposit(s, alice, &kept).await;
 
-        s.devices.revoke(alice, phone).await.unwrap();
-        s.devices.revoke(alice, tablet).await.unwrap();
+        s.devices
+            .revoke(alice, phone, Some(phone), time::OffsetDateTime::now_utc())
+            .await
+            .unwrap();
+        s.devices
+            .revoke(alice, tablet, Some(tablet), time::OffsetDateTime::now_utc())
+            .await
+            .unwrap();
 
         let g1 = first.generation;
         assert_eq!(held_for(s, alice, phone, g1).await, None, "its recipient");

@@ -90,11 +90,15 @@ impl World {
         }
         self.ok(&token, Method::POST, "/api/keys/devices", register)
             .await;
+        let proof = plain_signature(
+            &root(root_byte),
+            &domain::auth::naming_bytes(&self.alice.actor_uri, id.into(), session),
+        );
         self.ok(
             &token,
             Method::PUT,
             "/api/sessions/current/device",
-            json!({ "device_id": id }),
+            json!({ "device_id": id, "signature": B64.encode(proof.as_bytes()) }),
         )
         .await;
         Device {

@@ -8,8 +8,8 @@ use domain::e2ee::testing::{
 };
 use domain::e2ee::{
     ApprovalPublicKey, Approver, Attestation, CheckedApproval, DeviceLabel, DeviceRootKey,
-    HistoryCheckValue, HistoryGeneration, HistoryKey, HistorySalt, HpkeKeyWrite, KeyPackages,
-    KeyStoreError, approval_bytes,
+    DeviceTrust, HistoryCheckValue, HistoryGeneration, HistoryKey, HistorySalt, HpkeKeyWrite,
+    KeyPackages, KeyStoreError, approval_bytes,
 };
 use domain::identity::Account;
 use domain::identity::testing::{InMemoryAccounts, account};
@@ -107,6 +107,7 @@ fn world_with(
         revoke: RevokeDevice::new(
             devices.clone(),
             sessions.clone(),
+            devices.clone(),
             Arc::new(domain::auth::testing::RecordingSessionNotifier::default()),
             notifier.clone(),
         ),
@@ -236,7 +237,10 @@ async fn the_passphrase_approves_the_device_it_is_typed_on() {
     let w = world();
     let (laptop, on_laptop) = w.on_a_device(&w.alice, 1).await;
     let first = history_key(1, 40);
-    w.archive.replace(w.alice.id, &first, laptop).await.unwrap();
+    w.archive
+        .replace(w.alice.id, &first, laptop, time::OffsetDateTime::now_utc())
+        .await
+        .unwrap();
     let signature = w.signed(40, laptop, 1);
 
     w.approve
@@ -275,7 +279,15 @@ async fn approving_takes_a_session_that_named_its_unrevoked_device() {
         .approve
         .execute(&unnamed, phone, ApprovalBy::Device, signature.clone())
         .await;
-    w.devices.revoke(w.alice.id, laptop).await.unwrap();
+    w.devices
+        .revoke(
+            w.alice.id,
+            laptop,
+            Some(laptop),
+            time::OffsetDateTime::now_utc(),
+        )
+        .await
+        .unwrap();
     let from_revoked = w
         .approve
         .execute(&on_laptop, phone, ApprovalBy::Device, signature)
@@ -344,7 +356,14 @@ impl DeviceApprovals for RevokedMeanwhile {
         approval: &CheckedApproval,
     ) -> Result<Approve, KeyStoreError> {
         if !std::mem::replace(&mut *self.revoked.lock().unwrap(), true) {
-            self.devices.revoke(owner, approval.device()).await?;
+            self.devices
+                .revoke(
+                    owner,
+                    approval.device(),
+                    Some(approval.device()),
+                    time::OffsetDateTime::now_utc(),
+                )
+                .await?;
             return Ok(Approve::Stale);
         }
         self.devices.approve(owner, approval).await
@@ -352,6 +371,10 @@ impl DeviceApprovals for RevokedMeanwhile {
 
     async fn of_owner(&self, owner: UserId) -> Result<Vec<Approval>, KeyStoreError> {
         self.devices.of_owner(owner).await
+    }
+
+    async fn trust(&self, owner: UserId) -> Result<DeviceTrust, KeyStoreError> {
+        self.devices.trust(owner).await
     }
 }
 
@@ -745,7 +768,7 @@ async fn revoking_a_device_ends_its_requests_and_tells_the_other_side() {
         .await
         .unwrap();
 
-    w.revoke.execute(w.alice.id, laptop, now()).await.unwrap();
+    w.revoke.execute(&on_phone, laptop, now()).await.unwrap();
 
     assert_eq!(
         w.sent().last(),
@@ -780,6 +803,10 @@ impl DeviceApprovals for ApprovalsOfAnOldKey {
             created_at: now(),
         }])
     }
+
+    async fn trust(&self, _: UserId) -> Result<DeviceTrust, KeyStoreError> {
+        unreachable!("only listed")
+    }
 }
 
 #[tokio::test]
@@ -810,6 +837,10 @@ impl DeviceApprovals for AlwaysStale {
     async fn of_owner(&self, _: UserId) -> Result<Vec<Approval>, KeyStoreError> {
         Ok(Vec::new())
     }
+
+    async fn trust(&self, _: UserId) -> Result<DeviceTrust, KeyStoreError> {
+        Ok(DeviceTrust::default())
+    }
 }
 
 #[tokio::test]
@@ -837,7 +868,14 @@ struct RevokedAsItWrites {
 #[async_trait::async_trait]
 impl ApprovalRequests for RevokedAsItWrites {
     async fn open(&self, request: &ApprovalRequest) -> Result<Opened, KeyStoreError> {
-        self.devices.revoke(request.owner, request.device).await?;
+        self.devices
+            .revoke(
+                request.owner,
+                request.device,
+                Some(request.device),
+                time::OffsetDateTime::now_utc(),
+            )
+            .await?;
         Ok(Opened::Stale)
     }
 
@@ -857,7 +895,14 @@ impl ApprovalRequests for RevokedAsItWrites {
         _: &ApprovalMessageBody,
         _: OffsetDateTime,
     ) -> Result<Post, KeyStoreError> {
-        self.devices.revoke(owner, from.id).await?;
+        self.devices
+            .revoke(
+                owner,
+                from.id,
+                Some(from.id),
+                time::OffsetDateTime::now_utc(),
+            )
+            .await?;
         Ok(Post::Stale)
     }
 

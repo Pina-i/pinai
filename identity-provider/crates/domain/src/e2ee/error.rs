@@ -2,7 +2,8 @@ use crate::identity::AccountsError;
 use crate::social::{SocialStoreError, Unreachable};
 
 use super::{
-    DeviceRequired, HistoryGeneration, KeyPackageRefusal, RequestRefusal, StaleHistoryKey,
+    ApprovalRequired, DeviceRequired, HistoryGeneration, KeyPackageRefusal, RequestRefusal,
+    StaleHistoryKey, StartOverRefusal,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -52,6 +53,10 @@ pub enum KeyDirectoryError {
     NoKeyShare,
     #[error(transparent)]
     Request(#[from] RequestRefusal),
+    #[error(transparent)]
+    StartOver(#[from] StartOverRefusal),
+    #[error(transparent)]
+    ApprovalRequired(#[from] ApprovalRequired),
     #[error(transparent)]
     DeviceRequired(#[from] DeviceRequired),
     #[error(transparent)]
@@ -240,6 +245,8 @@ pub enum ArchiveError {
     KeyConflict { current: Option<HistoryGeneration> },
     #[error("a recent password is needed to replace the history key")]
     RecentSignInRequired,
+    #[error(transparent)]
+    StartOver(#[from] StartOverRefusal),
     #[error(transparent)]
     DeviceRequired(#[from] DeviceRequired),
     #[error(transparent)]

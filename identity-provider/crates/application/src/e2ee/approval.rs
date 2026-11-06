@@ -34,7 +34,7 @@ pub(super) async fn the_callers_device(
 }
 
 /// Why a write found the caller's device changed: read again, it says how — revoked, mostly.
-async fn revoked_meanwhile(
+pub(super) async fn revoked_meanwhile(
     sessions: &dyn Sessions,
     devices: &dyn Devices,
     bearer: &Bearer,
@@ -45,7 +45,7 @@ async fn revoked_meanwhile(
     }
 }
 
-async fn sessions_of(
+pub(super) async fn sessions_of(
     sessions: &dyn Sessions,
     owner: UserId,
 ) -> Result<Vec<Session>, KeyDirectoryError> {
@@ -120,9 +120,12 @@ impl ApproveDevice {
             };
             let checked = may_approve(approved, by, signature.clone(), facts, &*self.verifier)?;
             match self.approvals.approve(owner, &checked).await? {
-                Approve::Recorded => {
+                Approve::Recorded { start_over } => {
                     tracing::info!(user_id = %owner, device_id = %approved, approver = ?checked.approver(), "device approved");
                     self.notifier.device_approved(owner, approved);
+                    if let Some(request) = start_over {
+                        self.tell_ended(&request).await;
+                    }
                     return Ok(());
                 }
                 Approve::AlreadyHeld => return Ok(()),
@@ -132,6 +135,28 @@ impl ApproveDevice {
         Err(KeyDirectoryError::Unexpected(anyhow::anyhow!(
             "the devices kept changing while {approved} was approved"
         )))
+    }
+}
+
+impl ApproveDevice {
+    /// The approval ended the device's start over: it and the approved devices are told, as best
+    /// they can be — the write is done.
+    async fn tell_ended(&self, request: &domain::e2ee::StartOverRequest) {
+        match self.approvals.trust(request.owner).await {
+            Ok(trust) => {
+                super::start_over::tell_start_over_ended(
+                    &*self.sessions,
+                    &*self.notifier,
+                    &trust,
+                    request,
+                    OffsetDateTime::now_utc(),
+                )
+                .await;
+            }
+            Err(e) => {
+                tracing::warn!(error = ?e, user_id = %request.owner, "the approved start over went untold");
+            }
+        }
     }
 }
 

@@ -2,6 +2,7 @@
 
 mod approval;
 mod key_share;
+mod start_over;
 
 use std::sync::{Arc, Mutex};
 
@@ -22,7 +23,10 @@ use super::{
     HistoryArchive, HistoryGeneration, HistoryKey, HistoryKeys, Holding, KeyReplace,
     NewArchiveEntry, check_history_generation,
 };
-use super::{Approval, Approver, Ed25519PublicKey, KeyShare};
+use super::{
+    Approval, Approver, ArchiveError, DeviceTrust, Ed25519PublicKey, KeyGate, KeyShare,
+    StartOverEnd, StartOverEnding, StartOverRequest, may_replace_history_key, may_revoke,
+};
 use super::{
     Attest, Attestation, AttestationExpiry, Claim, ClaimedKeyPackage, Commit, CommitLog,
     DeliveryStoreError, Device, DeviceAttester, DeviceLabel, DeviceNotifier, DeviceRootKey,
@@ -31,6 +35,8 @@ use super::{
     OutgoingWelcome, RemoteClaimError, RemoteKeyPackages, Revocation, SignedAttestation,
     SignedHpkeKey, UnverifiedHpkeKey, Welcome, Welcomes,
 };
+use crate::auth::Sessions;
+use crate::auth::testing::InMemorySessions;
 
 /// The approvals of each account's devices, which a revoke, a new root key and a new generation
 /// drop: shared by the directory and the history keys, as one database holds them.
@@ -40,28 +46,65 @@ type Approvals = Arc<Mutex<Vec<(UserId, Approval)>>>;
 /// and a new generation drop: shared as the approvals are.
 type Shares = Arc<Mutex<Vec<(UserId, KeyShare)>>>;
 
+/// The start over requests, which a revoke and a new generation end: shared as the approvals are.
+type StartOvers = Arc<Mutex<Vec<StartOverRequest>>>;
+
 /// The devices, their KeyPackages and their approvals over one state, as KeyPackages mark their
 /// device seen.
 #[derive(Default)]
 pub struct InMemoryKeyDirectory {
-    state: Mutex<State>,
+    /// Shared with the history keys, which decide a new generation on the devices.
+    state: Arc<Mutex<State>>,
     /// Whose current generation a device's report, or a passphrase's approval, is checked
     /// against; none, every one is stale.
     history: Option<Arc<InMemoryArchive>>,
     approvals: Approvals,
     shares: Shares,
+    start_overs: StartOvers,
     /// Whose requests a revoke closes; none, it closes none.
     requests: Option<Arc<InMemoryApprovalRequests>>,
 }
 
 impl InMemoryKeyDirectory {
     pub fn keyed_by(history: Arc<InMemoryArchive>) -> Self {
+        let state = Arc::default();
+        *history.directory.lock().unwrap() = Some(Arc::clone(&state));
         Self {
-            state: Mutex::default(),
+            state,
             approvals: Arc::clone(&history.approvals),
             shares: Arc::clone(&history.shares),
+            start_overs: Arc::clone(&history.start_overs),
             history: Some(history),
             requests: None,
+        }
+    }
+
+    fn generation(&self, owner: UserId) -> Option<HistoryGeneration> {
+        self.history
+            .as_ref()
+            .and_then(|history| history.state.lock().unwrap().generation(owner))
+    }
+
+    /// What [`DeviceTrust`] decides on, as held now.
+    fn trust_of(&self, owner: UserId) -> DeviceTrust {
+        let current = self.generation(owner);
+        let state = self.state.lock().unwrap();
+        DeviceTrust {
+            devices: state
+                .devices
+                .iter()
+                .filter(|device| device.owner == owner)
+                .cloned()
+                .collect(),
+            approvals: self
+                .approvals
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(of, _)| *of == owner)
+                .map(|(_, approval)| approval.clone())
+                .collect(),
+            current,
         }
     }
 
@@ -200,15 +243,25 @@ impl Devices for InMemoryKeyDirectory {
         Ok(Attest::Stored)
     }
 
-    async fn revoke(&self, owner: UserId, id: DeviceId) -> Result<Revocation, KeyStoreError> {
-        let mut state = self.state.lock().unwrap();
-        let Some(device) = state.device_mut(id).filter(|device| device.owner == owner) else {
+    async fn revoke(
+        &self,
+        owner: UserId,
+        id: DeviceId,
+        by: Option<DeviceId>,
+        now: OffsetDateTime,
+    ) -> Result<Revocation, KeyStoreError> {
+        let trust = self.trust_of(owner);
+        let Some(device) = trust.device(id) else {
             return Ok(Revocation::NotFound);
         };
-        if device.revoked_at.is_some() {
+        if device.is_revoked() {
             return Ok(Revocation::AlreadyRevoked);
         }
-        let now = OffsetDateTime::now_utc();
+        if let Err(refusal) = may_revoke(id, by, &trust) {
+            return Ok(Revocation::Refused(refusal));
+        }
+        let mut state = self.state.lock().unwrap();
+        let device = state.device_mut(id).expect("read just now");
         device.revoked_at = Some(now);
         device.hpke_key = None;
         self.drop_approvals(|approval| approval.approver == Approver::Device(id));
@@ -218,7 +271,11 @@ impl Devices for InMemoryKeyDirectory {
             .as_ref()
             .map(|requests| requests.close_for(id, now))
             .unwrap_or_default();
-        Ok(Revocation::Revoked { closed })
+        let start_over = end_open(&self.start_overs, now, |request| {
+            (request.owner == owner && request.device == id).then_some(StartOverEnd::Revoked)
+        })
+        .pop();
+        Ok(Revocation::Revoked { closed, start_over })
     }
 
     async fn hold_history_key(
@@ -247,6 +304,29 @@ impl Devices for InMemoryKeyDirectory {
             None => Ok(Holding::Refused),
         }
     }
+}
+
+/// `at` as Postgres keeps it, to the microsecond: what a store hands back is what it holds.
+pub(super) fn stored(at: OffsetDateTime) -> OffsetDateTime {
+    at.replace_nanosecond(at.nanosecond() / 1000 * 1000)
+        .expect("fewer nanoseconds stay valid")
+}
+
+/// Ends the open requests `how` names an end for, as they ended.
+fn end_open(
+    start_overs: &StartOvers,
+    at: OffsetDateTime,
+    how: impl Fn(&StartOverRequest) -> Option<StartOverEnd>,
+) -> Vec<StartOverRequest> {
+    let at = stored(at);
+    let mut ended = Vec::new();
+    for request in start_overs.lock().unwrap().iter_mut() {
+        if let Some(how) = how(request).filter(|_| request.is_open()) {
+            request.ended = Some(StartOverEnding { how, at });
+            ended.push(request.clone());
+        }
+    }
+    ended
 }
 
 /// What a registration's write is guarded on, besides the device being unrevoked.
@@ -728,13 +808,46 @@ impl MlsFederation for RecordingMlsFederation {
 
 /// Each account's archive entries and history key, over one state: a new key erases the archive,
 /// and an upload is kept only under the current one. A new key also drops the approvals of older
-/// generations and the key shares, which a directory [`InMemoryKeyDirectory::keyed_by`] this one
-/// shares.
+/// generations and the key shares, and ends the start over requests, which a directory
+/// [`InMemoryKeyDirectory::keyed_by`] this one shares.
 #[derive(Default)]
 pub struct InMemoryArchive {
     state: Mutex<ArchiveState>,
     approvals: Approvals,
     shares: Shares,
+    start_overs: StartOvers,
+    /// The devices of the directory keyed by this one; none, no device is approved.
+    directory: Mutex<Option<Arc<Mutex<State>>>>,
+    /// Whose sessions' last uses a start over waits on; none, no device was ever used.
+    sessions: Option<Arc<InMemorySessions>>,
+}
+
+impl InMemoryArchive {
+    /// One that reads the approved devices' last uses from `sessions`.
+    pub fn watching(sessions: Arc<InMemorySessions>) -> Self {
+        Self {
+            sessions: Some(sessions),
+            ..Self::default()
+        }
+    }
+
+    fn devices_of(&self, owner: UserId) -> Vec<Device> {
+        self.directory
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|state| {
+                state
+                    .lock()
+                    .unwrap()
+                    .devices
+                    .iter()
+                    .filter(|device| device.owner == owner)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
 }
 
 #[derive(Default)]
@@ -844,19 +957,57 @@ impl HistoryKeys for InMemoryArchive {
         owner: UserId,
         key: &HistoryKey,
         set_by: DeviceId,
+        now: OffsetDateTime,
     ) -> Result<KeyReplace, ArchiveStoreError> {
+        let sessions = match &self.sessions {
+            Some(sessions) => sessions
+                .of_user(owner)
+                .await
+                .map_err(|e| ArchiveStoreError::Unexpected(e.into()))?,
+            None => Vec::new(),
+        };
+        let devices = self.devices_of(owner);
         let mut state = self.state.lock().unwrap();
-        if state
+        let held = state
             .keys
             .iter()
-            .any(|held| held.owner == owner && held.key == *key)
-        {
-            return Ok(KeyReplace::AlreadySet);
-        }
-        let current = state.generation(owner);
-        if !key.generation.follows(current) {
-            return Ok(KeyReplace::Conflict(current));
-        }
+            .find(|held| held.owner == owner)
+            .map(|held| held.key.clone());
+        let trust = DeviceTrust {
+            devices,
+            approvals: self
+                .approvals
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(of, _)| *of == owner)
+                .map(|(_, approval)| approval.clone())
+                .collect(),
+            current: held.as_ref().map(|held| held.generation),
+        };
+        let open = self
+            .start_overs
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|request| request.owner == owner && request.is_open())
+            .cloned();
+        let gate = may_replace_history_key(
+            key,
+            set_by,
+            held.as_ref(),
+            &trust,
+            open.as_ref(),
+            &sessions,
+            now,
+        );
+        let used = match gate {
+            Ok(KeyGate::AlreadySet) => return Ok(KeyReplace::AlreadySet),
+            Ok(KeyGate::Write(matured)) => matured.map(|matured| matured.request()),
+            Err(ArchiveError::KeyConflict { current }) => return Ok(KeyReplace::Conflict(current)),
+            Err(ArchiveError::StartOver(refusal)) => return Ok(KeyReplace::Refused(refusal)),
+            Err(other) => return Err(ArchiveStoreError::Unexpected(other.into())),
+        };
         state.keys.retain(|held| held.owner != owner);
         state.keys.push(HeldKey {
             owner,
@@ -868,10 +1019,21 @@ impl HistoryKeys for InMemoryArchive {
                 || !matches!(approval.approver, Approver::Passphrase(older) if older < key.generation)
         });
         self.shares.lock().unwrap().retain(|(of, _)| *of != owner);
+        let closed = end_open(&self.start_overs, now, |request| {
+            (request.owner == owner).then_some(if Some(request.id) == used {
+                StartOverEnd::Used
+            } else {
+                StartOverEnd::Superseded
+            })
+        })
+        .into_iter()
+        .filter(|request| Some(request.id) != used)
+        .collect();
         let before = state.entries.len();
         state.entries.retain(|(o, _)| *o != owner);
         Ok(KeyReplace::Replaced {
             erased: before - state.entries.len(),
+            closed,
         })
     }
 }
@@ -883,9 +1045,10 @@ pub mod contract {
 
     pub use super::approval::contract::*;
     pub use super::key_share::contract::*;
+    pub use super::start_over::contract::*;
 
     use super::*;
-    use crate::e2ee::{DeviceKind, KeyPackageBytes};
+    use crate::e2ee::{DeviceApprovals, DeviceKind, KeyPackageBytes};
 
     pub(super) fn at(offset: Duration) -> OffsetDateTime {
         let now = OffsetDateTime::now_utc().unix_timestamp();
@@ -1062,7 +1225,10 @@ pub mod contract {
         let as_if_unknown = attest(None).await;
         let before_the_new_key = attest(read_before_the_new_key).await;
         let unchanged = devices.find(id).await.unwrap();
-        devices.revoke(alice, id).await.unwrap();
+        devices
+            .revoke(alice, id, Some(id), time::OffsetDateTime::now_utc())
+            .await
+            .unwrap();
         let revoked = devices.find(id).await.unwrap();
         let after_the_revoke = attest(keyed.clone()).await;
 
@@ -1078,7 +1244,10 @@ pub mod contract {
         let (id, attested) = (DeviceId::generate(), attestation(1));
         register(devices, alice, id, &attested, set(1)).await;
 
-        devices.revoke(alice, id).await.unwrap();
+        devices
+            .revoke(alice, id, Some(id), time::OffsetDateTime::now_utc())
+            .await
+            .unwrap();
 
         let revoked = devices.find(id).await.unwrap().unwrap();
         assert_eq!(revoked.hpke_key, None);
@@ -1088,6 +1257,7 @@ pub mod contract {
     /// `keys` is the store whose current generation `devices` checks a report against.
     pub async fn a_device_records_the_current_history_generation_while_unrevoked(
         devices: &dyn Devices,
+        approvals: &dyn DeviceApprovals,
         keys: &dyn HistoryKeys,
         alice: UserId,
         bob: UserId,
@@ -1109,9 +1279,14 @@ pub mod contract {
             .hold_history_key(alice, laptop, first)
             .await
             .unwrap();
-        keys.replace(alice, &history_key(1, 1), laptop)
-            .await
-            .unwrap();
+        keys.replace(
+            alice,
+            &history_key(1, 1),
+            laptop,
+            time::OffsetDateTime::now_utc(),
+        )
+        .await
+        .unwrap();
         let recorded = devices
             .hold_history_key(alice, laptop, first)
             .await
@@ -1125,11 +1300,20 @@ pub mod contract {
             .hold_history_key(alice, DeviceId::generate(), first)
             .await
             .unwrap();
-        devices.revoke(alice, phone).await.unwrap();
-        let revoked = devices.hold_history_key(alice, phone, first).await.unwrap();
-        keys.replace(alice, &history_key(2, 2), laptop)
+        devices
+            .revoke(alice, phone, Some(phone), time::OffsetDateTime::now_utc())
             .await
             .unwrap();
+        let revoked = devices.hold_history_key(alice, phone, first).await.unwrap();
+        approve_by_its_words(devices, approvals, alice, laptop, &history_key(1, 1)).await;
+        keys.replace(
+            alice,
+            &history_key(2, 2),
+            laptop,
+            time::OffsetDateTime::now_utc(),
+        )
+        .await
+        .unwrap();
         let replaced = devices
             .hold_history_key(alice, laptop, first)
             .await
@@ -1200,7 +1384,10 @@ pub mod contract {
             HpkeKeyWrite::Clear,
         )
         .await;
-        devices.revoke(alice, recent).await.unwrap();
+        devices
+            .revoke(alice, recent, Some(recent), time::OffsetDateTime::now_utc())
+            .await
+            .unwrap();
         packages
             .stash(alice, seen, &label("laptop"), false, &[fresh(1)])
             .await
@@ -1225,17 +1412,40 @@ pub mod contract {
         let id = DeviceId::generate();
         register(devices, alice, id, &attestation(1), HpkeKeyWrite::Clear).await;
 
-        assert_eq!(devices.revoke(bob, id).await.unwrap(), Revocation::NotFound);
         assert_eq!(
-            devices.revoke(alice, id).await.unwrap(),
-            Revocation::Revoked { closed: vec![] }
+            devices
+                .revoke(bob, id, Some(id), time::OffsetDateTime::now_utc())
+                .await
+                .unwrap(),
+            Revocation::NotFound
         );
         assert_eq!(
-            devices.revoke(alice, id).await.unwrap(),
+            devices
+                .revoke(alice, id, Some(id), time::OffsetDateTime::now_utc())
+                .await
+                .unwrap(),
+            Revocation::Revoked {
+                closed: vec![],
+                start_over: None
+            }
+        );
+        assert_eq!(
+            devices
+                .revoke(alice, id, Some(id), time::OffsetDateTime::now_utc())
+                .await
+                .unwrap(),
             Revocation::AlreadyRevoked
         );
         assert_eq!(
-            devices.revoke(alice, DeviceId::generate()).await.unwrap(),
+            devices
+                .revoke(
+                    alice,
+                    DeviceId::generate(),
+                    Some(DeviceId::generate()),
+                    time::OffsetDateTime::now_utc()
+                )
+                .await
+                .unwrap(),
             Revocation::NotFound
         );
         assert!(
@@ -1450,7 +1660,15 @@ pub mod contract {
             .stash(alice, laptop, &label("laptop"), false, &[fresh(2)])
             .await
             .unwrap();
-        devices.revoke(alice, revoked).await.unwrap();
+        devices
+            .revoke(
+                alice,
+                revoked,
+                Some(revoked),
+                time::OffsetDateTime::now_utc(),
+            )
+            .await
+            .unwrap();
 
         let any = packages.claim(alice, None).await.unwrap();
         let pinned = packages.claim(alice, Some(revoked)).await.unwrap();
@@ -1684,6 +1902,18 @@ pub mod contract {
         id
     }
 
+    /// `device` approved by `key`'s words, so it may set the generation after `key`'s.
+    async fn approve_by_its_words(
+        devices: &dyn Devices,
+        approvals: &dyn DeviceApprovals,
+        owner: UserId,
+        device: DeviceId,
+        key: &HistoryKey,
+    ) {
+        let approval = super::approval::contract::by_passphrase(devices, device, key).await;
+        approvals.approve(owner, &approval).await.unwrap();
+    }
+
     /// The owner's first history key, set by a device of theirs.
     async fn first_key(
         keys: &dyn HistoryKeys,
@@ -1692,10 +1922,21 @@ pub mod contract {
     ) -> HistoryGeneration {
         let device = a_device(devices, owner).await;
         let replaced = keys
-            .replace(owner, &history_key(1, 1), device)
+            .replace(
+                owner,
+                &history_key(1, 1),
+                device,
+                time::OffsetDateTime::now_utc(),
+            )
             .await
             .unwrap();
-        assert_eq!(replaced, KeyReplace::Replaced { erased: 0 });
+        assert_eq!(
+            replaced,
+            KeyReplace::Replaced {
+                erased: 0,
+                closed: vec![]
+            }
+        );
         HistoryGeneration::FIRST
     }
 
@@ -1832,6 +2073,7 @@ pub mod contract {
         archive: &dyn HistoryArchive,
         keys: &dyn HistoryKeys,
         devices: &dyn Devices,
+        approvals: &dyn DeviceApprovals,
         alice: UserId,
         conversation: ConversationId,
     ) {
@@ -1845,9 +2087,15 @@ pub mod contract {
         first_key(keys, devices, alice).await;
         let ahead = archive.store(alice, second, &entries).await.unwrap();
         let device = a_device(devices, alice).await;
-        keys.replace(alice, &history_key(2, 2), device)
-            .await
-            .unwrap();
+        approve_by_its_words(devices, approvals, alice, device, &history_key(1, 1)).await;
+        keys.replace(
+            alice,
+            &history_key(2, 2),
+            device,
+            time::OffsetDateTime::now_utc(),
+        )
+        .await
+        .unwrap();
         let replaced = archive.store(alice, first, &entries).await.unwrap();
         let current = archive.store(alice, second, &entries).await.unwrap();
 
@@ -1861,6 +2109,7 @@ pub mod contract {
     pub async fn a_key_is_set_only_for_the_generation_after_the_current_one(
         keys: &dyn HistoryKeys,
         devices: &dyn Devices,
+        approvals: &dyn DeviceApprovals,
         alice: UserId,
         bob: UserId,
     ) {
@@ -1872,34 +2121,71 @@ pub mod contract {
 
         let unset = keys.current(alice).await.unwrap();
         let skipping = keys
-            .replace(alice, &history_key(2, 2), laptop)
+            .replace(
+                alice,
+                &history_key(2, 2),
+                laptop,
+                time::OffsetDateTime::now_utc(),
+            )
             .await
             .unwrap();
         let first = keys
-            .replace(alice, &history_key(1, 1), laptop)
+            .replace(
+                alice,
+                &history_key(1, 1),
+                laptop,
+                time::OffsetDateTime::now_utc(),
+            )
             .await
             .unwrap();
         let raced = keys
-            .replace(alice, &history_key(1, 9), phone)
+            .replace(
+                alice,
+                &history_key(1, 9),
+                phone,
+                time::OffsetDateTime::now_utc(),
+            )
             .await
             .unwrap();
         let ahead = keys
-            .replace(alice, &history_key(3, 3), phone)
+            .replace(
+                alice,
+                &history_key(3, 3),
+                phone,
+                time::OffsetDateTime::now_utc(),
+            )
             .await
             .unwrap();
         let held_first = keys.current(alice).await.unwrap();
+        approve_by_its_words(devices, approvals, alice, phone, &history_key(1, 1)).await;
         let second = keys
-            .replace(alice, &history_key(2, 2), phone)
+            .replace(
+                alice,
+                &history_key(2, 2),
+                phone,
+                time::OffsetDateTime::now_utc(),
+            )
             .await
             .unwrap();
         let back = keys
-            .replace(alice, &history_key(1, 1), laptop)
+            .replace(
+                alice,
+                &history_key(1, 1),
+                laptop,
+                time::OffsetDateTime::now_utc(),
+            )
             .await
             .unwrap();
 
         assert_eq!(unset, None);
         assert_eq!(skipping, KeyReplace::Conflict(None));
-        assert_eq!(first, KeyReplace::Replaced { erased: 0 });
+        assert_eq!(
+            first,
+            KeyReplace::Replaced {
+                erased: 0,
+                closed: vec![]
+            }
+        );
         assert_eq!(raced, KeyReplace::Conflict(generation(1)));
         assert_eq!(ahead, KeyReplace::Conflict(generation(1)));
         assert_eq!(
@@ -1910,7 +2196,13 @@ pub mod contract {
             }),
             "the first one's, by the device that set it"
         );
-        assert_eq!(second, KeyReplace::Replaced { erased: 0 });
+        assert_eq!(
+            second,
+            KeyReplace::Replaced {
+                erased: 0,
+                closed: vec![]
+            }
+        );
         assert_eq!(back, KeyReplace::Conflict(generation(2)));
         assert_eq!(
             keys.current(alice).await.unwrap(),
@@ -1926,6 +2218,7 @@ pub mod contract {
         archive: &dyn HistoryArchive,
         keys: &dyn HistoryKeys,
         devices: &dyn Devices,
+        approvals: &dyn DeviceApprovals,
         alice: UserId,
         conversation: ConversationId,
     ) {
@@ -1933,12 +2226,23 @@ pub mod contract {
             a_device(devices, alice).await,
             a_device(devices, alice).await,
         );
-        keys.replace(alice, &history_key(1, 1), laptop)
-            .await
-            .unwrap();
-        keys.replace(alice, &history_key(2, 2), laptop)
-            .await
-            .unwrap();
+        keys.replace(
+            alice,
+            &history_key(1, 1),
+            laptop,
+            time::OffsetDateTime::now_utc(),
+        )
+        .await
+        .unwrap();
+        approve_by_its_words(devices, approvals, alice, laptop, &history_key(1, 1)).await;
+        keys.replace(
+            alice,
+            &history_key(2, 2),
+            laptop,
+            time::OffsetDateTime::now_utc(),
+        )
+        .await
+        .unwrap();
         archive_under(
             archive,
             alice,
@@ -1948,11 +2252,21 @@ pub mod contract {
         .await;
 
         let again = keys
-            .replace(alice, &history_key(2, 2), phone)
+            .replace(
+                alice,
+                &history_key(2, 2),
+                phone,
+                time::OffsetDateTime::now_utc(),
+            )
             .await
             .unwrap();
         let older = keys
-            .replace(alice, &history_key(1, 1), laptop)
+            .replace(
+                alice,
+                &history_key(1, 1),
+                laptop,
+                time::OffsetDateTime::now_utc(),
+            )
             .await
             .unwrap();
 
@@ -1977,6 +2291,7 @@ pub mod contract {
         archive: &dyn HistoryArchive,
         keys: &dyn HistoryKeys,
         devices: &dyn Devices,
+        approvals: &dyn DeviceApprovals,
         alice: UserId,
         bob: UserId,
         conversation: ConversationId,
@@ -1984,6 +2299,7 @@ pub mod contract {
         let alices = first_key(keys, devices, alice).await;
         let bobs = first_key(keys, devices, bob).await;
         let device = a_device(devices, alice).await;
+        approve_by_its_words(devices, approvals, alice, device, &history_key(1, 1)).await;
         archive_under(
             archive,
             alice,
@@ -1994,18 +2310,34 @@ pub mod contract {
         archive_under(archive, bob, bobs, &[archived(conversation, 3)]).await;
 
         let refused = keys
-            .replace(alice, &history_key(3, 3), device)
+            .replace(
+                alice,
+                &history_key(3, 3),
+                device,
+                time::OffsetDateTime::now_utc(),
+            )
             .await
             .unwrap();
         let kept = archive.page(alice, None, 10).await.unwrap().len();
         let replaced = keys
-            .replace(alice, &history_key(2, 2), device)
+            .replace(
+                alice,
+                &history_key(2, 2),
+                device,
+                time::OffsetDateTime::now_utc(),
+            )
             .await
             .unwrap();
 
         assert_eq!(refused, KeyReplace::Conflict(Some(alices)));
         assert_eq!(kept, 2, "a conflict erases nothing");
-        assert_eq!(replaced, KeyReplace::Replaced { erased: 2 });
+        assert_eq!(
+            replaced,
+            KeyReplace::Replaced {
+                erased: 2,
+                closed: vec![]
+            }
+        );
         assert!(archive.page(alice, None, 10).await.unwrap().is_empty());
         assert_eq!(archive.page(bob, None, 10).await.unwrap().len(), 1);
     }

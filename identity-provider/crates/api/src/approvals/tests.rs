@@ -376,24 +376,29 @@ async fn a_device_without_a_root_key_is_neither_approved_nor_asks() {
         .unwrap();
     let session = w.app.sign_in.sessions.live(w.alice.id);
     let unattesteds = w.app.token_in(w.alice.id, session);
-    for (method, uri, body) in [
-        (
+    let (stashed, body) = w
+        .app
+        .call_in(
+            &unattesteds,
             Method::POST,
             "/api/keys/packages",
-            json!({
+            Some(json!({
                 "device_id": unattested,
                 "packages": [{ "key_package": B64.encode([1; 8]), "expires_at": in_a_week }],
-            }),
-        ),
-        (
+            })),
+        )
+        .await;
+    assert!(stashed.is_success(), "{body}");
+    let proof = w.app.naming_proof(w.alice.id, session, unattested).await;
+    let named = w
+        .app
+        .call_in(
+            &unattesteds,
             Method::PUT,
             "/api/sessions/current/device",
-            json!({ "device_id": unattested }),
-        ),
-    ] {
-        let (status, body) = w.app.call_in(&unattesteds, method, uri, Some(body)).await;
-        assert!(status.is_success(), "{uri}: {body}");
-    }
+            Some(json!({ "device_id": unattested, "signature": proof })),
+        )
+        .await;
 
     let approved = w
         .approve(
@@ -404,12 +409,31 @@ async fn a_device_without_a_root_key_is_neither_approved_nor_asks() {
         .await;
     let asked = w.open(&unattesteds).await;
 
-    let no_root_key = (
-        StatusCode::CONFLICT,
-        refusal("no_root_key", "The device has registered no root key"),
+    assert_eq!(
+        named,
+        (
+            StatusCode::FORBIDDEN,
+            refusal(
+                "device_proof_invalid",
+                "The signature does not prove this device's root key"
+            )
+        ),
+        "no root key, nothing to prove with"
     );
-    assert_eq!(approved, no_root_key);
-    assert_eq!(asked, no_root_key);
+    assert_eq!(
+        approved,
+        (
+            StatusCode::CONFLICT,
+            refusal("no_root_key", "The device has registered no root key"),
+        )
+    );
+    assert_eq!(
+        asked,
+        (
+            StatusCode::FORBIDDEN,
+            refusal("device_required", "Name this session's device first"),
+        )
+    );
 }
 
 #[tokio::test]
@@ -706,7 +730,10 @@ async fn a_request_names_its_device_as_its_first_registration_said() {
             &token,
             Method::PUT,
             "/api/sessions/current/device",
-            Some(json!({ "device_id": device })),
+            Some(json!({
+                "device_id": device,
+                "signature": w.app.naming_proof(w.alice.id, session, device).await,
+            })),
         )
         .await;
     assert_eq!(named, StatusCode::NO_CONTENT, "{body}");

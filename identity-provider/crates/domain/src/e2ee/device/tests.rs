@@ -335,3 +335,32 @@ fn only_a_label_that_says_something_replaces_the_unknown_one() {
     assert!(!DeviceLabel::unknown().replaces(&DeviceLabel::unknown()));
     assert!(!chrome.replaces(&label("Firefox on Linux", DeviceKind::Laptop)));
 }
+
+#[test]
+fn a_first_key_or_the_same_one_again_comes_from_any_session_of_the_owners() {
+    let id = DeviceId::generate();
+
+    for registration in [Registration::FirstTime, Registration::Renewal] {
+        assert!(
+            registration.may_come_from(None, id).is_ok(),
+            "{registration:?}"
+        );
+        assert!(registration.may_come_from(Some(id), id).is_ok());
+    }
+}
+
+#[test]
+fn another_root_key_takes_a_session_that_named_that_very_device() {
+    let id = DeviceId::generate();
+
+    assert!(Registration::Rotation.may_come_from(Some(id), id).is_ok());
+    for named in [None, Some(DeviceId::generate())] {
+        assert!(
+            matches!(
+                Registration::Rotation.may_come_from(named, id),
+                Err(KeyDirectoryError::DeviceRequired(_))
+            ),
+            "{named:?}"
+        );
+    }
+}

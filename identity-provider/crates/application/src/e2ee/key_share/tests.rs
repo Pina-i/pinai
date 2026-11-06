@@ -155,7 +155,12 @@ impl World {
     async fn laptop(&self) -> (DeviceId, Bearer) {
         let laptop = self.device(1).await;
         self.archive
-            .replace(self.alice.id, &first(), laptop)
+            .replace(
+                self.alice.id,
+                &first(),
+                laptop,
+                time::OffsetDateTime::now_utc(),
+            )
             .await
             .unwrap();
         self.holding(laptop).await;
@@ -279,7 +284,15 @@ async fn sharing_takes_a_session_that_named_its_unrevoked_device() {
     let unnamed = w.session(None).await;
 
     let without_a_device = w.share(&unnamed, laptop, 1, phone).await;
-    w.devices.revoke(w.alice.id, laptop).await.unwrap();
+    w.devices
+        .revoke(
+            w.alice.id,
+            laptop,
+            Some(laptop),
+            time::OffsetDateTime::now_utc(),
+        )
+        .await
+        .unwrap();
     let from_a_revoked = w.share(&on_laptop, laptop, 1, phone).await;
 
     assert!(matches!(

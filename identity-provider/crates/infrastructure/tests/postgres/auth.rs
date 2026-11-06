@@ -418,7 +418,10 @@ async fn a_link_racing_its_devices_revoke_never_leaves_a_session_naming_it(pool:
             let (sessions, devices) = (sessions.clone(), devices.clone());
             // As `RevokeDevice` does: the flag, then the device's sessions.
             tokio::spawn(async move {
-                devices.revoke(user, device).await.unwrap();
+                devices
+                    .revoke(user, device, Some(device), time::OffsetDateTime::now_utc())
+                    .await
+                    .unwrap();
                 sessions.revoke_device(user, device, now).await.unwrap()
             })
         };

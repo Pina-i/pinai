@@ -3,15 +3,16 @@ use domain::e2ee::{
     Attest, Attestation, ClaimedKeyPackage, Device, DeviceLabel, DeviceRootKey, Devices,
     Ed25519Signature, HeldHpkeKey, HistoryGeneration, Holding, HpkeKeyWrite, HpkePublicKey,
     KeyPackageBytes, KeyPackages, KeyStoreError, NewKeyPackage, Revocation,
-    check_history_generation,
+    check_history_generation, may_revoke,
 };
 use domain::{DeviceId, UserId};
 use sqlx::{PgConnection, PgPool};
 use time::OffsetDateTime;
 
-use super::approval::{close_requests_of, drop_approvals_by, drop_approvals_of};
+use super::approval::{close_requests_of, drop_approvals_by, drop_approvals_of, trust_facts};
 use super::archive::locked_generation;
 use super::key_share::{delete_shares_from, delete_shares_to};
+use super::start_over::end_with_revoke;
 
 /// `user_devices`.
 pub struct PgDevices {
@@ -103,6 +104,19 @@ impl TryFrom<DeviceRow> for Device {
     }
 }
 
+/// The owner's devices: active ones first, each group most recently seen first.
+pub(super) async fn devices_of(c: &mut PgConnection, owner: UserId) -> anyhow::Result<Vec<Device>> {
+    let rows: Vec<DeviceRow> = sqlx::query_as(&format!(
+        "SELECT {DEVICE_COLUMNS} FROM user_devices WHERE user_id = $1 \
+         ORDER BY (revoked_at IS NOT NULL), last_seen_at DESC"
+    ))
+    .bind(owner.as_uuid())
+    .fetch_all(c)
+    .await
+    .context("list a user's devices")?;
+    rows.into_iter().map(Device::try_from).collect()
+}
+
 /// Records a device not seen before under `label`, or marks it seen — a known one keeps its
 /// name, unless `relabel`. `DeviceTaken` when another account holds the id: the guarded upsert
 /// touches no row.
@@ -151,18 +165,8 @@ impl Devices for PgDevices {
     }
 
     async fn list(&self, owner: UserId) -> Result<Vec<Device>, KeyStoreError> {
-        let rows: Vec<DeviceRow> = sqlx::query_as(&format!(
-            "SELECT {DEVICE_COLUMNS} FROM user_devices WHERE user_id = $1 \
-             ORDER BY (revoked_at IS NOT NULL), last_seen_at DESC"
-        ))
-        .bind(owner.as_uuid())
-        .fetch_all(&self.pool)
-        .await
-        .context("list a user's devices")?;
-        Ok(rows
-            .into_iter()
-            .map(Device::try_from)
-            .collect::<Result<_, _>>()?)
+        let mut c = self.pool.acquire().await.context("list a user's devices")?;
+        Ok(devices_of(&mut c, owner).await?)
     }
 
     async fn attest(
@@ -260,40 +264,55 @@ impl Devices for PgDevices {
         Ok(Attest::Stored)
     }
 
-    async fn revoke(&self, owner: UserId, id: DeviceId) -> Result<Revocation, KeyStoreError> {
+    async fn revoke(
+        &self,
+        owner: UserId,
+        id: DeviceId,
+        by: Option<DeviceId>,
+        now: OffsetDateTime,
+    ) -> Result<Revocation, KeyStoreError> {
         let mut tx = self.pool.begin().await.context("begin a revoke")?;
-        let revoked = sqlx::query(
-            "UPDATE user_devices SET revoked_at = NOW(), hpke_public_key = NULL, \
-                 hpke_key_signature = NULL \
-             WHERE device_id = $1 AND user_id = $2 AND revoked_at IS NULL",
+        let current = locked_generation(&mut tx, owner).await?;
+        // The device and the one revoking it, in one order: two revoking each other queue.
+        let mut ids = vec![id.as_uuid()];
+        ids.extend(by.filter(|by| *by != id).map(|by| by.as_uuid()));
+        ids.sort();
+        sqlx::query(
+            "SELECT 1 FROM user_devices WHERE device_id = ANY($1) AND user_id = $2 \
+             ORDER BY device_id FOR NO KEY UPDATE",
         )
-        .bind(id.as_uuid())
+        .bind(&ids)
         .bind(owner.as_uuid())
         .execute(&mut *tx)
         .await
-        .context("revoke a device")?
-        .rows_affected();
-        if revoked > 0 {
-            drop_approvals_by(&mut tx, id).await?;
-            delete_shares_to(&mut tx, id).await?;
-            delete_shares_from(&mut tx, id).await?;
-            let closed = close_requests_of(&mut tx, owner, id).await?;
-            tx.commit().await.context("commit a revoke")?;
-            return Ok(Revocation::Revoked { closed });
+        .context("lock the devices of a revoke")?;
+        let trust = trust_facts(&mut tx, owner, current).await?;
+        match trust.device(id) {
+            None => return Ok(Revocation::NotFound),
+            Some(device) if device.is_revoked() => return Ok(Revocation::AlreadyRevoked),
+            Some(_) => {}
         }
-        let owned: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM user_devices WHERE device_id = $1 AND user_id = $2)",
+        if let Err(refusal) = may_revoke(id, by, &trust) {
+            return Ok(Revocation::Refused(refusal));
+        }
+        sqlx::query(
+            "UPDATE user_devices SET revoked_at = $3, hpke_public_key = NULL, \
+                 hpke_key_signature = NULL \
+             WHERE device_id = $1 AND user_id = $2",
         )
         .bind(id.as_uuid())
         .bind(owner.as_uuid())
-        .fetch_one(&mut *tx)
+        .bind(now)
+        .execute(&mut *tx)
         .await
-        .context("find a device to revoke")?;
-        Ok(if owned {
-            Revocation::AlreadyRevoked
-        } else {
-            Revocation::NotFound
-        })
+        .context("revoke a device")?;
+        drop_approvals_by(&mut tx, id).await?;
+        delete_shares_to(&mut tx, id).await?;
+        delete_shares_from(&mut tx, id).await?;
+        let closed = close_requests_of(&mut tx, owner, id, now).await?;
+        let start_over = end_with_revoke(&mut tx, owner, id, now).await?;
+        tx.commit().await.context("commit a revoke")?;
+        Ok(Revocation::Revoked { closed, start_over })
     }
 
     async fn hold_history_key(

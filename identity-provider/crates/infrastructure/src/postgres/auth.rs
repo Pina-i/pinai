@@ -842,6 +842,21 @@ impl RefreshTokens for PgRefreshTokens {
     }
 }
 
+/// The account's sessions, ended or not, until swept, as the connection's transaction reads them.
+pub(super) async fn sessions_of(
+    c: &mut sqlx::PgConnection,
+    user: UserId,
+) -> anyhow::Result<Vec<Session>> {
+    let rows: Vec<SessionRow> = sqlx::query_as(&format!(
+        "SELECT {SESSION_COLUMNS} FROM sessions WHERE user_id = $1 ORDER BY created_at, id"
+    ))
+    .bind(user.as_uuid())
+    .fetch_all(c)
+    .await
+    .context("list an account's sessions")?;
+    rows.into_iter().map(Session::try_from).collect()
+}
+
 fn sessions(rows: Vec<SessionRow>) -> Result<Vec<Session>, AuthError> {
     Ok(rows
         .into_iter()
@@ -1486,12 +1501,7 @@ impl PgPasswordResets {
 /// ([`PgSessions`]), so these queue up instead of deadlocking on each other's rows — and a
 /// reset ends the web app's session opened just before it.
 async fn lock_account(connection: &mut sqlx::PgConnection, user: UserId) -> Result<(), AuthError> {
-    sqlx::query("SELECT 1 FROM users WHERE id = $1 FOR NO KEY UPDATE")
-        .bind(user.as_uuid())
-        .execute(connection)
-        .await
-        .context("lock an account")?;
-    Ok(())
+    Ok(super::lock_account(connection, user).await?)
 }
 
 /// A new link for `member` by `by` — nobody, when the account asked for it —, the one they had

@@ -48,17 +48,22 @@ impl World {
         self.app.send(request.body(body).unwrap()).await
     }
 
-    /// A device of `who`'s, as its first KeyPackages name it.
+    /// A device of `who`'s, its root key `[7; 32]` registered.
     async fn device_of(&self, who: &Account) -> Uuid {
         let device = Uuid::new_v4();
-        let packages = json!([{ "key_package": "AQIDBA==", "expires_at": (OffsetDateTime::now_utc() + time::Duration::days(7)).format(&time::format_description::well_known::Rfc3339).unwrap() }]);
         let (status, body) = self
             .app
             .call(
                 Method::POST,
-                "/api/keys/packages",
+                "/api/keys/devices",
                 Some(who.id),
-                Some(json!({ "device_id": device, "packages": packages })),
+                Some(json!({
+                    "device_id": device,
+                    "drk_public_key": base64::Engine::encode(
+                        &base64::engine::general_purpose::STANDARD,
+                        [7; 32],
+                    ),
+                })),
             )
             .await;
         assert!(status.is_success(), "{status}: {body}");
@@ -66,12 +71,23 @@ impl World {
     }
 
     async fn link(&self, who: &Account, session: SessionId, device: Uuid) -> (StatusCode, Value) {
+        let proof = self.app.naming_proof(who.id, session, device).await;
+        self.link_with(who, session, device, Some(proof)).await
+    }
+
+    async fn link_with(
+        &self,
+        who: &Account,
+        session: SessionId,
+        device: Uuid,
+        proof: Option<String>,
+    ) -> (StatusCode, Value) {
         self.as_session(
             who,
             session,
             Method::PUT,
             "/api/sessions/current/device",
-            Some(json!({ "device_id": device })),
+            Some(json!({ "device_id": device, "signature": proof })),
         )
         .await
     }
@@ -233,4 +249,42 @@ async fn signing_out_elsewhere_keeps_the_callers_session_only() {
         );
     }
     assert_eq!(sessions.reason(bobs), None);
+}
+
+#[tokio::test]
+async fn naming_a_device_without_its_root_keys_proof_is_refused() {
+    let w = world();
+    let laptop = w.device_of(&w.alice).await;
+    let (on_the_laptop, thiefs) = (
+        w.app.sign_in.sessions.live(w.alice.id),
+        w.app.sign_in.sessions.live(w.alice.id),
+    );
+    w.link(&w.alice, on_the_laptop, laptop).await;
+    let lifted = w.app.naming_proof(w.alice.id, on_the_laptop, laptop).await;
+
+    for proof in [None, Some(lifted), Some("not base64".to_owned())] {
+        let refused = w.link_with(&w.alice, thiefs, laptop, proof.clone()).await;
+
+        assert_eq!(
+            refused,
+            (
+                StatusCode::FORBIDDEN,
+                json!({
+                    "error": "device_proof_invalid",
+                    "error_description": "The signature does not prove this device's root key",
+                })
+            ),
+            "{proof:?}"
+        );
+    }
+    let still = w
+        .as_session(
+            &w.alice,
+            on_the_laptop,
+            Method::GET,
+            "/api/keys/devices",
+            None,
+        )
+        .await;
+    assert_eq!(still.0, StatusCode::OK, "the laptop stays signed in");
 }

@@ -388,8 +388,8 @@ sequenceDiagram
     participant D as client (a device)
     participant I as IdP
     participant O as client (another device)
-    D->>I: PUT /api/sessions/current/device { device_id }
-    I->>I: the session names the device; the device's earlier session ends (replaced)
+    D->>I: PUT /api/sessions/current/device { device_id, signature }
+    I->>I: the signature is the device's root key's over this session: it names the device; the device's earlier session ends (replaced)
     O->>I: GET /api/keys/devices
     I-->>O: … signed_in, last_active_at
     O->>I: POST /api/keys/devices/:id/revoke
@@ -397,22 +397,42 @@ sequenceDiagram
     I-->>D: its sockets close (1008); its tokens and refresh tokens refused
 ```
 
-- **`PUT /api/sessions/current/device`** `{ device_id }`: the bearer's session names its device.
+- **`PUT /api/sessions/current/device`** `{ device_id, signature }`: the bearer's session names
+  its device, proving it holds that device's root key. `signature` is the Ed25519 signature, in
+  standard base64, by the root key the device registered (`identity-provider/specs/e2ee.md § 3.1`)
+  over the UTF-8 bytes
+
+  ```
+  PINAI-SESSION-DEVICE-v1\n<actor_uri>\n<device_id>\n<sid>
+  ```
+
+  — the account's actor URI, the device id lowercased, and `sid`, the session's id the access
+  token carries (`identity-provider/specs/e2ee.md § 7.2` writes each field). Bound to this very session, a proof names the device once: one seen on another
+  session is worth nothing here. It is asked every time, naming the same device again included.
   The client sends it right after registering the device (`POST /api/keys/devices`), before it
-  sets, reports or approves with the history key (`identity-provider/specs/e2ee.md § 6.1`). `204`;
-  `403 access_denied` "Not one of your devices, or revoked" for a device that isn't the
-  account's, is revoked, or is unknown; `401 invalid_token` for a session that ended since its
-  token was checked. Whether a session may name a device is `domain::auth::may_link`.
+  sets, reports or approves with the history key (`identity-provider/specs/e2ee.md § 6.1`).
+  `204`; `403 access_denied` "Not one of your devices, or revoked" for a device that isn't the
+  account's, is revoked, or is unknown; `403 device_proof_invalid` "The signature does not prove
+  this device's root key" for a signature missing, malformed, by another key or over another
+  session — and for a device that registered no root key, which has nothing to prove with;
+  `401 invalid_token` for a session that ended since its token was checked. Whether a session
+  may name a device is `domain::auth::may_name_device`, then `may_link`.
+- **A session speaks only for a device whose key it holds.** A password signs a session in, never
+  a device: naming one takes its root key (above), and so does replacing it — a registration
+  bringing another root key for a device already registered takes a session that named that
+  very device (`403 device_required`, `identity-provider/specs/e2ee.md § 5`, "Key directory
+  rules"). A session that names none registers a device the account doesn't have yet, or the same
+  root key again (a renewal), and nothing else.
 - **A session is limited to the device it declared.** Once it names one, it is never pointed at
   another: `PUT /api/sessions/current/device` naming any other device is `403 device_mismatch`
-  "This session signed in another device" (naming the same one again is `204`), and `POST
-  /api/keys/devices` from it registers that device only (`identity-provider/specs/e2ee.md § 5`,
-  "Key directory rules"). A session that names none yet registers and names any device of the
-  account, but can't set the account's history key or say a device holds it, approve a device,
-  take part in an approval request, share the passphrase or read a share: each takes a session
-  that has named its device (`403 device_required`, `identity-provider/specs/e2ee.md § 3.6`,
-  § 3.9, § 3.10 and § 3.11), so the key records the device that set it, an approval the device
-  that gave it, a share the device that sent it, and a device speaks only for itself.
+  "This session signed in another device" (naming the same one again, with its proof, is `204`),
+  and `POST /api/keys/devices` from it registers that device only. A session that names none
+  can't set the account's history key or say a device holds it, approve a device, take part in
+  an approval request, share the passphrase, read a share or ask to start over: each takes a
+  session that has named its device (`403 device_required`, `identity-provider/specs/e2ee.md
+  § 3.6`, § 3.9, § 3.10, § 3.11 and § 3.12), so the key records the device that set it, an
+  approval the device that gave it, a share the device that sent it, and a device speaks only for
+  itself.
 - **A device whose local storage was wiped** comes back as a new device from a new session. A web
   app revokes its own session (`POST /revoke`, its refresh token) and signs in again: silently
   while the browser session lives — its next exchange opens a new session under it — so no
@@ -426,8 +446,13 @@ sequenceDiagram
   `/authorize` stamps the browser session, the exchange after it the web app's), null when
   signed out (`last_active`). A browser session is no device and is listed nowhere: its use is
   its web apps', which the devices show.
-- **Revoking a device** (`POST /api/keys/devices/:device_id/revoke`) sets the directory flag,
-  then ends its sessions (`device_revoked`) — their tokens, refresh tokens and sockets. For a web
+- **Revoking a device** (`POST /api/keys/devices/:device_id/revoke`) takes a recent password,
+  and, for a device approved under the account's current history key, a session whose device is
+  approved too: a device nobody approved — a password thief's, say — revokes only devices nobody
+  approved, and itself (`403 approval_required`); a session that named no device revokes no
+  approved device; an account with no history key revokes any of its devices
+  (`domain::e2ee::may_revoke`, `identity-provider/specs/e2ee.md § 3.12`). It sets the directory
+  flag, then ends its sessions (`device_revoked`) — their tokens, refresh tokens and sockets. For a web
   app's session it also ends the browser session above it, and so that browser's other web apps
   (`domain::auth::ending_with_device`): the cookie left there would otherwise sign the device in
   again, silently, as a new one, so coming back takes the password. Revoking the device of
@@ -464,7 +489,7 @@ sequenceDiagram
     W->>I: GET /authorize (the cookie)
     I-->>W: 303 callback?code — no password
     W->>I: POST /token — a new session under the browser session
-    W->>I: POST /api/keys/devices, PUT /api/sessions/current/device
+    W->>I: POST /api/keys/devices, PUT /api/sessions/current/device (signed by the new device)
     I-->>W: 201, 204
     Note over B: still signed in, its device still named
 ```
@@ -479,15 +504,17 @@ taken from it, must not be enough to lock the owner out or erase their history.
 
 | Action | Route |
 |---|---|
-| Revoke a device | `POST /api/keys/devices/:device_id/revoke` |
+| Revoke a device — an approved one only from an approved device too (§ "Sessions and devices") | `POST /api/keys/devices/:device_id/revoke` |
 | Sign out every other device | `DELETE /api/sessions?keep=current` |
-| Turn the second factor on | `POST /api/totp/enroll` |
+| Turn the second factor on — from an approved device once the account has a history key (§ 3) | `POST /api/totp/enroll` |
 | Clear the history backup | `DELETE /api/history/messages` |
-| Replace the history key — any generation past the first, which erases the backup (`identity-provider/specs/e2ee.md § 3.6`) | `PUT /api/history/key` |
+| Replace the history key — any generation past the first, which erases the backup (`identity-provider/specs/e2ee.md § 3.6`); from a device not approved, through its matured start over request too (`identity-provider/specs/e2ee.md § 3.12`) | `PUT /api/history/key` |
 | Give a member a password reset link (§ 7) | `POST /api/admin/members/{id}/password-reset` |
 
 Turning the second factor off and replacing the recovery codes take a current authenticator code
-instead (§ 3). Nothing else asks: the profile, the settings, blocking, signing oneself out.
+instead (§ 3). Nothing else asks: the profile, the settings, blocking, signing oneself out — nor
+asking to start the history over, which erases nothing, nor cancelling another device's start
+over from an approved device, which must take one tap (`identity-provider/specs/e2ee.md § 3.12`).
 
 - **What counts** is the password: a sign-in on the login form, the code mailed at sign-up, the
   second factor. Each dates its browser session's `authenticated_at`; a web app's session and an
@@ -951,10 +978,22 @@ sequenceDiagram
 
 | Endpoint | Auth | Body | Result |
 |---|---|---|---|
-| `POST /api/totp/enroll` | Bearer, a recent password (§ 1 "Sensitive actions") | — | Generates a fresh 20-byte secret, keeps it in `pending_totp_enrollments` (replacing an earlier one), returns `{ secret_base32, provisioning_url }`. The provisioning URL is the `otpauth://totp/...` string the client renders as a QR; its issuer names the instance, `Pina'i (DOMAIN)` — a port written after a space, as the format keeps `:` to split the label. `400` while the second factor is on. |
-| `POST /api/totp/enroll/verify` | Bearer | `{ code }` | Checks the first authenticator code against the pending secret. On success, in one transaction: commits the secret, records the code's step, forgets the enrollment, and mints 10 recovery codes, returned in `{ recovery_codes: [...] }` — shown once and never re-served. The second factor is never on without recovery codes. `400 invalid_grant` for a wrong code. |
+| `POST /api/totp/enroll` | Bearer, a recent password (§ 1 "Sensitive actions"); once the account has a history key, a session whose device is approved under it (below) | — | Generates a fresh 20-byte secret, keeps it in `pending_totp_enrollments` (replacing an earlier one), returns `{ secret_base32, provisioning_url }`. The provisioning URL is the `otpauth://totp/...` string the client renders as a QR; its issuer names the instance, `Pina'i (DOMAIN)` — a port written after a space, as the format keeps `:` to split the label. `400` while the second factor is on. |
+| `POST /api/totp/enroll/verify` | Bearer; once the account has a history key, a session whose device is approved under it | `{ code }` | Checks the first authenticator code against the pending secret. On success, in one transaction: commits the secret, records the code's step, forgets the enrollment, and mints 10 recovery codes, returned in `{ recovery_codes: [...] }` — shown once and never re-served. The second factor is never on without recovery codes. `400 invalid_grant` for a wrong code. |
 | `POST /api/totp/disable` | Bearer | `{ code }` | Requires a current, unused TOTP code (a passive session cannot disarm it). In one transaction: clears the secret and its last step, sets `totp_enabled = false`, deletes the recovery codes and any enrollment. `204`. |
 | `POST /api/totp/recovery-codes/regenerate` | Bearer | `{ code }` | Requires a current, unused TOTP code. Replaces all of the account's recovery codes in one transaction and returns the fresh set. |
+
+**Only an approved device turns the second factor on.** Once the account has a history key
+(`identity-provider/specs/e2ee.md § 3.6`), starting an enrollment and confirming it each take a
+session whose device is approved under the current generation, by the stored approvals'
+structure (`identity-provider/specs/e2ee.md § 3.11`, `domain::e2ee::may_turn_on_second_factor`):
+`403 approval_required` "This takes a device approved under the current history key" otherwise,
+nothing kept. Someone with only the password would otherwise turn it on, sign the user's other
+sessions out, and lock the user's devices out of signing in — and a week without an approved
+device in use lets their start over through (`identity-provider/specs/e2ee.md § 3.12`). An
+account with no history key has no approved device, and turns it on from any session. Turning it
+off and replacing the recovery codes take a current code, as before: whoever can't sign in can't
+give one either.
 
 ### Constants
 

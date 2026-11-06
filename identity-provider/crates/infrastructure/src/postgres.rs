@@ -14,8 +14,22 @@ mod profile;
 mod reach;
 mod settings;
 mod social;
+mod start_over;
 
 pub use approval::{PgApprovalRequests, PgDeviceApprovals};
+
+use anyhow::Context;
+use domain::UserId;
+
+/// Locks the account until the transaction ends: what takes it is decided one at a time.
+async fn lock_account(c: &mut sqlx::PgConnection, user: UserId) -> anyhow::Result<()> {
+    sqlx::query("SELECT 1 FROM users WHERE id = $1 FOR NO KEY UPDATE")
+        .bind(user.as_uuid())
+        .execute(c)
+        .await
+        .context("lock an account")?;
+    Ok(())
+}
 pub use archive::{PgHistoryArchive, PgHistoryKeys};
 pub use attachments::PgAttachments;
 pub use auth::{
@@ -34,3 +48,4 @@ pub use profile::{PgPeerProfiles, PgProfileAudience, PgProfileCards, PgProfiles}
 pub use reach::{PgContactPolicies, PgReachability};
 pub use settings::PgSettingsStore;
 pub use social::PgSocialGraph;
+pub use start_over::PgStartOverRequests;

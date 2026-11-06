@@ -18,3 +18,4 @@ mod password_resets;
 mod sessions;
 mod shutdown;
 mod sign_up;
+mod start_over;

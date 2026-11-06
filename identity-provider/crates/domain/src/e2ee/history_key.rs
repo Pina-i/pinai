@@ -2,10 +2,14 @@ use std::fmt;
 
 use time::OffsetDateTime;
 
+use crate::auth::Session;
 use crate::identity::Bearer;
 use crate::{DeviceId, UserId, ValidationError};
 
-use super::{ArchiveError, Device, Ed25519PublicKey, KeyDirectoryError, own_unrevoked};
+use super::{
+    ArchiveError, Device, DeviceTrust, Ed25519PublicKey, KeyDirectoryError, MaturedStartOver,
+    StartOverRefusal, StartOverRequest, own_unrevoked,
+};
 
 /// A generation of the account's history passphrase: 1 for the first, one more each time the
 /// account starts over with a new one — identity-provider/specs/e2ee.md § 3.6.
@@ -168,6 +172,56 @@ pub fn may_set_history_key(
         return Err(ArchiveError::RecentSignInRequired);
     }
     Ok(device)
+}
+
+/// What setting a key comes to, past [`may_set_history_key`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeyGate {
+    /// The very key held: a retry of the write that set it.
+    AlreadySet,
+    /// Write it — through the setter's matured start over request, when it isn't approved.
+    Write(Option<MaturedStartOver>),
+}
+
+/// Whether `setter` sets `key` over `held`: a password alone never makes a device the root of
+/// trust while the account's approved devices are in use (identity-provider/specs/e2ee.md § 3.12
+/// gives the order of the checks).
+pub fn may_replace_history_key(
+    key: &HistoryKey,
+    setter: DeviceId,
+    held: Option<&HistoryKey>,
+    trust: &DeviceTrust,
+    request: Option<&StartOverRequest>,
+    sessions: &[Session],
+    now: OffsetDateTime,
+) -> Result<KeyGate, ArchiveError> {
+    if held == Some(key) {
+        return Ok(KeyGate::AlreadySet);
+    }
+    let current = held.map(|held| held.generation);
+    if !key.generation.follows(current) {
+        return Err(ArchiveError::KeyConflict { current });
+    }
+    let Some(replaced) = current else {
+        return Ok(KeyGate::Write(None));
+    };
+    if trust.chain_under(setter, replaced).is_some() {
+        return Ok(KeyGate::Write(None));
+    }
+    let request = request
+        .filter(|request| {
+            request.is_open() && request.device == setter && request.generation == replaced
+        })
+        .ok_or(StartOverRefusal::Required)?;
+    let ready_at = request.ready_at(trust, sessions);
+    if now < ready_at {
+        return Err(StartOverRefusal::NotReady { ready_at }.into());
+    }
+    Ok(KeyGate::Write(Some(MaturedStartOver {
+        request: request.id,
+        device: setter,
+        generation: replaced,
+    })))
 }
 
 /// The archive is written, and a device said to hold the key, under the current generation only:

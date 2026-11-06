@@ -103,3 +103,54 @@ fn a_share_is_announced_to_the_sessions_named_only() {
     );
     assert_eq!(received(&mut laptop), None);
 }
+
+#[test]
+fn a_start_over_reaches_the_sessions_named_with_when_it_matures_and_its_end_the_request_only() {
+    let hub = Arc::new(Hub::new());
+    let owner = UserId::generate();
+    let (laptops, freshs) = (SessionId::generate(), SessionId::generate());
+    let (mut laptop, _laptop, _) = hub.subscribe(owner.as_uuid(), laptops.as_uuid());
+    let (mut fresh, _fresh, _) = hub.subscribe(owner.as_uuid(), freshs.as_uuid());
+    let at = OffsetDateTime::from_unix_timestamp(1_788_000_000).unwrap();
+    let request = StartOverRequest {
+        id: StartOverRequestId::generate(),
+        owner,
+        device: DeviceId::generate(),
+        generation: domain::e2ee::HistoryGeneration::FIRST,
+        created_at: at,
+        ended: None,
+    };
+    let notifier = HubDeviceTrustNotifier::new(hub.clone());
+
+    notifier.start_over_requested(
+        owner,
+        &[laptops],
+        &request,
+        "Chrome on Linux",
+        at + time::Duration::days(7),
+    );
+    let on_the_fresh_device = received(&mut fresh);
+    notifier.start_over_cancelled(owner, &[freshs], request.id, StartOverEnd::Cancelled);
+
+    assert_eq!(
+        received(&mut laptop),
+        Some(json!({
+            "type": "start_over_requested",
+            "data": {
+                "request_id": request.id.to_string(),
+                "device_id": request.device.to_string(),
+                "display_name": "Chrome on Linux",
+                "ready_at": "2026-09-05T10:40:00Z",
+            },
+        }))
+    );
+    assert_eq!(on_the_fresh_device, None);
+    assert_eq!(
+        received(&mut fresh),
+        Some(json!({
+            "type": "start_over_cancelled",
+            "data": { "request_id": request.id.to_string(), "reason": "cancelled" },
+        }))
+    );
+    assert_eq!(received(&mut laptop), None);
+}

@@ -34,6 +34,7 @@ mod sign_in;
 mod sign_up;
 
 mod social;
+mod start_over;
 #[cfg(test)]
 mod testing;
 mod ws;
@@ -48,11 +49,12 @@ use application::auth::{
     VerifyEmail,
 };
 use application::e2ee::{
-    AppendCommit, ApproveDevice, ArchiveMessages, CatchUpCommits, ClaimKeyPackage, ClaimWelcomes,
-    ClearArchive, CloseApprovalRequest, KeyPackageStatus, ListApprovalRequests, ListDevices,
-    LoadHistoryKey, LoadKeyShare, OpenApprovalRequest, PostApprovalMessage, ReadApprovalMessages,
-    ReadArchive, ReceiveCommit, ReceiveWelcome, RegisterDevice, ReportHistoryKey, RevokeDevice,
-    SendWelcome, SetHistoryKey, ShareHistoryKey, UploadKeyPackages,
+    AppendCommit, ApproveDevice, ArchiveMessages, AskToStartOver, CatchUpCommits, ClaimKeyPackage,
+    ClaimWelcomes, ClearArchive, CloseApprovalRequest, EndStartOver, KeyPackageStatus,
+    ListApprovalRequests, ListDevices, LoadHistoryKey, LoadKeyShare, LoadStartOver,
+    OpenApprovalRequest, PostApprovalMessage, ReadApprovalMessages, ReadArchive, ReceiveCommit,
+    ReceiveWelcome, RegisterDevice, ReportHistoryKey, RevokeDevice, SendWelcome, SetHistoryKey,
+    ShareHistoryKey, UploadKeyPackages,
 };
 use application::identity::{
     DescribeInstance, EditIntro, FindAccount, SearchAccounts, ShowIntro, WebFinger,
@@ -229,6 +231,10 @@ pub struct AppState {
     /// The passphrase, sealed by one device of an account for another.
     pub share_history_key: Arc<ShareHistoryKey>,
     pub load_key_share: Arc<LoadKeyShare>,
+    /// A device not approved asking to start the history over, and the approved devices' cancel.
+    pub ask_to_start_over: Arc<AskToStartOver>,
+    pub load_start_over: Arc<LoadStartOver>,
+    pub end_start_over: Arc<EndStartOver>,
     /// The live connections, which the WebSocket registers with.
     pub hub: Arc<Hub>,
     pub missed_events: Arc<dyn MissedEvents>,
@@ -379,6 +385,11 @@ pub fn router(state: AppState) -> Router {
             "/api/history/key-shares",
             get(key_shares::held).post(key_shares::share),
         )
+        .route(
+            "/api/history/start-over",
+            get(start_over::pending).post(start_over::ask),
+        )
+        .route("/api/history/start-over/{id}", delete(start_over::end))
         .route("/api/presence", get(presence::read))
         .route("/api/presence/batch", post(presence::batch))
         .route("/api/presence/stream", get(presence::stream))

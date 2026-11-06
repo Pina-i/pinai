@@ -5,14 +5,20 @@ use std::sync::Arc;
 
 use domain::auth::Sessions;
 use domain::e2ee::{
-    ArchiveError, Devices, HeldHistoryKey, HistoryGeneration, HistoryKey, HistoryKeys, Holding,
-    KeyDirectoryError, KeyReplace, StaleHistoryKey, may_report_history_key, may_set_history_key,
+    ArchiveError, DeviceApprovals, DeviceTrustNotifier, Devices, HeldHistoryKey, HistoryGeneration,
+    HistoryKey, HistoryKeys, Holding, KeyDirectoryError, KeyReplace, StaleHistoryKey,
+    may_report_history_key, may_set_history_key,
 };
 use domain::identity::Bearer;
 use domain::{DeviceId, UserId};
 use time::OffsetDateTime;
 
+use super::start_over::tell_start_over_ended;
 use crate::auth::calling_session;
+
+fn unexpected(error: impl Into<anyhow::Error>) -> ArchiveError {
+    ArchiveError::Unexpected(error.into())
+}
 
 /// `GET /api/history/key`
 pub struct LoadHistoryKey {
@@ -30,37 +36,58 @@ impl LoadHistoryKey {
     }
 }
 
-/// `PUT /api/history/key`: the first device sets generation 1; a device that starts over sets the
-/// next one, which erases the archive saved under the one before.
+/// `PUT /api/history/key`: the first device sets generation 1; a device approved under the
+/// current one replaces it at once; any other through its matured start over request. Each later
+/// generation erases the archive saved under the one before.
 pub struct SetHistoryKey {
     sessions: Arc<dyn Sessions>,
     keys: Arc<dyn HistoryKeys>,
+    approvals: Arc<dyn DeviceApprovals>,
+    notifier: Arc<dyn DeviceTrustNotifier>,
 }
 
 impl SetHistoryKey {
-    pub fn new(sessions: Arc<dyn Sessions>, keys: Arc<dyn HistoryKeys>) -> Self {
-        Self { sessions, keys }
+    pub fn new(
+        sessions: Arc<dyn Sessions>,
+        keys: Arc<dyn HistoryKeys>,
+        approvals: Arc<dyn DeviceApprovals>,
+        notifier: Arc<dyn DeviceTrustNotifier>,
+    ) -> Self {
+        Self {
+            sessions,
+            keys,
+            approvals,
+            notifier,
+        }
     }
 
-    /// `KeyConflict` with the current generation when `key`'s doesn't follow it.
+    /// [`may_set_history_key`] here; the rest the store decides under the key's lock.
     pub async fn execute(
         &self,
         bearer: &Bearer,
         key: HistoryKey,
         now: OffsetDateTime,
     ) -> Result<(), ArchiveError> {
+        let owner = bearer.user;
         let session = calling_session(&*self.sessions, bearer)
             .await
-            .map_err(|e| ArchiveError::Unexpected(e.into()))?;
+            .map_err(unexpected)?;
         let set_by = may_set_history_key(key.generation, bearer, session.device, now)?;
-        match self.keys.replace(bearer.user, &key, set_by).await? {
-            KeyReplace::Replaced { erased } => {
+        // Read before the write drops the old generation's approvals: who to tell of a request it ends.
+        let before = self.approvals.trust(owner).await.map_err(unexpected)?;
+        match self.keys.replace(owner, &key, set_by, now).await? {
+            KeyReplace::Replaced { erased, closed } => {
                 let generation = key.generation.value();
-                tracing::info!(user_id = %bearer.user, generation, erased, "history key replaced");
+                tracing::info!(user_id = %owner, set_by = %set_by, generation, erased, "history key replaced");
+                for request in &closed {
+                    tell_start_over_ended(&*self.sessions, &*self.notifier, &before, request, now)
+                        .await;
+                }
                 Ok(())
             }
             KeyReplace::AlreadySet => Ok(()),
             KeyReplace::Conflict(current) => Err(ArchiveError::KeyConflict { current }),
+            KeyReplace::Refused(refusal) => Err(refusal.into()),
         }
     }
 }

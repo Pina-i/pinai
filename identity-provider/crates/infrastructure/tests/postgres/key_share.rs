@@ -148,7 +148,12 @@ async fn a_share_racing_a_new_generation_is_never_kept(pool: PgPool) {
 
         let (deposited, replaced) = tokio::join!(
             stores.shares.deposit(alice, &share),
-            stores.keys.replace(alice, &next, share.sender()),
+            stores.keys.replace(
+                alice,
+                &next,
+                share.sender(),
+                time::OffsetDateTime::now_utc()
+            ),
         );
         deposited.unwrap();
         replaced.unwrap();
@@ -167,7 +172,12 @@ async fn a_share_racing_its_recipients_revoke_is_never_kept(pool: PgPool) {
 
         let (deposited, revoked) = tokio::join!(
             stores.shares.deposit(alice, &share),
-            stores.devices.revoke(alice, share.recipient()),
+            stores.devices.revoke(
+                alice,
+                share.recipient(),
+                Some(share.recipient()),
+                time::OffsetDateTime::now_utc()
+            ),
         );
         revoked.unwrap();
 
@@ -240,7 +250,15 @@ async fn change(stores: &Stores, owner: UserId, share: &CheckedShare, change: Ch
     let devices = &stores.devices;
     match change {
         Change::RevokeTheSender => {
-            devices.revoke(owner, share.sender()).await.unwrap();
+            devices
+                .revoke(
+                    owner,
+                    share.sender(),
+                    Some(share.sender()),
+                    time::OffsetDateTime::now_utc(),
+                )
+                .await
+                .unwrap();
         }
         Change::RotateTheSender => reregister(devices, owner, share.sender(), 9, 1).await,
         Change::RotateTheRecipient => reregister(devices, owner, share.recipient(), 9, 2).await,
@@ -289,7 +307,16 @@ async fn a_share_racing_a_change_of_its_chains_approver_ends_one_way_or_the_othe
             if round % 2 == 0 {
                 reregister(&stores.devices, alice, approver, 9, 1).await;
             } else {
-                stores.devices.revoke(alice, approver).await.unwrap();
+                stores
+                    .devices
+                    .revoke(
+                        alice,
+                        approver,
+                        Some(approver),
+                        time::OffsetDateTime::now_utc(),
+                    )
+                    .await
+                    .unwrap();
             }
         });
 

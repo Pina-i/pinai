@@ -346,7 +346,7 @@ async fn an_approval_racing_its_signers_revoke_is_never_kept(pool: PgPool) {
 
         let (approved, revoked) = tokio::join!(
             approvals.approve(alice, &checked),
-            devices.revoke(alice, laptop),
+            devices.revoke(alice, laptop, Some(laptop), time::OffsetDateTime::now_utc()),
         );
         approved.unwrap();
         revoked.unwrap();
@@ -374,13 +374,13 @@ async fn an_approval_racing_the_approved_devices_revoke_is_written_only_before_i
 
         let (approved, revoked) = tokio::join!(
             approvals.approve(alice, &checked),
-            devices.revoke(alice, phone),
+            devices.revoke(alice, phone, Some(phone), time::OffsetDateTime::now_utc()),
         );
         revoked.unwrap();
 
         let held = approvals_of(&approvals, alice, phone).await;
         match approved.unwrap() {
-            Approve::Recorded => assert_eq!(held, 1),
+            Approve::Recorded { .. } => assert_eq!(held, 1),
             Approve::Stale => assert_eq!(held, 0),
             Approve::AlreadyHeld => panic!("approved once"),
         }
@@ -429,13 +429,15 @@ async fn a_passphrase_approval_racing_a_new_generation_is_never_kept(pool: PgPoo
         let alice = a_user(&pool).await;
         let laptop = a_device(&devices, alice, 1).await;
         let first = history_key(1, 1);
-        keys.replace(alice, &first, laptop).await.unwrap();
+        keys.replace(alice, &first, laptop, time::OffsetDateTime::now_utc())
+            .await
+            .unwrap();
         let checked = by_passphrase(&devices, laptop, &first).await;
         let second = history_key(2, 2);
 
         let (approved, replaced) = tokio::join!(
             approvals.approve(alice, &checked),
-            keys.replace(alice, &second, laptop),
+            keys.replace(alice, &second, laptop, time::OffsetDateTime::now_utc()),
         );
         approved.unwrap();
         replaced.unwrap();
@@ -458,8 +460,15 @@ async fn a_request_racing_its_devices_revoke_is_never_left_open(pool: PgPool) {
         let laptop = found(&devices, a_device(&devices, alice, 1).await).await;
         let request = ApprovalRequest::open_for(&laptop, now()).unwrap();
 
-        let (opened, revoked) =
-            tokio::join!(requests.open(&request), devices.revoke(alice, laptop.id),);
+        let (opened, revoked) = tokio::join!(
+            requests.open(&request),
+            devices.revoke(
+                alice,
+                laptop.id,
+                Some(laptop.id),
+                time::OffsetDateTime::now_utc()
+            ),
+        );
         revoked.unwrap();
 
         assert!(matches!(
@@ -496,7 +505,12 @@ async fn an_answer_racing_its_devices_revoke_never_leaves_the_request_to_it(pool
 
         let (posted, revoked) = tokio::join!(
             requests.post(alice, request.id, &phone, &body, now()),
-            devices.revoke(alice, phone.id),
+            devices.revoke(
+                alice,
+                phone.id,
+                Some(phone.id),
+                time::OffsetDateTime::now_utc()
+            ),
         );
         revoked.unwrap();
 

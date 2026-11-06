@@ -2,9 +2,10 @@
 //! attests, the KeyPackages peers claim to add those devices to MLS groups, the Delivery
 //! Service — each group's commits in order, and the Welcomes waiting for their devices — and
 //! each account's encrypted history archive, with the key it is sealed under; the approvals the
-//! account's devices give each other, the requests their handshake is relayed over, and the
-//! passphrase shared between them. Every key, package, MLS message, archive entry, handshake
-//! message and key share is opaque here — see identity-provider/specs/e2ee.md.
+//! account's devices give each other, the requests their handshake is relayed over, the
+//! passphrase shared between them, and the requests to start the history over. Every key,
+//! package, MLS message, archive entry, handshake message and key share is opaque here — see
+//! identity-provider/specs/e2ee.md.
 
 mod approval;
 mod approval_request;
@@ -16,8 +17,10 @@ mod history_key;
 mod key_package;
 mod key_share;
 mod ports;
+mod start_over;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod testing;
+mod trust;
 
 pub use approval::{
     Approval, ApprovalBy, ApprovalFacts, Approver, CheckedApproval, approval_bytes, approval_chain,
@@ -48,8 +51,8 @@ pub use error::{
 };
 pub use history_key::{
     ApprovalPublicKey, DeviceRequired, HeldHistoryKey, HistoryCheckValue, HistoryGeneration,
-    HistoryKey, HistorySalt, StaleHistoryKey, check_history_generation, may_report_history_key,
-    may_set_history_key, sessions_device,
+    HistoryKey, HistorySalt, KeyGate, StaleHistoryKey, check_history_generation,
+    may_replace_history_key, may_report_history_key, may_set_history_key, sessions_device,
 };
 pub use key_package::{
     CLAIMED_KEY_PACKAGE_GRACE, Claim, ClaimedKeyPackage, KeyPackageBytes, KeyPackagePolicy,
@@ -63,5 +66,12 @@ pub use ports::{
     ApprovalRequests, Approve, Archived, Attest, Close, CommitLog, Deposit, DeviceApprovals,
     DeviceAttester, DeviceNotifier, DeviceTrustNotifier, Devices, Ed25519Verifier, HistoryArchive,
     HistoryKeys, Holding, KeyPackages, KeyReplace, KeyShares, MlsFederation, MlsNotifier, Opened,
-    OutgoingWelcome, Post, Read, RemoteKeyPackages, Revocation, SignedAttestation, Welcomes,
+    OutgoingWelcome, Post, Read, RemoteKeyPackages, Revocation, SignedAttestation, StartOverEnded,
+    StartOverOpened, StartOverRequests, Welcomes,
 };
+pub use start_over::{
+    MaturedStartOver, START_OVER_KEPT, START_OVER_WAIT, StartOverEnd, StartOverEnding,
+    StartOverOpening, StartOverRefusal, StartOverRequest, may_open_start_over,
+    start_over_sweep_before, start_over_window,
+};
+pub use trust::{ApprovalRequired, DeviceTrust, may_revoke, may_turn_on_second_factor};
