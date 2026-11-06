@@ -58,12 +58,13 @@ use std::sync::Arc;
 use domain::auth::{
     AuthError, AuthorizationCode, AuthorizationCodes, AuthorizationRequest, CODE_TTL, ClientSignIn,
     ClientSignIns, Email, Grant, HandleSuffixes, NewAccount, PasswordHash, RESEND_LIMIT,
-    RESEND_WINDOW, Registration, RevokedReason, SIGNUP_CODE_TTL, Session, SessionKind,
-    SessionNotifier, Sessions, SignInAccount, SignInAccounts, SignUps, SignupCodes, SignupMailer,
+    RESEND_WINDOW, Registration, RevokedReason, SIGNUP_CODE_TTL, Session, SessionNotifier,
+    Sessions, SignInAccount, SignInAccounts, SignUps, SignupCodes, SignupMailer,
 };
-use domain::identity::{Handle, InstanceOrigin, UsernameChoice};
+use domain::e2ee::{DeviceApprovals, DeviceTrust};
+use domain::identity::{Bearer, Handle, InstanceOrigin, UsernameChoice};
 use domain::profile::DisplayName;
-use domain::{InvitationId, SessionId, UserId};
+use domain::{DeviceId, InvitationId, SessionId, UserId};
 use time::OffsetDateTime;
 
 /// Suffixes drawn for one chosen name before giving up: 36⁵ of them make a second a rarity.
@@ -144,7 +145,7 @@ impl CompleteSignIn {
                     )
                     .await?;
                 }
-                self.sessions.open(user, &SessionKind::Browser, now).await?
+                self.sessions.open_browser(user, now).await?
             }
         };
         self.sign_ins.remember(app, now).await?;
@@ -152,7 +153,7 @@ impl CompleteSignIn {
     }
 }
 
-/// Ends a session, and closes what hangs on it.
+/// Ends a session — a browser session's web apps with it —, and closes what hangs on each.
 pub(crate) async fn end_session(
     sessions: &dyn Sessions,
     notifier: &dyn SessionNotifier,
@@ -160,13 +161,32 @@ pub(crate) async fn end_session(
     reason: RevokedReason,
     now: OffsetDateTime,
 ) -> Result<(), AuthError> {
-    let Some(session) = sessions.find(id).await? else {
-        return Ok(());
-    };
-    if sessions.revoke(id, reason, now).await? {
-        notifier.ended(&session);
-    }
+    let ended = sessions.revoke(id, reason, now).await?;
+    tell_ended(notifier, &ended);
     Ok(())
+}
+
+/// The session a live token belongs to. One gone since the token was checked is unexpected —
+/// never read as a session that named no device, which would lift the device's limits.
+pub(crate) async fn calling_session(
+    sessions: &dyn Sessions,
+    bearer: &Bearer,
+) -> Result<Session, AuthError> {
+    sessions
+        .find(bearer.session)
+        .await?
+        .ok_or_else(|| AuthError::Unexpected(anyhow::anyhow!("the calling session is gone")))
+}
+
+/// The device the calling session named, and the account's devices, approvals and generation as
+/// they stand now: what `domain::e2ee::may_act_beyond_the_password` decides on.
+pub(crate) async fn calling_trust(
+    sessions: &dyn Sessions,
+    approvals: &dyn DeviceApprovals,
+    bearer: &Bearer,
+) -> anyhow::Result<(Option<DeviceId>, DeviceTrust)> {
+    let named = calling_session(sessions, bearer).await?.device;
+    Ok((named, approvals.trust(bearer.user).await?))
 }
 
 /// Closes what hangs on each of the sessions just ended.

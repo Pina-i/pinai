@@ -389,6 +389,8 @@ impl Application {
         let archive: Arc<dyn domain::e2ee::HistoryArchive> = Arc::new(
             infrastructure::postgres::PgHistoryArchive::new(pool.clone()),
         );
+        let history_keys: Arc<dyn domain::e2ee::HistoryKeys> =
+            Arc::new(infrastructure::postgres::PgHistoryKeys::new(pool.clone()));
         let commits: Arc<dyn domain::e2ee::CommitLog> =
             Arc::new(infrastructure::postgres::PgCommitLog::new(pool.clone()));
         let welcomes: Arc<dyn domain::e2ee::Welcomes> =
@@ -472,6 +474,28 @@ impl Application {
         let sweep_key_packages = Arc::new(application::e2ee::SweepKeyPackages::new(Arc::clone(
             &key_packages,
         )));
+        let ed25519_verifier: Arc<dyn domain::e2ee::Ed25519Verifier> =
+            Arc::new(infrastructure::attestation::StrictEd25519Verifier);
+        let approvals: Arc<dyn domain::e2ee::DeviceApprovals> = Arc::new(
+            infrastructure::postgres::PgDeviceApprovals::new(pool.clone()),
+        );
+        let approval_requests: Arc<dyn domain::e2ee::ApprovalRequests> = Arc::new(
+            infrastructure::postgres::PgApprovalRequests::new(pool.clone()),
+        );
+        let trust_notifier: Arc<dyn domain::e2ee::DeviceTrustNotifier> = Arc::new(
+            infrastructure::realtime::HubDeviceTrustNotifier::new(Arc::clone(&hub)),
+        );
+        let key_shares: Arc<dyn domain::e2ee::KeyShares> =
+            Arc::new(infrastructure::postgres::PgKeyShares::new(pool.clone()));
+        let sweep_approval_requests = Arc::new(application::e2ee::SweepApprovalRequests::new(
+            Arc::clone(&approval_requests),
+        ));
+        let start_overs: Arc<dyn domain::e2ee::StartOverRequests> = Arc::new(
+            infrastructure::postgres::PgStartOverRequests::new(pool.clone()),
+        );
+        let sweep_start_overs = Arc::new(application::e2ee::SweepStartOverRequests::new(
+            Arc::clone(&start_overs),
+        ));
 
         // Every client is its own document; the official desktop app's is described here.
         let clients: Arc<dyn domain::auth::Clients> =
@@ -745,10 +769,14 @@ impl Application {
                 Arc::clone(&sign_in_accounts),
                 Arc::clone(&second_factors),
                 Arc::clone(&authenticator),
+                Arc::clone(&sessions),
+                Arc::clone(&approvals),
             )),
             confirm_totp_enrollment: Arc::new(application::auth::ConfirmTotpEnrollment::new(
                 Arc::clone(&second_factors),
                 Arc::clone(&authenticator),
+                Arc::clone(&sessions),
+                Arc::clone(&approvals),
             )),
             disable_totp: Arc::new(application::auth::DisableTotp::new(
                 Arc::clone(&sign_in_accounts),
@@ -786,12 +814,15 @@ impl Application {
                 Arc::clone(&session_notifier),
             )),
             link_device: Arc::new(application::auth::LinkDevice::new(
+                Arc::clone(&accounts),
                 Arc::clone(&devices),
+                Arc::clone(&ed25519_verifier),
                 Arc::clone(&sessions),
                 Arc::clone(&session_notifier),
             )),
             sign_out_others: Arc::new(application::auth::SignOutOthers::new(
                 Arc::clone(&sessions),
+                Arc::clone(&approvals),
                 Arc::clone(&session_notifier),
             )),
             login_attempts: api::LoginAttempts::new(),
@@ -995,16 +1026,99 @@ impl Application {
                 Arc::new(infrastructure::attestation::Ed25519DeviceAttester::new(
                     Arc::clone(&keypair),
                 )),
+                Arc::clone(&ed25519_verifier),
+                Arc::clone(&sessions),
                 Arc::clone(&device_notifier),
             )),
             list_devices: Arc::new(application::e2ee::ListDevices::new(
                 Arc::clone(&devices),
+                Arc::clone(&approvals),
                 Arc::clone(&sessions),
             )),
             revoke_device: Arc::new(application::e2ee::RevokeDevice::new(
                 Arc::clone(&devices),
                 Arc::clone(&sessions),
+                Arc::clone(&approvals),
                 Arc::clone(&session_notifier),
+                Arc::clone(&trust_notifier),
+            )),
+            report_history_key: Arc::new(application::e2ee::ReportHistoryKey::new(
+                Arc::clone(&sessions),
+                Arc::clone(&devices),
+                Arc::clone(&history_keys),
+            )),
+            approve_device: Arc::new(application::e2ee::ApproveDevice::new(
+                Arc::clone(&accounts),
+                Arc::clone(&sessions),
+                Arc::clone(&devices),
+                Arc::clone(&history_keys),
+                Arc::clone(&approvals),
+                Arc::clone(&ed25519_verifier),
+                Arc::clone(&trust_notifier),
+            )),
+            share_history_key: Arc::new(application::e2ee::ShareHistoryKey::new(
+                Arc::clone(&accounts),
+                Arc::clone(&sessions),
+                Arc::clone(&devices),
+                Arc::clone(&history_keys),
+                Arc::clone(&approvals),
+                Arc::clone(&key_shares),
+                ed25519_verifier,
+                Arc::clone(&trust_notifier),
+            )),
+            load_key_share: Arc::new(application::e2ee::LoadKeyShare::new(
+                Arc::clone(&sessions),
+                Arc::clone(&devices),
+                Arc::clone(&history_keys),
+                key_shares,
+            )),
+            ask_to_start_over: Arc::new(application::e2ee::AskToStartOver::new(
+                Arc::clone(&sessions),
+                Arc::clone(&devices),
+                Arc::clone(&approvals),
+                Arc::clone(&start_overs),
+                Arc::clone(&trust_notifier),
+            )),
+            load_start_over: Arc::new(application::e2ee::LoadStartOver::new(
+                Arc::clone(&sessions),
+                Arc::clone(&devices),
+                Arc::clone(&approvals),
+                Arc::clone(&start_overs),
+            )),
+            end_start_over: Arc::new(application::e2ee::EndStartOver::new(
+                Arc::clone(&sessions),
+                Arc::clone(&devices),
+                Arc::clone(&approvals),
+                Arc::clone(&start_overs),
+                Arc::clone(&trust_notifier),
+            )),
+            open_approval_request: Arc::new(application::e2ee::OpenApprovalRequest::new(
+                Arc::clone(&sessions),
+                Arc::clone(&devices),
+                Arc::clone(&approval_requests),
+                Arc::clone(&trust_notifier),
+            )),
+            list_approval_requests: Arc::new(application::e2ee::ListApprovalRequests::new(
+                Arc::clone(&sessions),
+                Arc::clone(&devices),
+                Arc::clone(&approval_requests),
+            )),
+            post_approval_message: Arc::new(application::e2ee::PostApprovalMessage::new(
+                Arc::clone(&sessions),
+                Arc::clone(&devices),
+                Arc::clone(&approval_requests),
+                Arc::clone(&trust_notifier),
+            )),
+            read_approval_messages: Arc::new(application::e2ee::ReadApprovalMessages::new(
+                Arc::clone(&sessions),
+                Arc::clone(&devices),
+                Arc::clone(&approval_requests),
+            )),
+            close_approval_request: Arc::new(application::e2ee::CloseApprovalRequest::new(
+                Arc::clone(&sessions),
+                Arc::clone(&devices),
+                approval_requests,
+                Arc::clone(&trust_notifier),
             )),
             upload_key_packages: Arc::new(application::e2ee::UploadKeyPackages::new(
                 key_package_policy,
@@ -1045,14 +1159,25 @@ impl Application {
             archive_messages: Arc::new(application::e2ee::ArchiveMessages::new(
                 Arc::clone(&accounts),
                 Arc::clone(&conversations),
+                Arc::clone(&sessions),
+                Arc::clone(&approvals),
                 Arc::clone(&archive),
             )),
             read_archive: Arc::new(application::e2ee::ReadArchive::new(Arc::clone(&archive))),
-            clear_archive: Arc::new(application::e2ee::ClearArchive::new(Arc::clone(&archive))),
-            load_archive_salt: Arc::new(application::e2ee::LoadArchiveSalt::new(Arc::clone(
-                &archive,
+            clear_archive: Arc::new(application::e2ee::ClearArchive::new(
+                Arc::clone(&sessions),
+                Arc::clone(&approvals),
+                archive,
+            )),
+            load_history_key: Arc::new(application::e2ee::LoadHistoryKey::new(Arc::clone(
+                &history_keys,
             ))),
-            set_archive_salt: Arc::new(application::e2ee::SetArchiveSalt::new(archive)),
+            set_history_key: Arc::new(application::e2ee::SetHistoryKey::new(
+                Arc::clone(&sessions),
+                history_keys,
+                approvals,
+                trust_notifier,
+            )),
             hub: Arc::clone(&hub),
             missed_events: Arc::new(infrastructure::presence::BrokerMissedEvents::new(
                 Arc::clone(&broker_arc),
@@ -1164,6 +1289,16 @@ impl Application {
         ));
         tasks.spawn(api::background::sweep_welcomes(
             sweep_welcomes,
+            stop.clone(),
+        ));
+        // The approval requests past the hour they count in.
+        tasks.spawn(api::background::sweep_approval_requests(
+            sweep_approval_requests,
+            stop.clone(),
+        ));
+        // The start over requests a week after they ended.
+        tasks.spawn(api::background::sweep_start_over_requests(
+            sweep_start_overs,
             stop.clone(),
         ));
         // Reap uploads never sent.

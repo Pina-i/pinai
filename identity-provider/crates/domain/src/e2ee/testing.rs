@@ -1,6 +1,10 @@
 //! In-memory fakes of the E2EE ports and the contract every store must satisfy.
 
-use std::sync::Mutex;
+mod approval;
+mod key_share;
+mod start_over;
+
+use std::sync::{Arc, Mutex};
 
 use time::OffsetDateTime;
 
@@ -11,22 +15,119 @@ use crate::identity::RemoteActor;
 use crate::messaging::GroupSnapshot;
 use crate::{CommitId, ConversationId, WelcomeId};
 
-use super::{
-    Append, ArchiveCursor, ArchiveEntry, ArchiveSalt, ArchiveStoreError, HistoryArchive,
-    NewArchiveEntry,
-};
-use super::{
-    Attestation, Claim, ClaimedKeyPackage, Commit, CommitLog, DeliveryStoreError, Device,
-    DeviceAttester, DeviceLabel, DeviceNotifier, DeviceRootKey, Devices, Epoch, KeyPackages,
-    KeyStoreError, MlsFederation, MlsNotifier, NewCommit, NewKeyPackage, NewWelcome,
-    OutgoingWelcome, RemoteClaimError, RemoteKeyPackages, Revocation, SignedAttestation, Welcome,
-    Welcomes,
-};
+pub use approval::{InMemoryApprovalRequests, RecordingDeviceTrustNotifier, SentTrust};
+pub use key_share::sealed_share;
 
-/// Both stores over one state, as KeyPackages mark their device seen.
+use super::{
+    Append, ArchiveCursor, ArchiveEntry, ArchiveStoreError, Archived, Cleared, HeldHistoryKey,
+    HistoryArchive, HistoryGeneration, HistoryKey, HistoryKeys, Holding, KeyReplace,
+    NewArchiveEntry, check_history_generation,
+};
+use super::{
+    Approval, Approver, ArchiveError, DeviceTrust, Ed25519PublicKey, KeyGate, KeyShare,
+    StartOverEnd, StartOverEnding, StartOverRequest, may_replace_history_key, may_revoke,
+};
+use super::{
+    Attest, Attestation, AttestationExpiry, Claim, ClaimedKeyPackage, Commit, CommitLog,
+    DeliveryStoreError, Device, DeviceAttester, DeviceLabel, DeviceNotifier, DeviceRootKey,
+    Devices, Ed25519Signature, Ed25519Verifier, Epoch, HeldHpkeKey, HpkeKeyWrite, HpkePublicKey,
+    KeyPackages, KeyStoreError, MlsFederation, MlsNotifier, NewCommit, NewKeyPackage, NewWelcome,
+    OutgoingWelcome, RemoteClaimError, RemoteKeyPackages, Revocation, SignedAttestation,
+    SignedHpkeKey, UnverifiedHpkeKey, Welcome, Welcomes,
+};
+use crate::auth::Sessions;
+use crate::auth::testing::InMemorySessions;
+
+/// The approvals of each account's devices, which a revoke, a new root key and a new generation
+/// drop: shared by the directory and the history keys, as one database holds them.
+type Approvals = Arc<Mutex<Vec<(UserId, Approval)>>>;
+
+/// The key shares of each account's devices, which a revoke, a new root key or HPKE key, a report
+/// and a new generation drop: shared as the approvals are.
+type Shares = Arc<Mutex<Vec<(UserId, KeyShare)>>>;
+
+/// The start over requests, which a revoke and a new generation end: shared as the approvals are.
+type StartOvers = Arc<Mutex<Vec<StartOverRequest>>>;
+
+/// The devices, their KeyPackages and their approvals over one state, as KeyPackages mark their
+/// device seen.
 #[derive(Default)]
 pub struct InMemoryKeyDirectory {
-    state: Mutex<State>,
+    /// Shared with the history keys, which decide a new generation on the devices.
+    state: Arc<Mutex<State>>,
+    /// Whose current generation a device's report, or a passphrase's approval, is checked
+    /// against; none, every one is stale.
+    history: Option<Arc<InMemoryArchive>>,
+    approvals: Approvals,
+    shares: Shares,
+    start_overs: StartOvers,
+    /// Whose requests a revoke closes; none, it closes none.
+    requests: Option<Arc<InMemoryApprovalRequests>>,
+}
+
+impl InMemoryKeyDirectory {
+    pub fn keyed_by(history: Arc<InMemoryArchive>) -> Self {
+        let state = Arc::default();
+        *history.directory.lock().unwrap() = Some(Arc::clone(&state));
+        Self {
+            state,
+            approvals: Arc::clone(&history.approvals),
+            shares: Arc::clone(&history.shares),
+            start_overs: Arc::clone(&history.start_overs),
+            history: Some(history),
+            requests: None,
+        }
+    }
+
+    fn generation(&self, owner: UserId) -> Option<HistoryGeneration> {
+        self.history
+            .as_ref()
+            .and_then(|history| history.state.lock().unwrap().generation(owner))
+    }
+
+    /// What [`DeviceTrust`] decides on, as held now.
+    fn trust_of(&self, owner: UserId) -> DeviceTrust {
+        let current = self.generation(owner);
+        let state = self.state.lock().unwrap();
+        DeviceTrust {
+            devices: state
+                .devices
+                .iter()
+                .filter(|device| device.owner == owner)
+                .cloned()
+                .collect(),
+            approvals: self
+                .approvals
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(of, _)| *of == owner)
+                .map(|(_, approval)| approval.clone())
+                .collect(),
+            current,
+        }
+    }
+
+    pub fn relaying(self, requests: Arc<InMemoryApprovalRequests>) -> Self {
+        Self {
+            requests: Some(requests),
+            ..self
+        }
+    }
+
+    fn drop_approvals(&self, which: impl Fn(&Approval) -> bool) {
+        self.approvals
+            .lock()
+            .unwrap()
+            .retain(|(_, approval)| !which(approval));
+    }
+
+    fn drop_shares(&self, which: impl Fn(&KeyShare) -> bool) {
+        self.shares
+            .lock()
+            .unwrap()
+            .retain(|(_, share)| !which(share));
+    }
 }
 
 #[derive(Default)]
@@ -73,6 +174,8 @@ impl State {
                 last_seen_at: now,
                 revoked_at: None,
                 attestation: None,
+                hpke_key: None,
+                history_generation: None,
             });
         }
         Ok(self.device_mut(id).expect("just recorded"))
@@ -103,24 +206,139 @@ impl Devices for InMemoryKeyDirectory {
         owner: UserId,
         id: DeviceId,
         label: &DeviceLabel,
+        read: Option<&Device>,
         attestation: &Attestation,
-    ) -> Result<(), KeyStoreError> {
+        hpke_key: &HpkeKeyWrite,
+    ) -> Result<Attest, KeyStoreError> {
         let mut state = self.state.lock().unwrap();
-        state.record(owner, id, label)?.attestation = Some(attestation.clone());
-        Ok(())
+        let current = state.devices.iter().find(|d| d.id == id);
+        if current.is_some_and(|d| d.owner != owner) {
+            return Err(KeyStoreError::DeviceTaken);
+        }
+        if current.is_some_and(Device::is_revoked) || keys(current) != keys(read) {
+            return Ok(Attest::Stale);
+        }
+        let device = state.record(owner, id, label)?;
+        let rotated = device
+            .attestation
+            .as_ref()
+            .is_some_and(|held| held.root_key != attestation.root_key);
+        let hpke_before = device.hpke_key.as_ref().map(|held| held.key.clone());
+        device.attestation = Some(attestation.clone());
+        match hpke_key {
+            HpkeKeyWrite::Keep => {}
+            HpkeKeyWrite::Set(signed) => device.hpke_key = Some(signed.into()),
+            HpkeKeyWrite::Clear => device.hpke_key = None,
+        }
+        let resealed = hpke_before != device.hpke_key.as_ref().map(|held| held.key.clone());
+        if rotated {
+            self.drop_approvals(|approval| {
+                approval.device == id || approval.approver == Approver::Device(id)
+            });
+            self.drop_shares(|share| share.sender == id);
+        }
+        if rotated || resealed {
+            self.drop_shares(|share| share.recipient == id);
+        }
+        Ok(Attest::Stored)
     }
 
-    async fn revoke(&self, owner: UserId, id: DeviceId) -> Result<Revocation, KeyStoreError> {
-        let mut state = self.state.lock().unwrap();
-        let Some(device) = state.device_mut(id).filter(|device| device.owner == owner) else {
+    async fn revoke(
+        &self,
+        owner: UserId,
+        id: DeviceId,
+        by: Option<DeviceId>,
+        now: OffsetDateTime,
+    ) -> Result<Revocation, KeyStoreError> {
+        let trust = self.trust_of(owner);
+        let Some(device) = trust.device(id) else {
             return Ok(Revocation::NotFound);
         };
-        if device.revoked_at.is_some() {
+        if device.is_revoked() {
             return Ok(Revocation::AlreadyRevoked);
         }
-        device.revoked_at = Some(OffsetDateTime::now_utc());
-        Ok(Revocation::Revoked)
+        if let Err(refusal) = may_revoke(id, by, &trust) {
+            return Ok(Revocation::Refused(refusal));
+        }
+        let mut state = self.state.lock().unwrap();
+        let device = state.device_mut(id).expect("read just now");
+        device.revoked_at = Some(now);
+        device.hpke_key = None;
+        self.drop_approvals(|approval| approval.approver == Approver::Device(id));
+        self.drop_shares(|share| share.sender == id || share.recipient == id);
+        let closed = self
+            .requests
+            .as_ref()
+            .map(|requests| requests.close_for(id, now))
+            .unwrap_or_default();
+        let start_over = end_open(&self.start_overs, now, |request| {
+            (request.owner == owner && request.device == id).then_some(StartOverEnd::Revoked)
+        })
+        .pop();
+        Ok(Revocation::Revoked { closed, start_over })
     }
+
+    async fn hold_history_key(
+        &self,
+        owner: UserId,
+        id: DeviceId,
+        generation: HistoryGeneration,
+    ) -> Result<Holding, KeyStoreError> {
+        let current = self
+            .history
+            .as_ref()
+            .and_then(|history| history.state.lock().unwrap().generation(owner));
+        if check_history_generation(generation, current).is_err() {
+            return Ok(Holding::Stale);
+        }
+        let mut state = self.state.lock().unwrap();
+        match state
+            .device_mut(id)
+            .filter(|device| device.owner == owner && !device.is_revoked())
+        {
+            Some(device) => {
+                device.history_generation = Some(generation);
+                self.drop_shares(|share| share.recipient == id);
+                Ok(Holding::Recorded)
+            }
+            None => Ok(Holding::Refused),
+        }
+    }
+}
+
+/// `at` as Postgres keeps it, to the microsecond: what a store hands back is what it holds.
+pub(super) fn stored(at: OffsetDateTime) -> OffsetDateTime {
+    at.replace_nanosecond(at.nanosecond() / 1000 * 1000)
+        .expect("fewer nanoseconds stay valid")
+}
+
+/// Ends the open requests `how` names an end for, as they ended.
+fn end_open(
+    start_overs: &StartOvers,
+    at: OffsetDateTime,
+    how: impl Fn(&StartOverRequest) -> Option<StartOverEnd>,
+) -> Vec<StartOverRequest> {
+    let at = stored(at);
+    let mut ended = Vec::new();
+    for request in start_overs.lock().unwrap().iter_mut() {
+        if let Some(how) = how(request).filter(|_| request.is_open()) {
+            request.ended = Some(StartOverEnding { how, at });
+            ended.push(request.clone());
+        }
+    }
+    ended
+}
+
+/// What a registration's write is guarded on, besides the device being unrevoked.
+fn keys(device: Option<&Device>) -> (Option<&DeviceRootKey>, Option<&HpkePublicKey>) {
+    (
+        device
+            .and_then(|d| d.attestation.as_ref())
+            .map(|a| &a.root_key),
+        device
+            .and_then(|d| d.hpke_key.as_ref())
+            .map(|held| &held.key),
+    )
 }
 
 #[async_trait::async_trait]
@@ -163,10 +381,15 @@ impl KeyPackages for InMemoryKeyDirectory {
         owner: UserId,
         device: DeviceId,
         label: &DeviceLabel,
+        relabel: bool,
         packages: &[NewKeyPackage],
     ) -> Result<usize, KeyStoreError> {
         let mut state = self.state.lock().unwrap();
-        state.record(owner, device, label)?.last_seen_at = OffsetDateTime::now_utc();
+        let recorded = state.record(owner, device, label)?;
+        recorded.last_seen_at = OffsetDateTime::now_utc();
+        if relabel {
+            recorded.label = label.clone();
+        }
         state
             .packages
             .extend(packages.iter().map(|package| Stashed {
@@ -232,16 +455,63 @@ impl DeviceAttester for PlainAttester {
         actor: &ActorUri,
         device: DeviceId,
         key: &DeviceRootKey,
-        expires_at: OffsetDateTime,
+        expires_at: AttestationExpiry,
     ) -> SignedAttestation {
-        let signed_message =
-            format!("{actor}\n{device}\n{:?}\n{expires_at}", key.as_bytes()).into_bytes();
+        let signed_message = format!(
+            "{actor}\n{device}\n{:?}\n{}",
+            key.as_bytes(),
+            expires_at.at()
+        )
+        .into_bytes();
         SignedAttestation {
             signature: signed_message.iter().rev().copied().collect(),
             kid: "test-key".to_owned(),
             signed_message,
         }
     }
+}
+
+/// Takes for a signature what [`plain_signature`] makes: no cryptography.
+pub struct PlainEd25519Verifier;
+
+impl Ed25519Verifier for PlainEd25519Verifier {
+    fn verifies(
+        &self,
+        key: &dyn Ed25519PublicKey,
+        message: &[u8],
+        signature: &Ed25519Signature,
+    ) -> bool {
+        plain_signature(key, message) == *signature
+    }
+}
+
+/// `key`'s "signature" over `message` as [`PlainEd25519Verifier`] takes it: two SHA-256 rounds.
+pub fn plain_signature(key: &dyn Ed25519PublicKey, message: &[u8]) -> Ed25519Signature {
+    use sha2::{Digest, Sha256};
+    let first = Sha256::new()
+        .chain_update(key.public_bytes())
+        .chain_update(message)
+        .finalize();
+    let second = Sha256::digest(first);
+    Ed25519Signature::parse("signature", &[first.as_slice(), second.as_slice()].concat())
+        .expect("two digests are 64 bytes")
+}
+
+/// The HPKE key `[byte; 32]`, verified as root key `[byte; 32]` signed it for a test device.
+pub fn hpke_key(byte: u8) -> SignedHpkeKey {
+    let root = DeviceRootKey::parse(&[byte; 32]).unwrap();
+    let actor = ActorUri::parse("https://idp.test/users/alice_t3st0").unwrap();
+    let device = DeviceId::from(uuid::Uuid::nil());
+    let key = HpkePublicKey::parse(&[byte; 32]).unwrap();
+    let signature = plain_signature(&root, &key.canonical_bytes(&actor, device));
+    UnverifiedHpkeKey::new(key, signature)
+        .verified(&root, &actor, device, &PlainEd25519Verifier)
+        .expect("signed by its root key")
+}
+
+/// [`hpke_key`] as the directory reads it back.
+pub fn held(byte: u8) -> HeldHpkeKey {
+    HeldHpkeKey::from(&hpke_key(byte))
 }
 
 #[derive(Default)]
@@ -536,16 +806,69 @@ impl MlsFederation for RecordingMlsFederation {
     }
 }
 
-/// Each account's archive entries, and salts.
+/// Each account's archive entries and history key, over one state: a new key erases the archive,
+/// and an upload is kept only under the current one. A new key also drops the approvals of older
+/// generations and the key shares, and ends the start over requests, which a directory
+/// [`InMemoryKeyDirectory::keyed_by`] this one shares.
 #[derive(Default)]
 pub struct InMemoryArchive {
     state: Mutex<ArchiveState>,
+    approvals: Approvals,
+    shares: Shares,
+    start_overs: StartOvers,
+    /// The devices of the directory keyed by this one; none, no device is approved.
+    directory: Mutex<Option<Arc<Mutex<State>>>>,
+    /// Whose sessions' last uses a start over waits on; none, no device was ever used.
+    sessions: Option<Arc<InMemorySessions>>,
+}
+
+impl InMemoryArchive {
+    /// One that reads the approved devices' last uses from `sessions`.
+    pub fn watching(sessions: Arc<InMemorySessions>) -> Self {
+        Self {
+            sessions: Some(sessions),
+            ..Self::default()
+        }
+    }
+
+    fn devices_of(&self, owner: UserId) -> Vec<Device> {
+        self.directory
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|state| {
+                state
+                    .lock()
+                    .unwrap()
+                    .devices
+                    .iter()
+                    .filter(|device| device.owner == owner)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
 }
 
 #[derive(Default)]
 struct ArchiveState {
     entries: Vec<(UserId, ArchiveEntry)>,
-    salts: Vec<(UserId, ArchiveSalt)>,
+    keys: Vec<HeldKey>,
+}
+
+struct HeldKey {
+    owner: UserId,
+    key: HistoryKey,
+    set_by: DeviceId,
+}
+
+impl ArchiveState {
+    fn generation(&self, owner: UserId) -> Option<HistoryGeneration> {
+        self.keys
+            .iter()
+            .find(|held| held.owner == owner)
+            .map(|held| held.key.generation)
+    }
 }
 
 #[async_trait::async_trait]
@@ -553,11 +876,15 @@ impl HistoryArchive for InMemoryArchive {
     async fn store(
         &self,
         owner: UserId,
+        generation: HistoryGeneration,
         entries: &[NewArchiveEntry],
-    ) -> Result<usize, ArchiveStoreError> {
+    ) -> Result<Archived, ArchiveStoreError> {
         // One upload, one moment: its entries share their `created_at`.
         let now = OffsetDateTime::now_utc();
         let mut state = self.state.lock().unwrap();
+        if check_history_generation(generation, state.generation(owner)).is_err() {
+            return Ok(Archived::Stale);
+        }
         let mut stored = 0;
         for entry in entries {
             if state
@@ -580,7 +907,7 @@ impl HistoryArchive for InMemoryArchive {
             ));
             stored += 1;
         }
-        Ok(stored)
+        Ok(Archived::Stored(stored))
     }
 
     async fn page(
@@ -603,33 +930,118 @@ impl HistoryArchive for InMemoryArchive {
         Ok(entries)
     }
 
-    async fn clear(&self, owner: UserId) -> Result<usize, ArchiveStoreError> {
-        let mut state = self.state.lock().unwrap();
-        let before = state.entries.len();
-        state.entries.retain(|(o, _)| *o != owner);
-        Ok(before - state.entries.len())
-    }
-
-    async fn salt(&self, owner: UserId) -> Result<Option<ArchiveSalt>, ArchiveStoreError> {
-        let state = self.state.lock().unwrap();
-        Ok(state
-            .salts
-            .iter()
-            .find(|(o, _)| *o == owner)
-            .map(|(_, salt)| salt.clone()))
-    }
-
-    async fn set_salt_once(
+    async fn clear(
         &self,
         owner: UserId,
-        salt: &ArchiveSalt,
-    ) -> Result<ArchiveSalt, ArchiveStoreError> {
+        generation: HistoryGeneration,
+    ) -> Result<Cleared, ArchiveStoreError> {
         let mut state = self.state.lock().unwrap();
-        if let Some((_, held)) = state.salts.iter().find(|(o, _)| *o == owner) {
-            return Ok(held.clone());
+        if state.generation(owner) != Some(generation) {
+            return Ok(Cleared::Stale);
         }
-        state.salts.push((owner, salt.clone()));
-        Ok(salt.clone())
+        let before = state.entries.len();
+        state.entries.retain(|(o, _)| *o != owner);
+        Ok(Cleared::Erased(before - state.entries.len()))
+    }
+}
+
+#[async_trait::async_trait]
+impl HistoryKeys for InMemoryArchive {
+    async fn current(&self, owner: UserId) -> Result<Option<HeldHistoryKey>, ArchiveStoreError> {
+        let state = self.state.lock().unwrap();
+        Ok(state
+            .keys
+            .iter()
+            .find(|held| held.owner == owner)
+            .map(|held| HeldHistoryKey {
+                key: held.key.clone(),
+                set_by: Some(held.set_by),
+            }))
+    }
+
+    async fn replace(
+        &self,
+        owner: UserId,
+        key: &HistoryKey,
+        set_by: DeviceId,
+        now: OffsetDateTime,
+    ) -> Result<KeyReplace, ArchiveStoreError> {
+        let sessions = match &self.sessions {
+            Some(sessions) => sessions
+                .of_user(owner)
+                .await
+                .map_err(|e| ArchiveStoreError::Unexpected(e.into()))?,
+            None => Vec::new(),
+        };
+        let devices = self.devices_of(owner);
+        let mut state = self.state.lock().unwrap();
+        let held = state
+            .keys
+            .iter()
+            .find(|held| held.owner == owner)
+            .map(|held| held.key.clone());
+        let trust = DeviceTrust {
+            devices,
+            approvals: self
+                .approvals
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(of, _)| *of == owner)
+                .map(|(_, approval)| approval.clone())
+                .collect(),
+            current: held.as_ref().map(|held| held.generation),
+        };
+        let open = self
+            .start_overs
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|request| request.owner == owner && request.is_open())
+            .cloned();
+        let gate = may_replace_history_key(
+            key,
+            set_by,
+            held.as_ref(),
+            &trust,
+            open.as_ref(),
+            &sessions,
+            now,
+        );
+        let used = match gate {
+            Ok(KeyGate::AlreadySet) => return Ok(KeyReplace::AlreadySet),
+            Ok(KeyGate::Write(matured)) => matured.map(|matured| matured.request()),
+            Err(ArchiveError::KeyConflict { current }) => return Ok(KeyReplace::Conflict(current)),
+            Err(ArchiveError::StartOver(refusal)) => return Ok(KeyReplace::Refused(refusal)),
+            Err(other) => return Err(ArchiveStoreError::Unexpected(other.into())),
+        };
+        state.keys.retain(|held| held.owner != owner);
+        state.keys.push(HeldKey {
+            owner,
+            key: key.clone(),
+            set_by,
+        });
+        self.approvals.lock().unwrap().retain(|(of, approval)| {
+            *of != owner
+                || !matches!(approval.approver, Approver::Passphrase(older) if older < key.generation)
+        });
+        self.shares.lock().unwrap().retain(|(of, _)| *of != owner);
+        let closed = end_open(&self.start_overs, now, |request| {
+            (request.owner == owner).then_some(if Some(request.id) == used {
+                StartOverEnd::Used
+            } else {
+                StartOverEnd::Superseded
+            })
+        })
+        .into_iter()
+        .filter(|request| Some(request.id) != used)
+        .collect();
+        let before = state.entries.len();
+        state.entries.retain(|(o, _)| *o != owner);
+        Ok(KeyReplace::Replaced {
+            erased: before - state.entries.len(),
+            closed,
+        })
     }
 }
 
@@ -638,22 +1050,26 @@ impl HistoryArchive for InMemoryArchive {
 pub mod contract {
     use time::Duration;
 
-    use super::*;
-    use crate::e2ee::{DeviceKind, KeyPackageBytes};
+    pub use super::approval::contract::*;
+    pub use super::key_share::contract::*;
+    pub use super::start_over::contract::*;
 
-    fn at(offset: Duration) -> OffsetDateTime {
+    use super::*;
+    use crate::e2ee::{DeviceApprovals, DeviceKind, KeyPackageBytes};
+
+    pub(super) fn at(offset: Duration) -> OffsetDateTime {
         let now = OffsetDateTime::now_utc().unix_timestamp();
         OffsetDateTime::from_unix_timestamp(now).unwrap() + offset
     }
 
-    fn label(name: &str) -> DeviceLabel {
+    pub(super) fn label(name: &str) -> DeviceLabel {
         DeviceLabel {
             name: name.to_owned(),
             kind: DeviceKind::Laptop,
         }
     }
 
-    fn attestation(key: u8) -> Attestation {
+    pub(super) fn attestation(key: u8) -> Attestation {
         Attestation {
             root_key: DeviceRootKey::parse(&[key; 32]).unwrap(),
             signature: vec![key; 64],
@@ -674,14 +1090,47 @@ pub mod contract {
         package(byte, Duration::days(30))
     }
 
+    fn set(byte: u8) -> HpkeKeyWrite {
+        HpkeKeyWrite::Set(hpke_key(byte))
+    }
+
+    /// A registration that read the device just before writing.
+    pub(super) async fn register(
+        devices: &dyn Devices,
+        owner: UserId,
+        id: DeviceId,
+        attestation: &Attestation,
+        hpke_key: HpkeKeyWrite,
+    ) -> Attest {
+        let read = devices.find(id).await.unwrap();
+        devices
+            .attest(
+                owner,
+                id,
+                &label("laptop"),
+                read.as_ref(),
+                attestation,
+                &hpke_key,
+            )
+            .await
+            .unwrap()
+    }
+
     pub async fn a_registered_device_is_found_and_listed_with_its_attestation(
         devices: &dyn Devices,
         alice: UserId,
     ) {
         let (id, attested) = (DeviceId::generate(), attestation(1));
 
-        devices
-            .attest(alice, id, &label("Firefox on Linux"), &attested)
+        let stored = devices
+            .attest(
+                alice,
+                id,
+                &label("Firefox on Linux"),
+                None,
+                &attested,
+                &HpkeKeyWrite::Clear,
+            )
             .await
             .unwrap();
 
@@ -690,6 +1139,7 @@ pub mod contract {
             (device.owner, &device.label, device.revoked_at),
             (alice, &label("Firefox on Linux"), None)
         );
+        assert_eq!(stored, Attest::Stored);
         assert_eq!(device.attestation, Some(attested));
         assert_eq!(devices.list(alice).await.unwrap(), vec![device]);
         assert_eq!(devices.find(DeviceId::generate()).await.unwrap(), None);
@@ -701,13 +1151,28 @@ pub mod contract {
     ) {
         let id = DeviceId::generate();
         devices
-            .attest(alice, id, &label("first"), &attestation(1))
+            .attest(
+                alice,
+                id,
+                &label("first"),
+                None,
+                &attestation(1),
+                &HpkeKeyWrite::Clear,
+            )
             .await
             .unwrap();
+        let read = devices.find(id).await.unwrap();
 
         let renewed = attestation(2);
         devices
-            .attest(alice, id, &label("second"), &renewed)
+            .attest(
+                alice,
+                id,
+                &label("second"),
+                read.as_ref(),
+                &renewed,
+                &HpkeKeyWrite::Clear,
+            )
             .await
             .unwrap();
 
@@ -716,6 +1181,192 @@ pub mod contract {
             (device.label, device.attestation),
             (label("first"), Some(renewed))
         );
+    }
+
+    pub async fn a_device_holds_the_hpke_key_registered_with_its_attestation_until_replaced(
+        devices: &dyn Devices,
+        alice: UserId,
+    ) {
+        let id = DeviceId::generate();
+
+        register(devices, alice, id, &attestation(1), set(1)).await;
+        let registered = devices.find(id).await.unwrap().unwrap().hpke_key;
+        let listed = devices.list(alice).await.unwrap()[0].hpke_key.clone();
+        register(devices, alice, id, &attestation(1), HpkeKeyWrite::Keep).await;
+        let kept = devices.find(id).await.unwrap().unwrap().hpke_key;
+        register(devices, alice, id, &attestation(1), set(2)).await;
+        let replaced = devices.find(id).await.unwrap().unwrap().hpke_key;
+        register(devices, alice, id, &attestation(2), HpkeKeyWrite::Clear).await;
+        let cleared = devices.find(id).await.unwrap().unwrap().hpke_key;
+
+        assert_eq!(registered, Some(held(1)));
+        assert_eq!(listed, Some(held(1)));
+        assert_eq!(kept, Some(held(1)));
+        assert_eq!(replaced, Some(held(2)));
+        assert_eq!(cleared, None);
+    }
+
+    pub async fn a_registration_decided_on_a_stale_read_writes_nothing(
+        devices: &dyn Devices,
+        alice: UserId,
+    ) {
+        let id = DeviceId::generate();
+        register(devices, alice, id, &attestation(1), set(1)).await;
+        let read_before_the_new_key = devices.find(id).await.unwrap();
+        register(devices, alice, id, &attestation(1), set(2)).await;
+        let keyed = devices.find(id).await.unwrap();
+        let attest = |read: Option<Device>| async move {
+            devices
+                .attest(
+                    alice,
+                    id,
+                    &label("laptop"),
+                    read.as_ref(),
+                    &attestation(3),
+                    &HpkeKeyWrite::Keep,
+                )
+                .await
+                .unwrap()
+        };
+
+        let as_if_unknown = attest(None).await;
+        let before_the_new_key = attest(read_before_the_new_key).await;
+        let unchanged = devices.find(id).await.unwrap();
+        devices
+            .revoke(alice, id, Some(id), time::OffsetDateTime::now_utc())
+            .await
+            .unwrap();
+        let revoked = devices.find(id).await.unwrap();
+        let after_the_revoke = attest(keyed.clone()).await;
+
+        assert_eq!(
+            (as_if_unknown, before_the_new_key, after_the_revoke),
+            (Attest::Stale, Attest::Stale, Attest::Stale)
+        );
+        assert_eq!(unchanged, keyed);
+        assert_eq!(devices.find(id).await.unwrap(), revoked);
+    }
+
+    pub async fn a_revoked_device_holds_no_hpke_key(devices: &dyn Devices, alice: UserId) {
+        let (id, attested) = (DeviceId::generate(), attestation(1));
+        register(devices, alice, id, &attested, set(1)).await;
+
+        devices
+            .revoke(alice, id, Some(id), time::OffsetDateTime::now_utc())
+            .await
+            .unwrap();
+
+        let revoked = devices.find(id).await.unwrap().unwrap();
+        assert_eq!(revoked.hpke_key, None);
+        assert_eq!(revoked.attestation, Some(attested));
+    }
+
+    /// `keys` is the store whose current generation `devices` checks a report against.
+    pub async fn a_device_records_the_current_history_generation_while_unrevoked(
+        devices: &dyn Devices,
+        approvals: &dyn DeviceApprovals,
+        keys: &dyn HistoryKeys,
+        alice: UserId,
+        bob: UserId,
+    ) {
+        let (laptop, phone, bobs) = (
+            DeviceId::generate(),
+            DeviceId::generate(),
+            DeviceId::generate(),
+        );
+        for (owner, id) in [(alice, laptop), (alice, phone), (bob, bobs)] {
+            register(devices, owner, id, &attestation(1), HpkeKeyWrite::Clear).await;
+        }
+        let (first, second) = (
+            HistoryGeneration::FIRST,
+            HistoryGeneration::parse(2).unwrap(),
+        );
+
+        let before_any = devices
+            .hold_history_key(alice, laptop, first)
+            .await
+            .unwrap();
+        keys.replace(
+            alice,
+            &history_key(1, 1),
+            laptop,
+            time::OffsetDateTime::now_utc(),
+        )
+        .await
+        .unwrap();
+        let recorded = devices
+            .hold_history_key(alice, laptop, first)
+            .await
+            .unwrap();
+        let ahead = devices
+            .hold_history_key(alice, phone, second)
+            .await
+            .unwrap();
+        let anothers = devices.hold_history_key(alice, bobs, first).await.unwrap();
+        let unknown = devices
+            .hold_history_key(alice, DeviceId::generate(), first)
+            .await
+            .unwrap();
+        devices
+            .revoke(alice, phone, Some(phone), time::OffsetDateTime::now_utc())
+            .await
+            .unwrap();
+        let revoked = devices.hold_history_key(alice, phone, first).await.unwrap();
+        approve_by_its_words(devices, approvals, alice, laptop, &history_key(1, 1)).await;
+        keys.replace(
+            alice,
+            &history_key(2, 2),
+            laptop,
+            time::OffsetDateTime::now_utc(),
+        )
+        .await
+        .unwrap();
+        let replaced = devices
+            .hold_history_key(alice, laptop, first)
+            .await
+            .unwrap();
+
+        for stale in [before_any, ahead, replaced] {
+            assert_eq!(stale, Holding::Stale);
+        }
+        assert_eq!(recorded, Holding::Recorded);
+        for refused in [anothers, unknown, revoked] {
+            assert_eq!(refused, Holding::Refused);
+        }
+        let listed: Vec<_> = devices
+            .list(alice)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|d| (d.id, d.history_generation))
+            .collect();
+        assert_eq!(listed, vec![(laptop, Some(first)), (phone, None)]);
+        assert_eq!(
+            devices
+                .find(bobs)
+                .await
+                .unwrap()
+                .unwrap()
+                .history_generation,
+            None
+        );
+    }
+
+    pub async fn stashing_keeps_the_hpke_key_registered(
+        devices: &dyn Devices,
+        packages: &dyn KeyPackages,
+        alice: UserId,
+    ) {
+        let id = DeviceId::generate();
+        register(devices, alice, id, &attestation(1), set(1)).await;
+
+        packages
+            .stash(alice, id, &label("laptop"), false, &[fresh(1)])
+            .await
+            .unwrap();
+
+        let device = devices.find(id).await.unwrap().unwrap();
+        assert_eq!(device.hpke_key, Some(held(1)));
     }
 
     pub async fn devices_are_listed_active_first_then_most_recently_seen(
@@ -730,18 +1381,22 @@ pub mod contract {
             DeviceId::generate(),
         );
         for id in [old, seen, recent] {
-            devices
-                .attest(alice, id, &label("laptop"), &attestation(1))
-                .await
-                .unwrap();
+            register(devices, alice, id, &attestation(1), HpkeKeyWrite::Clear).await;
         }
+        register(
+            devices,
+            bob,
+            DeviceId::generate(),
+            &attestation(1),
+            HpkeKeyWrite::Clear,
+        )
+        .await;
         devices
-            .attest(bob, DeviceId::generate(), &label("bob's"), &attestation(1))
+            .revoke(alice, recent, Some(recent), time::OffsetDateTime::now_utc())
             .await
             .unwrap();
-        devices.revoke(alice, recent).await.unwrap();
         packages
-            .stash(alice, seen, &label("laptop"), &[fresh(1)])
+            .stash(alice, seen, &label("laptop"), false, &[fresh(1)])
             .await
             .unwrap();
 
@@ -762,22 +1417,42 @@ pub mod contract {
         bob: UserId,
     ) {
         let id = DeviceId::generate();
-        devices
-            .attest(alice, id, &label("laptop"), &attestation(1))
-            .await
-            .unwrap();
+        register(devices, alice, id, &attestation(1), HpkeKeyWrite::Clear).await;
 
-        assert_eq!(devices.revoke(bob, id).await.unwrap(), Revocation::NotFound);
         assert_eq!(
-            devices.revoke(alice, id).await.unwrap(),
-            Revocation::Revoked
+            devices
+                .revoke(bob, id, Some(id), time::OffsetDateTime::now_utc())
+                .await
+                .unwrap(),
+            Revocation::NotFound
         );
         assert_eq!(
-            devices.revoke(alice, id).await.unwrap(),
+            devices
+                .revoke(alice, id, Some(id), time::OffsetDateTime::now_utc())
+                .await
+                .unwrap(),
+            Revocation::Revoked {
+                closed: vec![],
+                start_over: None
+            }
+        );
+        assert_eq!(
+            devices
+                .revoke(alice, id, Some(id), time::OffsetDateTime::now_utc())
+                .await
+                .unwrap(),
             Revocation::AlreadyRevoked
         );
         assert_eq!(
-            devices.revoke(alice, DeviceId::generate()).await.unwrap(),
+            devices
+                .revoke(
+                    alice,
+                    DeviceId::generate(),
+                    Some(DeviceId::generate()),
+                    time::OffsetDateTime::now_utc()
+                )
+                .await
+                .unwrap(),
             Revocation::NotFound
         );
         assert!(
@@ -802,6 +1477,7 @@ pub mod contract {
                 alice,
                 laptop,
                 &label("laptop"),
+                false,
                 &[fresh(1), fresh(2), fresh(3)],
             )
             .await
@@ -811,12 +1487,19 @@ pub mod contract {
                 alice,
                 phone,
                 &label("phone"),
+                false,
                 &[fresh(4), package(5, -Duration::minutes(1))],
             )
             .await
             .unwrap();
         packages
-            .stash(bob, DeviceId::generate(), &label("bob's"), &[fresh(6)])
+            .stash(
+                bob,
+                DeviceId::generate(),
+                &label("bob's"),
+                false,
+                &[fresh(6)],
+            )
             .await
             .unwrap();
         packages.claim(alice, Some(laptop)).await.unwrap();
@@ -836,23 +1519,70 @@ pub mod contract {
     ) {
         let id = DeviceId::generate();
         packages
-            .stash(alice, id, &label("Chrome on Android"), &[fresh(1)])
+            .stash(alice, id, &label("Chrome on Android"), false, &[fresh(1)])
             .await
             .unwrap();
         let recorded = devices.find(id).await.unwrap().expect("recorded");
 
         packages
-            .stash(alice, id, &label("another name"), &[fresh(2)])
+            .stash(alice, id, &label("another name"), false, &[fresh(2)])
             .await
             .unwrap();
 
         let seen = devices.find(id).await.unwrap().unwrap();
         assert_eq!(
-            (recorded.owner, &recorded.label, &recorded.attestation),
-            (alice, &label("Chrome on Android"), &None)
+            (
+                recorded.owner,
+                &recorded.label,
+                &recorded.attestation,
+                &recorded.hpke_key
+            ),
+            (alice, &label("Chrome on Android"), &None, &None)
         );
         assert_eq!(seen.label, label("Chrome on Android"));
         assert!(seen.last_seen_at >= recorded.last_seen_at);
+    }
+
+    /// A device registered before its client said what it is, then named by a stash asked to.
+    pub async fn a_known_device_takes_a_stashs_label_only_when_asked(
+        devices: &dyn Devices,
+        packages: &dyn KeyPackages,
+        alice: UserId,
+    ) {
+        let id = DeviceId::generate();
+        devices
+            .attest(
+                alice,
+                id,
+                &DeviceLabel::unknown(),
+                None,
+                &attestation(1),
+                &HpkeKeyWrite::Clear,
+            )
+            .await
+            .unwrap();
+
+        packages
+            .stash(alice, id, &label("Chrome on Linux"), false, &[fresh(1)])
+            .await
+            .unwrap();
+        let still_unknown = devices.find(id).await.unwrap().unwrap().label;
+        packages
+            .stash(alice, id, &label("Chrome on Linux"), true, &[fresh(2)])
+            .await
+            .unwrap();
+        let named = devices.find(id).await.unwrap().unwrap().label;
+        packages
+            .stash(alice, id, &label("Firefox on Linux"), false, &[fresh(3)])
+            .await
+            .unwrap();
+
+        assert_eq!(still_unknown, DeviceLabel::unknown());
+        assert_eq!(named, label("Chrome on Linux"));
+        assert_eq!(
+            devices.find(id).await.unwrap().unwrap().label,
+            label("Chrome on Linux")
+        );
     }
 
     pub async fn a_claim_hands_out_the_oldest_package_once(
@@ -862,7 +1592,7 @@ pub mod contract {
         let (device, oldest) = (DeviceId::generate(), fresh(1));
         for stashed in [oldest.clone(), fresh(2)] {
             packages
-                .stash(alice, device, &label("laptop"), &[stashed])
+                .stash(alice, device, &label("laptop"), false, &[stashed])
                 .await
                 .unwrap();
         }
@@ -893,16 +1623,23 @@ pub mod contract {
                 alice,
                 empty,
                 &label("laptop"),
+                false,
                 &[package(1, -Duration::minutes(1))],
             )
             .await
             .unwrap();
         packages
-            .stash(alice, stocked, &label("phone"), &[fresh(2)])
+            .stash(alice, stocked, &label("phone"), false, &[fresh(2)])
             .await
             .unwrap();
         packages
-            .stash(bob, DeviceId::generate(), &label("bob's"), &[fresh(3)])
+            .stash(
+                bob,
+                DeviceId::generate(),
+                &label("bob's"),
+                false,
+                &[fresh(3)],
+            )
             .await
             .unwrap();
 
@@ -923,14 +1660,22 @@ pub mod contract {
     ) {
         let (revoked, laptop) = (DeviceId::generate(), DeviceId::generate());
         packages
-            .stash(alice, revoked, &label("stolen phone"), &[fresh(1)])
+            .stash(alice, revoked, &label("stolen phone"), false, &[fresh(1)])
             .await
             .unwrap();
         packages
-            .stash(alice, laptop, &label("laptop"), &[fresh(2)])
+            .stash(alice, laptop, &label("laptop"), false, &[fresh(2)])
             .await
             .unwrap();
-        devices.revoke(alice, revoked).await.unwrap();
+        devices
+            .revoke(
+                alice,
+                revoked,
+                Some(revoked),
+                time::OffsetDateTime::now_utc(),
+            )
+            .await
+            .unwrap();
 
         let any = packages.claim(alice, None).await.unwrap();
         let pinned = packages.claim(alice, Some(revoked)).await.unwrap();
@@ -947,16 +1692,15 @@ pub mod contract {
         bob: UserId,
     ) {
         let id = DeviceId::generate();
-        devices
-            .attest(alice, id, &label("alice's"), &attestation(1))
-            .await
-            .unwrap();
+        register(devices, alice, id, &attestation(1), HpkeKeyWrite::Clear).await;
         let before = devices.find(id).await.unwrap();
 
         let attested = devices
-            .attest(bob, id, &label("bob's"), &attestation(2))
+            .attest(bob, id, &label("bob's"), None, &attestation(2), &set(2))
             .await;
-        let stashed = packages.stash(bob, id, &label("bob's"), &[fresh(1)]).await;
+        let stashed = packages
+            .stash(bob, id, &label("bob's"), false, &[fresh(1)])
+            .await;
 
         assert!(
             matches!(attested, Err(KeyStoreError::DeviceTaken)),
@@ -980,12 +1724,13 @@ pub mod contract {
                 alice,
                 device,
                 &label("laptop"),
+                false,
                 &[package(1, -Duration::minutes(1)), fresh(2)],
             )
             .await
             .unwrap();
         packages
-            .stash(alice, device, &label("laptop"), &[fresh(3)])
+            .stash(alice, device, &label("laptop"), false, &[fresh(3)])
             .await
             .unwrap();
         packages.claim(alice, Some(device)).await.unwrap();
@@ -1146,18 +1891,90 @@ pub mod contract {
         }
     }
 
+    /// Generation `generation`, its salt, check value and approval key made of `byte`s.
+    pub(super) fn history_key(generation: i64, byte: u8) -> HistoryKey {
+        HistoryKey {
+            generation: HistoryGeneration::parse(generation).unwrap(),
+            salt: crate::e2ee::HistorySalt::parse(&[byte; 16]).unwrap(),
+            check_value: crate::e2ee::HistoryCheckValue::parse(&[byte; 32]).unwrap(),
+            approval_public_key: crate::e2ee::ApprovalPublicKey::parse(&[byte.wrapping_add(1); 32])
+                .unwrap(),
+        }
+    }
+
+    /// A device of `owner`'s, which a history key may name as having set it.
+    async fn a_device(devices: &dyn Devices, owner: UserId) -> DeviceId {
+        let id = DeviceId::generate();
+        register(devices, owner, id, &attestation(1), HpkeKeyWrite::Clear).await;
+        id
+    }
+
+    /// `device` approved by `key`'s words, so it may set the generation after `key`'s.
+    async fn approve_by_its_words(
+        devices: &dyn Devices,
+        approvals: &dyn DeviceApprovals,
+        owner: UserId,
+        device: DeviceId,
+        key: &HistoryKey,
+    ) {
+        let approval = super::approval::contract::by_passphrase(devices, device, key).await;
+        approvals.approve(owner, &approval).await.unwrap();
+    }
+
+    /// The owner's first history key, set by a device of theirs.
+    async fn first_key(
+        keys: &dyn HistoryKeys,
+        devices: &dyn Devices,
+        owner: UserId,
+    ) -> HistoryGeneration {
+        let device = a_device(devices, owner).await;
+        let replaced = keys
+            .replace(
+                owner,
+                &history_key(1, 1),
+                device,
+                time::OffsetDateTime::now_utc(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            replaced,
+            KeyReplace::Replaced {
+                erased: 0,
+                closed: vec![]
+            }
+        );
+        HistoryGeneration::FIRST
+    }
+
+    async fn archive_under(
+        archive: &dyn HistoryArchive,
+        owner: UserId,
+        generation: HistoryGeneration,
+        entries: &[NewArchiveEntry],
+    ) -> usize {
+        match archive.store(owner, generation, entries).await.unwrap() {
+            Archived::Stored(new) => new,
+            Archived::Stale => panic!("{generation:?} is not the current key"),
+        }
+    }
+
     /// `conversation` is one the store may reference.
     pub async fn an_entry_is_archived_once_per_owner(
         archive: &dyn HistoryArchive,
+        keys: &dyn HistoryKeys,
+        devices: &dyn Devices,
         alice: UserId,
         bob: UserId,
         conversation: ConversationId,
     ) {
+        let alices = first_key(keys, devices, alice).await;
+        let bobs = first_key(keys, devices, bob).await;
         let entries = [archived(conversation, 1), archived(conversation, 2)];
 
-        let first = archive.store(alice, &entries).await.unwrap();
-        let again = archive.store(alice, &entries).await.unwrap();
-        let bobs = archive.store(bob, &entries[..1]).await.unwrap();
+        let first = archive_under(archive, alice, alices, &entries).await;
+        let again = archive_under(archive, alice, alices, &entries).await;
+        let bobs = archive_under(archive, bob, bobs, &entries[..1]).await;
 
         assert_eq!((first, again, bobs), (2, 0, 1));
         let page = archive.page(alice, None, 10).await.unwrap();
@@ -1184,13 +2001,16 @@ pub mod contract {
 
     pub async fn the_archive_pages_newest_first_before_a_cursor(
         archive: &dyn HistoryArchive,
+        keys: &dyn HistoryKeys,
+        devices: &dyn Devices,
         alice: UserId,
         conversation: ConversationId,
     ) {
+        let generation = first_key(keys, devices, alice).await;
         let older: Vec<NewArchiveEntry> = (1..=3).map(|b| archived(conversation, b)).collect();
         let newer: Vec<NewArchiveEntry> = (4..=5).map(|b| archived(conversation, b)).collect();
-        archive.store(alice, &older).await.unwrap();
-        archive.store(alice, &newer).await.unwrap();
+        archive_under(archive, alice, generation, &older).await;
+        archive_under(archive, alice, generation, &newer).await;
 
         let all = archive.page(alice, None, 10).await.unwrap();
         let first = archive.page(alice, None, 2).await.unwrap();
@@ -1220,43 +2040,349 @@ pub mod contract {
         assert_eq!(rest, all[2..].to_vec());
     }
 
-    pub async fn clearing_an_archive_deletes_its_owners_entries_only(
+    pub async fn clearing_an_archive_deletes_its_owners_entries_and_keeps_the_key(
         archive: &dyn HistoryArchive,
+        keys: &dyn HistoryKeys,
+        devices: &dyn Devices,
         alice: UserId,
         bob: UserId,
         conversation: ConversationId,
     ) {
-        archive
-            .store(
+        let alices = first_key(keys, devices, alice).await;
+        let bobs = first_key(keys, devices, bob).await;
+        archive_under(
+            archive,
+            alice,
+            alices,
+            &[archived(conversation, 1), archived(conversation, 2)],
+        )
+        .await;
+        archive_under(archive, bob, bobs, &[archived(conversation, 3)]).await;
+
+        let cleared = archive.clear(alice, alices).await.unwrap();
+
+        assert_eq!(cleared, Cleared::Erased(2));
+        assert!(archive.page(alice, None, 10).await.unwrap().is_empty());
+        assert_eq!(archive.page(bob, None, 10).await.unwrap().len(), 1);
+        assert_eq!(
+            keys.current(alice).await.unwrap().map(|held| held.key),
+            Some(history_key(1, 1)),
+            "the key stays"
+        );
+        assert_eq!(
+            archive_under(archive, alice, alices, &[archived(conversation, 4)]).await,
+            1,
+            "and is saved under still"
+        );
+    }
+
+    pub async fn a_clear_erases_only_under_the_generation_it_was_decided_on(
+        archive: &dyn HistoryArchive,
+        keys: &dyn HistoryKeys,
+        devices: &dyn Devices,
+        approvals: &dyn DeviceApprovals,
+        alice: UserId,
+        bob: UserId,
+        conversation: ConversationId,
+    ) {
+        let generation = |raw| HistoryGeneration::parse(raw).unwrap();
+        let first = first_key(keys, devices, alice).await;
+        let device = a_device(devices, alice).await;
+        approve_by_its_words(devices, approvals, alice, device, &history_key(1, 1)).await;
+        keys.replace(
+            alice,
+            &history_key(2, 2),
+            device,
+            time::OffsetDateTime::now_utc(),
+        )
+        .await
+        .unwrap();
+        archive_under(archive, alice, generation(2), &[archived(conversation, 1)]).await;
+
+        let replaced = archive.clear(alice, first).await.unwrap();
+        let ahead = archive.clear(alice, generation(3)).await.unwrap();
+        let none_set = archive.clear(bob, first).await.unwrap();
+        let kept = archive.page(alice, None, 10).await.unwrap().len();
+        let current = archive.clear(alice, generation(2)).await.unwrap();
+
+        for refused in [replaced, ahead, none_set] {
+            assert_eq!(refused, Cleared::Stale);
+        }
+        assert_eq!(kept, 1, "the new generation's entry stays");
+        assert_eq!(current, Cleared::Erased(1));
+    }
+
+    pub async fn an_upload_is_stored_only_under_the_current_generation(
+        archive: &dyn HistoryArchive,
+        keys: &dyn HistoryKeys,
+        devices: &dyn Devices,
+        approvals: &dyn DeviceApprovals,
+        alice: UserId,
+        conversation: ConversationId,
+    ) {
+        let (first, second) = (
+            HistoryGeneration::FIRST,
+            HistoryGeneration::parse(2).unwrap(),
+        );
+        let entries = [archived(conversation, 1)];
+
+        let before_any = archive.store(alice, first, &entries).await.unwrap();
+        first_key(keys, devices, alice).await;
+        let ahead = archive.store(alice, second, &entries).await.unwrap();
+        let device = a_device(devices, alice).await;
+        approve_by_its_words(devices, approvals, alice, device, &history_key(1, 1)).await;
+        keys.replace(
+            alice,
+            &history_key(2, 2),
+            device,
+            time::OffsetDateTime::now_utc(),
+        )
+        .await
+        .unwrap();
+        let replaced = archive.store(alice, first, &entries).await.unwrap();
+        let current = archive.store(alice, second, &entries).await.unwrap();
+
+        for refused in [before_any, ahead, replaced] {
+            assert_eq!(refused, Archived::Stale);
+        }
+        assert_eq!(current, Archived::Stored(1));
+        assert_eq!(archive.page(alice, None, 10).await.unwrap().len(), 1);
+    }
+
+    pub async fn a_key_is_set_only_for_the_generation_after_the_current_one(
+        keys: &dyn HistoryKeys,
+        devices: &dyn Devices,
+        approvals: &dyn DeviceApprovals,
+        alice: UserId,
+        bob: UserId,
+    ) {
+        let generation = |raw| Some(HistoryGeneration::parse(raw).unwrap());
+        let (laptop, phone) = (
+            a_device(devices, alice).await,
+            a_device(devices, alice).await,
+        );
+
+        let unset = keys.current(alice).await.unwrap();
+        let skipping = keys
+            .replace(
                 alice,
-                &[archived(conversation, 1), archived(conversation, 2)],
+                &history_key(2, 2),
+                laptop,
+                time::OffsetDateTime::now_utc(),
             )
             .await
             .unwrap();
-        archive
-            .store(bob, &[archived(conversation, 3)])
+        let first = keys
+            .replace(
+                alice,
+                &history_key(1, 1),
+                laptop,
+                time::OffsetDateTime::now_utc(),
+            )
+            .await
+            .unwrap();
+        let raced = keys
+            .replace(
+                alice,
+                &history_key(1, 9),
+                phone,
+                time::OffsetDateTime::now_utc(),
+            )
+            .await
+            .unwrap();
+        let ahead = keys
+            .replace(
+                alice,
+                &history_key(3, 3),
+                phone,
+                time::OffsetDateTime::now_utc(),
+            )
+            .await
+            .unwrap();
+        let held_first = keys.current(alice).await.unwrap();
+        approve_by_its_words(devices, approvals, alice, phone, &history_key(1, 1)).await;
+        let second = keys
+            .replace(
+                alice,
+                &history_key(2, 2),
+                phone,
+                time::OffsetDateTime::now_utc(),
+            )
+            .await
+            .unwrap();
+        let back = keys
+            .replace(
+                alice,
+                &history_key(1, 1),
+                laptop,
+                time::OffsetDateTime::now_utc(),
+            )
             .await
             .unwrap();
 
-        let cleared = archive.clear(alice).await.unwrap();
-
-        assert_eq!(cleared, 2);
-        assert!(archive.page(alice, None, 10).await.unwrap().is_empty());
-        assert_eq!(archive.page(bob, None, 10).await.unwrap().len(), 1);
+        assert_eq!(unset, None);
+        assert_eq!(skipping, KeyReplace::Conflict(None));
+        assert_eq!(
+            first,
+            KeyReplace::Replaced {
+                erased: 0,
+                closed: vec![]
+            }
+        );
+        assert_eq!(raced, KeyReplace::Conflict(generation(1)));
+        assert_eq!(ahead, KeyReplace::Conflict(generation(1)));
+        assert_eq!(
+            held_first,
+            Some(HeldHistoryKey {
+                key: history_key(1, 1),
+                set_by: Some(laptop),
+            }),
+            "the first one's, by the device that set it"
+        );
+        assert_eq!(
+            second,
+            KeyReplace::Replaced {
+                erased: 0,
+                closed: vec![]
+            }
+        );
+        assert_eq!(back, KeyReplace::Conflict(generation(2)));
+        assert_eq!(
+            keys.current(alice).await.unwrap(),
+            Some(HeldHistoryKey {
+                key: history_key(2, 2),
+                set_by: Some(phone),
+            })
+        );
+        assert_eq!(keys.current(bob).await.unwrap(), None);
     }
 
-    pub async fn the_first_salt_set_is_kept(archive: &dyn HistoryArchive, alice: UserId) {
-        let (first, second) = (
-            ArchiveSalt::parse(&[1; 16]).unwrap(),
-            ArchiveSalt::parse(&[2; 16]).unwrap(),
+    pub async fn setting_the_key_held_again_is_a_retry_that_writes_nothing(
+        archive: &dyn HistoryArchive,
+        keys: &dyn HistoryKeys,
+        devices: &dyn Devices,
+        approvals: &dyn DeviceApprovals,
+        alice: UserId,
+        conversation: ConversationId,
+    ) {
+        let (laptop, phone) = (
+            a_device(devices, alice).await,
+            a_device(devices, alice).await,
         );
+        keys.replace(
+            alice,
+            &history_key(1, 1),
+            laptop,
+            time::OffsetDateTime::now_utc(),
+        )
+        .await
+        .unwrap();
+        approve_by_its_words(devices, approvals, alice, laptop, &history_key(1, 1)).await;
+        keys.replace(
+            alice,
+            &history_key(2, 2),
+            laptop,
+            time::OffsetDateTime::now_utc(),
+        )
+        .await
+        .unwrap();
+        archive_under(
+            archive,
+            alice,
+            HistoryGeneration::parse(2).unwrap(),
+            &[archived(conversation, 1)],
+        )
+        .await;
 
-        let unset = archive.salt(alice).await.unwrap();
-        let set = archive.set_salt_once(alice, &first).await.unwrap();
-        let kept = archive.set_salt_once(alice, &second).await.unwrap();
+        let again = keys
+            .replace(
+                alice,
+                &history_key(2, 2),
+                phone,
+                time::OffsetDateTime::now_utc(),
+            )
+            .await
+            .unwrap();
+        let older = keys
+            .replace(
+                alice,
+                &history_key(1, 1),
+                laptop,
+                time::OffsetDateTime::now_utc(),
+            )
+            .await
+            .unwrap();
 
-        assert_eq!((unset, &set, &kept), (None, &first, &first));
-        assert_eq!(archive.salt(alice).await.unwrap(), Some(first));
+        assert_eq!(again, KeyReplace::AlreadySet);
+        assert_eq!(
+            older,
+            KeyReplace::Conflict(Some(HistoryGeneration::parse(2).unwrap())),
+            "only the key held"
+        );
+        assert_eq!(archive.page(alice, None, 10).await.unwrap().len(), 1);
+        assert_eq!(
+            keys.current(alice)
+                .await
+                .unwrap()
+                .and_then(|held| held.set_by),
+            Some(laptop),
+            "still the device that set it"
+        );
+    }
+
+    pub async fn a_new_generation_erases_its_owners_archive_in_the_same_write(
+        archive: &dyn HistoryArchive,
+        keys: &dyn HistoryKeys,
+        devices: &dyn Devices,
+        approvals: &dyn DeviceApprovals,
+        alice: UserId,
+        bob: UserId,
+        conversation: ConversationId,
+    ) {
+        let alices = first_key(keys, devices, alice).await;
+        let bobs = first_key(keys, devices, bob).await;
+        let device = a_device(devices, alice).await;
+        approve_by_its_words(devices, approvals, alice, device, &history_key(1, 1)).await;
+        archive_under(
+            archive,
+            alice,
+            alices,
+            &[archived(conversation, 1), archived(conversation, 2)],
+        )
+        .await;
+        archive_under(archive, bob, bobs, &[archived(conversation, 3)]).await;
+
+        let refused = keys
+            .replace(
+                alice,
+                &history_key(3, 3),
+                device,
+                time::OffsetDateTime::now_utc(),
+            )
+            .await
+            .unwrap();
+        let kept = archive.page(alice, None, 10).await.unwrap().len();
+        let replaced = keys
+            .replace(
+                alice,
+                &history_key(2, 2),
+                device,
+                time::OffsetDateTime::now_utc(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(refused, KeyReplace::Conflict(Some(alices)));
+        assert_eq!(kept, 2, "a conflict erases nothing");
+        assert_eq!(
+            replaced,
+            KeyReplace::Replaced {
+                erased: 2,
+                closed: vec![]
+            }
+        );
+        assert!(archive.page(alice, None, 10).await.unwrap().is_empty());
+        assert_eq!(archive.page(bob, None, 10).await.unwrap().len(), 1);
     }
 }
 

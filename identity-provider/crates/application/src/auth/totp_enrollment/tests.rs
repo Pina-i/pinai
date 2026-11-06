@@ -1,6 +1,8 @@
 use domain::auth::SignInAccount;
 use domain::auth::testing::{StepAuthenticator, signed_up};
 
+use domain::UserId;
+
 use crate::auth::world::{now, world};
 
 use super::*;
@@ -9,12 +11,12 @@ use super::*;
 async fn an_enrolled_secret_turns_the_second_factor_on_once_the_apps_code_confirms_it() {
     let w = world().await;
 
-    let enrollment = w.enroll.execute(w.alice.id).await.unwrap();
+    let enrollment = w.enroll.execute(&w.bearer_of(w.alice.id)).await.unwrap();
     let pending = w.factors.pending(w.alice.id).await.unwrap().unwrap();
     let codes = w
         .confirm
         .execute(
-            w.alice.id,
+            &w.bearer_of(w.alice.id),
             &StepAuthenticator::code_at(&pending, now()),
             now(),
         )
@@ -44,9 +46,12 @@ async fn enrolling_again_is_refused_while_on_and_a_confirmation_needs_the_right_
     };
     w.sign_up(&bob).await;
 
-    let again = w.enroll.execute(bob.id).await;
-    let unasked = w.confirm.execute(w.alice.id, "123456", now()).await;
-    w.enroll.execute(w.alice.id).await.unwrap();
+    let again = w.enroll.execute(&w.bearer_of(bob.id)).await;
+    let unasked = w
+        .confirm
+        .execute(&w.bearer_of(w.alice.id), "123456", now())
+        .await;
+    w.enroll.execute(&w.bearer_of(w.alice.id)).await.unwrap();
     let pending = w.factors.pending(w.alice.id).await.unwrap().unwrap();
     let right = StepAuthenticator::code_at(&pending, now());
     let wrong = if right == "000000" {
@@ -54,8 +59,11 @@ async fn enrolling_again_is_refused_while_on_and_a_confirmation_needs_the_right_
     } else {
         "000000"
     };
-    let guessed = w.confirm.execute(w.alice.id, wrong, now()).await;
-    let unknown = w.enroll.execute(UserId::generate()).await;
+    let guessed = w
+        .confirm
+        .execute(&w.bearer_of(w.alice.id), wrong, now())
+        .await;
+    let unknown = w.enroll.execute(&w.bearer_of(UserId::generate())).await;
 
     assert!(matches!(again, Err(AuthError::TotpEnabled)), "{again:?}");
     assert!(
@@ -78,14 +86,14 @@ fn consistent((on, codes, pending): (bool, usize, bool)) -> bool {
 #[tokio::test]
 async fn a_confirmation_the_store_fails_part_way_never_leaves_the_factor_on_without_codes() {
     let w = world().await;
-    w.enroll.execute(w.alice.id).await.unwrap();
+    w.enroll.execute(&w.bearer_of(w.alice.id)).await.unwrap();
     let pending = w.factors.pending(w.alice.id).await.unwrap().unwrap();
     w.factors.down_after(1);
 
     let _ = w
         .confirm
         .execute(
-            w.alice.id,
+            &w.bearer_of(w.alice.id),
             &StepAuthenticator::code_at(&pending, now()),
             now(),
         )
@@ -93,4 +101,36 @@ async fn a_confirmation_the_store_fails_part_way_never_leaves_the_factor_on_with
 
     let state = w.factors.state_of(w.alice.id);
     assert!(consistent(state), "{state:?}");
+}
+
+#[tokio::test]
+async fn only_an_approved_device_turns_the_second_factor_on_once_the_account_has_a_key() {
+    let w = world().await;
+    let (laptop, on_the_laptop) = w.on_a_device().await;
+    let (_, on_a_fresh_one) = w.on_a_device().await;
+    w.keyed_from(laptop).await;
+    let unnamed = w.bearer_of(w.alice.id);
+
+    let fresh_enrolls = w.enroll.execute(&on_a_fresh_one).await;
+    let unnamed_enrolls = w.enroll.execute(&unnamed).await;
+    w.enroll.execute(&on_the_laptop).await.unwrap();
+    let pending = w.factors.pending(w.alice.id).await.unwrap().unwrap();
+    let code = StepAuthenticator::code_at(&pending, now());
+    let fresh_confirms = w.confirm.execute(&on_a_fresh_one, &code, now()).await;
+    let still_off = w.factors.state_of(w.alice.id);
+    let laptop_confirms = w.confirm.execute(&on_the_laptop, &code, now()).await;
+
+    for refused in [fresh_enrolls.map(|_| ()), unnamed_enrolls.map(|_| ())] {
+        assert!(
+            matches!(refused, Err(AuthError::ApprovalRequired(_))),
+            "{refused:?}"
+        );
+    }
+    assert!(
+        matches!(fresh_confirms, Err(AuthError::ApprovalRequired(_))),
+        "{fresh_confirms:?}"
+    );
+    assert_eq!(still_off, (false, 0, true));
+    assert!(laptop_confirms.is_ok(), "{laptop_confirms:?}");
+    assert!(w.factors.state_of(w.alice.id).0);
 }

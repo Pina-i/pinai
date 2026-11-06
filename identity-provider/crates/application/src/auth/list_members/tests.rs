@@ -1,5 +1,5 @@
 use domain::auth::testing::{seeded_actor, signed_up};
-use domain::auth::{SessionKind, Sessions, SignInAccount};
+use domain::auth::{Sessions, SignInAccount};
 use domain::presence::PresenceState;
 use time::Duration;
 
@@ -34,7 +34,7 @@ async fn each_member_is_online_while_the_presence_board_says_it_is_around() {
         (&carol, hours_ago(4)),
     ] {
         w.sessions
-            .open(account.id, &SessionKind::Browser, last_used)
+            .open_browser(account.id, last_used)
             .await
             .unwrap();
     }

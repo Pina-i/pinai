@@ -242,11 +242,21 @@ async fn a_code_is_exchanged_once_for_the_accounts_tokens() {
     let alice = signed_up("alice");
     let app = app_with(std::slice::from_ref(&alice)).await;
     app.respond(login(&alice.email, "alice-password")).await;
-    let session = app.sign_in.sessions.all()[0].id;
+    let browser = app.sign_in.sessions.all()[0].id;
 
     let (status, tokens) = app.send(exchange("code-1", VERIFIER)).await;
     let (again, refused) = app.send(exchange("code-1", VERIFIER)).await;
 
+    let session = app.sign_in.sessions.all()[1].clone();
+    assert_eq!(
+        session.kind,
+        domain::auth::SessionKind::Web {
+            client: domain::auth::ClientId::parse(CLIENT_ID).unwrap(),
+            browser,
+        },
+        "the web app's own, under the browser's"
+    );
+    let session = session.id;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         tokens,
@@ -831,7 +841,9 @@ async fn signing_out_ends_the_session_so_its_tokens_stop_working_at_once() {
     let app = app_with(std::slice::from_ref(&alice)).await;
     let signed_in = app.respond(login(&alice.email, "alice-password")).await;
     let cookie = set_cookie(&signed_in).split(';').next().unwrap().to_owned();
-    let session = app.sign_in.sessions.all()[0].id;
+    let browser = app.sign_in.sessions.all()[0].id;
+    app.respond(exchange("code-1", VERIFIER)).await;
+    let session = app.sign_in.sessions.all()[1].id;
     let token = app.token_in(alice.id, session);
 
     let before = app
@@ -850,8 +862,8 @@ async fn signing_out_ends_the_session_so_its_tokens_stop_working_at_once() {
     );
     assert_eq!(
         app.sign_in.ended.ended(),
-        vec![session],
-        "its sockets closed"
+        vec![browser, session],
+        "its web app's with it, their sockets closed"
     );
     assert!(
         location(&again).starts_with("/login?"),
@@ -865,8 +877,8 @@ async fn a_refresh_token_is_traded_for_an_access_token_and_its_successor() {
     let alice = signed_up("alice");
     let app = app_with(std::slice::from_ref(&alice)).await;
     app.respond(login(&alice.email, "alice-password")).await;
-    let session = app.sign_in.sessions.all()[0].id;
     app.respond(exchange("code-1", VERIFIER)).await;
+    let session = app.sign_in.sessions.all()[1].id;
 
     let (status, tokens) = app.send(refresh(CLIENT_ID, "refresh-1")).await;
     let (unknown, refused) = app.send(refresh(CLIENT_ID, "a-guess")).await;
@@ -897,9 +909,10 @@ async fn a_refresh_token_presented_again_ends_its_session_and_every_token_with_i
     let alice = signed_up("alice");
     let app = app_with(std::slice::from_ref(&alice)).await;
     app.respond(login(&alice.email, "alice-password")).await;
-    let session = app.sign_in.sessions.all()[0].id;
-    let token = app.token_in(alice.id, session);
+    let browser = app.sign_in.sessions.all()[0].id;
     app.respond(exchange("code-1", VERIFIER)).await;
+    let session = app.sign_in.sessions.all()[1].id;
+    let token = app.token_in(alice.id, session);
     app.respond(refresh(CLIENT_ID, "refresh-1")).await;
     app.respond(refresh(CLIENT_ID, "refresh-2")).await;
 
@@ -921,6 +934,11 @@ async fn a_refresh_token_presented_again_ends_its_session_and_every_token_with_i
         app.sign_in.ended.ended(),
         vec![session],
         "its sockets closed"
+    );
+    assert_eq!(
+        app.sign_in.sessions.reason(browser),
+        None,
+        "the browser signs the app in again"
     );
 }
 
@@ -1031,15 +1049,18 @@ fn revoke(client: &str, token: &str) -> Request<Body> {
 async fn revoking_the_refresh_token_signs_its_session_out() {
     let alice = signed_up("alice");
     let app = app_with(std::slice::from_ref(&alice)).await;
-    app.respond(login(&alice.email, "alice-password")).await;
-    let session = app.sign_in.sessions.all()[0].id;
+    let signed_in = app.respond(login(&alice.email, "alice-password")).await;
+    let cookie = set_cookie(&signed_in).split(';').next().unwrap().to_owned();
     app.respond(exchange("code-1", VERIFIER)).await;
+    let session = app.sign_in.sessions.all()[1].id;
 
     let revoked = app.respond(revoke(CLIENT_ID, "refresh-1")).await;
     let (after, _) = app.send(refresh(CLIENT_ID, "refresh-1")).await;
     let (bearer, _) = app
         .send(bearer_get("/api/friends", &app.token_in(alice.id, session)))
         .await;
+    let silent = app.respond(get(&authorize_uri(&[]), Some(&cookie))).await;
+    let (_, again) = app.send(exchange("code-2", VERIFIER)).await;
 
     assert_eq!(revoked.status(), StatusCode::OK);
     assert_eq!(revoked.headers()[header::CACHE_CONTROL], "no-store");
@@ -1050,6 +1071,17 @@ async fn revoking_the_refresh_token_signs_its_session_out() {
     assert_eq!(
         (after, bearer),
         (StatusCode::BAD_REQUEST, StatusCode::UNAUTHORIZED)
+    );
+    assert!(
+        location(&silent).starts_with(REDIRECT_URI),
+        "the browser session lives on: {}",
+        location(&silent)
+    );
+    let reopened = app.sign_in.sessions.all()[2].id;
+    assert_eq!(
+        again["access_token"],
+        format!("access:{}:{reopened}:{CLIENT_ID}", alice.id),
+        "a new session of the web app's"
     );
 }
 

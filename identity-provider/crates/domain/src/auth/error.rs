@@ -18,6 +18,16 @@ pub enum AuthError {
     RefreshUnusable,
     #[error("not one of the account's devices, or revoked")]
     DeviceRefused,
+    #[error("this session declared another device")]
+    DeviceMismatch,
+    /// Naming a device takes its root key's signature over the session: a password alone speaks
+    /// for no device.
+    #[error("the signature does not prove the device's root key")]
+    DeviceProofInvalid,
+    #[error(transparent)]
+    ApprovalRequired(#[from] crate::e2ee::ApprovalRequired),
+    #[error("the session has ended")]
+    SessionEnded,
     #[error("the code was issued to another client")]
     ClientMismatch,
     #[error("the code_verifier does not match the code_challenge")]

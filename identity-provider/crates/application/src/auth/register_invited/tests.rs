@@ -137,11 +137,7 @@ async fn the_web_app_then_signs_in_without_the_password() {
 async fn a_browser_signed_in_as_someone_else_is_signed_in_as_the_new_account() {
     let w = world().await;
     let (_, token) = invited(&w).await;
-    let alices = w
-        .sessions
-        .open(w.alice.id, &SessionKind::Browser, now())
-        .await
-        .unwrap();
+    let alices = w.sessions.open_browser(w.alice.id, now()).await.unwrap();
 
     let joined = w
         .register_invited

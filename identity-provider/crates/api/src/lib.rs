@@ -1,9 +1,11 @@
 mod accounts;
 mod actors;
+mod approvals;
 mod attachments;
 pub mod auth;
 pub mod background;
 mod blocks;
+mod e2ee;
 pub mod error;
 mod forgot;
 mod groups;
@@ -14,6 +16,7 @@ mod intro;
 mod invitations;
 mod invite;
 mod key_directory;
+mod key_shares;
 mod members;
 mod messaging;
 mod mls;
@@ -31,6 +34,7 @@ mod sign_in;
 mod sign_up;
 
 mod social;
+mod start_over;
 #[cfg(test)]
 mod testing;
 mod ws;
@@ -45,9 +49,12 @@ use application::auth::{
     VerifyEmail,
 };
 use application::e2ee::{
-    AppendCommit, ArchiveMessages, CatchUpCommits, ClaimKeyPackage, ClaimWelcomes, ClearArchive,
-    KeyPackageStatus, ListDevices, LoadArchiveSalt, ReadArchive, ReceiveCommit, ReceiveWelcome,
-    RegisterDevice, RevokeDevice, SendWelcome, SetArchiveSalt, UploadKeyPackages,
+    AppendCommit, ApproveDevice, ArchiveMessages, AskToStartOver, CatchUpCommits, ClaimKeyPackage,
+    ClaimWelcomes, ClearArchive, CloseApprovalRequest, EndStartOver, KeyPackageStatus,
+    ListApprovalRequests, ListDevices, LoadHistoryKey, LoadKeyShare, LoadStartOver,
+    OpenApprovalRequest, PostApprovalMessage, ReadApprovalMessages, ReadArchive, ReceiveCommit,
+    ReceiveWelcome, RegisterDevice, ReportHistoryKey, RevokeDevice, SendWelcome, SetHistoryKey,
+    ShareHistoryKey, UploadKeyPackages,
 };
 use application::identity::{
     DescribeInstance, EditIntro, FindAccount, SearchAccounts, ShowIntro, WebFinger,
@@ -199,6 +206,14 @@ pub struct AppState {
     pub register_device: Arc<RegisterDevice>,
     pub list_devices: Arc<ListDevices>,
     pub revoke_device: Arc<RevokeDevice>,
+    pub report_history_key: Arc<ReportHistoryKey>,
+    pub approve_device: Arc<ApproveDevice>,
+    /// The code handshake's relay between two devices of an account.
+    pub open_approval_request: Arc<OpenApprovalRequest>,
+    pub list_approval_requests: Arc<ListApprovalRequests>,
+    pub post_approval_message: Arc<PostApprovalMessage>,
+    pub read_approval_messages: Arc<ReadApprovalMessages>,
+    pub close_approval_request: Arc<CloseApprovalRequest>,
     pub upload_key_packages: Arc<UploadKeyPackages>,
     pub claim_key_package: Arc<ClaimKeyPackage>,
     pub key_package_status: Arc<KeyPackageStatus>,
@@ -211,8 +226,15 @@ pub struct AppState {
     pub archive_messages: Arc<ArchiveMessages>,
     pub read_archive: Arc<ReadArchive>,
     pub clear_archive: Arc<ClearArchive>,
-    pub load_archive_salt: Arc<LoadArchiveSalt>,
-    pub set_archive_salt: Arc<SetArchiveSalt>,
+    pub load_history_key: Arc<LoadHistoryKey>,
+    pub set_history_key: Arc<SetHistoryKey>,
+    /// The passphrase, sealed by one device of an account for another.
+    pub share_history_key: Arc<ShareHistoryKey>,
+    pub load_key_share: Arc<LoadKeyShare>,
+    /// A device not approved asking to start the history over, and the approved devices' cancel.
+    pub ask_to_start_over: Arc<AskToStartOver>,
+    pub load_start_over: Arc<LoadStartOver>,
+    pub end_start_over: Arc<EndStartOver>,
     /// The live connections, which the WebSocket registers with.
     pub hub: Arc<Hub>,
     pub missed_events: Arc<dyn MissedEvents>,
@@ -315,6 +337,26 @@ pub fn router(state: AppState) -> Router {
             "/api/keys/devices/{device_id}/revoke",
             post(key_directory::revoke),
         )
+        .route(
+            "/api/keys/devices/{device_id}/history-key",
+            put(key_directory::hold_history_key),
+        )
+        .route(
+            "/api/keys/devices/{device_id}/approvals",
+            post(approvals::approve),
+        )
+        .route(
+            "/api/keys/devices/approval-requests",
+            get(approvals::requests).post(approvals::open),
+        )
+        .route(
+            "/api/keys/devices/approval-requests/{request_id}",
+            delete(approvals::close),
+        )
+        .route(
+            "/api/keys/devices/approval-requests/{request_id}/messages",
+            get(approvals::messages).post(approvals::post_message),
+        )
         .route("/api/sessions", delete(sessions::sign_out_others))
         .route("/api/sessions/current/device", put(sessions::link_device))
         .route("/api/keys/packages", post(key_directory::upload))
@@ -338,10 +380,16 @@ pub fn router(state: AppState) -> Router {
                 .get(history::page)
                 .delete(history::clear),
         )
+        .route("/api/history/key", get(history::key).put(history::set_key))
         .route(
-            "/api/history/salt",
-            get(history::salt).post(history::set_salt),
+            "/api/history/key-shares",
+            get(key_shares::held).post(key_shares::share),
         )
+        .route(
+            "/api/history/start-over",
+            get(start_over::pending).post(start_over::ask),
+        )
+        .route("/api/history/start-over/{id}", delete(start_over::end))
         .route("/api/presence", get(presence::read))
         .route("/api/presence/batch", post(presence::batch))
         .route("/api/presence/stream", get(presence::stream))

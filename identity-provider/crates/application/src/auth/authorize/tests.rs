@@ -1,5 +1,4 @@
 use domain::SessionId;
-use domain::auth::SessionKind;
 use domain::auth::testing::{CHALLENGE, REDIRECT_URI, a_request};
 use domain::auth::{ClientSignIn, Grant, RevokedReason, SESSION_IDLE, Sessions};
 use time::Duration;
@@ -28,7 +27,7 @@ async fn a_browser_signed_in_already_to_this_app_is_handed_a_code_at_once() {
     let w = world().await;
     let session = w
         .sessions
-        .open(w.alice.id, &SessionKind::Browser, now() - Duration::days(3))
+        .open_browser(w.alice.id, now() - Duration::days(3))
         .await
         .unwrap();
     w.sign_ins
@@ -77,14 +76,8 @@ async fn a_session_never_signs_in_silently_to_an_app_its_account_did_not_sign_in
         .await
         .unwrap();
     let (alices, bobs) = (
-        w.sessions
-            .open(w.alice.id, &SessionKind::Browser, now())
-            .await
-            .unwrap(),
-        w.sessions
-            .open(bob.id, &SessionKind::Browser, now())
-            .await
-            .unwrap(),
+        w.sessions.open_browser(w.alice.id, now()).await.unwrap(),
+        w.sessions.open_browser(bob.id, now()).await.unwrap(),
     );
     let staying = AuthorizeCommand {
         scope: "openid profile email offline_access".to_owned(),
@@ -121,18 +114,14 @@ async fn a_browser_without_a_live_session_is_sent_to_sign_in() {
         .remember(&ClientSignIn::of(w.alice.id, &a_request()), now())
         .await
         .unwrap();
-    let revoked = w
-        .sessions
-        .open(w.alice.id, &SessionKind::Browser, now())
-        .await
-        .unwrap();
+    let revoked = w.sessions.open_browser(w.alice.id, now()).await.unwrap();
     w.sessions
         .revoke(revoked, RevokedReason::SignOut, now())
         .await
         .unwrap();
     let idle = w
         .sessions
-        .open(w.alice.id, &SessionKind::Browser, now() - SESSION_IDLE)
+        .open_browser(w.alice.id, now() - SESSION_IDLE)
         .await
         .unwrap();
 
@@ -151,11 +140,7 @@ async fn a_browser_without_a_live_session_is_sent_to_sign_in() {
 #[tokio::test]
 async fn a_request_is_refused_for_another_flow_an_unknown_client_or_an_unregistered_redirect() {
     let w = world().await;
-    let session = w
-        .sessions
-        .open(w.alice.id, &SessionKind::Browser, now())
-        .await
-        .unwrap();
+    let session = w.sessions.open_browser(w.alice.id, now()).await.unwrap();
     let refused = async |command: AuthorizeCommand| {
         w.authorize
             .execute(command, Some(session), now())
@@ -239,11 +224,7 @@ async fn the_client_and_its_redirect_are_checked_before_the_flow_so_an_error_can
 #[tokio::test]
 async fn prompt_login_asks_the_password_whatever_session_the_browser_holds() {
     let w = world().await;
-    let session = w
-        .sessions
-        .open(w.alice.id, &SessionKind::Browser, now())
-        .await
-        .unwrap();
+    let session = w.sessions.open_browser(w.alice.id, now()).await.unwrap();
     w.sign_ins
         .remember(&ClientSignIn::of(w.alice.id, &a_request()), now())
         .await

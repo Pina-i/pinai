@@ -108,13 +108,26 @@ impl Hub {
     /// Send a frame to all connections for a given user.
     /// Dead senders are pruned automatically.
     pub fn send_to_user(&self, user_id: &Uuid, frame: Frame) {
+        self.send_where(user_id, |_| true, frame);
+    }
+
+    /// Send a frame to the connections `user_id` opened under any of `sessions`; dead senders
+    /// among them are pruned.
+    pub fn send_to_sessions(&self, user_id: &Uuid, sessions: &[Uuid], frame: Frame) {
+        self.send_where(
+            user_id,
+            |connection| sessions.contains(&connection.session),
+            frame,
+        );
+    }
+
+    fn send_where(&self, user_id: &Uuid, to: impl Fn(&Connection) -> bool, frame: Frame) {
         if let Some(mut senders) = self.connections.get_mut(user_id) {
-            senders.retain(|connection| connection.tx.send(Arc::clone(&frame)).is_ok());
-            if senders.is_empty() {
-                drop(senders);
-                self.connections.remove(user_id);
-            }
+            senders.retain(|connection| {
+                !to(connection) || connection.tx.send(Arc::clone(&frame)).is_ok()
+            });
         }
+        self.forget_if_gone(user_id);
     }
 
     /// Tells the connections `user_id` opened under `session` that it ended; each closes, and
@@ -138,11 +151,15 @@ impl Hub {
     fn remove(&self, user_id: Uuid, conn_id: Uuid) {
         if let Some(mut senders) = self.connections.get_mut(&user_id) {
             senders.retain(|connection| connection.id != conn_id);
-            if senders.is_empty() {
-                drop(senders);
-                self.connections.remove(&user_id);
-            }
         }
+        self.forget_if_gone(&user_id);
+    }
+
+    /// Checked under the shard's lock: a connection subscribing between the emptying and the
+    /// removal is never dropped with the entry.
+    fn forget_if_gone(&self, user_id: &Uuid) {
+        self.connections
+            .remove_if(user_id, |_, connections| connections.is_empty());
     }
 }
 

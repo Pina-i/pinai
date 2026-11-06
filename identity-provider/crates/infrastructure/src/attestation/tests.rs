@@ -1,4 +1,4 @@
-use ed25519_dalek::{Signature, Verifier};
+use ed25519_dalek::{SigningKey, Verifier};
 use jwt_utils::load_ed_keypair;
 
 use super::*;
@@ -17,8 +17,10 @@ fn attester() -> Ed25519DeviceAttester {
     Ed25519DeviceAttester::new(Arc::new(keypair))
 }
 
-fn expires() -> OffsetDateTime {
-    OffsetDateTime::parse("2027-05-14T00:00:00Z", &Rfc3339).unwrap()
+/// 2027-05-14T00:00:00Z, a lifetime after its issue.
+fn expires() -> AttestationExpiry {
+    let issued = time::OffsetDateTime::parse("2026-05-14T00:00:00Z", &Rfc3339).unwrap();
+    domain::e2ee::attestation_period(issued).1
 }
 
 /// The wire format's golden vector: a break here means a new version tag.
@@ -61,4 +63,59 @@ fn an_attestation_verifies_under_the_instance_key_and_only_for_its_bytes() {
             .signed_message
             .starts_with(b"IDP-ATTEST-v1\nhttps://idp.alice.com/users/alice_xK9mP\n")
     );
+}
+
+fn root_key(seed: u8) -> (SigningKey, DeviceRootKey) {
+    let signing = SigningKey::from_bytes(&[seed; 32]);
+    let public = DeviceRootKey::parse(signing.verifying_key().as_bytes()).unwrap();
+    (signing, public)
+}
+
+#[test]
+fn a_root_key_signature_verifies_only_under_its_key_and_over_its_bytes() {
+    let ((signing, key), (_, other)) = (root_key(1), root_key(2));
+    let message = b"PINAI-DEVICE-HPKE-v1\nhttps://idp.alice.com/users/alice_xK9mP";
+    let signature =
+        Ed25519Signature::parse("signature", &signing.sign(message).to_bytes()).unwrap();
+    let verifier = StrictEd25519Verifier;
+
+    assert!(verifier.verifies(&key, message, &signature));
+    assert!(!verifier.verifies(&other, message, &signature));
+    assert!(!verifier.verifies(&key, b"tampered", &signature));
+    assert!(!verifier.verifies(
+        &key,
+        message,
+        &Ed25519Signature::parse("signature", &[0; 64]).unwrap()
+    ));
+}
+
+/// With the identity point as key, `R` = identity and `S` = 0 satisfy the equation for any
+/// message: only a strict check refuses it.
+#[test]
+fn a_small_order_root_key_verifies_nothing() {
+    let mut identity = [0; 32];
+    identity[0] = 1;
+    let forged = Ed25519Signature::parse("signature", &[identity, [0; 32]].concat()).unwrap();
+
+    let verified = StrictEd25519Verifier.verifies(
+        &DeviceRootKey::parse(&identity).unwrap(),
+        b"anything at all",
+        &forged,
+    );
+
+    assert!(!verified);
+}
+
+#[test]
+fn an_approval_keys_signature_verifies_under_it_as_a_root_keys_does() {
+    let (signing, _) = root_key(3);
+    let approval_key =
+        domain::e2ee::ApprovalPublicKey::parse(signing.verifying_key().as_bytes()).unwrap();
+    let (_, other) = root_key(4);
+    let message = b"PINAI-DEVICE-APPROVAL-v1\nhttps://idp.alice.com/users/alice_xK9mP";
+    let signature =
+        Ed25519Signature::parse("signature", &signing.sign(message).to_bytes()).unwrap();
+
+    assert!(StrictEd25519Verifier.verifies(&approval_key, message, &signature));
+    assert!(!StrictEd25519Verifier.verifies(&other, message, &signature));
 }

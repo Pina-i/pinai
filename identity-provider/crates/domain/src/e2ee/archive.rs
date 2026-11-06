@@ -30,30 +30,6 @@ impl fmt::Debug for ArchiveNonce {
     }
 }
 
-/// The per-user salt the History Archive Key is derived with, by Argon2id: 16 bytes, not
-/// secret — it only slows an offline guess at a stolen archive.
-#[derive(Clone, PartialEq, Eq)]
-pub struct ArchiveSalt([u8; 16]);
-
-impl ArchiveSalt {
-    pub fn parse(bytes: &[u8]) -> Result<Self, ValidationError> {
-        bytes
-            .try_into()
-            .map(Self)
-            .map_err(|_| ValidationError::new("salt", "must be exactly 16 bytes"))
-    }
-
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.0
-    }
-}
-
-impl fmt::Debug for ArchiveSalt {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("ArchiveSalt(..)")
-    }
-}
-
 /// A decrypted message, sealed again under the History Archive Key: opaque here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewArchiveEntry {

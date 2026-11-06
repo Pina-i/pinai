@@ -11,7 +11,7 @@ use domain::auth::{
     PasswordHash, PasswordReset, PasswordResets, Presentation, RESET_REQUEST_WINDOW, RefreshLink,
     RefreshToken, RefreshTokens, Registration, ResetToken, RevokedReason, Rotation, SESSION_IDLE,
     Session, SessionKind, Sessions, SignInAccount, SignInAccounts, SignUps, SignupCodes,
-    may_request_reset,
+    WebAppSignIn, may_request_reset, web_app_sign_in,
 };
 use domain::auth::{
     RECOVERY_CODES, SecondFactors, TICKET_ATTEMPTS, Ticket, TicketAttempt, TotpSecret,
@@ -218,7 +218,9 @@ impl TryFrom<TicketRow> for Ticket {
     }
 }
 
-/// `sessions`.
+/// `sessions`. Every change to an account's sessions that a browser session's end must take
+/// along — a web app's session opened under it, an ending — takes the account's lock first
+/// ([`lock_account`]), then reads: an ending never misses a session opened under it meanwhile.
 pub struct PgSessions {
     pool: PgPool,
 }
@@ -229,8 +231,8 @@ impl PgSessions {
     }
 }
 
-const SESSION_COLUMNS: &str = "id, user_id, kind, client_id, device_id, created_at, last_used_at, \
-     authenticated_at, revoked_at";
+const SESSION_COLUMNS: &str = "id, user_id, kind, client_id, browser_session_id, device_id, \
+     created_at, last_used_at, authenticated_at, revoked_at";
 
 #[derive(sqlx::FromRow)]
 struct SessionRow {
@@ -238,6 +240,7 @@ struct SessionRow {
     user_id: uuid::Uuid,
     kind: String,
     client_id: Option<String>,
+    browser_session_id: Option<uuid::Uuid>,
     device_id: Option<uuid::Uuid>,
     created_at: OffsetDateTime,
     last_used_at: OffsetDateTime,
@@ -249,12 +252,17 @@ impl TryFrom<SessionRow> for Session {
     type Error = anyhow::Error;
 
     fn try_from(row: SessionRow) -> Result<Self, Self::Error> {
-        let kind = match (row.kind.as_str(), row.client_id) {
-            ("browser", None) => SessionKind::Browser,
-            ("app", Some(client)) => {
-                SessionKind::App(ClientId::parse(&client).context("sessions.client_id")?)
+        let client = |client: String| ClientId::parse(&client).context("sessions.client_id");
+        let kind = match (row.kind.as_str(), row.client_id, row.browser_session_id) {
+            ("browser", None, None) => SessionKind::Browser,
+            ("web", Some(id), Some(browser)) => SessionKind::Web {
+                client: client(id)?,
+                browser: browser.into(),
+            },
+            ("app", Some(id), None) => SessionKind::App(client(id)?),
+            (kind, _, _) => {
+                anyhow::bail!("sessions.kind {kind}, against its client_id or browser_session_id")
             }
-            (kind, _) => anyhow::bail!("sessions.kind {kind}, against its client_id"),
         };
         Ok(Session {
             id: row.id.into(),
@@ -269,33 +277,204 @@ impl TryFrom<SessionRow> for Session {
     }
 }
 
+/// The account `session` is one of, unlocked.
+async fn owner_of(
+    connection: &mut sqlx::PgConnection,
+    session: SessionId,
+) -> Result<Option<UserId>, AuthError> {
+    let owner: Option<uuid::Uuid> =
+        sqlx::query_scalar("SELECT user_id FROM sessions WHERE id = $1")
+            .bind(session.as_uuid())
+            .fetch_optional(connection)
+            .await
+            .context("find a session's account")?;
+    Ok(owner.map(UserId::from))
+}
+
+/// Ends what `pick` chooses among the account's unrevoked sessions, read under its lock, which
+/// the caller holds. The sessions it ended.
+async fn end_sessions(
+    connection: &mut sqlx::PgConnection,
+    user: UserId,
+    pick: impl FnOnce(&[Session]) -> Vec<SessionId>,
+    reason: RevokedReason,
+    now: OffsetDateTime,
+) -> Result<Vec<Session>, AuthError> {
+    let rows: Vec<SessionRow> = sqlx::query_as(&format!(
+        "SELECT {SESSION_COLUMNS} FROM sessions WHERE user_id = $1 AND revoked_at IS NULL"
+    ))
+    .bind(user.as_uuid())
+    .fetch_all(&mut *connection)
+    .await
+    .context("read an account's sessions to end")?;
+    let picked: Vec<uuid::Uuid> = pick(&sessions(rows)?)
+        .into_iter()
+        .map(|id| id.as_uuid())
+        .collect();
+    if picked.is_empty() {
+        return Ok(Vec::new());
+    }
+    let ended: Vec<SessionRow> = sqlx::query_as(&format!(
+        "UPDATE sessions SET revoked_at = $2, revoked_reason = $3 \
+         WHERE id = ANY($1) AND revoked_at IS NULL RETURNING {SESSION_COLUMNS}"
+    ))
+    .bind(&picked)
+    .bind(now)
+    .bind(reason.as_str())
+    .fetch_all(connection)
+    .await
+    .context("end an account's sessions")?;
+    sessions(ended)
+}
+
+/// The browser session a code was issued under, read under the account's lock the caller holds,
+/// while it signs apps in at `now`.
+async fn signing_apps_in(
+    connection: &mut sqlx::PgConnection,
+    browser: SessionId,
+    now: OffsetDateTime,
+) -> Result<Option<Session>, AuthError> {
+    let held: Option<SessionRow> = sqlx::query_as(&format!(
+        "SELECT {SESSION_COLUMNS} FROM sessions WHERE id = $1"
+    ))
+    .bind(browser.as_uuid())
+    .fetch_optional(connection)
+    .await
+    .context("read the browser session a code was issued under")?;
+    Ok(held
+        .map(Session::try_from)
+        .transpose()?
+        .filter(|held| held.signs_apps_in(now)))
+}
+
+const INSERT_SESSION: &str = "INSERT INTO sessions (id, user_id, kind, client_id, \
+     browser_session_id, created_at, last_used_at, authenticated_at)";
+
 #[async_trait::async_trait]
 impl Sessions for PgSessions {
-    async fn open(
+    async fn open_browser(
         &self,
         user: UserId,
-        kind: &SessionKind,
         now: OffsetDateTime,
     ) -> Result<SessionId, AuthError> {
         let id = SessionId::generate();
-        let (kind, client) = match kind {
-            SessionKind::Browser => ("browser", None),
-            SessionKind::App(client) => ("app", Some(client.as_str())),
-        };
-        sqlx::query(
-            "INSERT INTO sessions \
-             (id, user_id, kind, client_id, created_at, last_used_at, authenticated_at) \
-             VALUES ($1, $2, $3, $4, $5, $5, $5)",
-        )
+        sqlx::query(&format!(
+            "{INSERT_SESSION} VALUES ($1, $2, 'browser', NULL, NULL, $3, $3, $3)"
+        ))
         .bind(id.as_uuid())
         .bind(user.as_uuid())
-        .bind(kind)
-        .bind(client)
         .bind(now)
         .execute(&self.pool)
         .await
-        .context("open a session")?;
+        .context("open a browser session")?;
         Ok(id)
+    }
+
+    async fn open_under(
+        &self,
+        browser: SessionId,
+        client: &ClientId,
+        now: OffsetDateTime,
+    ) -> Result<Option<Session>, AuthError> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .context("begin a web app's session")?;
+        let Some(user) = owner_of(&mut tx, browser).await? else {
+            return Ok(None);
+        };
+        lock_account(&mut tx, user).await?;
+        let Some(held) = signing_apps_in(&mut tx, browser, now).await? else {
+            return Ok(None);
+        };
+        sqlx::query("UPDATE sessions SET last_used_at = GREATEST(last_used_at, $2) WHERE id = $1")
+            .bind(browser.as_uuid())
+            .bind(now)
+            .execute(&mut *tx)
+            .await
+            .context("stamp a browser session's use")?;
+        let current: Option<SessionRow> = sqlx::query_as(&format!(
+            "SELECT {SESSION_COLUMNS} FROM sessions \
+             WHERE browser_session_id = $1 AND client_id = $2 AND revoked_at IS NULL"
+        ))
+        .bind(browser.as_uuid())
+        .bind(client.as_str())
+        .fetch_optional(&mut *tx)
+        .await
+        .context("find a web app's session")?;
+        let current = current.map(Session::try_from).transpose()?;
+        match web_app_sign_in(current.as_ref(), now) {
+            WebAppSignIn::Reuse(id) => {
+                let reused: SessionRow = sqlx::query_as(&format!(
+                    "UPDATE sessions SET last_used_at = $2, authenticated_at = $3 \
+                     WHERE id = $1 RETURNING {SESSION_COLUMNS}"
+                ))
+                .bind(id.as_uuid())
+                .bind(now)
+                .bind(held.authenticated_at)
+                .fetch_one(&mut *tx)
+                .await
+                .context("use a web app's session again")?;
+                tx.commit().await.context("commit a web app's session")?;
+                return Ok(Some(reused.try_into()?));
+            }
+            WebAppSignIn::Replace(id) => {
+                sqlx::query(
+                    "UPDATE sessions SET revoked_at = $2, revoked_reason = 'replaced' \
+                     WHERE id = $1",
+                )
+                .bind(id.as_uuid())
+                .bind(now)
+                .execute(&mut *tx)
+                .await
+                .context("end a web app's idle session")?;
+            }
+            WebAppSignIn::Open => {}
+        }
+        let opened: SessionRow = sqlx::query_as(&format!(
+            "{INSERT_SESSION} VALUES ($1, $2, 'web', $3, $4, $5, $5, $6) RETURNING {SESSION_COLUMNS}"
+        ))
+        .bind(SessionId::generate().as_uuid())
+        .bind(user.as_uuid())
+        .bind(client.as_str())
+        .bind(browser.as_uuid())
+        .bind(now)
+        .bind(held.authenticated_at)
+        .fetch_one(&mut *tx)
+        .await
+        .context("open a web app's session")?;
+        tx.commit().await.context("commit a web app's session")?;
+        Ok(Some(opened.try_into()?))
+    }
+
+    async fn open_app(
+        &self,
+        browser: SessionId,
+        client: &ClientId,
+        now: OffsetDateTime,
+    ) -> Result<Option<Session>, AuthError> {
+        let mut tx = self.pool.begin().await.context("begin an app session")?;
+        let Some(user) = owner_of(&mut tx, browser).await? else {
+            return Ok(None);
+        };
+        lock_account(&mut tx, user).await?;
+        let Some(held) = signing_apps_in(&mut tx, browser, now).await? else {
+            return Ok(None);
+        };
+        let opened: SessionRow = sqlx::query_as(&format!(
+            "{INSERT_SESSION} VALUES ($1, $2, 'app', $3, NULL, $4, $4, $5) RETURNING {SESSION_COLUMNS}"
+        ))
+        .bind(SessionId::generate().as_uuid())
+        .bind(user.as_uuid())
+        .bind(client.as_str())
+        .bind(now)
+        .bind(held.authenticated_at)
+        .fetch_one(&mut *tx)
+        .await
+        .context("open an app session")?;
+        tx.commit().await.context("commit an app session")?;
+        Ok(Some(opened.try_into()?))
     }
 
     async fn find(&self, id: SessionId) -> Result<Option<Session>, AuthError> {
@@ -310,7 +489,18 @@ impl Sessions for PgSessions {
     }
 
     async fn touch(&self, id: SessionId, now: OffsetDateTime) -> Result<(), AuthError> {
-        sqlx::query("UPDATE sessions SET last_used_at = $2 WHERE id = $1")
+        // The browser session first, and neither set back: a web app's last use stays at or
+        // before its browser session's even when the second statement never runs.
+        sqlx::query(
+            "UPDATE sessions SET last_used_at = GREATEST(last_used_at, $2) \
+             WHERE id = (SELECT browser_session_id FROM sessions WHERE id = $1)",
+        )
+        .bind(id.as_uuid())
+        .bind(now)
+        .execute(&self.pool)
+        .await
+        .context("stamp the use of a web app's browser session")?;
+        sqlx::query("UPDATE sessions SET last_used_at = GREATEST(last_used_at, $2) WHERE id = $1")
             .bind(id.as_uuid())
             .bind(now)
             .execute(&self.pool)
@@ -334,28 +524,37 @@ impl Sessions for PgSessions {
         id: SessionId,
         reason: RevokedReason,
         now: OffsetDateTime,
-    ) -> Result<bool, AuthError> {
-        let revoked = sqlx::query(
-            "UPDATE sessions SET revoked_at = $2, revoked_reason = $3 \
-             WHERE id = $1 AND revoked_at IS NULL",
+    ) -> Result<Vec<Session>, AuthError> {
+        let mut tx = self.pool.begin().await.context("begin a session's end")?;
+        let Some(user) = owner_of(&mut tx, id).await? else {
+            return Ok(Vec::new());
+        };
+        lock_account(&mut tx, user).await?;
+        let ended = end_sessions(
+            &mut tx,
+            user,
+            |sessions| domain::auth::ending(sessions, id),
+            reason,
+            now,
         )
-        .bind(id.as_uuid())
-        .bind(now)
-        .bind(reason.as_str())
-        .execute(&self.pool)
-        .await
-        .context("revoke a session")?;
-        Ok(revoked.rows_affected() == 1)
+        .await?;
+        tx.commit().await.context("commit a session's end")?;
+        Ok(ended)
     }
 
     async fn delete_ended(&self, before: OffsetDateTime) -> Result<usize, AuthError> {
-        let deleted =
-            sqlx::query("DELETE FROM sessions WHERE revoked_at < $1 OR last_used_at < $2")
-                .bind(before)
-                .bind(before - SESSION_IDLE)
-                .execute(&self.pool)
-                .await
-                .context("delete the ended sessions")?;
+        // The web apps' sessions under them named here, so the count holds them too.
+        let deleted = sqlx::query(
+            "DELETE FROM sessions WHERE id IN (\
+                 SELECT id FROM sessions WHERE revoked_at < $1 OR last_used_at < $2) \
+             OR browser_session_id IN (\
+                 SELECT id FROM sessions WHERE revoked_at < $1 OR last_used_at < $2)",
+        )
+        .bind(before)
+        .bind(before - SESSION_IDLE)
+        .execute(&self.pool)
+        .await
+        .context("delete the ended sessions")?;
         Ok(usize::try_from(deleted.rows_affected()).unwrap_or(usize::MAX))
     }
 
@@ -372,17 +571,54 @@ impl Sessions for PgSessions {
 
     async fn link(
         &self,
+        user: UserId,
         id: SessionId,
         device: DeviceId,
         now: OffsetDateTime,
     ) -> Result<Vec<Session>, AuthError> {
         let mut tx = self.pool.begin().await.context("begin a link")?;
-        // One link of a device at a time: two at once would each miss the other.
-        sqlx::query("SELECT 1 FROM user_devices WHERE device_id = $1 FOR UPDATE")
-            .bind(device.as_uuid())
-            .execute(&mut *tx)
-            .await
-            .context("lock a device to link")?;
+        // The device row first, as a revoke takes it: a device revoked meanwhile is refused, and
+        // one revoked after finds this session naming it.
+        let usable: Option<i32> = sqlx::query_scalar(
+            "SELECT 1 FROM user_devices \
+             WHERE device_id = $1 AND user_id = $2 AND revoked_at IS NULL FOR UPDATE",
+        )
+        .bind(device.as_uuid())
+        .bind(user.as_uuid())
+        .fetch_optional(&mut *tx)
+        .await
+        .context("lock a device to link")?;
+        if usable.is_none() {
+            return Err(AuthError::DeviceRefused);
+        }
+        lock_account(&mut tx, user).await?;
+        let held: Option<SessionRow> = sqlx::query_as(&format!(
+            "SELECT {SESSION_COLUMNS} FROM sessions WHERE id = $1 AND user_id = $2"
+        ))
+        .bind(id.as_uuid())
+        .bind(user.as_uuid())
+        .fetch_optional(&mut *tx)
+        .await
+        .context("read the session to link")?;
+        let held = held
+            .map(Session::try_from)
+            .transpose()?
+            .ok_or_else(|| anyhow::anyhow!("the session to link is gone"))?;
+        domain::auth::may_link(&held, device, now)?;
+        let named = sqlx::query(
+            "UPDATE sessions SET device_id = $2 \
+             WHERE id = $1 AND revoked_at IS NULL AND (device_id IS NULL OR device_id = $2)",
+        )
+        .bind(id.as_uuid())
+        .bind(device.as_uuid())
+        .execute(&mut *tx)
+        .await
+        .context("link a session to its device")?;
+        if named.rows_affected() != 1 {
+            return Err(
+                anyhow::anyhow!("the session to link changed under the account's lock").into(),
+            );
+        }
         let replaced: Vec<SessionRow> = sqlx::query_as(&format!(
             "UPDATE sessions SET revoked_at = $3, revoked_reason = 'replaced' \
              WHERE device_id = $2 AND id <> $1 AND revoked_at IS NULL RETURNING {SESSION_COLUMNS}"
@@ -393,12 +629,6 @@ impl Sessions for PgSessions {
         .fetch_all(&mut *tx)
         .await
         .context("end a device's earlier sessions")?;
-        sqlx::query("UPDATE sessions SET device_id = $2 WHERE id = $1")
-            .bind(id.as_uuid())
-            .bind(device.as_uuid())
-            .execute(&mut *tx)
-            .await
-            .context("link a session to its device")?;
         tx.commit().await.context("commit a link")?;
         sessions(replaced)
     }
@@ -409,18 +639,22 @@ impl Sessions for PgSessions {
         device: DeviceId,
         now: OffsetDateTime,
     ) -> Result<Vec<Session>, AuthError> {
-        let rows: Vec<SessionRow> = sqlx::query_as(&format!(
-            "UPDATE sessions SET revoked_at = $3, revoked_reason = 'device_revoked' \
-             WHERE user_id = $1 AND device_id = $2 AND revoked_at IS NULL \
-             RETURNING {SESSION_COLUMNS}"
-        ))
-        .bind(user.as_uuid())
-        .bind(device.as_uuid())
-        .bind(now)
-        .fetch_all(&self.pool)
-        .await
-        .context("end a revoked device's sessions")?;
-        sessions(rows)
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .context("begin a device's sign-out")?;
+        lock_account(&mut tx, user).await?;
+        let ended = end_sessions(
+            &mut tx,
+            user,
+            |sessions| domain::auth::ending_with_device(sessions, device),
+            RevokedReason::DeviceRevoked,
+            now,
+        )
+        .await?;
+        tx.commit().await.context("commit a device's sign-out")?;
+        Ok(ended)
     }
 
     async fn revoke_others(
@@ -429,17 +663,22 @@ impl Sessions for PgSessions {
         keep: SessionId,
         now: OffsetDateTime,
     ) -> Result<Vec<Session>, AuthError> {
-        let rows: Vec<SessionRow> = sqlx::query_as(&format!(
-            "UPDATE sessions SET revoked_at = $3, revoked_reason = 'signed_out_elsewhere' \
-             WHERE user_id = $1 AND id <> $2 AND revoked_at IS NULL RETURNING {SESSION_COLUMNS}"
-        ))
-        .bind(user.as_uuid())
-        .bind(keep.as_uuid())
-        .bind(now)
-        .fetch_all(&self.pool)
-        .await
-        .context("end an account's other sessions")?;
-        sessions(rows)
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .context("begin a sign-out elsewhere")?;
+        lock_account(&mut tx, user).await?;
+        let ended = end_sessions(
+            &mut tx,
+            user,
+            |sessions| domain::auth::ending_all_but(sessions, keep),
+            RevokedReason::SignedOutElsewhere,
+            now,
+        )
+        .await?;
+        tx.commit().await.context("commit a sign-out elsewhere")?;
+        Ok(ended)
     }
 }
 
@@ -601,6 +840,21 @@ impl RefreshTokens for PgRefreshTokens {
                 .context("delete the unused refresh tokens")?;
         Ok(usize::try_from(deleted.rows_affected()).unwrap_or(usize::MAX))
     }
+}
+
+/// The account's sessions, ended or not, until swept, as the connection's transaction reads them.
+pub(super) async fn sessions_of(
+    c: &mut sqlx::PgConnection,
+    user: UserId,
+) -> anyhow::Result<Vec<Session>> {
+    let rows: Vec<SessionRow> = sqlx::query_as(&format!(
+        "SELECT {SESSION_COLUMNS} FROM sessions WHERE user_id = $1 ORDER BY created_at, id"
+    ))
+    .bind(user.as_uuid())
+    .fetch_all(c)
+    .await
+    .context("list an account's sessions")?;
+    rows.into_iter().map(Session::try_from).collect()
 }
 
 fn sessions(rows: Vec<SessionRow>) -> Result<Vec<Session>, AuthError> {
@@ -1242,15 +1496,12 @@ impl PgPasswordResets {
     }
 }
 
-/// Locks the member's account until the transaction ends. Issuing and resetting both take it
-/// first, so the two at once queue up instead of deadlocking on each other's rows.
-async fn lock_member(connection: &mut sqlx::PgConnection, member: UserId) -> Result<(), AuthError> {
-    sqlx::query("SELECT 1 FROM users WHERE id = $1 FOR NO KEY UPDATE")
-        .bind(member.as_uuid())
-        .execute(connection)
-        .await
-        .context("lock a member's account")?;
-    Ok(())
+/// Locks the account until the transaction ends. Issuing and resetting a link take it first,
+/// and so does every change to its sessions a browser session's end must take along
+/// ([`PgSessions`]), so these queue up instead of deadlocking on each other's rows — and a
+/// reset ends the web app's session opened just before it.
+async fn lock_account(connection: &mut sqlx::PgConnection, user: UserId) -> Result<(), AuthError> {
+    Ok(super::lock_account(connection, user).await?)
 }
 
 /// A new link for `member` by `by` — nobody, when the account asked for it —, the one they had
@@ -1336,7 +1587,7 @@ impl PasswordResets for PgPasswordResets {
         expires_at: OffsetDateTime,
     ) -> Result<ResetToken, AuthError> {
         let mut tx = self.pool.begin().await.context("begin a reset link")?;
-        lock_member(&mut tx, member).await?;
+        lock_account(&mut tx, member).await?;
         let token = open_link(&mut tx, member, Some(by), now, expires_at).await?;
         tx.commit().await.context("commit a reset link")?;
         Ok(token)
@@ -1354,7 +1605,7 @@ impl PasswordResets for PgPasswordResets {
             .await
             .context("begin a reset link asked for")?;
         // Counted under the account's lock: requests at once queue up, and none passes the limit.
-        lock_member(&mut tx, member).await?;
+        lock_account(&mut tx, member).await?;
         let asked: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM password_resets \
              WHERE user_id = $1 AND created_by IS NULL AND created_at > $2",
@@ -1388,7 +1639,7 @@ impl PasswordResets for PgPasswordResets {
         let Some(named) = named else {
             return Ok(());
         };
-        lock_member(&mut tx, named.into()).await?;
+        lock_account(&mut tx, named.into()).await?;
         // Deleted first: the link it replaced may then be the one open link again.
         let withdrawn: Option<(uuid::Uuid, uuid::Uuid, bool)> = sqlx::query_as(
             "DELETE FROM password_resets \
@@ -1454,7 +1705,7 @@ impl PasswordResets for PgPasswordResets {
         let Some(named) = named else {
             return Ok(PasswordChange::LinkUnusable);
         };
-        lock_member(&mut tx, named.into()).await?;
+        lock_account(&mut tx, named.into()).await?;
         // Spent first: a second submission of the link waits on the account, then finds it used.
         let spent: Option<uuid::Uuid> = sqlx::query_scalar(
             "UPDATE password_resets SET used_at = $2 \

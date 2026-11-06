@@ -213,6 +213,91 @@ async fn a_revoked_device_and_signing_out_elsewhere_end_the_right_sessions() {
         UserId::generate(),
         UserId::generate(),
         DeviceId::generate(),
+        DeviceId::generate(),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn an_apps_session_staying_signed_in_takes_its_browsers_password_and_outlives_it() {
+    contract::an_apps_session_staying_signed_in_takes_its_browsers_password_and_outlives_it(
+        &InMemorySessions::default(),
+        UserId::generate(),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_browser_session_swept_takes_its_web_apps_with_it_and_counts_them() {
+    contract::a_browser_session_swept_takes_its_web_apps_with_it_and_counts_them(
+        &InMemorySessions::default(),
+        UserId::generate(),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_session_names_one_device_and_a_browser_session_none() {
+    contract::a_session_names_one_device_and_a_browser_session_none(
+        &InMemorySessions::default(),
+        UserId::generate(),
+        DeviceId::generate(),
+        DeviceId::generate(),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_desktop_signing_out_elsewhere_keeps_its_own_session_only() {
+    contract::a_desktop_signing_out_elsewhere_keeps_its_own_session_only(
+        &InMemorySessions::default(),
+        UserId::generate(),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn revoking_a_desktops_device_leaves_every_browser_signed_in() {
+    contract::revoking_a_desktops_device_leaves_every_browser_signed_in(
+        &InMemorySessions::default(),
+        UserId::generate(),
+        DeviceId::generate(),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_web_apps_session_is_opened_once_under_its_browser_session_and_reused() {
+    contract::a_web_apps_session_is_opened_once_under_its_browser_session_and_reused(
+        &InMemorySessions::default(),
+        UserId::generate(),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_web_apps_session_ended_or_idle_is_followed_by_a_new_one() {
+    contract::a_web_apps_session_ended_or_idle_is_followed_by_a_new_one(
+        &InMemorySessions::default(),
+        UserId::generate(),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn only_a_live_browser_session_opens_web_apps_sessions() {
+    contract::only_a_live_browser_session_opens_web_apps_sessions(
+        &InMemorySessions::default(),
+        UserId::generate(),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_web_apps_use_is_its_browser_sessions_and_its_end_its_alone() {
+    contract::a_web_apps_use_is_its_browser_sessions_and_its_end_its_alone(
+        &InMemorySessions::default(),
+        UserId::generate(),
     )
     .await;
 }

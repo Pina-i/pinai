@@ -42,6 +42,7 @@ macro_rules! id {
     };
 }
 
+id!(ApprovalRequestId);
 id!(AttachmentId);
 id!(CommitId);
 id!(ConnectionId);
@@ -52,6 +53,7 @@ id!(GroupEventId);
 id!(InvitationId);
 id!(MessageId);
 id!(SessionId);
+id!(StartOverRequestId);
 id!(TicketId);
 id!(UserId);
 id!(WelcomeId);

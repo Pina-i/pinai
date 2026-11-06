@@ -1,5 +1,5 @@
 use domain::auth::testing::{PlainHasher, StepAuthenticator, a_request, signed_up};
-use domain::auth::{REQUESTED_RESET_TTL, RevokedReason, SessionKind, Sessions, SignInAccount};
+use domain::auth::{REQUESTED_RESET_TTL, RevokedReason, Sessions, SignInAccount};
 use time::Duration;
 
 use crate::auth::world::{World, invite_only, now, world};
@@ -159,12 +159,10 @@ async fn a_new_link_replaces_the_members_open_one() {
 #[tokio::test]
 async fn a_reset_sets_the_password_and_ends_every_session_closing_their_sockets() {
     let w = world().await;
-    let open =
-        async |user: UserId, kind: SessionKind| w.sessions.open(user, &kind, now()).await.unwrap();
-    let browser = open(w.alice.id, SessionKind::Browser).await;
-    let desktop = open(w.alice.id, SessionKind::App(w.desktop.id.clone())).await;
+    let web = w.sessions.live_at(w.alice.id, now());
+    let (window, desktop) = w.on_the_desktop(w.alice.id).await;
     let (admin, issued) = a_link_for_alice(&w).await;
-    let admins = open(admin.id, SessionKind::Browser).await;
+    let admins = w.sessions.open_browser(admin.id, now()).await.unwrap();
     let at = now() + Duration::hours(1);
 
     let member = w
@@ -183,12 +181,23 @@ async fn a_reset_sets_the_password_and_ends_every_session_closing_their_sockets(
             .password_hash,
         PlainHasher::hash(NEW)
     );
-    for ended in [browser, desktop] {
-        assert_eq!(w.sessions.reason(ended), Some(RevokedReason::PasswordReset));
+    let browser = w
+        .sessions
+        .find(web)
+        .await
+        .unwrap()
+        .unwrap()
+        .browser()
+        .unwrap();
+    let mut theirs = vec![browser, web, window, desktop];
+    for ended in &theirs {
+        assert_eq!(
+            w.sessions.reason(*ended),
+            Some(RevokedReason::PasswordReset)
+        );
     }
     let mut closed = w.ended.ended();
     closed.sort();
-    let mut theirs = vec![browser, desktop];
     theirs.sort();
     assert_eq!(closed, theirs, "their sockets close");
     assert!(w.sessions.find(admins).await.unwrap().unwrap().is_live(at));
@@ -277,11 +286,7 @@ async fn a_sign_in_half_done_with_the_old_password_cannot_finish_after_a_reset()
 #[tokio::test]
 async fn a_short_or_mismatched_password_changes_nothing() {
     let w = world().await;
-    let session = w
-        .sessions
-        .open(w.alice.id, &SessionKind::Browser, now())
-        .await
-        .unwrap();
+    let session = w.sessions.open_browser(w.alice.id, now()).await.unwrap();
     let (_, issued) = a_link_for_alice(&w).await;
 
     let short = w
@@ -397,11 +402,7 @@ async fn a_link_through_the_mailbox_ends_every_session_and_signs_nobody_in() {
         if second_factor {
             w.with_authenticator(&w.alice).await;
         }
-        let browser = w
-            .sessions
-            .open(w.alice.id, &SessionKind::Browser, now())
-            .await
-            .unwrap();
+        let browser = w.sessions.open_browser(w.alice.id, now()).await.unwrap();
         let token = alices_request(&w).await;
 
         let member = w

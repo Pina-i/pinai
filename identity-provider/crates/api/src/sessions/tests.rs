@@ -48,17 +48,22 @@ impl World {
         self.app.send(request.body(body).unwrap()).await
     }
 
-    /// A device of `who`'s, as its first KeyPackages name it.
+    /// A device of `who`'s, its root key `[7; 32]` registered.
     async fn device_of(&self, who: &Account) -> Uuid {
         let device = Uuid::new_v4();
-        let packages = json!([{ "key_package": "AQIDBA==", "expires_at": (OffsetDateTime::now_utc() + time::Duration::days(7)).format(&time::format_description::well_known::Rfc3339).unwrap() }]);
         let (status, body) = self
             .app
             .call(
                 Method::POST,
-                "/api/keys/packages",
+                "/api/keys/devices",
                 Some(who.id),
-                Some(json!({ "device_id": device, "packages": packages })),
+                Some(json!({
+                    "device_id": device,
+                    "drk_public_key": base64::Engine::encode(
+                        &base64::engine::general_purpose::STANDARD,
+                        [7; 32],
+                    ),
+                })),
             )
             .await;
         assert!(status.is_success(), "{status}: {body}");
@@ -66,12 +71,23 @@ impl World {
     }
 
     async fn link(&self, who: &Account, session: SessionId, device: Uuid) -> (StatusCode, Value) {
+        let proof = self.app.naming_proof(who.id, session, device).await;
+        self.link_with(who, session, device, Some(proof)).await
+    }
+
+    async fn link_with(
+        &self,
+        who: &Account,
+        session: SessionId,
+        device: Uuid,
+        proof: Option<String>,
+    ) -> (StatusCode, Value) {
         self.as_session(
             who,
             session,
             Method::PUT,
             "/api/sessions/current/device",
-            Some(json!({ "device_id": device })),
+            Some(json!({ "device_id": device, "signature": proof })),
         )
         .await
     }
@@ -167,15 +183,27 @@ async fn revoking_a_device_signs_it_out_at_once() {
         (status, refused["error_description"].as_str()),
         (StatusCode::UNAUTHORIZED, Some("The session has ended"))
     );
-    assert_eq!(
-        w.app.sign_in.sessions.reason(on_device),
-        Some(RevokedReason::DeviceRevoked)
-    );
+    let browser = w
+        .app
+        .sign_in
+        .sessions
+        .all()
+        .into_iter()
+        .find(|session| session.id == on_device)
+        .and_then(|session| session.browser())
+        .unwrap();
+    for ended in [browser, on_device] {
+        assert_eq!(
+            w.app.sign_in.sessions.reason(ended),
+            Some(RevokedReason::DeviceRevoked)
+        );
+    }
     assert_eq!(
         w.app.sign_in.ended.ended(),
-        vec![on_device],
-        "its sockets close"
+        vec![browser, on_device],
+        "its sockets close, and the browser it signed in through signs out"
     );
+    assert_eq!(w.app.sign_in.sessions.reason(here), None);
     let listed = w.devices(&w.alice, here).await;
     assert_eq!(listed[0]["signed_in"], false);
     assert!(listed[0]["revoked_at"].is_string());
@@ -221,4 +249,93 @@ async fn signing_out_elsewhere_keeps_the_callers_session_only() {
         );
     }
     assert_eq!(sessions.reason(bobs), None);
+}
+
+#[tokio::test]
+async fn signing_out_elsewhere_takes_an_approved_device_once_the_account_has_a_key() {
+    let w = world();
+    let (laptop_session, laptop) = w.app.on_a_device(w.alice.id).await;
+    let (fresh, _) = w.app.on_a_device(w.alice.id).await;
+    let unnamed = w.app.sign_in.sessions.live(w.alice.id);
+    w.app
+        .keyed_from(
+            &w.alice,
+            &w.app.token_in(w.alice.id, laptop_session),
+            laptop,
+        )
+        .await;
+    let sign_out = async |session| {
+        w.as_session(
+            &w.alice,
+            session,
+            Method::DELETE,
+            "/api/sessions?keep=current",
+            None,
+        )
+        .await
+    };
+
+    let by_the_fresh_one = sign_out(fresh).await;
+    let by_the_unnamed = sign_out(unnamed).await;
+    let still = w.app.sign_in.sessions.reason(laptop_session);
+    let by_the_laptop = sign_out(laptop_session).await;
+
+    for refused in [by_the_fresh_one, by_the_unnamed] {
+        assert_eq!(
+            refused,
+            (
+                StatusCode::FORBIDDEN,
+                json!({
+                    "error": "approval_required",
+                    "error_description": "This takes a device approved under the current history key",
+                })
+            )
+        );
+    }
+    assert_eq!(still, None, "the laptop stays signed in");
+    assert_eq!(by_the_laptop, (StatusCode::NO_CONTENT, Value::Null));
+    for ended in [fresh, unnamed] {
+        assert_eq!(
+            w.app.sign_in.sessions.reason(ended),
+            Some(RevokedReason::SignedOutElsewhere)
+        );
+    }
+}
+
+#[tokio::test]
+async fn naming_a_device_without_its_root_keys_proof_is_refused() {
+    let w = world();
+    let laptop = w.device_of(&w.alice).await;
+    let (on_the_laptop, thiefs) = (
+        w.app.sign_in.sessions.live(w.alice.id),
+        w.app.sign_in.sessions.live(w.alice.id),
+    );
+    w.link(&w.alice, on_the_laptop, laptop).await;
+    let lifted = w.app.naming_proof(w.alice.id, on_the_laptop, laptop).await;
+
+    for proof in [None, Some(lifted), Some("not base64".to_owned())] {
+        let refused = w.link_with(&w.alice, thiefs, laptop, proof.clone()).await;
+
+        assert_eq!(
+            refused,
+            (
+                StatusCode::FORBIDDEN,
+                json!({
+                    "error": "device_proof_invalid",
+                    "error_description": "The signature does not prove this device's root key",
+                })
+            ),
+            "{proof:?}"
+        );
+    }
+    let still = w
+        .as_session(
+            &w.alice,
+            on_the_laptop,
+            Method::GET,
+            "/api/keys/devices",
+            None,
+        )
+        .await;
+    assert_eq!(still.0, StatusCode::OK, "the laptop stays signed in");
 }

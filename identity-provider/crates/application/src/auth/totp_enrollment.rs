@@ -1,9 +1,22 @@
 use std::sync::Arc;
 
-use domain::UserId;
-use domain::auth::{AuthError, Authenticator, Enrollment, SecondFactors, SignInAccounts};
-use domain::identity::InstanceOrigin;
+use domain::auth::{AuthError, Authenticator, Enrollment, SecondFactors, Sessions, SignInAccounts};
+use domain::e2ee::{DeviceApprovals, may_act_beyond_the_password};
+use domain::identity::{Bearer, InstanceOrigin};
 use time::OffsetDateTime;
+
+use super::calling_trust;
+
+/// The second factor goes on only from an approved device once the account has a history key:
+/// identity-provider/specs/auth.md § 3.
+async fn may_turn_on(
+    sessions: &dyn Sessions,
+    approvals: &dyn DeviceApprovals,
+    bearer: &Bearer,
+) -> Result<(), AuthError> {
+    let (named, trust) = calling_trust(sessions, approvals, bearer).await?;
+    Ok(may_act_beyond_the_password(named, &trust)?)
+}
 
 /// `POST /api/totp/enroll`: a fresh secret for the account's authenticator app, kept aside until
 /// a first code confirms it.
@@ -12,6 +25,8 @@ pub struct StartTotpEnrollment {
     accounts: Arc<dyn SignInAccounts>,
     factors: Arc<dyn SecondFactors>,
     authenticator: Arc<dyn Authenticator>,
+    sessions: Arc<dyn Sessions>,
+    approvals: Arc<dyn DeviceApprovals>,
 }
 
 impl StartTotpEnrollment {
@@ -20,16 +35,22 @@ impl StartTotpEnrollment {
         accounts: Arc<dyn SignInAccounts>,
         factors: Arc<dyn SecondFactors>,
         authenticator: Arc<dyn Authenticator>,
+        sessions: Arc<dyn Sessions>,
+        approvals: Arc<dyn DeviceApprovals>,
     ) -> Self {
         Self {
             origin,
             accounts,
             factors,
             authenticator,
+            sessions,
+            approvals,
         }
     }
 
-    pub async fn execute(&self, user: UserId) -> Result<Enrollment, AuthError> {
+    pub async fn execute(&self, bearer: &Bearer) -> Result<Enrollment, AuthError> {
+        may_turn_on(&*self.sessions, &*self.approvals, bearer).await?;
+        let user = bearer.user;
         let account = self
             .accounts
             .by_id(user)
@@ -57,22 +78,34 @@ impl StartTotpEnrollment {
 pub struct ConfirmTotpEnrollment {
     factors: Arc<dyn SecondFactors>,
     authenticator: Arc<dyn Authenticator>,
+    sessions: Arc<dyn Sessions>,
+    approvals: Arc<dyn DeviceApprovals>,
 }
 
 impl ConfirmTotpEnrollment {
-    pub fn new(factors: Arc<dyn SecondFactors>, authenticator: Arc<dyn Authenticator>) -> Self {
+    pub fn new(
+        factors: Arc<dyn SecondFactors>,
+        authenticator: Arc<dyn Authenticator>,
+        sessions: Arc<dyn Sessions>,
+        approvals: Arc<dyn DeviceApprovals>,
+    ) -> Self {
         Self {
             factors,
             authenticator,
+            sessions,
+            approvals,
         }
     }
 
+    /// Asked again here: what turns the second factor on is this code, not the enrollment.
     pub async fn execute(
         &self,
-        user: UserId,
+        bearer: &Bearer,
         code: &str,
         now: OffsetDateTime,
     ) -> Result<Vec<String>, AuthError> {
+        may_turn_on(&*self.sessions, &*self.approvals, bearer).await?;
+        let user = bearer.user;
         let secret = self
             .factors
             .pending(user)

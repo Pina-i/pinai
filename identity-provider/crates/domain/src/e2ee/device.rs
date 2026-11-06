@@ -1,14 +1,45 @@
 use std::fmt;
 use std::str::FromStr;
 
-use time::{Duration, OffsetDateTime};
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as B64;
+use time::{Duration, OffsetDateTime, UtcOffset};
 
+use crate::identity::ActorUri;
 use crate::{DeviceId, UserId, ValidationError};
 
-use super::KeyDirectoryError;
+use super::{DeviceRequired, Ed25519Verifier, HistoryGeneration, KeyDirectoryError};
 
 /// How long an attestation holds; clients renew it silently within its last 30 days.
 pub const ATTESTATION_LIFETIME: Duration = Duration::days(365);
+
+/// When an attestation expires, as its canonical bytes write it: UTC, to the second.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AttestationExpiry(OffsetDateTime);
+
+impl AttestationExpiry {
+    pub fn at(self) -> OffsetDateTime {
+        self.0
+    }
+}
+
+/// UTC whole seconds outlive the database's microseconds — identity-provider/specs/e2ee.md § 7.2.
+pub fn attestation_period(now: OffsetDateTime) -> (OffsetDateTime, AttestationExpiry) {
+    let issued_at = now
+        .to_offset(UtcOffset::UTC)
+        .replace_nanosecond(0)
+        .expect("0 is a valid nanosecond");
+    (
+        issued_at,
+        AttestationExpiry(issued_at + ATTESTATION_LIFETIME),
+    )
+}
+
+/// An Ed25519 public key signatures are checked against: a device's root key, or a generation's
+/// approval key.
+pub trait Ed25519PublicKey {
+    fn public_bytes(&self) -> &[u8; 32];
+}
 
 /// A device's Ed25519 public key, which its IdP attests: every MLS leaf the device signs
 /// chains to it.
@@ -28,10 +59,162 @@ impl DeviceRootKey {
     }
 }
 
+impl Ed25519PublicKey for DeviceRootKey {
+    fn public_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
 impl fmt::Debug for DeviceRootKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("DeviceRootKey(..)")
     }
+}
+
+/// An Ed25519 signature: by a device's root key, or by a generation's approval key.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Ed25519Signature([u8; 64]);
+
+impl Ed25519Signature {
+    /// `field` names it in the refusal: the same kind of signature signs more than one thing.
+    pub fn parse(field: &'static str, bytes: &[u8]) -> Result<Self, ValidationError> {
+        bytes
+            .try_into()
+            .map(Self)
+            .map_err(|_| ValidationError::new(field, "must be 64 bytes (Ed25519)"))
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for Ed25519Signature {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Ed25519Signature(..)")
+    }
+}
+
+/// A device's HPKE public key — DHKEM(X25519, HKDF-SHA256) — which the account's other devices
+/// encrypt to.
+#[derive(Clone, PartialEq, Eq)]
+pub struct HpkePublicKey([u8; 32]);
+
+impl HpkePublicKey {
+    pub fn parse(bytes: &[u8]) -> Result<Self, ValidationError> {
+        bytes
+            .try_into()
+            .map(Self)
+            .map_err(|_| ValidationError::new("hpke_public_key", "must be 32 bytes (X25519)"))
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+
+    /// What the device's root key signs. The `PINAI-DEVICE-HPKE-v1` tag keeps the signature from
+    /// verifying as any other use of the root key; a change to these fields needs a new tag.
+    pub fn canonical_bytes(&self, actor: &ActorUri, device: DeviceId) -> Vec<u8> {
+        format!(
+            "PINAI-DEVICE-HPKE-v1\n{actor}\n{device}\n{}",
+            B64.encode(self.0)
+        )
+        .into_bytes()
+    }
+}
+
+impl fmt::Debug for HpkePublicKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("HpkePublicKey(..)")
+    }
+}
+
+/// An HPKE key and the signature a registration sends with it, not checked yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnverifiedHpkeKey {
+    key: HpkePublicKey,
+    signature: Ed25519Signature,
+}
+
+impl UnverifiedHpkeKey {
+    pub fn new(key: HpkePublicKey, signature: Ed25519Signature) -> Self {
+        Self { key, signature }
+    }
+
+    /// A registration sends both halves, or neither.
+    pub fn from_parts(
+        key: Option<HpkePublicKey>,
+        signature: Option<Ed25519Signature>,
+    ) -> Result<Option<Self>, ValidationError> {
+        match (key, signature) {
+            (Some(key), Some(signature)) => Ok(Some(Self::new(key, signature))),
+            (None, None) => Ok(None),
+            _ => Err(ValidationError::new(
+                "hpke_key_signature",
+                "comes with hpke_public_key, or neither is sent",
+            )),
+        }
+    }
+
+    /// The key, if `root` signed it for this `device` of `actor`.
+    pub fn verified(
+        self,
+        root: &DeviceRootKey,
+        actor: &ActorUri,
+        device: DeviceId,
+        verifier: &dyn Ed25519Verifier,
+    ) -> Result<SignedHpkeKey, KeyDirectoryError> {
+        let signed = self.key.canonical_bytes(actor, device);
+        if !verifier.verifies(root, &signed, &self.signature) {
+            return Err(KeyDirectoryError::HpkeKeyUnsigned);
+        }
+        Ok(SignedHpkeKey {
+            key: self.key,
+            signature: self.signature,
+        })
+    }
+}
+
+/// A device's HPKE key with its root key's signature over the key's canonical bytes, checked:
+/// only [`UnverifiedHpkeKey::verified`] makes one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignedHpkeKey {
+    key: HpkePublicKey,
+    signature: Ed25519Signature,
+}
+
+impl SignedHpkeKey {
+    pub fn key(&self) -> &HpkePublicKey {
+        &self.key
+    }
+
+    pub fn signature(&self) -> &Ed25519Signature {
+        &self.signature
+    }
+}
+
+/// The HPKE key a device holds, as the directory reads it back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeldHpkeKey {
+    pub key: HpkePublicKey,
+    pub signature: Ed25519Signature,
+}
+
+impl From<&SignedHpkeKey> for HeldHpkeKey {
+    fn from(signed: &SignedHpkeKey) -> Self {
+        Self {
+            key: signed.key.clone(),
+            signature: signed.signature.clone(),
+        }
+    }
+}
+
+/// What a registration does to the HPKE key its device holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HpkeKeyWrite {
+    Keep,
+    Set(SignedHpkeKey),
+    Clear,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,6 +267,11 @@ impl DeviceLabel {
             name: "Web client".to_owned(),
             kind: DeviceKind::Unknown,
         }
+    }
+
+    /// A device recorded before its client said what it is takes the first label that says.
+    pub fn replaces(&self, held: &DeviceLabel) -> bool {
+        *held == Self::unknown() && *self != Self::unknown()
     }
 
     /// Coarse on purpose — an icon and a "Chrome on macOS" line. An iPadOS Safari claiming to be
@@ -175,6 +363,11 @@ pub struct Device {
     pub revoked_at: Option<OffsetDateTime>,
     /// `None` until the device registers its root key.
     pub attestation: Option<Attestation>,
+    /// Signed by the attested root key; `None` until the device registers one.
+    pub hpke_key: Option<HeldHpkeKey>,
+    /// The generation of the account's history key the device says it holds; `None` until it
+    /// says.
+    pub history_generation: Option<HistoryGeneration>,
 }
 
 impl Device {
@@ -192,6 +385,26 @@ impl Device {
             return Err(KeyDirectoryError::DeviceRevoked);
         }
         Ok(())
+    }
+}
+
+/// One of `caller`'s devices, unrevoked, from what the directory holds under its id: another
+/// account's id says nothing here.
+pub fn own_unrevoked(caller: UserId, found: Option<&Device>) -> Result<&Device, KeyDirectoryError> {
+    let device = found
+        .filter(|device| device.owner == caller)
+        .ok_or(KeyDirectoryError::DeviceNotFound)?;
+    if device.is_revoked() {
+        return Err(KeyDirectoryError::DeviceRevoked);
+    }
+    Ok(device)
+}
+
+/// A session is limited to the device it declared — identity-provider/specs/auth.md § 1.
+pub fn may_register(named: Option<DeviceId>, device: DeviceId) -> Result<(), KeyDirectoryError> {
+    match named {
+        Some(named) if named != device => Err(KeyDirectoryError::NotTheSessionsDevice),
+        _ => Ok(()),
     }
 }
 
@@ -224,6 +437,29 @@ impl Registration {
                 Some(_) => Self::Rotation,
             },
         )
+    }
+
+    /// Another root key drops the device's approvals: only a session that named this very device
+    /// brings one, so a password alone can't un-approve a device. A first key or the same one
+    /// again comes from any session of the owner's.
+    pub fn may_come_from(
+        self,
+        named: Option<DeviceId>,
+        device: DeviceId,
+    ) -> Result<(), KeyDirectoryError> {
+        if self == Self::Rotation && named != Some(device) {
+            return Err(DeviceRequired.into());
+        }
+        Ok(())
+    }
+
+    /// A key held is kept on a renewal only, since the old root key alone signed it.
+    pub fn hpke_key(self, brought: Option<SignedHpkeKey>) -> HpkeKeyWrite {
+        match (brought, self) {
+            (Some(brought), _) => HpkeKeyWrite::Set(brought),
+            (None, Self::Renewal) => HpkeKeyWrite::Keep,
+            (None, Self::FirstTime | Self::Rotation) => HpkeKeyWrite::Clear,
+        }
     }
 }
 

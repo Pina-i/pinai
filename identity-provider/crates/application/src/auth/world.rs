@@ -8,12 +8,20 @@ use domain::auth::testing::{
     InMemoryInstanceMembers, InMemoryPasswordResets, InMemoryRefreshTokens, InMemorySecondFactors,
     InMemorySessions, InMemorySignInAccounts, InMemorySignupCodes, PlainHasher, RecordingMailer,
     RecordingSessionNotifier, RecordingTickets, SignInSeeds, SpelledTokens, StepAuthenticator,
-    signed_up, web_client,
+    another_web_app, signed_up, web_client,
 };
-use domain::auth::{Client, Registrations, SecondFactors, TotpSecret, WebApp, desktop_client};
-use domain::e2ee::testing::InMemoryKeyDirectory;
-use domain::identity::{InstanceOrigin, IntroText};
+use domain::auth::{
+    Client, Registrations, SecondFactors, Sessions, TotpSecret, WebApp, desktop_client,
+};
+use domain::e2ee::testing::{InMemoryArchive, InMemoryKeyDirectory, PlainEd25519Verifier};
+use domain::e2ee::{
+    ApprovalPublicKey, Attestation, DeviceLabel, DeviceRootKey, Devices, HistoryCheckValue,
+    HistoryGeneration, HistoryKey, HistoryKeys, HistorySalt, HpkeKeyWrite,
+};
+use domain::identity::testing::InMemoryAccounts;
+use domain::identity::{Account, ActorUri, Bearer, InstanceOrigin, IntroText};
 use domain::presence::PresenceBoard;
+use domain::{DeviceId, SessionId, UserId};
 use time::OffsetDateTime;
 
 use crate::identity::IntroInForce;
@@ -42,6 +50,10 @@ pub struct World {
     pub ended: Arc<RecordingSessionNotifier>,
     pub refresh_tokens: Arc<InMemoryRefreshTokens>,
     pub devices: Arc<InMemoryKeyDirectory>,
+    /// The history keys the devices are approved under.
+    pub archive: Arc<InMemoryArchive>,
+    /// Alice's actor URI, which a device's naming proof signs.
+    pub actor: ActorUri,
     pub resets: Arc<InMemoryPasswordResets>,
     /// Named Aotearoa.
     pub intro: Arc<IntroInForce>,
@@ -95,7 +107,11 @@ async fn world_with(registrations: Registrations) -> World {
     let accounts = Arc::new(InMemorySignInAccounts::with([alice.clone()]));
     let origin = InstanceOrigin::parse("http://localhost:8080").unwrap();
     let desktop = desktop_client(&origin);
-    let clients = Arc::new(InMemoryClients::with([web_client(), desktop.clone()]));
+    let clients = Arc::new(InMemoryClients::with([
+        web_client(),
+        another_web_app(),
+        desktop.clone(),
+    ]));
     let codes = Arc::new(InMemoryCodes::default());
     let hasher = Arc::new(PlainHasher::default());
     let tickets = Arc::new(RecordingTickets::default());
@@ -105,7 +121,17 @@ async fn world_with(registrations: Registrations) -> World {
     let sessions = Arc::new(InMemorySessions::default());
     let ended = Arc::new(RecordingSessionNotifier::default());
     let refresh_tokens = Arc::new(InMemoryRefreshTokens::default());
-    let devices = Arc::new(InMemoryKeyDirectory::default());
+    let archive = Arc::new(InMemoryArchive::default());
+    let devices = Arc::new(InMemoryKeyDirectory::keyed_by(archive.clone()));
+    let actor =
+        ActorUri::parse(&format!("http://localhost:8080/users/{}", alice.username)).unwrap();
+    let actors = Arc::new(InMemoryAccounts::with([Account {
+        id: alice.id,
+        actor_uri: actor.clone(),
+        username: alice.username.clone(),
+        display_name: alice.display_name.clone(),
+        avatar_url: None,
+    }]));
     let resets = Arc::new(InMemoryPasswordResets::over(
         accounts.clone(),
         sessions.clone(),
@@ -136,8 +162,15 @@ async fn world_with(registrations: Registrations) -> World {
             accounts.clone(),
             factors.clone(),
             authenticator.clone(),
+            sessions.clone(),
+            devices.clone(),
         ),
-        confirm: ConfirmTotpEnrollment::new(factors.clone(), authenticator.clone()),
+        confirm: ConfirmTotpEnrollment::new(
+            factors.clone(),
+            authenticator.clone(),
+            sessions.clone(),
+            devices.clone(),
+        ),
         disable: DisableTotp::new(accounts.clone(), factors.clone(), authenticator.clone()),
         regenerate: RegenerateRecoveryCodes::new(
             accounts.clone(),
@@ -176,8 +209,14 @@ async fn world_with(registrations: Registrations) -> World {
             accounts.clone(),
             Arc::new(SpelledTokens),
         ),
-        link: LinkDevice::new(devices.clone(), sessions.clone(), ended.clone()),
-        sign_out_others: SignOutOthers::new(sessions.clone(), ended.clone()),
+        link: LinkDevice::new(
+            actors,
+            devices.clone(),
+            Arc::new(PlainEd25519Verifier),
+            sessions.clone(),
+            ended.clone(),
+        ),
+        sign_out_others: SignOutOthers::new(sessions.clone(), devices.clone(), ended.clone()),
         revoke_token: RevokeToken::new(refresh_tokens.clone(), sessions.clone(), ended.clone()),
         log_out: LogOut::new(clients.clone(), sessions.clone(), ended.clone()),
         register: Register::new(
@@ -271,6 +310,8 @@ async fn world_with(registrations: Registrations) -> World {
         ended,
         refresh_tokens,
         devices,
+        archive,
+        actor,
         resets,
         intro,
         board,
@@ -278,8 +319,31 @@ async fn world_with(registrations: Registrations) -> World {
 }
 
 impl World {
+    /// A live session of `user`'s, naming no device, its password just typed.
+    pub fn bearer_of(&self, user: UserId) -> Bearer {
+        Bearer {
+            user,
+            session: self.sessions.live_at(user, now()),
+            authenticated_at: now(),
+        }
+    }
+
     pub async fn sign_up(&self, account: &SignInAccount) {
         self.accounts.sign_up(account).await;
+    }
+
+    /// `user`'s desktop app session, staying signed in, through a browser session of its window:
+    /// the window's, then the app's.
+    pub async fn on_the_desktop(&self, user: UserId) -> (SessionId, SessionId) {
+        let window = self.sessions.open_browser(user, now()).await.unwrap();
+        let app = self
+            .sessions
+            .open_app(window, &self.desktop.id, now())
+            .await
+            .unwrap()
+            .expect("a live browser session signs apps in")
+            .id;
+        (window, app)
     }
 
     /// An admin of the instance, signed up.
@@ -290,6 +354,52 @@ impl World {
         };
         self.sign_up(&admin).await;
         admin
+    }
+
+    /// A device of Alice's, its root key registered, and a session naming it.
+    pub async fn on_a_device(&self) -> (DeviceId, Bearer) {
+        let device = DeviceId::generate();
+        let attestation = Attestation {
+            root_key: DeviceRootKey::parse(&[1; 32]).unwrap(),
+            signature: vec![1; 64],
+            kid: "key-1".to_owned(),
+            issued_at: now(),
+            expires_at: now() + time::Duration::days(365),
+        };
+        self.devices
+            .attest(
+                self.alice.id,
+                device,
+                &DeviceLabel::unknown(),
+                None,
+                &attestation,
+                &HpkeKeyWrite::Clear,
+            )
+            .await
+            .unwrap();
+        let bearer = self.bearer_of(self.alice.id);
+        self.sessions
+            .link(self.alice.id, bearer.session, device, now())
+            .await
+            .unwrap();
+        (device, bearer)
+    }
+
+    /// Alice's first history key, set from `device`, which its words approve.
+    pub async fn keyed_from(&self, device: DeviceId) {
+        let first = HistoryKey {
+            generation: HistoryGeneration::FIRST,
+            salt: HistorySalt::parse(&[1; 16]).unwrap(),
+            check_value: HistoryCheckValue::parse(&[1; 32]).unwrap(),
+            approval_public_key: ApprovalPublicKey::parse(&[1; 32]).unwrap(),
+        };
+        self.archive
+            .replace(self.alice.id, &first, device, now())
+            .await
+            .unwrap();
+        self.devices
+            .approved_by_words(self.alice.id, device, &first)
+            .await;
     }
 
     /// Turns the account's second factor on with a known secret: the codes of its app come from

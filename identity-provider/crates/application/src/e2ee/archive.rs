@@ -4,18 +4,26 @@
 use std::sync::Arc;
 
 use domain::UserId;
+use domain::auth::Sessions;
 use domain::e2ee::{
-    ArchiveCursor, ArchiveEntry, ArchiveError, ArchiveSalt, HistoryArchive, NewArchiveEntry,
-    archive_page_size, check_archive_batch,
+    ArchiveCursor, ArchiveEntry, ArchiveError, Archived, Cleared, DeviceApprovals, HistoryArchive,
+    HistoryGeneration, NewArchiveEntry, StaleHistoryKey, archive_page_size, check_archive_batch,
+    check_history_generation, may_act_beyond_the_password,
 };
-use domain::identity::Accounts;
+use domain::identity::{Accounts, Bearer};
 use domain::messaging::Conversations;
 
-/// `POST /api/history/messages`: archive a batch, for conversations the account is or was in —
-/// leaving a group keeps the history one already read.
+use crate::auth::calling_trust;
+
+/// `POST /api/history/messages`: archive a batch sealed under the account's current history key,
+/// for conversations the account is or was in — leaving a group keeps the history one already
+/// read. Only from a device approved under that key: the first entry stored under a message id is
+/// the one a device added later restores.
 pub struct ArchiveMessages {
     accounts: Arc<dyn Accounts>,
     conversations: Arc<dyn Conversations>,
+    sessions: Arc<dyn Sessions>,
+    approvals: Arc<dyn DeviceApprovals>,
     archive: Arc<dyn HistoryArchive>,
 }
 
@@ -23,36 +31,51 @@ impl ArchiveMessages {
     pub fn new(
         accounts: Arc<dyn Accounts>,
         conversations: Arc<dyn Conversations>,
+        sessions: Arc<dyn Sessions>,
+        approvals: Arc<dyn DeviceApprovals>,
         archive: Arc<dyn HistoryArchive>,
     ) -> Self {
         Self {
             accounts,
             conversations,
+            sessions,
+            approvals,
             archive,
         }
     }
 
-    /// How many entries were new.
+    /// How many entries were new. A generation not the current one is `Stale` before any
+    /// approval is asked: the device must learn of the new key first. The write then checks the
+    /// generation only, as a clear's does.
     pub async fn execute(
         &self,
-        owner: UserId,
+        bearer: &Bearer,
+        generation: HistoryGeneration,
         entries: Vec<NewArchiveEntry>,
     ) -> Result<usize, ArchiveError> {
         check_archive_batch(entries.len())?;
+        let owner = bearer.user;
+        let (named, trust) = calling_trust(&*self.sessions, &*self.approvals, bearer).await?;
+        check_history_generation(generation, trust.current)?;
+        may_act_beyond_the_password(named, &trust)?;
         let account = self.accounts.find(owner).await?.ok_or_else(|| {
             ArchiveError::Unexpected(anyhow::anyhow!("the archiving account is gone"))
         })?;
-        let mut named: Vec<_> = entries.iter().map(|e| e.conversation).collect();
-        named.sort();
-        named.dedup();
+        let mut conversations: Vec<_> = entries.iter().map(|e| e.conversation).collect();
+        conversations.sort();
+        conversations.dedup();
         let held = self
             .conversations
-            .ever_held(&account.actor_uri, &named)
+            .ever_held(&account.actor_uri, &conversations)
             .await?;
-        if held.len() != named.len() {
+        if held.len() != conversations.len() {
             return Err(ArchiveError::NotAMember);
         }
-        Ok(self.archive.store(owner, &entries).await?)
+        match self.archive.store(owner, generation, &entries).await? {
+            Archived::Stored(new) => Ok(new),
+            // A new generation was set since the key was read.
+            Archived::Stale => Err(StaleHistoryKey.into()),
+        }
     }
 }
 
@@ -90,55 +113,41 @@ impl ReadArchive {
     }
 }
 
-/// `DELETE /api/history/messages`: Settings → Clear.
+/// `DELETE /api/history/messages`: Settings → Clear. The key stays, and every device goes on
+/// saving under it. Once the account has a history key, only from an approved device: a device
+/// added later restores from what this erases.
 pub struct ClearArchive {
+    sessions: Arc<dyn Sessions>,
+    approvals: Arc<dyn DeviceApprovals>,
     archive: Arc<dyn HistoryArchive>,
 }
 
 impl ClearArchive {
-    pub fn new(archive: Arc<dyn HistoryArchive>) -> Self {
-        Self { archive }
+    pub fn new(
+        sessions: Arc<dyn Sessions>,
+        approvals: Arc<dyn DeviceApprovals>,
+        archive: Arc<dyn HistoryArchive>,
+    ) -> Self {
+        Self {
+            sessions,
+            approvals,
+            archive,
+        }
     }
 
-    /// How many entries went.
-    pub async fn execute(&self, owner: UserId) -> Result<usize, ArchiveError> {
-        Ok(self.archive.clear(owner).await?)
-    }
-}
-
-/// `GET /api/history/salt`
-pub struct LoadArchiveSalt {
-    archive: Arc<dyn HistoryArchive>,
-}
-
-impl LoadArchiveSalt {
-    pub fn new(archive: Arc<dyn HistoryArchive>) -> Self {
-        Self { archive }
-    }
-
-    /// `NoSalt` until a device sets one.
-    pub async fn execute(&self, owner: UserId) -> Result<ArchiveSalt, ArchiveError> {
-        self.archive.salt(owner).await?.ok_or(ArchiveError::NoSalt)
-    }
-}
-
-/// `POST /api/history/salt`: set once — a second device reads back the first one's.
-pub struct SetArchiveSalt {
-    archive: Arc<dyn HistoryArchive>,
-}
-
-impl SetArchiveSalt {
-    pub fn new(archive: Arc<dyn HistoryArchive>) -> Self {
-        Self { archive }
-    }
-
-    /// The salt now held.
-    pub async fn execute(
-        &self,
-        owner: UserId,
-        salt: ArchiveSalt,
-    ) -> Result<ArchiveSalt, ArchiveError> {
-        Ok(self.archive.set_salt_once(owner, &salt).await?)
+    /// How many entries went. The erase happens only under the generation decided on: one set
+    /// since is `Stale`, its entries kept.
+    pub async fn execute(&self, bearer: &Bearer) -> Result<usize, ArchiveError> {
+        let (named, trust) = calling_trust(&*self.sessions, &*self.approvals, bearer).await?;
+        may_act_beyond_the_password(named, &trust)?;
+        // Nothing is archived without a history key.
+        let Some(generation) = trust.current else {
+            return Ok(0);
+        };
+        match self.archive.clear(bearer.user, generation).await? {
+            Cleared::Erased(erased) => Ok(erased),
+            Cleared::Stale => Err(StaleHistoryKey.into()),
+        }
     }
 }
 

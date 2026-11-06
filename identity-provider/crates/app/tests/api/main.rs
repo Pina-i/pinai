@@ -2,15 +2,20 @@
 //! `make test-integration`.
 
 mod admin;
+mod approvals;
 mod avatars;
 mod blocking;
+mod devices;
 mod federation;
 mod forgot_password;
 mod groups;
 mod helpers;
+mod history;
 mod intro;
 mod invitations;
+mod key_shares;
 mod password_resets;
 mod sessions;
 mod shutdown;
 mod sign_up;
+mod start_over;

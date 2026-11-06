@@ -21,7 +21,7 @@ use super::{
     ResetToken, RevokedReason, Rotation, SESSION_IDLE, SESSION_RETENTION, SIGNUP_CODE_TTL,
     SecondFactors, Session, SessionKind, SessionNotifier, Sessions, SignInAccount, SignInAccounts,
     SignUps, SignupCodes, SignupMailer, TICKET_ATTEMPTS, Ticket, TicketAttempt, TokenIssuer,
-    TotpSecret, may_request_reset,
+    TotpSecret, WebAppSignIn, may_request_reset,
 };
 
 pub const CLIENT_ID: &str = "http://localhost:5173/oauth-client.json";
@@ -40,6 +40,16 @@ pub fn web_client() -> Client {
         redirect_uris: vec![REDIRECT_URI.to_owned()],
         post_logout_redirect_uris: vec![POST_LOGOUT_URI.to_owned()],
         offline_access: false,
+    }
+}
+
+/// Another web app than [`web_client`] — an instance's own, on an origin of its own.
+pub fn another_web_app() -> Client {
+    Client {
+        id: ClientId::parse("http://localhost:4173/oauth-client.json").unwrap(),
+        redirect_uris: vec!["http://localhost:4173/callback".to_owned()],
+        post_logout_redirect_uris: vec!["http://localhost:4173/".to_owned()],
+        ..web_client()
     }
 }
 
@@ -118,24 +128,24 @@ impl InMemorySessions {
             .collect()
     }
 
-    /// A live session of `user`'s, opened now: what a test's bearer token belongs to.
+    /// A live web app's session of `user`'s under a browser session of its own, opened now: what
+    /// a test's bearer token belongs to.
     pub fn live(&self, user: UserId) -> SessionId {
-        let id = SessionId::generate();
-        let now = OffsetDateTime::now_utc();
-        self.sessions.lock().unwrap().push((
-            Session {
-                id,
-                user,
-                kind: SessionKind::Browser,
-                device: None,
-                created_at: now,
-                last_used_at: now,
-                authenticated_at: now,
-                revoked_at: None,
+        self.live_at(user, OffsetDateTime::now_utc())
+    }
+
+    /// The same, opened — and its password typed — `now`.
+    pub fn live_at(&self, user: UserId, now: OffsetDateTime) -> SessionId {
+        let browser = self.push(user, SessionKind::Browser, now, now);
+        self.push(
+            user,
+            SessionKind::Web {
+                client: web_client().id,
+                browser,
             },
-            None,
-        ));
-        id
+            now,
+            now,
+        )
     }
 
     pub fn reason(&self, id: SessionId) -> Option<RevokedReason> {
@@ -147,16 +157,57 @@ impl InMemorySessions {
             .and_then(|(_, reason)| *reason)
     }
 
-    /// Ends the sessions not ended yet that `which` picks, as they are once ended.
+    fn push(
+        &self,
+        user: UserId,
+        kind: SessionKind,
+        now: OffsetDateTime,
+        authenticated_at: OffsetDateTime,
+    ) -> SessionId {
+        let id = SessionId::generate();
+        self.sessions.lock().unwrap().push((
+            Session {
+                id,
+                user,
+                kind,
+                device: None,
+                created_at: now,
+                last_used_at: now,
+                authenticated_at,
+                revoked_at: None,
+            },
+            None,
+        ));
+        id
+    }
+
+    /// The browser session `browser`, while it signs apps in at `now`.
+    fn signing_apps_in(&self, browser: SessionId, now: OffsetDateTime) -> Option<Session> {
+        self.all()
+            .into_iter()
+            .find(|session| session.id == browser)
+            .filter(|held| held.signs_apps_in(now))
+    }
+
+    /// Ends what `which` picks among `user`'s sessions not ended yet, as they are once ended.
     fn end(
         &self,
-        which: impl Fn(&Session) -> bool,
+        user: UserId,
+        which: impl Fn(&[Session]) -> Vec<SessionId>,
         reason: RevokedReason,
         now: OffsetDateTime,
     ) -> Vec<Session> {
+        let mut sessions = self.sessions.lock().unwrap();
+        let unrevoked: Vec<Session> = sessions
+            .iter()
+            .map(|(session, _)| session)
+            .filter(|session| session.user == user && session.revoked_at.is_none())
+            .cloned()
+            .collect();
+        let picked = which(&unrevoked);
         let mut ended = Vec::new();
-        for (session, why) in self.sessions.lock().unwrap().iter_mut() {
-            if session.revoked_at.is_none() && which(session) {
+        for (session, why) in sessions.iter_mut() {
+            if session.revoked_at.is_none() && picked.contains(&session.id) {
                 session.revoked_at = Some(now);
                 *why = Some(reason);
                 ended.push(session.clone());
@@ -168,27 +219,74 @@ impl InMemorySessions {
 
 #[async_trait::async_trait]
 impl Sessions for InMemorySessions {
-    async fn open(
+    async fn open_browser(
         &self,
         user: UserId,
-        kind: &SessionKind,
         now: OffsetDateTime,
     ) -> Result<SessionId, AuthError> {
-        let id = SessionId::generate();
-        self.sessions.lock().unwrap().push((
-            Session {
-                id,
-                user,
-                kind: kind.clone(),
-                device: None,
-                created_at: now,
-                last_used_at: now,
-                authenticated_at: now,
-                revoked_at: None,
-            },
-            None,
-        ));
-        Ok(id)
+        Ok(self.push(user, SessionKind::Browser, now, now))
+    }
+
+    async fn open_under(
+        &self,
+        browser: SessionId,
+        client: &ClientId,
+        now: OffsetDateTime,
+    ) -> Result<Option<Session>, AuthError> {
+        let Some(held) = self.signing_apps_in(browser, now) else {
+            return Ok(None);
+        };
+        let kind = SessionKind::Web {
+            client: client.clone(),
+            browser,
+        };
+        let mut sessions = self.sessions.lock().unwrap();
+        for (session, _) in sessions.iter_mut() {
+            if session.id == browser {
+                session.last_used_at = session.last_used_at.max(now);
+            }
+        }
+        let current = sessions
+            .iter()
+            .map(|(session, _)| session)
+            .find(|session| session.kind == kind && session.revoked_at.is_none())
+            .cloned();
+        let decision = super::web_app_sign_in(current.as_ref(), now);
+        for (session, why) in sessions.iter_mut() {
+            match decision {
+                WebAppSignIn::Reuse(id) if session.id == id => {
+                    session.last_used_at = now;
+                    session.authenticated_at = held.authenticated_at;
+                    return Ok(Some(session.clone()));
+                }
+                WebAppSignIn::Replace(id) if session.id == id => {
+                    session.revoked_at = Some(now);
+                    *why = Some(RevokedReason::Replaced);
+                }
+                _ => {}
+            }
+        }
+        drop(sessions);
+        let id = self.push(held.user, kind, now, held.authenticated_at);
+        Ok(self.all().into_iter().find(|session| session.id == id))
+    }
+
+    async fn open_app(
+        &self,
+        browser: SessionId,
+        client: &ClientId,
+        now: OffsetDateTime,
+    ) -> Result<Option<Session>, AuthError> {
+        let Some(held) = self.signing_apps_in(browser, now) else {
+            return Ok(None);
+        };
+        let id = self.push(
+            held.user,
+            SessionKind::App(client.clone()),
+            now,
+            held.authenticated_at,
+        );
+        Ok(self.all().into_iter().find(|session| session.id == id))
     }
 
     async fn find(&self, id: SessionId) -> Result<Option<Session>, AuthError> {
@@ -202,9 +300,10 @@ impl Sessions for InMemorySessions {
     }
 
     async fn touch(&self, id: SessionId, now: OffsetDateTime) -> Result<(), AuthError> {
+        let browser = self.find(id).await?.and_then(|session| session.browser());
         for (session, _) in self.sessions.lock().unwrap().iter_mut() {
-            if session.id == id {
-                session.last_used_at = now;
+            if session.id == id || Some(session.id) == browser {
+                session.last_used_at = session.last_used_at.max(now);
             }
         }
         Ok(())
@@ -224,25 +323,36 @@ impl Sessions for InMemorySessions {
         id: SessionId,
         reason: RevokedReason,
         now: OffsetDateTime,
-    ) -> Result<bool, AuthError> {
-        let mut sessions = self.sessions.lock().unwrap();
-        let Some((session, why)) = sessions
-            .iter_mut()
-            .find(|(session, _)| session.id == id && session.revoked_at.is_none())
-        else {
-            return Ok(false);
+    ) -> Result<Vec<Session>, AuthError> {
+        let Some(session) = self.find(id).await? else {
+            return Ok(Vec::new());
         };
-        session.revoked_at = Some(now);
-        *why = Some(reason);
-        Ok(true)
+        Ok(self.end(
+            session.user,
+            |sessions| super::ending(sessions, id),
+            reason,
+            now,
+        ))
     }
 
     async fn delete_ended(&self, before: OffsetDateTime) -> Result<usize, AuthError> {
         let mut sessions = self.sessions.lock().unwrap();
         let held = sessions.len();
+        let ended = |session: &Session| {
+            session.revoked_at.is_some_and(|at| at < before)
+                || session.last_used_at < before - SESSION_IDLE
+        };
+        let gone: Vec<SessionId> = sessions
+            .iter()
+            .map(|(session, _)| session)
+            .filter(|session| ended(session))
+            .map(|session| session.id)
+            .collect();
         sessions.retain(|(session, _)| {
-            !(session.revoked_at.is_some_and(|at| at < before)
-                || session.last_used_at < before - SESSION_IDLE)
+            !(gone.contains(&session.id)
+                || session
+                    .browser()
+                    .is_some_and(|browser| gone.contains(&browser)))
         });
         Ok(held - sessions.len())
     }
@@ -257,18 +367,25 @@ impl Sessions for InMemorySessions {
 
     async fn link(
         &self,
+        user: UserId,
         id: SessionId,
         device: DeviceId,
         now: OffsetDateTime,
     ) -> Result<Vec<Session>, AuthError> {
-        let replaced = self.end(
-            |session| session.device == Some(device) && session.id != id,
-            RevokedReason::Replaced,
-            now,
-        );
-        for (session, _) in self.sessions.lock().unwrap().iter_mut() {
+        let session = self
+            .find(id)
+            .await?
+            .filter(|session| session.user == user)
+            .ok_or_else(|| anyhow::anyhow!("the session to link is gone"))?;
+        super::may_link(&session, device, now)?;
+        let mut replaced = Vec::new();
+        for (session, why) in self.sessions.lock().unwrap().iter_mut() {
             if session.id == id {
                 session.device = Some(device);
+            } else if session.device == Some(device) && session.revoked_at.is_none() {
+                session.revoked_at = Some(now);
+                *why = Some(RevokedReason::Replaced);
+                replaced.push(session.clone());
             }
         }
         Ok(replaced)
@@ -281,7 +398,8 @@ impl Sessions for InMemorySessions {
         now: OffsetDateTime,
     ) -> Result<Vec<Session>, AuthError> {
         Ok(self.end(
-            |session| session.user == user && session.device == Some(device),
+            user,
+            |sessions| super::ending_with_device(sessions, device),
             RevokedReason::DeviceRevoked,
             now,
         ))
@@ -294,7 +412,8 @@ impl Sessions for InMemorySessions {
         now: OffsetDateTime,
     ) -> Result<Vec<Session>, AuthError> {
         Ok(self.end(
-            |session| session.user == user && session.id != keep,
+            user,
+            |sessions| super::ending_all_but(sessions, keep),
             RevokedReason::SignedOutElsewhere,
             now,
         ))
@@ -883,7 +1002,8 @@ impl PasswordResets for InMemoryPasswordResets {
         let member = row.reset.member;
         self.accounts.set_password(member, hash);
         let ended = self.sessions.end(
-            |session| session.user == member,
+            member,
+            |sessions| sessions.iter().map(|session| session.id).collect(),
             RevokedReason::PasswordReset,
             now,
         );
@@ -2336,18 +2456,45 @@ pub mod contract {
         assert_eq!((expired, spent), (TicketAttempt::Gone, TicketAttempt::Gone));
     }
 
+    fn desktop() -> ClientId {
+        ClientId::parse("http://localhost:8080/clients/desktop.json").unwrap()
+    }
+
+    /// The desktop app's session, staying signed in, through a browser session of its window.
+    async fn desktop_of(sessions: &dyn Sessions, user: UserId, at: OffsetDateTime) -> SessionId {
+        let window = sessions.open_browser(user, at).await.unwrap();
+        sessions
+            .open_app(window, &desktop(), at)
+            .await
+            .unwrap()
+            .expect("a live browser session signs apps in")
+            .id
+    }
+
+    /// `client`'s session under `browser`, a live browser session.
+    async fn web_app_of(
+        sessions: &dyn Sessions,
+        browser: SessionId,
+        client: &ClientId,
+        at: OffsetDateTime,
+    ) -> Session {
+        sessions
+            .open_under(browser, client, at)
+            .await
+            .unwrap()
+            .expect("a live browser session signs apps in")
+    }
+
     pub async fn a_session_opens_is_used_and_ends_once(sessions: &dyn Sessions, user: UserId) {
         let at = OffsetDateTime::from_unix_timestamp(1_790_000_000).unwrap();
-        let id = sessions
-            .open(user, &SessionKind::Browser, at)
-            .await
-            .unwrap();
-        let app = SessionKind::App(web_client().id);
-        let apps = sessions.open(user, &app, at).await.unwrap();
+        let id = sessions.open_browser(user, at).await.unwrap();
+        let apps = desktop_of(sessions, user, at).await;
 
         let opened = sessions.find(id).await.unwrap();
         sessions.touch(id, at + Duration::hours(1)).await.unwrap();
         let used = sessions.find(id).await.unwrap().unwrap();
+        sessions.touch(id, at).await.unwrap();
+        let never_back = sessions.find(id).await.unwrap().unwrap();
         sessions
             .authenticate(id, at + Duration::minutes(90))
             .await
@@ -2385,12 +2532,255 @@ pub mod contract {
             (at, at + Duration::minutes(90)),
             "a use is no password"
         );
-        assert_eq!(authenticated.last_used_at, at + Duration::hours(1));
-        assert_eq!(sessions.find(apps).await.unwrap().unwrap().kind, app);
         assert_eq!(used.last_used_at, at + Duration::hours(1));
-        assert_eq!((revoked, again, reused), (true, false, true), "ended once");
+        assert_eq!(
+            never_back.last_used_at,
+            at + Duration::hours(1),
+            "a late stamp sets no use back"
+        );
+        assert_eq!(
+            sessions.find(apps).await.unwrap().unwrap().kind,
+            SessionKind::App(desktop())
+        );
+        assert_eq!(
+            (ids(revoked), ids(again), ids(reused)),
+            (vec![id], vec![], vec![apps]),
+            "ended once, the desktop's own apart"
+        );
         assert_eq!(ended.revoked_at, Some(at + Duration::hours(2)));
         assert_eq!(sessions.find(SessionId::generate()).await.unwrap(), None);
+    }
+
+    pub async fn an_apps_session_staying_signed_in_takes_its_browsers_password_and_outlives_it(
+        sessions: &dyn Sessions,
+        user: UserId,
+    ) {
+        let at = OffsetDateTime::from_unix_timestamp(1_790_000_000).unwrap();
+        let window = sessions.open_browser(user, at).await.unwrap();
+        let signed_out = sessions.open_browser(user, at).await.unwrap();
+        sessions
+            .revoke(signed_out, RevokedReason::SignOut, at)
+            .await
+            .unwrap();
+
+        let app = sessions
+            .open_app(window, &desktop(), at + Duration::minutes(2))
+            .await
+            .unwrap()
+            .expect("a live browser session signs apps in");
+        let refused = sessions.open_app(signed_out, &desktop(), at).await.unwrap();
+        let held = sessions.of_user(user).await.unwrap().len();
+        sessions
+            .revoke(window, RevokedReason::SignOut, at + Duration::hours(1))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            app,
+            Session {
+                id: app.id,
+                user,
+                kind: SessionKind::App(desktop()),
+                device: None,
+                created_at: at + Duration::minutes(2),
+                last_used_at: at + Duration::minutes(2),
+                authenticated_at: at,
+                revoked_at: None,
+            },
+            "the password typed in its window"
+        );
+        assert_eq!(refused, None);
+        assert_eq!(held, 3, "nothing opened for an ended browser session");
+        assert!(
+            sessions
+                .find(app.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_live(at + Duration::hours(1)),
+            "under no browser session"
+        );
+    }
+
+    pub async fn a_web_apps_session_is_opened_once_under_its_browser_session_and_reused(
+        sessions: &dyn Sessions,
+        user: UserId,
+    ) {
+        let at = OffsetDateTime::from_unix_timestamp(1_790_000_000).unwrap();
+        let web = web_client().id;
+        let browser = sessions.open_browser(user, at).await.unwrap();
+        let other_browser = sessions.open_browser(user, at).await.unwrap();
+
+        let first = web_app_of(sessions, browser, &web, at + Duration::minutes(1)).await;
+        sessions
+            .authenticate(browser, at + Duration::minutes(5))
+            .await
+            .unwrap();
+        let again = web_app_of(sessions, browser, &web, at + Duration::minutes(6)).await;
+        let other_app = web_app_of(
+            sessions,
+            browser,
+            &another_web_app().id,
+            at + Duration::minutes(6),
+        )
+        .await;
+        let other_browsers =
+            web_app_of(sessions, other_browser, &web, at + Duration::minutes(6)).await;
+        let stamped = sessions.find(browser).await.unwrap().unwrap();
+
+        assert_eq!(
+            first,
+            Session {
+                id: first.id,
+                user,
+                kind: SessionKind::Web {
+                    client: web.clone(),
+                    browser,
+                },
+                device: None,
+                created_at: at + Duration::minutes(1),
+                last_used_at: at + Duration::minutes(1),
+                authenticated_at: at,
+                revoked_at: None,
+            },
+            "the browser session's password"
+        );
+        assert_eq!(again.id, first.id, "one a browser session and client");
+        assert_eq!(
+            (again.last_used_at, again.authenticated_at),
+            (at + Duration::minutes(6), at + Duration::minutes(5)),
+            "used again, its password the browser session's anew"
+        );
+        assert_eq!(stamped.last_used_at, at + Duration::minutes(6));
+        assert_ne!(other_app.id, first.id);
+        assert_ne!(other_browsers.id, first.id);
+        assert_eq!(other_browsers.browser(), Some(other_browser));
+        assert_eq!(sessions.of_user(user).await.unwrap().len(), 5);
+    }
+
+    pub async fn a_web_apps_session_ended_or_idle_is_followed_by_a_new_one(
+        sessions: &dyn Sessions,
+        user: UserId,
+    ) {
+        let at = OffsetDateTime::from_unix_timestamp(1_790_000_000).unwrap();
+        let web = web_client().id;
+        let browser = sessions.open_browser(user, at).await.unwrap();
+        let signed_out = web_app_of(sessions, browser, &web, at).await;
+        sessions
+            .revoke(signed_out.id, RevokedReason::SignOut, at)
+            .await
+            .unwrap();
+        let idle = web_app_of(sessions, browser, &another_web_app().id, at).await;
+        // The browser session used until `later`, this app's session not since `at`.
+        let later = at + SESSION_IDLE + Duration::days(1);
+        sessions
+            .touch(browser, later - Duration::days(1))
+            .await
+            .unwrap();
+
+        let after_sign_out = web_app_of(sessions, browser, &web, at + Duration::minutes(1)).await;
+        let after_idle = web_app_of(sessions, browser, &another_web_app().id, later).await;
+
+        assert_ne!(after_sign_out.id, signed_out.id);
+        assert_ne!(after_idle.id, idle.id);
+        assert!(after_idle.is_live(later));
+        assert_eq!(
+            sessions.find(idle.id).await.unwrap().unwrap().revoked_at,
+            Some(later),
+            "the idle one ends, so the browser session holds one a client"
+        );
+    }
+
+    pub async fn only_a_live_browser_session_opens_web_apps_sessions(
+        sessions: &dyn Sessions,
+        user: UserId,
+    ) {
+        let at = OffsetDateTime::from_unix_timestamp(1_790_000_000).unwrap();
+        let web = web_client().id;
+        let signed_out = sessions.open_browser(user, at).await.unwrap();
+        sessions
+            .revoke(signed_out, RevokedReason::SignOut, at)
+            .await
+            .unwrap();
+        let idle = sessions.open_browser(user, at).await.unwrap();
+        let desktop = desktop_of(sessions, user, at).await;
+        let live = sessions.open_browser(user, at).await.unwrap();
+        let a_web_app = web_app_of(sessions, live, &web, at).await;
+        let held = sessions.of_user(user).await.unwrap().len();
+
+        for refused in [signed_out, desktop, a_web_app.id, SessionId::generate()] {
+            assert_eq!(
+                sessions.open_under(refused, &web, at).await.unwrap(),
+                None,
+                "{refused}"
+            );
+        }
+        assert_eq!(
+            sessions
+                .open_under(idle, &web, at + SESSION_IDLE)
+                .await
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            sessions.of_user(user).await.unwrap().len(),
+            held,
+            "nothing opened"
+        );
+    }
+
+    pub async fn a_web_apps_use_is_its_browser_sessions_and_its_end_its_alone(
+        sessions: &dyn Sessions,
+        user: UserId,
+    ) {
+        let at = OffsetDateTime::from_unix_timestamp(1_790_000_000).unwrap();
+        let browser = sessions.open_browser(user, at).await.unwrap();
+        let desktop = desktop_of(sessions, user, at).await;
+        let web = web_app_of(sessions, browser, &web_client().id, at).await;
+        let other = web_app_of(sessions, browser, &another_web_app().id, at).await;
+
+        sessions
+            .touch(web.id, at + Duration::hours(1))
+            .await
+            .unwrap();
+        let browser_used = sessions.find(browser).await.unwrap().unwrap().last_used_at;
+        let alone = sessions
+            .revoke(web.id, RevokedReason::SignOut, at + Duration::hours(2))
+            .await
+            .unwrap();
+        let browser_live = sessions
+            .find(browser)
+            .await
+            .unwrap()
+            .unwrap()
+            .is_live(at + Duration::hours(2));
+        let with_it = sessions
+            .revoke(browser, RevokedReason::SignOut, at + Duration::hours(3))
+            .await
+            .unwrap();
+
+        assert_eq!(browser_used, at + Duration::hours(1));
+        assert_eq!(ids(alone), vec![web.id], "one app signs out alone");
+        assert!(browser_live);
+        assert_eq!(
+            sorted(ids(with_it.clone())),
+            sorted(vec![browser, other.id]),
+            "the browser session's web apps go with it"
+        );
+        assert!(
+            with_it
+                .iter()
+                .all(|session| session.revoked_at == Some(at + Duration::hours(3)))
+        );
+        assert!(
+            sessions
+                .find(desktop)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_live(at + Duration::hours(3)),
+            "the desktop's own outlives the browser"
+        );
     }
 
     pub async fn sessions_ended_are_swept_after_their_retention(
@@ -2399,14 +2789,19 @@ pub mod contract {
     ) {
         let now = OffsetDateTime::from_unix_timestamp(1_790_000_000).unwrap();
         let before = now - SESSION_RETENTION;
-        let live = sessions
-            .open(user, &SessionKind::Browser, now)
-            .await
-            .unwrap();
+        let live = sessions.open_browser(user, now).await.unwrap();
         let revoked_long_ago = sessions
-            .open(user, &SessionKind::Browser, now - Duration::days(40))
+            .open_browser(user, now - Duration::days(40))
             .await
             .unwrap();
+        let its_web_app = web_app_of(
+            sessions,
+            revoked_long_ago,
+            &web_client().id,
+            now - Duration::days(40),
+        )
+        .await
+        .id;
         sessions
             .revoke(
                 revoked_long_ago,
@@ -2416,7 +2811,7 @@ pub mod contract {
             .await
             .unwrap();
         let revoked_lately = sessions
-            .open(user, &SessionKind::Browser, now - Duration::days(2))
+            .open_browser(user, now - Duration::days(2))
             .await
             .unwrap();
         sessions
@@ -2428,35 +2823,69 @@ pub mod contract {
             .await
             .unwrap();
         let idle_long_ago = sessions
-            .open(
-                user,
-                &SessionKind::Browser,
-                before - SESSION_IDLE - Duration::days(1),
-            )
+            .open_browser(user, before - SESSION_IDLE - Duration::days(1))
             .await
             .unwrap();
         let idle_lately = sessions
-            .open(
-                user,
-                &SessionKind::Browser,
-                before - SESSION_IDLE + Duration::days(1),
-            )
+            .open_browser(user, before - SESSION_IDLE + Duration::days(1))
             .await
             .unwrap();
 
         let swept = sessions.delete_ended(before).await.unwrap();
 
-        assert_eq!(swept, 2);
+        assert_eq!(swept, 3);
         for kept in [live, revoked_lately, idle_lately] {
             assert!(sessions.find(kept).await.unwrap().is_some());
         }
-        for gone in [revoked_long_ago, idle_long_ago] {
+        for gone in [revoked_long_ago, its_web_app, idle_long_ago] {
+            assert_eq!(sessions.find(gone).await.unwrap(), None);
+        }
+    }
+
+    pub async fn a_browser_session_swept_takes_its_web_apps_with_it_and_counts_them(
+        sessions: &dyn Sessions,
+        user: UserId,
+    ) {
+        let now = OffsetDateTime::from_unix_timestamp(1_790_000_000).unwrap();
+        let before = now - SESSION_RETENTION;
+        let browser = sessions
+            .open_browser(user, now - Duration::days(40))
+            .await
+            .unwrap();
+        let web_app = web_app_of(
+            sessions,
+            browser,
+            &web_client().id,
+            now - Duration::days(40),
+        )
+        .await
+        .id;
+        // The web app signed out lately, its browser session a while before: only the browser
+        // session is past its retention.
+        sessions
+            .revoke(web_app, RevokedReason::SignOut, before + Duration::days(1))
+            .await
+            .unwrap();
+        sessions
+            .revoke(browser, RevokedReason::SignOut, before - Duration::days(1))
+            .await
+            .unwrap();
+
+        let swept = sessions.delete_ended(before).await.unwrap();
+
+        assert_eq!(swept, 2, "the web app's counted");
+        for gone in [browser, web_app] {
             assert_eq!(sessions.find(gone).await.unwrap(), None);
         }
     }
 
     fn ids(sessions: Vec<Session>) -> Vec<SessionId> {
         sessions.into_iter().map(|session| session.id).collect()
+    }
+
+    fn sorted(mut ids: Vec<SessionId>) -> Vec<SessionId> {
+        ids.sort();
+        ids
     }
 
     /// `device` is one of `user`'s.
@@ -2466,29 +2895,19 @@ pub mod contract {
         device: DeviceId,
     ) {
         let at = OffsetDateTime::from_unix_timestamp(1_790_000_000).unwrap();
-        let first = sessions
-            .open(user, &SessionKind::Browser, at)
-            .await
-            .unwrap();
-        let second = sessions
-            .open(user, &SessionKind::Browser, at)
-            .await
-            .unwrap();
-        let unlinked = sessions
-            .open(user, &SessionKind::Browser, at)
-            .await
-            .unwrap();
+        let first = desktop_of(sessions, user, at).await;
+        let second = desktop_of(sessions, user, at).await;
+        let unlinked = desktop_of(sessions, user, at).await;
 
-        let linked = sessions.link(first, device, at).await.unwrap();
+        let linked = sessions.link(user, first, device, at).await.unwrap();
         let replaced = sessions
-            .link(second, device, at + Duration::hours(1))
+            .link(user, second, device, at + Duration::hours(1))
             .await
             .unwrap();
         let again = sessions
-            .link(second, device, at + Duration::hours(2))
+            .link(user, second, device, at + Duration::hours(2))
             .await
             .unwrap();
-        let mine = sessions.of_user(user).await.unwrap();
         let first = sessions.find(first).await.unwrap().unwrap();
 
         assert!(linked.is_empty());
@@ -2504,34 +2923,75 @@ pub mod contract {
             Some(device)
         );
         assert_eq!(sessions.find(unlinked).await.unwrap().unwrap().device, None);
-        assert_eq!(mine.len(), 3);
     }
 
-    /// `device` is one of `user`'s; `other` is another account.
+    /// `laptop` and `phone` are `user`'s devices.
+    pub async fn a_session_names_one_device_and_a_browser_session_none(
+        sessions: &dyn Sessions,
+        user: UserId,
+        laptop: DeviceId,
+        phone: DeviceId,
+    ) {
+        let at = OffsetDateTime::from_unix_timestamp(1_790_000_000).unwrap();
+        let browser = sessions.open_browser(user, at).await.unwrap();
+        let web = web_app_of(sessions, browser, &web_client().id, at).await.id;
+        let signed_out = web_app_of(sessions, browser, &another_web_app().id, at)
+            .await
+            .id;
+        sessions
+            .revoke(signed_out, RevokedReason::SignOut, at)
+            .await
+            .unwrap();
+        sessions.link(user, web, laptop, at).await.unwrap();
+
+        let another = sessions.link(user, web, phone, at).await;
+        let on_the_browser = sessions.link(user, browser, phone, at).await;
+        let ended = sessions.link(user, signed_out, phone, at).await;
+
+        assert!(
+            matches!(another, Err(AuthError::DeviceMismatch)),
+            "{another:?}"
+        );
+        assert!(
+            matches!(on_the_browser, Err(AuthError::DeviceMismatch)),
+            "{on_the_browser:?}"
+        );
+        assert!(matches!(ended, Err(AuthError::SessionEnded)), "{ended:?}");
+        for (session, device) in [(web, Some(laptop)), (browser, None), (signed_out, None)] {
+            assert_eq!(
+                sessions.find(session).await.unwrap().unwrap().device,
+                device
+            );
+        }
+    }
+
+    /// `device` and `desktops` are `user`'s; `other` is another account.
     pub async fn a_revoked_device_and_signing_out_elsewhere_end_the_right_sessions(
         sessions: &dyn Sessions,
         user: UserId,
         other: UserId,
         device: DeviceId,
+        desktops: DeviceId,
     ) {
         let at = OffsetDateTime::from_unix_timestamp(1_790_000_000).unwrap();
-        let on_device = sessions
-            .open(user, &SessionKind::Browser, at)
+        let web = web_client().id;
+        // A laptop's browser, a web app there on `device` and another beside it.
+        let laptop = sessions.open_browser(user, at).await.unwrap();
+        let on_device = web_app_of(sessions, laptop, &web, at).await.id;
+        sessions.link(user, on_device, device, at).await.unwrap();
+        let beside = web_app_of(sessions, laptop, &another_web_app().id, at)
             .await
-            .unwrap();
-        sessions.link(on_device, device, at).await.unwrap();
-        let current = sessions
-            .open(user, &SessionKind::Browser, at)
+            .id;
+        // This browser, the caller's web app and another beside it.
+        let here = sessions.open_browser(user, at).await.unwrap();
+        let current = web_app_of(sessions, here, &web, at).await.id;
+        let beside_current = web_app_of(sessions, here, &another_web_app().id, at)
             .await
-            .unwrap();
-        let elsewhere = sessions
-            .open(user, &SessionKind::App(web_client().id), at)
-            .await
-            .unwrap();
-        let someone_elses = sessions
-            .open(other, &SessionKind::Browser, at)
-            .await
-            .unwrap();
+            .id;
+        let desktop = desktop_of(sessions, user, at).await;
+        sessions.link(user, desktop, desktops, at).await.unwrap();
+        let theirs = sessions.open_browser(other, at).await.unwrap();
+        let someone_elses = web_app_of(sessions, theirs, &web, at).await.id;
 
         let not_theirs = sessions.revoke_device(other, device, at).await.unwrap();
         let revoked = sessions.revoke_device(user, device, at).await.unwrap();
@@ -2539,22 +2999,74 @@ pub mod contract {
         let signed_out = sessions.revoke_others(user, current, at).await.unwrap();
 
         assert!(not_theirs.is_empty());
-        assert_eq!(ids(revoked), vec![on_device]);
-        assert!(revoked_again.is_empty());
         assert_eq!(
-            ids(signed_out),
-            vec![elsewhere],
-            "the ended one is not ended twice"
+            sorted(ids(revoked)),
+            sorted(vec![laptop, on_device, beside]),
+            "the browser it signed in through, and that browser's other web app"
         );
-        assert!(sessions.find(current).await.unwrap().unwrap().is_live(at));
-        assert!(
+        assert!(revoked_again.is_empty());
+        let desktops_window = signed_out
+            .iter()
+            .find(|session| session.kind == SessionKind::Browser)
+            .map(|session| session.id)
+            .expect("the desktop's window");
+        assert_eq!(
+            sorted(ids(signed_out)),
+            sorted(vec![desktops_window, desktop]),
+            "the ended ones are not ended twice, and this browser is kept whole"
+        );
+        for kept in [here, current, beside_current, someone_elses] {
+            assert!(
+                sessions.find(kept).await.unwrap().unwrap().is_live(at),
+                "{kept}"
+            );
+        }
+    }
+
+    pub async fn a_desktop_signing_out_elsewhere_keeps_its_own_session_only(
+        sessions: &dyn Sessions,
+        user: UserId,
+    ) {
+        let at = OffsetDateTime::from_unix_timestamp(1_790_000_000).unwrap();
+        let browser = sessions.open_browser(user, at).await.unwrap();
+        let web = web_app_of(sessions, browser, &web_client().id, at).await.id;
+        let desktop = desktop_of(sessions, user, at).await;
+
+        let signed_out = sessions.revoke_others(user, desktop, at).await.unwrap();
+
+        assert!(ids(signed_out.clone()).contains(&browser));
+        assert!(ids(signed_out).contains(&web));
+        assert!(sessions.find(desktop).await.unwrap().unwrap().is_live(at));
+        assert_eq!(
             sessions
-                .find(someone_elses)
+                .of_user(user)
                 .await
                 .unwrap()
-                .unwrap()
-                .is_live(at)
+                .iter()
+                .filter(|session| session.is_live(at))
+                .count(),
+            1
         );
+    }
+
+    /// `device` is one of `user`'s.
+    pub async fn revoking_a_desktops_device_leaves_every_browser_signed_in(
+        sessions: &dyn Sessions,
+        user: UserId,
+        device: DeviceId,
+    ) {
+        let at = OffsetDateTime::from_unix_timestamp(1_790_000_000).unwrap();
+        let browser = sessions.open_browser(user, at).await.unwrap();
+        let web = web_app_of(sessions, browser, &web_client().id, at).await;
+        let desktop = desktop_of(sessions, user, at).await;
+        sessions.link(user, desktop, device, at).await.unwrap();
+
+        let revoked = sessions.revoke_device(user, device, at).await.unwrap();
+
+        assert_eq!(ids(revoked), vec![desktop]);
+        for kept in [browser, web.id] {
+            assert!(sessions.find(kept).await.unwrap().unwrap().is_live(at));
+        }
     }
 
     fn rotated(rotation: Rotation) -> RefreshToken {
@@ -3221,16 +3733,25 @@ pub mod contract {
         let (alice, bob) = (signed_up("alice"), signed_up("bob"));
         seeds.sign_up(&alice).await;
         seeds.sign_up(&bob).await;
-        let open =
-            async |user: UserId, kind: SessionKind| sessions.open(user, &kind, now).await.unwrap();
-        let browser = open(alice.id, SessionKind::Browser).await;
-        let desktop = open(alice.id, SessionKind::App(web_client().id)).await;
-        let signed_out = open(alice.id, SessionKind::Browser).await;
+        let browser = sessions.open_browser(alice.id, now).await.unwrap();
+        let web = web_app_of(sessions, browser, &web_client().id, now)
+            .await
+            .id;
+        let desktop = desktop_of(sessions, alice.id, now).await;
+        let signed_out = sessions.open_browser(alice.id, now).await.unwrap();
         sessions
             .revoke(signed_out, RevokedReason::SignOut, now)
             .await
             .unwrap();
-        let bobs = open(bob.id, SessionKind::Browser).await;
+        let bobs = sessions.open_browser(bob.id, now).await.unwrap();
+        let live: Vec<SessionId> = sessions
+            .of_user(alice.id)
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|session| session.id != signed_out)
+            .map(|session| session.id)
+            .collect();
         let token = resets
             .issue(alice.id, admin.id, now, now + RESET_TTL)
             .await
@@ -3254,12 +3775,13 @@ pub mod contract {
         let PasswordChange::Changed { member, ended } = changed else {
             panic!("not changed: {changed:?}");
         };
-        let mut ended_ids = ids(ended.clone());
-        ended_ids.sort();
-        let mut live = vec![browser, desktop];
-        live.sort();
         assert_eq!(member, alice.id);
-        assert_eq!(ended_ids, live, "the sessions not ended already");
+        assert_eq!(live.len(), 4, "the desktop's window too");
+        assert_eq!(
+            sorted(ids(ended.clone())),
+            sorted(live),
+            "the sessions not ended already"
+        );
         assert!(ended.iter().all(|session| session.revoked_at == Some(at)));
         assert_eq!(again, PasswordChange::LinkUnusable, "spent");
         assert_eq!(
@@ -3276,7 +3798,7 @@ pub mod contract {
             bob.password_hash
         );
         assert_eq!(resets.find_open(&token, at).await.unwrap(), None);
-        for gone in [browser, desktop] {
+        for gone in [browser, web, desktop] {
             assert!(!sessions.find(gone).await.unwrap().unwrap().is_live(at));
         }
         assert_eq!(
@@ -3305,10 +3827,7 @@ pub mod contract {
         let (alice, carol) = (signed_up("alice"), signed_up("carol"));
         seeds.sign_up(&alice).await;
         seeds.sign_up(&carol).await;
-        let alices = sessions
-            .open(alice.id, &SessionKind::Browser, now)
-            .await
-            .unwrap();
+        let alices = sessions.open_browser(alice.id, now).await.unwrap();
         let expires_at = now + RESET_TTL;
         let replaced = resets
             .issue(alice.id, admin.id, now, expires_at)
@@ -3784,10 +4303,7 @@ pub mod contract {
         let bob = a_new_account("bob");
         sign_ups.create(&bob).await.unwrap();
         let used = async |user: UserId, opened: OffsetDateTime, last_used: OffsetDateTime| {
-            let id = sessions
-                .open(user, &SessionKind::Browser, opened)
-                .await
-                .unwrap();
+            let id = sessions.open_browser(user, opened).await.unwrap();
             sessions.touch(id, last_used).await.unwrap();
             id
         };

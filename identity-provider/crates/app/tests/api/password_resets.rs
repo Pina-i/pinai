@@ -110,7 +110,8 @@ async fn a_member_resets_their_password_with_an_admins_link_and_is_signed_out_ev
     assert_eq!(
         app.count("SELECT count(*) FROM sessions WHERE revoked_reason = 'password_reset'")
             .await,
-        1
+        2,
+        "the browser session and its web app's"
     );
     app.stop().await.unwrap();
 }

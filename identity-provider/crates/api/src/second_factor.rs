@@ -18,7 +18,8 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 use crate::ApiError;
-use crate::auth::{Authenticated, RecentlySignedIn};
+use crate::auth::{Authenticated, RecentlySignedIn, SignedIn};
+use crate::e2ee::approval_required;
 use crate::pages::{
     Appearance, SameOrigin, SecondFactorPage, SignInPages, cancel, expired, render, to, totp_alert,
 };
@@ -153,6 +154,7 @@ fn refused(error: AuthError, wrong_code: &'static str) -> ApiError {
             ApiError::bad_request("No pending enrollment — call /api/totp/enroll first")
         }
         AuthError::WrongCode => ApiError::new(StatusCode::BAD_REQUEST, "invalid_grant", wrong_code),
+        AuthError::ApprovalRequired(_) => approval_required(),
         other => ApiError::internal(anyhow::Error::from(other)),
     }
 }
@@ -169,7 +171,7 @@ pub async fn enroll(
     RecentlySignedIn(bearer): RecentlySignedIn,
 ) -> Result<Json<EnrollmentBody>, ApiError> {
     let enrollment = enroll
-        .execute(bearer.user)
+        .execute(&bearer)
         .await
         .map_err(|e| refused(e, "Incorrect code"))?;
     Ok(Json(EnrollmentBody {
@@ -191,11 +193,11 @@ pub struct RecoveryCodesBody {
 /// `POST /api/totp/enroll/verify` — the app's first code: on, with recovery codes shown once.
 pub async fn confirm(
     State(confirm): State<Arc<ConfirmTotpEnrollment>>,
-    Authenticated(user): Authenticated,
+    SignedIn(bearer): SignedIn,
     Json(body): Json<CodeBody>,
 ) -> Result<Json<RecoveryCodesBody>, ApiError> {
     let recovery_codes = confirm
-        .execute(user, &body.code, OffsetDateTime::now_utc())
+        .execute(&bearer, &body.code, OffsetDateTime::now_utc())
         .await
         .map_err(|e| refused(e, "Incorrect code — try again"))?;
     Ok(Json(RecoveryCodesBody { recovery_codes }))

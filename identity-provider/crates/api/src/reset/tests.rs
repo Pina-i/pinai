@@ -195,6 +195,7 @@ async fn setting_the_password_signs_the_member_out_everywhere_and_points_to_the_
     let app = TestApp::with([], []);
     let (alice, token) = alices_link(&app).await;
     let session = app.sign_in.sessions.live(alice.id);
+    let browser = app.sign_in.sessions.all()[0].id;
 
     let response = app.respond(post(token.as_str(), NEW, NEW)).await;
 
@@ -210,14 +211,16 @@ async fn setting_the_password_signs_the_member_out_everywhere_and_points_to_the_
     }
     assert!(!page.contains(NEW), "{page}");
     assert_eq!(password_of(&app, &alice).await, PlainHasher::hash(NEW));
-    assert_eq!(
-        app.sign_in.sessions.reason(session),
-        Some(RevokedReason::PasswordReset)
-    );
+    for ended in [browser, session] {
+        assert_eq!(
+            app.sign_in.sessions.reason(ended),
+            Some(RevokedReason::PasswordReset)
+        );
+    }
     assert_eq!(
         app.sign_in.ended.ended(),
-        vec![session],
-        "its sockets close"
+        vec![browser, session],
+        "their sockets close"
     );
 }
 

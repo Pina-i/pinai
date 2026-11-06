@@ -1,12 +1,20 @@
 use std::sync::Arc;
 
+use domain::DeviceId;
+use domain::auth::Sessions;
 use domain::e2ee::{
-    ATTESTATION_LIFETIME, Attestation, DeviceAttester, DeviceLabel, DeviceNotifier, DeviceRootKey,
-    Devices, KeyDirectoryError, Registration, SignedAttestation,
+    Attest, Attestation, DeviceAttester, DeviceLabel, DeviceNotifier, DeviceRootKey, Devices,
+    Ed25519Verifier, KeyDirectoryError, Registration, SignedAttestation, UnverifiedHpkeKey,
+    attestation_period, may_register,
 };
-use domain::identity::Accounts;
-use domain::{DeviceId, UserId};
+use domain::identity::{Accounts, Bearer};
 use time::OffsetDateTime;
+
+use crate::auth::calling_session;
+
+/// A revoke or another registration may land between the read and the write: each attempt reads
+/// the device again.
+const ATTEMPTS: usize = 3;
 
 pub struct Registered {
     pub signed: SignedAttestation,
@@ -15,11 +23,13 @@ pub struct Registered {
 }
 
 /// `POST /api/keys/devices`: attest a device's root key — the first time, again to renew it, or
-/// another key to rotate.
+/// another key to rotate — with the HPKE key it signed, when it sends one.
 pub struct RegisterDevice {
     accounts: Arc<dyn Accounts>,
     devices: Arc<dyn Devices>,
     attester: Arc<dyn DeviceAttester>,
+    verifier: Arc<dyn Ed25519Verifier>,
+    sessions: Arc<dyn Sessions>,
     notifier: Arc<dyn DeviceNotifier>,
 }
 
@@ -28,32 +38,41 @@ impl RegisterDevice {
         accounts: Arc<dyn Accounts>,
         devices: Arc<dyn Devices>,
         attester: Arc<dyn DeviceAttester>,
+        verifier: Arc<dyn Ed25519Verifier>,
+        sessions: Arc<dyn Sessions>,
         notifier: Arc<dyn DeviceNotifier>,
     ) -> Self {
         Self {
             accounts,
             devices,
             attester,
+            verifier,
+            sessions,
             notifier,
         }
     }
 
     pub async fn execute(
         &self,
-        owner: UserId,
+        bearer: &Bearer,
         device: DeviceId,
         key: DeviceRootKey,
+        brought: Option<UnverifiedHpkeKey>,
+        label: &DeviceLabel,
         now: OffsetDateTime,
     ) -> Result<Registered, KeyDirectoryError> {
+        let owner = bearer.user;
+        let session = calling_session(&*self.sessions, bearer)
+            .await
+            .map_err(|e| KeyDirectoryError::Unexpected(e.into()))?;
+        may_register(session.device, device)?;
         let account = self.accounts.find(owner).await?.ok_or_else(|| {
             KeyDirectoryError::Unexpected(anyhow::anyhow!("the registering account is gone"))
         })?;
-        let existing = self.devices.find(device).await?;
-        let registration = Registration::of(existing.as_ref(), owner, &key)?;
-        if registration == Registration::Rotation {
-            tracing::warn!(%device, "device root key rotated: KeyPackages under the old key stop verifying");
-        }
-        let expires_at = now + ATTESTATION_LIFETIME;
+        let brought = brought
+            .map(|brought| brought.verified(&key, &account.actor_uri, device, &*self.verifier))
+            .transpose()?;
+        let (issued_at, expires_at) = attestation_period(now);
         let signed = self
             .attester
             .attest(&account.actor_uri, device, &key, expires_at);
@@ -61,21 +80,48 @@ impl RegisterDevice {
             root_key: key,
             signature: signed.signature.clone(),
             kid: signed.kid.clone(),
-            issued_at: now,
-            expires_at,
+            issued_at,
+            expires_at: expires_at.at(),
         };
-        // A device registering before it publishes any KeyPackage is not known yet.
-        self.devices
-            .attest(owner, device, &DeviceLabel::unknown(), &attestation)
-            .await?;
-        if registration == Registration::FirstTime {
-            self.notifier
-                .device_joined(owner, &account.actor_uri, device, &attestation.root_key);
+        for _ in 0..ATTEMPTS {
+            let existing = self.devices.find(device).await?;
+            let registration = Registration::of(existing.as_ref(), owner, &attestation.root_key)?;
+            registration.may_come_from(session.device, device)?;
+            let hpke_key = registration.hpke_key(brought.clone());
+            let written = self
+                .devices
+                .attest(
+                    owner,
+                    device,
+                    label,
+                    existing.as_ref(),
+                    &attestation,
+                    &hpke_key,
+                )
+                .await?;
+            if written == Attest::Stale {
+                continue;
+            }
+            match registration {
+                Registration::FirstTime => self.notifier.device_joined(
+                    owner,
+                    &account.actor_uri,
+                    device,
+                    &attestation.root_key,
+                ),
+                Registration::Rotation => {
+                    tracing::warn!(%device, "device root key rotated: KeyPackages under the old key stop verifying");
+                }
+                Registration::Renewal => {}
+            }
+            return Ok(Registered {
+                signed,
+                issued_at,
+                expires_at: expires_at.at(),
+            });
         }
-        Ok(Registered {
-            signed,
-            issued_at: now,
-            expires_at,
-        })
+        Err(KeyDirectoryError::Unexpected(anyhow::anyhow!(
+            "device {device} kept changing while it registered"
+        )))
     }
 }

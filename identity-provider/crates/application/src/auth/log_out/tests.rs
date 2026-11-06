@@ -1,6 +1,5 @@
-use domain::auth::SessionKind;
-use domain::auth::Sessions;
-use domain::auth::testing::{CLIENT_ID, POST_LOGOUT_URI};
+use domain::auth::testing::{CLIENT_ID, POST_LOGOUT_URI, another_web_app, web_client};
+use domain::auth::{RevokedReason, Sessions};
 
 use crate::auth::world::{now, world};
 
@@ -60,13 +59,20 @@ async fn a_logout_naming_no_known_client_stays_here() {
 }
 
 #[tokio::test]
-async fn signing_out_ends_the_browsers_session_and_what_hangs_on_it_once() {
+async fn signing_out_ends_the_browsers_session_and_its_web_apps_once_never_a_desktops() {
     let w = world().await;
-    let session = w
-        .sessions
-        .open(w.alice.id, &SessionKind::Browser, now())
-        .await
-        .unwrap();
+    let session = w.sessions.open_browser(w.alice.id, now()).await.unwrap();
+    let under = async |client: &domain::auth::ClientId| {
+        w.sessions
+            .open_under(session, client, now())
+            .await
+            .unwrap()
+            .unwrap()
+            .id
+    };
+    let web = under(&web_client().id).await;
+    let other = under(&another_web_app().id).await;
+    let (_, desktop) = w.on_the_desktop(w.alice.id).await;
 
     w.log_out
         .execute(Some(session), None, None, now())
@@ -77,9 +83,13 @@ async fn signing_out_ends_the_browsers_session_and_what_hangs_on_it_once() {
         .await
         .unwrap();
 
-    assert_eq!(
-        w.sessions.reason(session),
-        Some(domain::auth::RevokedReason::SignOut)
-    );
-    assert_eq!(w.ended.ended(), vec![session], "its sockets closed once");
+    for ended in [session, web, other] {
+        assert_eq!(w.sessions.reason(ended), Some(RevokedReason::SignOut));
+    }
+    let mut told = w.ended.ended();
+    told.sort();
+    let mut expected = vec![session, web, other];
+    expected.sort();
+    assert_eq!(told, expected, "their sockets closed once");
+    assert_eq!(w.sessions.reason(desktop), None, "the desktop's own stays");
 }

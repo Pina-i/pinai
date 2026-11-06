@@ -10,9 +10,12 @@ use application::auth::{
     ShowSignIn, SignOutOthers, StartTotpEnrollment, VerifyEmail,
 };
 use application::e2ee::{
-    AppendCommit, ArchiveMessages, CatchUpCommits, ClaimKeyPackage, ClaimWelcomes, ClearArchive,
-    KeyPackageStatus, ListDevices, LoadArchiveSalt, ReadArchive, ReceiveCommit, ReceiveWelcome,
-    RegisterDevice, RevokeDevice, SendWelcome, SetArchiveSalt, UploadKeyPackages,
+    AppendCommit, ApproveDevice, ArchiveMessages, AskToStartOver, CatchUpCommits, ClaimKeyPackage,
+    ClaimWelcomes, ClearArchive, CloseApprovalRequest, EndStartOver, KeyPackageStatus,
+    ListApprovalRequests, ListDevices, LoadHistoryKey, LoadKeyShare, LoadStartOver,
+    OpenApprovalRequest, PostApprovalMessage, ReadApprovalMessages, ReadArchive, ReceiveCommit,
+    ReceiveWelcome, RegisterDevice, ReportHistoryKey, RevokeDevice, SendWelcome, SetHistoryKey,
+    ShareHistoryKey, UploadKeyPackages,
 };
 use application::identity::{
     DescribeInstance, EditIntro, FindAccount, IntroInForce, SearchAccounts, ShowIntro, WebFinger,
@@ -51,8 +54,9 @@ use domain::auth::testing::{
 use domain::auth::{Registrations, WebApp};
 use domain::e2ee::KeyPackagePolicy;
 use domain::e2ee::testing::{
-    InMemoryArchive, InMemoryDelivery, InMemoryKeyDirectory, InMemoryRemoteKeyPackages,
-    PlainAttester, RecordingDeviceNotifier, RecordingMlsFederation, RecordingMlsNotifier,
+    InMemoryApprovalRequests, InMemoryArchive, InMemoryDelivery, InMemoryKeyDirectory,
+    InMemoryRemoteKeyPackages, PlainAttester, PlainEd25519Verifier, RecordingDeviceNotifier,
+    RecordingDeviceTrustNotifier, RecordingMlsFederation, RecordingMlsNotifier,
 };
 use domain::identity::testing::{
     InMemoryAccounts, InMemoryRemoteActors, InMemorySavedIntro, InMemoryTokens, TrustedSignatures,
@@ -159,6 +163,8 @@ pub struct TestApp {
     /// The reset links asked for, waiting for [`Self::serve_reset_requests`]: the background's work.
     reset_queue: tokio::sync::Mutex<ResetRequestQueue>,
     request_reset: Arc<RequestPasswordReset>,
+    /// Whose actor URIs a device's naming proof signs.
+    identities: Arc<dyn Accounts>,
 }
 
 impl TestApp {
@@ -261,15 +267,19 @@ impl TestApp {
             blocked_mimes: Vec::new(),
             blocked_extensions: Vec::new(),
         };
-        let keys = Arc::new(InMemoryKeyDirectory::default());
-        let delivery = Arc::new(InMemoryDelivery::default());
         let archive = Arc::new(InMemoryArchive::default());
+        let approval_requests = Arc::new(InMemoryApprovalRequests::default());
+        let keys = Arc::new(
+            InMemoryKeyDirectory::keyed_by(archive.clone()).relaying(approval_requests.clone()),
+        );
+        let delivery = Arc::new(InMemoryDelivery::default());
         let tracker = Arc::new(ConnectionTracker::default());
         let board = Arc::new(PresenceBoard::default());
         let audience = Arc::new(InMemoryAudience::default());
         let bus = Arc::new(RecordingBus::default());
         let mls_notifier = Arc::new(RecordingMlsNotifier::default());
         let device_notifier = Arc::new(RecordingDeviceNotifier::default());
+        let trust_notifier = Arc::new(RecordingDeviceTrustNotifier::default());
         let mls_federation = Arc::new(RecordingMlsFederation::default());
         let key_policy = KeyPackagePolicy {
             cap_per_device: 100,
@@ -406,12 +416,15 @@ impl TestApp {
                 sign_in.ended.clone(),
             )),
             link_device: Arc::new(LinkDevice::new(
+                accounts.clone(),
                 keys.clone(),
+                Arc::new(PlainEd25519Verifier),
                 sign_in.sessions.clone(),
                 sign_in.ended.clone(),
             )),
             sign_out_others: Arc::new(SignOutOthers::new(
                 sign_in.sessions.clone(),
+                keys.clone(),
                 sign_in.ended.clone(),
             )),
             login_attempts: crate::LoginAttempts::new(),
@@ -502,10 +515,14 @@ impl TestApp {
                 sign_in.accounts.clone(),
                 sign_in.factors.clone(),
                 authenticator.clone(),
+                sign_in.sessions.clone(),
+                keys.clone(),
             )),
             confirm_totp_enrollment: Arc::new(ConfirmTotpEnrollment::new(
                 sign_in.factors.clone(),
                 authenticator.clone(),
+                sign_in.sessions.clone(),
+                keys.clone(),
             )),
             disable_totp: Arc::new(DisableTotp::new(
                 sign_in.accounts.clone(),
@@ -812,13 +829,99 @@ impl TestApp {
                 accounts.clone(),
                 keys.clone(),
                 Arc::new(PlainAttester),
+                Arc::new(PlainEd25519Verifier),
+                sign_in.sessions.clone(),
                 device_notifier.clone(),
             )),
-            list_devices: Arc::new(ListDevices::new(keys.clone(), sign_in.sessions.clone())),
+            list_devices: Arc::new(ListDevices::new(
+                keys.clone(),
+                keys.clone(),
+                sign_in.sessions.clone(),
+            )),
             revoke_device: Arc::new(RevokeDevice::new(
                 keys.clone(),
                 sign_in.sessions.clone(),
+                keys.clone(),
                 sign_in.ended.clone(),
+                trust_notifier.clone(),
+            )),
+            report_history_key: Arc::new(ReportHistoryKey::new(
+                sign_in.sessions.clone(),
+                keys.clone(),
+                archive.clone(),
+            )),
+            approve_device: Arc::new(ApproveDevice::new(
+                accounts.clone(),
+                sign_in.sessions.clone(),
+                keys.clone(),
+                archive.clone(),
+                keys.clone(),
+                Arc::new(PlainEd25519Verifier),
+                trust_notifier.clone(),
+            )),
+            open_approval_request: Arc::new(OpenApprovalRequest::new(
+                sign_in.sessions.clone(),
+                keys.clone(),
+                approval_requests.clone(),
+                trust_notifier.clone(),
+            )),
+            list_approval_requests: Arc::new(ListApprovalRequests::new(
+                sign_in.sessions.clone(),
+                keys.clone(),
+                approval_requests.clone(),
+            )),
+            post_approval_message: Arc::new(PostApprovalMessage::new(
+                sign_in.sessions.clone(),
+                keys.clone(),
+                approval_requests.clone(),
+                trust_notifier.clone(),
+            )),
+            read_approval_messages: Arc::new(ReadApprovalMessages::new(
+                sign_in.sessions.clone(),
+                keys.clone(),
+                approval_requests.clone(),
+            )),
+            close_approval_request: Arc::new(CloseApprovalRequest::new(
+                sign_in.sessions.clone(),
+                keys.clone(),
+                approval_requests,
+                trust_notifier.clone(),
+            )),
+            share_history_key: Arc::new(ShareHistoryKey::new(
+                accounts.clone(),
+                sign_in.sessions.clone(),
+                keys.clone(),
+                archive.clone(),
+                keys.clone(),
+                keys.clone(),
+                Arc::new(PlainEd25519Verifier),
+                trust_notifier.clone(),
+            )),
+            load_key_share: Arc::new(LoadKeyShare::new(
+                sign_in.sessions.clone(),
+                keys.clone(),
+                archive.clone(),
+                keys.clone(),
+            )),
+            ask_to_start_over: Arc::new(AskToStartOver::new(
+                sign_in.sessions.clone(),
+                keys.clone(),
+                keys.clone(),
+                keys.clone(),
+                trust_notifier.clone(),
+            )),
+            load_start_over: Arc::new(LoadStartOver::new(
+                sign_in.sessions.clone(),
+                keys.clone(),
+                keys.clone(),
+                keys.clone(),
+            )),
+            end_start_over: Arc::new(EndStartOver::new(
+                sign_in.sessions.clone(),
+                keys.clone(),
+                keys.clone(),
+                keys.clone(),
+                trust_notifier.clone(),
             )),
             upload_key_packages: Arc::new(UploadKeyPackages::new(
                 key_policy,
@@ -834,7 +937,7 @@ impl TestApp {
                 reach.clone(),
                 device_notifier,
             )),
-            key_package_status: Arc::new(KeyPackageStatus::new(key_policy, keys)),
+            key_package_status: Arc::new(KeyPackageStatus::new(key_policy, keys.clone())),
             claim_limiter: Arc::new(RateLimiter::new(60, 1.0)),
             append_commit: Arc::new(AppendCommit::new(
                 accounts.clone(),
@@ -852,12 +955,23 @@ impl TestApp {
             archive_messages: Arc::new(ArchiveMessages::new(
                 accounts.clone(),
                 store.clone(),
+                sign_in.sessions.clone(),
+                keys.clone(),
                 archive.clone(),
             )),
             read_archive: Arc::new(ReadArchive::new(archive.clone())),
-            clear_archive: Arc::new(ClearArchive::new(archive.clone())),
-            load_archive_salt: Arc::new(LoadArchiveSalt::new(archive.clone())),
-            set_archive_salt: Arc::new(SetArchiveSalt::new(archive)),
+            clear_archive: Arc::new(ClearArchive::new(
+                sign_in.sessions.clone(),
+                keys.clone(),
+                archive.clone(),
+            )),
+            load_history_key: Arc::new(LoadHistoryKey::new(archive.clone())),
+            set_history_key: Arc::new(SetHistoryKey::new(
+                sign_in.sessions.clone(),
+                archive,
+                keys.clone(),
+                trust_notifier,
+            )),
             hub: Arc::new(connections::Hub::new()),
             missed_events: Arc::new(InMemoryMissedEvents::default()),
             connect: Arc::new(Connect::new(accounts.clone(), tracker.clone(), bus.clone())),
@@ -910,6 +1024,7 @@ impl TestApp {
             board,
             reset_queue: tokio::sync::Mutex::new(reset_queue),
             request_reset,
+            identities: accounts,
         }
     }
 
@@ -931,9 +1046,30 @@ impl TestApp {
         caller: Option<UserId>,
         body: Option<Value>,
     ) -> (StatusCode, Value) {
+        let token = caller.map(|user| self.token(user));
+        self.call_with(token.as_deref(), method, uri, body).await
+    }
+
+    /// The same with `token`, for calls about the session it belongs to.
+    pub async fn call_in(
+        &self,
+        token: &str,
+        method: Method,
+        uri: &str,
+        body: Option<Value>,
+    ) -> (StatusCode, Value) {
+        self.call_with(Some(token), method, uri, body).await
+    }
+
+    async fn call_with(
+        &self,
+        token: Option<&str>,
+        method: Method,
+        uri: &str,
+        body: Option<Value>,
+    ) -> (StatusCode, Value) {
         let mut request = Request::builder().method(method).uri(uri);
-        if let Some(user) = caller {
-            let token = self.token(user);
+        if let Some(token) = token {
             request = request.header(header::AUTHORIZATION, format!("Bearer {token}"));
         }
         let request = match body {
@@ -960,6 +1096,119 @@ impl TestApp {
     pub fn token_signed_in_at(&self, user: UserId, at: time::OffsetDateTime) -> String {
         let session = self.sign_in.sessions.live(user);
         self.tokens.issue_signed_in_at(user, session, at)
+    }
+
+    /// A token of `session`, the password typed there at `at`.
+    pub fn token_in_signed_in_at(
+        &self,
+        user: UserId,
+        session: domain::SessionId,
+        at: time::OffsetDateTime,
+    ) -> String {
+        self.tokens.issue_signed_in_at(user, session, at)
+    }
+
+    /// What a client holding root key `[7; 32]` signs to name `device` on `user`'s `session`.
+    pub async fn naming_proof(
+        &self,
+        user: UserId,
+        session: domain::SessionId,
+        device: uuid::Uuid,
+    ) -> String {
+        let actor = self
+            .identities
+            .find(user)
+            .await
+            .unwrap()
+            .expect("an account here")
+            .actor_uri;
+        let signature = domain::e2ee::testing::plain_signature(
+            &domain::e2ee::DeviceRootKey::parse(&[7; 32]).unwrap(),
+            &domain::auth::naming_bytes(&actor, device.into(), session),
+        );
+        base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            signature.as_bytes(),
+        )
+    }
+
+    /// A session of `user`'s that registered a new device and named it: the session, the device.
+    pub async fn on_a_device(&self, user: UserId) -> (domain::SessionId, uuid::Uuid) {
+        let (session, device) = (self.sign_in.sessions.live(user), uuid::Uuid::new_v4());
+        let token = self.token_in(user, session);
+        let drk = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, [7; 32]);
+        let proof = self.naming_proof(user, session, device).await;
+        for (method, uri, body) in [
+            (
+                Method::POST,
+                "/api/keys/devices",
+                serde_json::json!({ "device_id": device, "drk_public_key": drk }),
+            ),
+            (
+                Method::PUT,
+                "/api/sessions/current/device",
+                serde_json::json!({ "device_id": device, "signature": proof }),
+            ),
+        ] {
+            let (status, answer) = self.call_in(&token, method, uri, Some(body)).await;
+            assert!(status.is_success(), "{uri}: {answer}");
+        }
+        (session, device)
+    }
+
+    /// `device`, registered by [`Self::on_a_device`], approved by the words of `generation`, whose
+    /// approval public key is `approval_key`, from `token`, a session naming it.
+    pub async fn approved_by_words(
+        &self,
+        owner: &Account,
+        token: &str,
+        device: uuid::Uuid,
+        generation: i64,
+        approval_key: [u8; 32],
+    ) {
+        use base64::Engine;
+        use domain::e2ee::{ApprovalPublicKey, DeviceRootKey, approval_bytes};
+        let signature = domain::e2ee::testing::plain_signature(
+            &ApprovalPublicKey::parse(&approval_key).unwrap(),
+            &approval_bytes(
+                &owner.actor_uri,
+                device.into(),
+                &DeviceRootKey::parse(&[7; 32]).unwrap(),
+            ),
+        );
+        let body = serde_json::json!({
+            "by": "passphrase",
+            "generation": generation,
+            "signature": base64::engine::general_purpose::STANDARD.encode(signature.as_bytes()),
+        });
+        let (status, answer) = self
+            .call_in(
+                token,
+                Method::POST,
+                &format!("/api/keys/devices/{device}/approvals"),
+                Some(body),
+            )
+            .await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{answer}");
+    }
+
+    /// `owner`'s first history key — salt `[1; 16]`, check value `[1; 32]`, approval public key
+    /// `[2; 32]` — set from `token`, the session naming `device`, which its words approve.
+    pub async fn keyed_from(&self, owner: &Account, token: &str, device: uuid::Uuid) {
+        use base64::Engine;
+        let b64 = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        let body = serde_json::json!({
+            "generation": 1,
+            "salt": b64(&[1; 16]),
+            "check_value": b64(&[1; 32]),
+            "approval_public_key": b64(&[2; 32]),
+        });
+        let (status, answer) = self
+            .call_in(token, Method::PUT, "/api/history/key", Some(body))
+            .await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "{answer}");
+        self.approved_by_words(owner, token, device, 1, [2; 32])
+            .await;
     }
 
     /// A request another instance signed, as `peer`, with the `Digest` of its body.

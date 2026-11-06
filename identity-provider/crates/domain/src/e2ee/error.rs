@@ -1,7 +1,10 @@
 use crate::identity::AccountsError;
 use crate::social::{SocialStoreError, Unreachable};
 
-use super::KeyPackageRefusal;
+use super::{
+    ApprovalRequired, DeviceRequired, HistoryGeneration, KeyPackageRefusal, RequestRefusal,
+    StaleHistoryKey, StartOverRefusal,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum KeyDirectoryError {
@@ -13,6 +16,51 @@ pub enum KeyDirectoryError {
     DeviceRevoked,
     #[error("the device id is another account's")]
     DeviceTaken,
+    #[error("the HPKE key's signature does not verify under the root key")]
+    HpkeKeyUnsigned,
+    #[error("this session signed in another device")]
+    NotTheSessionsDevice,
+    /// An approval binds a root key: a device that registered none can't be approved, nor approve.
+    #[error("the device has registered no root key")]
+    NoRootKey,
+    /// A device approves itself with the passphrase only.
+    #[error("a device approves another device")]
+    SelfApproval,
+    #[error("the approval's signature does not verify")]
+    ApprovalUnsigned,
+    /// A share goes to another device: the sender holds the passphrase already.
+    #[error("a device shares the history key with another device")]
+    SelfShare,
+    /// A share is sealed for the recipient's HPKE key.
+    #[error("the device has registered no HPKE key")]
+    NoHpkeKey,
+    /// The sender hasn't said it holds the generation it shares.
+    #[error("the sending device does not hold the current history key")]
+    HistoryKeyNotHeld,
+    #[error("the device holds the current history key already")]
+    HistoryKeyHeld,
+    #[error("the sending device is not approved under the current history key")]
+    SenderNotApproved,
+    #[error("the device is not approved under the current history key")]
+    RecipientNotApproved,
+    /// A share comes from a device the recipient approved in a handshake: it approved that device
+    /// in return, so that is the device it trusts before it holds the passphrase.
+    #[error("only a device that approved this one shares the history key with it")]
+    NotTheApprover,
+    #[error("the share's signature does not verify")]
+    ShareUnsigned,
+    #[error("no key share for this device")]
+    NoKeyShare,
+    #[error(transparent)]
+    Request(#[from] RequestRefusal),
+    #[error(transparent)]
+    StartOver(#[from] StartOverRefusal),
+    #[error(transparent)]
+    ApprovalRequired(#[from] ApprovalRequired),
+    #[error(transparent)]
+    DeviceRequired(#[from] DeviceRequired),
+    #[error(transparent)]
+    StaleHistoryKey(#[from] StaleHistoryKey),
     #[error("user not found")]
     UserNotFound,
     #[error("no available KeyPackage")]
@@ -180,7 +228,7 @@ impl From<crate::messaging::MessagingError> for DeliveryError {
     }
 }
 
-/// Why the history archive refused an upload or a read.
+/// Why the history backup refused a request: to its archive, or to its key.
 #[derive(Debug, thiserror::Error)]
 pub enum ArchiveError {
     #[error(transparent)]
@@ -188,8 +236,21 @@ pub enum ArchiveError {
     /// The archive holds only what its owner could read: conversations it is or was in.
     #[error("not a member of one or more conversations")]
     NotAMember,
-    #[error("no salt set")]
-    NoSalt,
+    #[error("no history key set")]
+    NoKey,
+    #[error(transparent)]
+    Stale(#[from] StaleHistoryKey),
+    /// The generation set isn't the one right after `current`, `None` when there is none.
+    #[error("the history key's generation does not follow the current one")]
+    KeyConflict { current: Option<HistoryGeneration> },
+    #[error("a recent password is needed to replace the history key")]
+    RecentSignInRequired,
+    #[error(transparent)]
+    StartOver(#[from] StartOverRefusal),
+    #[error(transparent)]
+    DeviceRequired(#[from] DeviceRequired),
+    #[error(transparent)]
+    ApprovalRequired(#[from] ApprovalRequired),
     #[error(transparent)]
     Unexpected(#[from] anyhow::Error),
 }

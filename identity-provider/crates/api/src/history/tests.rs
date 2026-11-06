@@ -13,8 +13,13 @@ struct World {
     app: TestApp,
     alice: Account,
     group: String,
+    /// A session of Alice's that named her laptop.
+    laptops: domain::SessionId,
+    laptop: Uuid,
 }
 
+/// Alice in a group, her account's history key at generation 1, set from her laptop, which its
+/// words approve.
 async fn world() -> World {
     let (alice, bob) = (account("alice"), account("bob"));
     let app = TestApp::with([alice.clone(), bob.clone()], []);
@@ -26,11 +31,35 @@ async fn world() -> World {
             Some(json!({ "member_actor_uris": [bob.actor_uri.to_string()] })),
         )
         .await;
-    World {
+    let (laptops, laptop) = app.on_a_device(alice.id).await;
+    let w = World {
         group: group["conversationId"].as_str().unwrap().to_owned(),
         app,
         alice,
-    }
+        laptops,
+        laptop,
+    };
+    w.app
+        .keyed_from(&w.alice, &w.laptop_token(), w.laptop)
+        .await;
+    w
+}
+
+/// A history key of generation `generation`, its bytes made of `byte`s.
+fn key_body(generation: i64, byte: u8) -> Value {
+    json!({
+        "generation": generation,
+        "salt": B64.encode([byte; 16]),
+        "check_value": B64.encode([byte; 32]),
+        "approval_public_key": B64.encode([byte.wrapping_add(1); 32]),
+    })
+}
+
+/// The same, as `GET /api/history/key` answers it once `set_by` set it.
+fn held_body(generation: i64, byte: u8, set_by: Uuid) -> Value {
+    let mut body = key_body(generation, byte);
+    body["set_by_device"] = json!(set_by);
+    body
 }
 
 fn refusal(code: &str, description: &str) -> Value {
@@ -48,14 +77,53 @@ fn entry(conversation: &str, byte: u8) -> Value {
 
 impl World {
     async fn upload(&self, entries: Value) -> (StatusCode, Value) {
+        self.upload_under(1, entries).await
+    }
+
+    /// From the laptop's session.
+    async fn upload_under(&self, generation: i64, entries: Value) -> (StatusCode, Value) {
+        self.upload_in(&self.laptop_token(), generation, entries)
+            .await
+    }
+
+    async fn upload_in(&self, token: &str, generation: i64, entries: Value) -> (StatusCode, Value) {
         self.app
-            .call(
+            .call_in(
+                token,
                 Method::POST,
                 "/api/history/messages",
-                Some(self.alice.id),
-                Some(json!({ "entries": entries })),
+                Some(json!({ "generation": generation, "entries": entries })),
             )
             .await
+    }
+
+    /// From the laptop's session.
+    async fn set_key(&self, body: Value) -> (StatusCode, Value) {
+        self.app
+            .call_in(
+                &self.laptop_token(),
+                Method::PUT,
+                "/api/history/key",
+                Some(body),
+            )
+            .await
+    }
+
+    async fn key(&self) -> (StatusCode, Value) {
+        self.app
+            .call(Method::GET, "/api/history/key", Some(self.alice.id), None)
+            .await
+    }
+
+    /// `DELETE /api/history/messages` from `token`'s session.
+    async fn clear(&self, token: &str) -> (StatusCode, Value) {
+        self.app
+            .call_in(token, Method::DELETE, "/api/history/messages", None)
+            .await
+    }
+
+    fn laptop_token(&self) -> String {
+        self.app.token_in(self.alice.id, self.laptops)
     }
 
     async fn page(&self, query: &str) -> (StatusCode, Value) {
@@ -232,66 +300,312 @@ async fn clearing_answers_how_many_entries_went() {
     w.upload(json!([entry(&w.group, 1), entry(&w.group, 2)]))
         .await;
 
-    let cleared = w
-        .app
-        .call(
-            Method::DELETE,
-            "/api/history/messages",
-            Some(w.alice.id),
-            None,
-        )
-        .await;
+    let cleared = w.clear(&w.laptop_token()).await;
 
     assert_eq!(cleared, (StatusCode::OK, json!({ "deleted": 2 })));
     assert_eq!(w.page("").await.1["entries"], json!([]));
 }
 
 #[tokio::test]
-async fn the_salt_is_set_once_and_read_back() {
+async fn clearing_takes_an_approved_device_once_the_account_has_a_key() {
     let w = world().await;
-    let set = |salt: String| {
-        w.app.call(
-            Method::POST,
-            "/api/history/salt",
-            Some(w.alice.id),
-            Some(json!({ "salt_base64": salt })),
-        )
-    };
-    let first = B64.encode([1; 16]);
+    w.upload(json!([entry(&w.group, 1)])).await;
+    let (fresh, _) = w.app.on_a_device(w.alice.id).await;
+    let unnamed = w.app.token(w.alice.id);
 
-    let unset = w
-        .app
-        .call(Method::GET, "/api/history/salt", Some(w.alice.id), None)
+    let by_the_fresh_one = w.clear(&w.app.token_in(w.alice.id, fresh)).await;
+    let by_the_unnamed = w.clear(&unnamed).await;
+    let kept = w.page("").await.1["entries"].as_array().unwrap().len();
+
+    for refused in [by_the_fresh_one, by_the_unnamed] {
+        assert_eq!(
+            refused,
+            (
+                StatusCode::FORBIDDEN,
+                refusal(
+                    "approval_required",
+                    "This takes a device approved under the current history key"
+                )
+            )
+        );
+    }
+    assert_eq!(kept, 1, "a refusal erases nothing");
+}
+
+#[tokio::test]
+async fn an_upload_takes_an_approved_device_once_the_account_has_a_key() {
+    let w = world().await;
+    let (fresh, _) = w.app.on_a_device(w.alice.id).await;
+    let unnamed = w.app.token(w.alice.id);
+    let batch = json!([entry(&w.group, 1)]);
+
+    let by_the_fresh_one = w
+        .upload_in(&w.app.token_in(w.alice.id, fresh), 1, batch.clone())
         .await;
-    let stored = set(first.clone()).await;
-    let kept = set(B64.encode([2; 16])).await;
-    let read = w
-        .app
-        .call(Method::GET, "/api/history/salt", Some(w.alice.id), None)
+    let by_the_unnamed = w.upload_in(&unnamed, 1, batch.clone()).await;
+    let stored = w.page("").await.1["entries"].as_array().unwrap().len();
+    let by_the_laptop = w.upload(batch).await;
+
+    for refused in [by_the_fresh_one, by_the_unnamed] {
+        assert_eq!(
+            refused,
+            (
+                StatusCode::FORBIDDEN,
+                refusal(
+                    "approval_required",
+                    "This takes a device approved under the current history key"
+                )
+            )
+        );
+    }
+    assert_eq!(stored, 0, "a refusal stores nothing");
+    assert_eq!(by_the_laptop, (StatusCode::OK, json!({ "inserted": 1 })));
+}
+
+#[tokio::test]
+async fn an_account_with_no_history_key_clears_from_any_session() {
+    let alice = account("alice");
+    let app = TestApp::with([alice.clone()], []);
+
+    let cleared = app
+        .call(
+            Method::DELETE,
+            "/api/history/messages",
+            Some(alice.id),
+            None,
+        )
         .await;
-    let not_base64 = set("%%".to_owned()).await;
-    let short = set(B64.encode([1; 15])).await;
+
+    assert_eq!(cleared, (StatusCode::OK, json!({ "deleted": 0 })));
+}
+
+#[tokio::test]
+async fn the_key_is_read_back_as_set_with_the_device_that_set_it_and_is_none_before_the_first() {
+    let alice = account("alice");
+    let app = TestApp::with([alice.clone()], []);
+    let (session, laptop) = app.on_a_device(alice.id).await;
+    let token = app.token_in(alice.id, session);
+
+    let unset = app
+        .call_in(&token, Method::GET, "/api/history/key", None)
+        .await;
+    let set = app
+        .call_in(
+            &token,
+            Method::PUT,
+            "/api/history/key",
+            Some(key_body(1, 1)),
+        )
+        .await;
+    let read = app
+        .call_in(&token, Method::GET, "/api/history/key", None)
+        .await;
 
     assert_eq!(
         unset,
-        (StatusCode::NOT_FOUND, refusal("not_found", "no salt set"))
+        (
+            StatusCode::NOT_FOUND,
+            refusal("not_found", "No history key set")
+        )
     );
-    for answer in [stored, kept, read] {
-        assert_eq!(answer, (StatusCode::OK, json!({ "salt_base64": first })));
+    assert_eq!(set, (StatusCode::NO_CONTENT, Value::Null));
+    assert_eq!(read, (StatusCode::OK, held_body(1, 1, laptop)));
+}
+
+#[tokio::test]
+async fn a_session_that_named_no_device_sets_no_key() {
+    let alice = account("alice");
+    let app = TestApp::with([alice.clone()], []);
+
+    let refused = app
+        .call(
+            Method::PUT,
+            "/api/history/key",
+            Some(alice.id),
+            Some(key_body(1, 1)),
+        )
+        .await;
+
+    assert_eq!(
+        refused,
+        (
+            StatusCode::FORBIDDEN,
+            refusal("device_required", "Name this session's device first")
+        )
+    );
+    assert_eq!(
+        app.call(Method::GET, "/api/history/key", Some(alice.id), None)
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+}
+
+#[tokio::test]
+async fn a_key_is_refused_with_the_documented_errors() {
+    let w = world().await;
+    let with = |field: &str, value: Value| {
+        let mut body = key_body(2, 2);
+        body[field] = value;
+        body
+    };
+
+    for (body, description) in [
+        (
+            with("generation", json!(0)),
+            "generation: must be from 1 to 2147483647",
+        ),
+        (with("salt", json!("%%")), "salt: must be base64"),
+        (
+            with("salt", json!(B64.encode([1; 15]))),
+            "salt: must be 16 bytes",
+        ),
+        (
+            with("check_value", json!(B64.encode([1; 16]))),
+            "check_value: must be 32 bytes (HMAC-SHA256)",
+        ),
+        (
+            with("approval_public_key", json!(B64.encode([1; 33]))),
+            "approval_public_key: must be 32 bytes (Ed25519)",
+        ),
+        (
+            with("approval_public_key", json!("%%")),
+            "approval_public_key: must be base64",
+        ),
+    ] {
+        assert_eq!(
+            w.set_key(body.clone()).await,
+            (
+                StatusCode::BAD_REQUEST,
+                refusal("invalid_request", description)
+            ),
+            "{body}"
+        );
     }
+    assert_eq!(w.key().await.1, held_body(1, 1, w.laptop));
+}
+
+#[tokio::test]
+async fn only_the_generation_after_the_current_one_is_set_and_the_conflict_says_which_it_is() {
+    let w = world().await;
+
+    let again = w.set_key(key_body(1, 9)).await;
+    let skipping = w.set_key(key_body(3, 3)).await;
+    let retried = w.set_key(key_body(1, 1)).await;
+    let next = w.set_key(key_body(2, 2)).await;
+
+    let conflict = |current: i64| {
+        json!({
+            "error": "history_key_conflict",
+            "error_description": "The history key is at another generation",
+            "current_generation": current,
+        })
+    };
+    assert_eq!(again, (StatusCode::CONFLICT, conflict(1)));
+    assert_eq!(skipping, (StatusCode::CONFLICT, conflict(1)));
     assert_eq!(
-        not_base64,
+        retried,
+        (StatusCode::NO_CONTENT, Value::Null),
+        "the very key held: a retry"
+    );
+    assert_eq!(next.0, StatusCode::NO_CONTENT);
+    assert_eq!(w.key().await.1, held_body(2, 2, w.laptop));
+}
+
+#[tokio::test]
+async fn a_conflict_before_any_key_names_generation_zero() {
+    let alice = account("alice");
+    let app = TestApp::with([alice.clone()], []);
+    let (session, _) = app.on_a_device(alice.id).await;
+
+    let refused = app
+        .call_in(
+            &app.token_in(alice.id, session),
+            Method::PUT,
+            "/api/history/key",
+            Some(key_body(2, 2)),
+        )
+        .await;
+
+    assert_eq!(refused.0, StatusCode::CONFLICT);
+    assert_eq!(refused.1["current_generation"], json!(0));
+}
+
+#[tokio::test]
+async fn a_later_generation_asks_for_the_password_again_and_then_erases_the_archive() {
+    let w = world().await;
+    w.upload(json!([entry(&w.group, 1)])).await;
+    let token = w.app.token_in_signed_in_at(
+        w.alice.id,
+        w.laptops,
+        OffsetDateTime::now_utc() - time::Duration::minutes(11),
+    );
+    let request = axum::http::Request::builder()
+        .method(Method::PUT)
+        .uri("/api/history/key")
+        .header(axum::http::header::AUTHORIZATION, format!("Bearer {token}"))
+        .header(axum::http::header::CONTENT_TYPE, "application/json")
+        .body(axum::body::Body::from(key_body(2, 2).to_string()))
+        .unwrap();
+
+    let refused = w.app.respond(request).await;
+    let kept = w.page("").await.1["entries"].as_array().unwrap().len();
+    let replaced = w.set_key(key_body(2, 2)).await;
+
+    assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        refused.headers()[axum::http::header::WWW_AUTHENTICATE],
+        r#"Bearer error="insufficient_user_authentication", max_age="600""#
+    );
+    assert_eq!(kept, 1, "nothing erased");
+    assert_eq!(replaced.0, StatusCode::NO_CONTENT);
+    assert_eq!(w.page("").await.1["entries"], json!([]));
+}
+
+#[tokio::test]
+async fn an_upload_under_any_generation_but_the_current_one_is_stale() {
+    let w = world().await;
+    w.set_key(key_body(2, 2)).await;
+    w.app
+        .approved_by_words(&w.alice, &w.laptop_token(), w.laptop, 2, [3; 32])
+        .await;
+
+    let replaced = w.upload_under(1, json!([entry(&w.group, 1)])).await;
+    let ahead = w.upload_under(3, json!([entry(&w.group, 1)])).await;
+    let not_one = w.upload_under(0, json!([entry(&w.group, 1)])).await;
+    let current = w.upload_under(2, json!([entry(&w.group, 1)])).await;
+
+    let stale = (
+        StatusCode::CONFLICT,
+        refusal("stale_history_key", "Not the account's current history key"),
+    );
+    assert_eq!(replaced, stale);
+    assert_eq!(ahead, stale);
+    assert_eq!(
+        not_one,
         (
             StatusCode::BAD_REQUEST,
-            refusal("invalid_request", "salt must be base64")
+            refusal(
+                "invalid_request",
+                "generation: must be from 1 to 2147483647"
+            )
         )
     );
+    assert_eq!(current, (StatusCode::OK, json!({ "inserted": 1 })));
+}
+
+#[tokio::test]
+async fn clearing_keeps_the_key() {
+    let w = world().await;
+    w.upload(json!([entry(&w.group, 1)])).await;
+
+    let (cleared, _) = w.clear(&w.laptop_token()).await;
+
+    assert_eq!(cleared, StatusCode::OK);
+    assert_eq!(w.key().await, (StatusCode::OK, held_body(1, 1, w.laptop)));
     assert_eq!(
-        short,
-        (
-            StatusCode::BAD_REQUEST,
-            refusal("invalid_request", "salt must be exactly 16 bytes")
-        )
+        w.upload(json!([entry(&w.group, 2)])).await,
+        (StatusCode::OK, json!({ "inserted": 1 }))
     );
 }
 
@@ -300,9 +614,11 @@ async fn the_archive_needs_a_signed_in_user() {
     let w = world().await;
 
     for (method, uri) in [
+        (Method::POST, "/api/history/messages"),
         (Method::GET, "/api/history/messages"),
         (Method::DELETE, "/api/history/messages"),
-        (Method::GET, "/api/history/salt"),
+        (Method::GET, "/api/history/key"),
+        (Method::PUT, "/api/history/key"),
     ] {
         let (status, _) = w.app.call(method, uri, None, None).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "{uri}");

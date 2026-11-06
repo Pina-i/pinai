@@ -7,8 +7,7 @@ use super::{
     AdminFacts, AuthError, AuthorizationCode, AuthorizationRequest, Client, ClientId, ClientSignIn,
     CodeAttempt, Email, Grant, InstanceMember, InvitationToken, NewAccount, OpenInvitation,
     OpenReset, OtpCode, PasswordChange, PasswordHash, RefreshToken, Registration, ResetMail,
-    ResetToken, RevokedReason, Rotation, Session, SessionKind, SignInAccount, Ticket,
-    TicketAttempt, TotpSecret,
+    ResetToken, RevokedReason, Rotation, Session, SignInAccount, Ticket, TicketAttempt, TotpSecret,
 };
 
 #[async_trait::async_trait]
@@ -68,50 +67,76 @@ pub trait TokenIssuer: Send + Sync {
     ) -> Result<String, AuthError>;
 }
 
-/// The sessions: each a row, so each can end on its own.
+/// The sessions: each a row, so each can end on its own. A browser session's web apps hang under
+/// it ([`SessionKind::Web`](super::SessionKind::Web)), and every ending below takes them with
+/// it, in one step with the exchanges that open them under the account's lock: a browser session
+/// never ends leaving one behind.
 #[async_trait::async_trait]
 pub trait Sessions: Send + Sync {
-    /// A new session for the account, used — and its password typed — `now`.
-    async fn open(
+    /// A new browser session for the account, used — and its password typed — `now`.
+    async fn open_browser(&self, user: UserId, now: OffsetDateTime)
+    -> Result<SessionId, AuthError>;
+    /// `client`'s session under the browser session `browser`, for a code exchange at `now`:
+    /// as [`web_app_sign_in`](super::web_app_sign_in) decides on the one it holds there, used now
+    /// with `browser`, its password the browser session's (`authenticated_at`). `None`, and
+    /// nothing changes, unless `browser` [signs apps in](Session::signs_apps_in).
+    async fn open_under(
         &self,
-        user: UserId,
-        kind: &SessionKind,
+        browser: SessionId,
+        client: &ClientId,
         now: OffsetDateTime,
-    ) -> Result<SessionId, AuthError>;
+    ) -> Result<Option<Session>, AuthError>;
+    /// A session of `client`'s own, staying signed in, for a code exchange under the browser
+    /// session `browser` at `now`: its password the browser session's. `None`, and nothing
+    /// opened, unless `browser` [signs apps in](Session::signs_apps_in).
+    async fn open_app(
+        &self,
+        browser: SessionId,
+        client: &ClientId,
+        now: OffsetDateTime,
+    ) -> Result<Option<Session>, AuthError>;
     async fn find(&self, id: SessionId) -> Result<Option<Session>, AuthError>;
-    /// Stamps a use of it.
+    /// Stamps a use of it, and of the browser session it hangs under — never setting either
+    /// back: a web app in use keeps its browser signed in.
     async fn touch(&self, id: SessionId, now: OffsetDateTime) -> Result<(), AuthError>;
     /// Records the account's password typed on it at `at`.
     async fn authenticate(&self, id: SessionId, at: OffsetDateTime) -> Result<(), AuthError>;
-    /// Ends it; `false` when it had ended already.
+    /// Ends it and the sessions under it ([`ending`](super::ending)). The sessions it ended, none
+    /// when it had ended already.
     async fn revoke(
         &self,
         id: SessionId,
         reason: RevokedReason,
         now: OffsetDateTime,
-    ) -> Result<bool, AuthError>;
-    /// The sessions over before `before`: revoked then, or idle since `before - SESSION_IDLE`.
-    /// How many went.
+    ) -> Result<Vec<Session>, AuthError>;
+    /// The sessions over before `before` — revoked then, or idle since `before - SESSION_IDLE` —
+    /// and the web apps' sessions under them. How many went, those included.
     async fn delete_ended(&self, before: OffsetDateTime) -> Result<usize, AuthError>;
     /// The account's sessions, ended or not, until swept.
     async fn of_user(&self, user: UserId) -> Result<Vec<Session>, AuthError>;
-    /// Links the session to the E2EE device it signed in, and ends the device's other sessions
-    /// (`replaced`): a device is signed in once at a time. The sessions it ended.
+    /// Names `device` on `user`'s session `id`, and ends the device's other sessions
+    /// (`replaced`): a device is signed in once at a time. Under the device's row lock, then the
+    /// account's, as a revoke takes them: `DeviceRefused` unless the device is the account's and
+    /// unrevoked as the store holds it — a fake leaves that to its caller —, then what
+    /// [`may_link`](super::may_link) refuses; a session gone is unexpected. The sessions it ended.
     async fn link(
         &self,
+        user: UserId,
         id: SessionId,
         device: DeviceId,
         now: OffsetDateTime,
     ) -> Result<Vec<Session>, AuthError>;
-    /// Ends the account's sessions linked to `device` (`device_revoked`). The sessions it ended.
+    /// Ends what revoking `device` ends among the account's sessions
+    /// ([`ending_with_device`](super::ending_with_device), `device_revoked`). The sessions it
+    /// ended.
     async fn revoke_device(
         &self,
         user: UserId,
         device: DeviceId,
         now: OffsetDateTime,
     ) -> Result<Vec<Session>, AuthError>;
-    /// Ends every session of the account but `keep` (`signed_out_elsewhere`). The sessions it
-    /// ended.
+    /// Ends every session of the account but `keep`'s browser
+    /// ([`ending_all_but`](super::ending_all_but), `signed_out_elsewhere`). The sessions it ended.
     async fn revoke_others(
         &self,
         user: UserId,

@@ -1,17 +1,13 @@
 use super::*;
 
 #[test]
-fn a_nonce_is_12_bytes_and_a_salt_16() {
+fn a_nonce_is_12_bytes() {
     assert_eq!(ArchiveNonce::parse(&[1; 12]).unwrap().as_bytes(), &[1; 12]);
-    assert_eq!(ArchiveSalt::parse(&[2; 16]).unwrap().as_bytes(), &[2; 16]);
     for len in [0, 11, 13] {
         assert!(
             ArchiveNonce::parse(&vec![1; len]).is_err(),
             "nonce of {len}"
         );
-    }
-    for len in [0, 15, 17, 32] {
-        assert!(ArchiveSalt::parse(&vec![1; len]).is_err(), "salt of {len}");
     }
 }
 

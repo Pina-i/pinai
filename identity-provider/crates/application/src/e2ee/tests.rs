@@ -1,18 +1,24 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use domain::DeviceId;
-use domain::auth::testing::{InMemorySessions, RecordingSessionNotifier};
-use domain::auth::{RevokedReason, SessionKind, Sessions};
+use domain::auth::testing::{
+    InMemorySessions, RecordingSessionNotifier, another_web_app, web_client,
+};
+use domain::auth::{Client, RevokedReason, Sessions};
 use domain::e2ee::testing::{
-    InMemoryKeyDirectory, InMemoryRemoteKeyPackages, PlainAttester, RecordingDeviceNotifier,
+    InMemoryArchive, InMemoryKeyDirectory, InMemoryRemoteKeyPackages, PlainAttester,
+    PlainEd25519Verifier, RecordingDeviceNotifier, RecordingDeviceTrustNotifier, hpke_key,
+    plain_signature,
 };
 use domain::e2ee::{
-    ATTESTATION_LIFETIME, Claim, ClaimedKeyPackage, DeviceAttester, DeviceKind, DeviceLabel,
-    DeviceRootKey, Devices, KeyDirectoryError, KeyPackageBytes, KeyPackagePolicy,
-    KeyPackageRefusal, KeyPackages, NewKeyPackage,
+    ATTESTATION_LIFETIME, ApprovalPublicKey, Attest, Attestation, Claim, ClaimedKeyPackage, Device,
+    DeviceAttester, DeviceKind, DeviceLabel, DeviceRootKey, Devices, HistoryCheckValue,
+    HistoryGeneration, HistoryKey, HistoryKeys, HistorySalt, Holding, HpkeKeyWrite, HpkePublicKey,
+    KeyDirectoryError, KeyPackageBytes, KeyPackagePolicy, KeyPackageRefusal, KeyPackages,
+    KeyStoreError, NewKeyPackage, Revocation, SignedHpkeKey, UnverifiedHpkeKey, attestation_period,
 };
 use domain::identity::testing::{InMemoryAccounts, account, remote_actor};
-use domain::identity::{Account, ActorUri, InstanceOrigin, RemoteActor, Requester};
+use domain::identity::{Account, ActorUri, Bearer, InstanceOrigin, RemoteActor, Requester};
 use domain::social::testing::{BLOCKED, KEPT_OUT_BY_THE_SETTING, StubReachability};
 use time::{Duration, OffsetDateTime};
 
@@ -52,6 +58,16 @@ fn policy() -> KeyPackagePolicy {
 
 fn key(byte: u8) -> DeviceRootKey {
     DeviceRootKey::parse(&[byte; 32]).unwrap()
+}
+
+/// The HPKE key `[byte; 32]`, as root key `root` signs it for `owner`'s `device`.
+fn hpke(owner: &Account, device: DeviceId, root: u8, byte: u8) -> UnverifiedHpkeKey {
+    let hpke_key = HpkePublicKey::parse(&[byte; 32]).unwrap();
+    let signature = plain_signature(
+        &key(root),
+        &hpke_key.canonical_bytes(&owner.actor_uri, device),
+    );
+    UnverifiedHpkeKey::new(hpke_key, signature)
 }
 
 fn package(byte: u8) -> NewKeyPackage {
@@ -99,10 +115,18 @@ fn world() -> World {
             accounts.clone(),
             store.clone(),
             Arc::new(PlainAttester),
+            Arc::new(PlainEd25519Verifier),
+            sessions.clone(),
             notifier.clone(),
         ),
-        list: ListDevices::new(store.clone(), sessions.clone()),
-        revoke: RevokeDevice::new(store.clone(), sessions.clone(), ended.clone()),
+        list: ListDevices::new(store.clone(), store.clone(), sessions.clone()),
+        revoke: RevokeDevice::new(
+            store.clone(),
+            sessions.clone(),
+            store.clone(),
+            ended.clone(),
+            Arc::new(RecordingDeviceTrustNotifier::default()),
+        ),
         upload: UploadKeyPackages::new(policy(), store.clone(), store.clone()),
         claim: ClaimKeyPackage::new(
             InstanceOrigin::parse("http://localhost:8080").unwrap(),
@@ -129,6 +153,84 @@ fn world() -> World {
 }
 
 impl World {
+    /// A session of `who`'s, naming `device` when given.
+    async fn signed_in(&self, who: &Account, device: Option<DeviceId>) -> Bearer {
+        let session = self.sessions.live_at(who.id, now());
+        if let Some(device) = device {
+            self.sessions
+                .link(who.id, session, device, now())
+                .await
+                .unwrap();
+        }
+        Bearer {
+            user: who.id,
+            session,
+            authenticated_at: now(),
+        }
+    }
+
+    /// `who` registers `device` under root key `root`, from a session that names no device yet.
+    async fn register_as(
+        &self,
+        who: &Account,
+        device: DeviceId,
+        root: u8,
+        brought: Option<UnverifiedHpkeKey>,
+        at: OffsetDateTime,
+    ) -> Result<Registered, KeyDirectoryError> {
+        let bearer = self.signed_in(who, None).await;
+        self.register
+            .execute(
+                &bearer,
+                device,
+                key(root),
+                brought,
+                &DeviceLabel::unknown(),
+                at,
+            )
+            .await
+    }
+
+    /// The same from a session that named `device`: what a rotation takes.
+    async fn rotate_as(
+        &self,
+        who: &Account,
+        device: DeviceId,
+        root: u8,
+        brought: Option<UnverifiedHpkeKey>,
+        at: OffsetDateTime,
+    ) -> Result<Registered, KeyDirectoryError> {
+        let bearer = self.signed_in(who, Some(device)).await;
+        self.register
+            .execute(
+                &bearer,
+                device,
+                key(root),
+                brought,
+                &DeviceLabel::unknown(),
+                at,
+            )
+            .await
+    }
+
+    /// The HPKE key `device` holds, as bytes.
+    async fn held_key(&self, device: DeviceId) -> Option<Vec<u8>> {
+        let device = self.store.find(device).await.unwrap().expect("recorded");
+        device.hpke_key.map(|held| held.key.as_bytes().to_vec())
+    }
+
+    /// The same use case over `devices`.
+    fn registering_over(&self, devices: Arc<dyn Devices>) -> RegisterDevice {
+        RegisterDevice::new(
+            Arc::new(InMemoryAccounts::with([self.alice.clone()])),
+            devices,
+            Arc::new(PlainAttester),
+            Arc::new(PlainEd25519Verifier),
+            self.sessions.clone(),
+            self.notifier.clone(),
+        )
+    }
+
     async fn upload(&self, owner: &Account, device: DeviceId, packages: Vec<NewKeyPackage>) {
         self.upload
             .execute(owner.id, device, phone(), packages, now())
@@ -151,16 +253,17 @@ async fn a_first_registration_attests_the_key_and_tells_the_owners_other_devices
     let w = world();
     let (device, at) = (DeviceId::generate(), now());
 
-    let registered = w
-        .register
-        .execute(w.alice.id, device, key(1), at)
-        .await
-        .unwrap();
+    let registered = w.register_as(&w.alice, device, 1, None, at).await.unwrap();
 
     let expires_at = at + ATTESTATION_LIFETIME;
     assert_eq!(
         registered.signed,
-        PlainAttester.attest(&w.alice.actor_uri, device, &key(1), expires_at)
+        PlainAttester.attest(
+            &w.alice.actor_uri,
+            device,
+            &key(1),
+            attestation_period(at).1
+        )
     );
     assert_eq!(
         (registered.issued_at, registered.expires_at),
@@ -194,20 +297,15 @@ async fn a_first_registration_attests_the_key_and_tells_the_owners_other_devices
 async fn registering_again_renews_or_rotates_the_key_without_telling_anyone() {
     let w = world();
     let (device, later) = (DeviceId::generate(), now() + Duration::days(300));
-    w.register
-        .execute(w.alice.id, device, key(1), now())
+    w.register_as(&w.alice, device, 1, None, now())
         .await
         .unwrap();
 
-    w.register
-        .execute(w.alice.id, device, key(1), later)
+    w.register_as(&w.alice, device, 1, None, later)
         .await
         .unwrap();
     let renewed = w.store.find(device).await.unwrap().unwrap();
-    w.register
-        .execute(w.alice.id, device, key(2), now())
-        .await
-        .unwrap();
+    w.rotate_as(&w.alice, device, 2, None, now()).await.unwrap();
     let rotated = w.store.find(device).await.unwrap().unwrap();
 
     assert_eq!(
@@ -219,25 +317,516 @@ async fn registering_again_renews_or_rotates_the_key_without_telling_anyone() {
 }
 
 #[tokio::test]
+async fn another_root_key_from_a_session_that_named_no_device_is_refused_and_changes_nothing() {
+    let w = world();
+    let device = DeviceId::generate();
+    w.register_as(
+        &w.alice,
+        device,
+        1,
+        Some(hpke(&w.alice, device, 1, 9)),
+        now(),
+    )
+    .await
+    .unwrap();
+    let before = w.store.find(device).await.unwrap().unwrap();
+
+    let refused = w.register_as(&w.alice, device, 2, None, now()).await;
+
+    assert!(
+        matches!(refused, Err(KeyDirectoryError::DeviceRequired(_))),
+        "{:?}",
+        refused.err()
+    );
+    assert_eq!(w.store.find(device).await.unwrap().unwrap(), before);
+}
+
+#[tokio::test]
+async fn an_attestation_is_issued_in_whole_seconds_and_signed_so() {
+    let w = world();
+    let (device, second) = (DeviceId::generate(), now());
+
+    let registered = w
+        .register_as(
+            &w.alice,
+            device,
+            1,
+            None,
+            second + Duration::nanoseconds(123_456_789),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        (registered.issued_at, registered.expires_at),
+        (second, second + ATTESTATION_LIFETIME)
+    );
+    assert_eq!(
+        registered.signed,
+        PlainAttester.attest(
+            &w.alice.actor_uri,
+            device,
+            &key(1),
+            attestation_period(second).1
+        )
+    );
+}
+
+#[tokio::test]
+async fn a_registration_stores_the_hpke_key_its_root_key_signed() {
+    let w = world();
+    let device = DeviceId::generate();
+
+    w.register_as(
+        &w.alice,
+        device,
+        1,
+        Some(hpke(&w.alice, device, 1, 9)),
+        now(),
+    )
+    .await
+    .unwrap();
+
+    let stored = w.store.find(device).await.unwrap().expect("recorded");
+    assert_eq!(stored.attestation.unwrap().root_key, key(1));
+    assert_eq!(w.held_key(device).await, Some(vec![9; 32]));
+}
+
+#[tokio::test]
+async fn an_hpke_key_its_root_key_did_not_sign_is_refused_and_changes_nothing() {
+    let w = world();
+    let (device, new) = (DeviceId::generate(), DeviceId::generate());
+    w.register_as(
+        &w.alice,
+        device,
+        1,
+        Some(hpke(&w.alice, device, 1, 9)),
+        now(),
+    )
+    .await
+    .unwrap();
+    let before = w.store.find(device).await.unwrap();
+
+    let renewal = w
+        .register_as(
+            &w.alice,
+            device,
+            1,
+            Some(hpke(&w.alice, device, 2, 8)),
+            now() + Duration::days(1),
+        )
+        .await;
+    let first_time = w
+        .register_as(&w.alice, new, 1, Some(hpke(&w.alice, new, 2, 9)), now())
+        .await;
+
+    for refused in [renewal, first_time] {
+        assert!(
+            matches!(refused, Err(KeyDirectoryError::HpkeKeyUnsigned)),
+            "{:?}",
+            refused.err()
+        );
+    }
+    assert_eq!(w.store.find(device).await.unwrap(), before);
+    assert_eq!(w.store.find(new).await.unwrap(), None);
+    assert_eq!(w.notifier.joined().len(), 1, "the first device only");
+}
+
+#[tokio::test]
+async fn a_renewal_keeps_the_hpke_key_and_a_rotation_drops_it_unless_it_brings_one() {
+    let w = world();
+    let (kept, dropped) = (DeviceId::generate(), DeviceId::generate());
+    for device in [kept, dropped] {
+        w.register_as(
+            &w.alice,
+            device,
+            1,
+            Some(hpke(&w.alice, device, 1, 9)),
+            now(),
+        )
+        .await
+        .unwrap();
+    }
+
+    w.register_as(&w.alice, kept, 1, None, now()).await.unwrap();
+    let renewed = w.held_key(kept).await;
+    w.rotate_as(&w.alice, kept, 2, Some(hpke(&w.alice, kept, 2, 7)), now())
+        .await
+        .unwrap();
+    let rotated_with_one = w.held_key(kept).await;
+    w.rotate_as(&w.alice, dropped, 2, None, now())
+        .await
+        .unwrap();
+    let rotated_without = w.held_key(dropped).await;
+
+    assert_eq!(renewed, Some(vec![9; 32]));
+    assert_eq!(rotated_with_one, Some(vec![7; 32]));
+    assert_eq!(rotated_without, None, "only the old root key signed it");
+}
+
+#[tokio::test]
+async fn a_new_hpke_key_replaces_the_one_held() {
+    let w = world();
+    let device = DeviceId::generate();
+    for byte in [9, 8] {
+        w.register_as(
+            &w.alice,
+            device,
+            1,
+            Some(hpke(&w.alice, device, 1, byte)),
+            now(),
+        )
+        .await
+        .unwrap();
+    }
+
+    assert_eq!(w.held_key(device).await, Some(vec![8; 32]));
+}
+
+#[tokio::test]
+async fn a_device_its_key_packages_recorded_registers_its_hpke_key_for_the_first_time() {
+    let w = world();
+    let device = DeviceId::generate();
+    w.upload(&w.alice, device, batch(1)).await;
+
+    w.register_as(
+        &w.alice,
+        device,
+        1,
+        Some(hpke(&w.alice, device, 1, 9)),
+        now(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(w.held_key(device).await, Some(vec![9; 32]));
+    assert_eq!(
+        w.notifier.joined(),
+        vec![(w.alice.id, w.alice.actor_uri.clone(), device)]
+    );
+}
+
+#[tokio::test]
+async fn a_session_registers_only_the_device_it_declared() {
+    let w = world();
+    let (laptop, phone, new) = (
+        DeviceId::generate(),
+        DeviceId::generate(),
+        DeviceId::generate(),
+    );
+    for device in [laptop, phone] {
+        w.register_as(&w.alice, device, 1, None, now())
+            .await
+            .unwrap();
+    }
+    let phones = w.store.find(phone).await.unwrap();
+    let on_the_laptop = w.signed_in(&w.alice, Some(laptop)).await;
+
+    let the_phone = w
+        .register
+        .execute(
+            &on_the_laptop,
+            phone,
+            key(2),
+            Some(hpke(&w.alice, phone, 2, 9)),
+            &DeviceLabel::unknown(),
+            now(),
+        )
+        .await;
+    let itself = w
+        .register
+        .execute(
+            &on_the_laptop,
+            laptop,
+            key(1),
+            None,
+            &DeviceLabel::unknown(),
+            now(),
+        )
+        .await;
+    let a_new_one = w
+        .register
+        .execute(
+            &on_the_laptop,
+            new,
+            key(3),
+            None,
+            &DeviceLabel::unknown(),
+            now(),
+        )
+        .await;
+
+    for refused in [the_phone, a_new_one] {
+        assert!(
+            matches!(refused, Err(KeyDirectoryError::NotTheSessionsDevice)),
+            "{:?}",
+            refused.err()
+        );
+    }
+    assert_eq!(w.store.find(phone).await.unwrap(), phones);
+    assert_eq!(w.store.find(new).await.unwrap(), None);
+    assert!(itself.is_ok(), "{:?}", itself.err());
+}
+
+/// Lets another write land between a registration's read of the device and its write.
+struct Racing {
+    store: Arc<InMemoryKeyDirectory>,
+    meanwhile: Mutex<Option<Meanwhile>>,
+}
+
+enum Meanwhile {
+    Revoke,
+    /// Under the root key it holds.
+    RegisterKey(SignedHpkeKey),
+    /// Before every write.
+    Always,
+}
+
+impl Racing {
+    fn new(store: Arc<InMemoryKeyDirectory>, meanwhile: Meanwhile) -> Arc<Self> {
+        Arc::new(Self {
+            store,
+            meanwhile: Mutex::new(Some(meanwhile)),
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl Devices for Racing {
+    async fn find(&self, id: DeviceId) -> Result<Option<Device>, KeyStoreError> {
+        self.store.find(id).await
+    }
+
+    async fn list(&self, owner: domain::UserId) -> Result<Vec<Device>, KeyStoreError> {
+        self.store.list(owner).await
+    }
+
+    async fn attest(
+        &self,
+        owner: domain::UserId,
+        id: DeviceId,
+        label: &DeviceLabel,
+        read: Option<&Device>,
+        attestation: &Attestation,
+        hpke_key: &HpkeKeyWrite,
+    ) -> Result<Attest, KeyStoreError> {
+        let meanwhile = {
+            let mut meanwhile = self.meanwhile.lock().unwrap();
+            if matches!(*meanwhile, Some(Meanwhile::Always)) {
+                return Ok(Attest::Stale);
+            }
+            meanwhile.take()
+        };
+        match meanwhile {
+            Some(Meanwhile::Revoke) => {
+                self.store
+                    .revoke(owner, id, Some(id), time::OffsetDateTime::now_utc())
+                    .await?;
+            }
+            Some(Meanwhile::RegisterKey(key)) => {
+                let current = self.store.find(id).await?;
+                let held = current.as_ref().and_then(|d| d.attestation.clone());
+                self.store
+                    .attest(
+                        owner,
+                        id,
+                        label,
+                        current.as_ref(),
+                        &held.expect("attested"),
+                        &HpkeKeyWrite::Set(key),
+                    )
+                    .await?;
+            }
+            _ => {}
+        }
+        self.store
+            .attest(owner, id, label, read, attestation, hpke_key)
+            .await
+    }
+
+    async fn revoke(
+        &self,
+        owner: domain::UserId,
+        id: DeviceId,
+        by: Option<DeviceId>,
+        now: time::OffsetDateTime,
+    ) -> Result<Revocation, KeyStoreError> {
+        self.store.revoke(owner, id, by, now).await
+    }
+
+    async fn hold_history_key(
+        &self,
+        owner: domain::UserId,
+        id: DeviceId,
+        generation: HistoryGeneration,
+    ) -> Result<Holding, KeyStoreError> {
+        let meanwhile = self.meanwhile.lock().unwrap().take();
+        if let Some(Meanwhile::Revoke) = meanwhile {
+            self.store
+                .revoke(owner, id, Some(id), time::OffsetDateTime::now_utc())
+                .await?;
+        }
+        self.store.hold_history_key(owner, id, generation).await
+    }
+}
+
+#[tokio::test]
+async fn a_device_revoked_while_it_reports_its_history_key_is_refused() {
+    let w = world();
+    let keys = Arc::new(InMemoryArchive::default());
+    let store = Arc::new(InMemoryKeyDirectory::keyed_by(keys.clone()));
+    let device = DeviceId::generate();
+    let unnamed = w.signed_in(&w.alice, None).await;
+    w.registering_over(store.clone())
+        .execute(
+            &unnamed,
+            device,
+            key(1),
+            None,
+            &DeviceLabel::unknown(),
+            now(),
+        )
+        .await
+        .unwrap();
+    let bearer = w.signed_in(&w.alice, Some(device)).await;
+    keys.replace(
+        w.alice.id,
+        &first_history_key(),
+        device,
+        time::OffsetDateTime::now_utc(),
+    )
+    .await
+    .unwrap();
+    let report = ReportHistoryKey::new(
+        w.sessions.clone(),
+        Racing::new(store.clone(), Meanwhile::Revoke),
+        keys,
+    );
+
+    let refused = report
+        .execute(&bearer, device, HistoryGeneration::FIRST)
+        .await;
+
+    assert!(
+        matches!(refused, Err(KeyDirectoryError::DeviceRevoked)),
+        "{refused:?}"
+    );
+    let device = store.find(device).await.unwrap().unwrap();
+    assert_eq!(device.history_generation, None);
+}
+
+fn first_history_key() -> HistoryKey {
+    HistoryKey {
+        generation: HistoryGeneration::FIRST,
+        salt: HistorySalt::parse(&[1; 16]).unwrap(),
+        check_value: HistoryCheckValue::parse(&[2; 32]).unwrap(),
+        approval_public_key: ApprovalPublicKey::parse(&[3; 32]).unwrap(),
+    }
+}
+
+#[tokio::test]
+async fn a_registration_that_loses_a_race_decides_again_on_what_won() {
+    let w = world();
+    let device = DeviceId::generate();
+    w.register_as(&w.alice, device, 1, None, now())
+        .await
+        .unwrap();
+    let racing = Racing::new(w.store.clone(), Meanwhile::RegisterKey(hpke_key(9)));
+    let bearer = w.signed_in(&w.alice, None).await;
+
+    w.registering_over(racing)
+        .execute(
+            &bearer,
+            device,
+            key(1),
+            None,
+            &DeviceLabel::unknown(),
+            now(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        w.held_key(device).await,
+        Some(vec![9; 32]),
+        "the renewal keeps the key registered meanwhile"
+    );
+}
+
+#[tokio::test]
+async fn a_device_revoked_while_it_registers_gets_nothing_written() {
+    let w = world();
+    let device = DeviceId::generate();
+    w.register_as(&w.alice, device, 1, None, now())
+        .await
+        .unwrap();
+    let before = w.store.find(device).await.unwrap().unwrap();
+    let bearer = w.signed_in(&w.alice, None).await;
+
+    let refused = w
+        .registering_over(Racing::new(w.store.clone(), Meanwhile::Revoke))
+        .execute(
+            &bearer,
+            device,
+            key(1),
+            Some(hpke(&w.alice, device, 1, 9)),
+            &DeviceLabel::unknown(),
+            now() + Duration::days(1),
+        )
+        .await;
+
+    assert!(
+        matches!(refused, Err(KeyDirectoryError::DeviceRevoked)),
+        "{:?}",
+        refused.err()
+    );
+    let after = w.store.find(device).await.unwrap().unwrap();
+    assert!(after.is_revoked());
+    assert_eq!(
+        (after.attestation, after.hpke_key),
+        (before.attestation, None)
+    );
+}
+
+#[tokio::test]
+async fn a_device_that_keeps_changing_fails_its_registration() {
+    let w = world();
+    let bearer = w.signed_in(&w.alice, None).await;
+
+    let failed = w
+        .registering_over(Racing::new(w.store.clone(), Meanwhile::Always))
+        .execute(
+            &bearer,
+            DeviceId::generate(),
+            key(1),
+            None,
+            &DeviceLabel::unknown(),
+            now(),
+        )
+        .await;
+
+    assert!(
+        matches!(failed, Err(KeyDirectoryError::Unexpected(_))),
+        "{:?}",
+        failed.err()
+    );
+}
+
+#[tokio::test]
 async fn the_owner_lists_its_own_devices() {
     let w = world();
     let (laptop, phone) = (DeviceId::generate(), DeviceId::generate());
-    w.register
-        .execute(w.alice.id, laptop, key(1), now())
+    w.register_as(&w.alice, laptop, 1, None, now())
         .await
         .unwrap();
     w.upload(&w.alice, phone, batch(1)).await;
     w.upload(&w.bob, DeviceId::generate(), batch(1)).await;
-    let session = w
-        .sessions
-        .open(
-            w.alice.id,
-            &SessionKind::Browser,
-            now() - Duration::hours(2),
-        )
+    let used = now() - Duration::hours(2);
+    let session = w.sessions.live_at(w.alice.id, used);
+    w.sessions
+        .link(w.alice.id, session, laptop, now())
         .await
         .unwrap();
-    w.sessions.link(session, laptop, now()).await.unwrap();
 
     let listed: Vec<(DeviceId, Option<OffsetDateTime>)> = w
         .list
@@ -250,7 +839,7 @@ async fn the_owner_lists_its_own_devices() {
 
     assert_eq!(
         listed,
-        vec![(phone, None), (laptop, Some(now() - Duration::hours(2)))],
+        vec![(phone, None), (laptop, Some(used))],
         "the laptop is signed in, the phone isn't"
     );
 }
@@ -260,14 +849,16 @@ async fn revoking_a_device_signs_it_out() {
     let w = world();
     let device = DeviceId::generate();
     w.upload(&w.alice, device, batch(1)).await;
-    let session = w
-        .sessions
-        .open(w.alice.id, &SessionKind::Browser, now())
+    let session = w.sessions.live_at(w.alice.id, now());
+    w.sessions
+        .link(w.alice.id, session, device, now())
         .await
         .unwrap();
-    w.sessions.link(session, device, now()).await.unwrap();
 
-    let by_bob = w.revoke.execute(w.bob.id, device, now()).await;
+    let by_bob = w
+        .revoke
+        .execute(&w.signed_in(&w.bob, None).await, device, now())
+        .await;
     let still = w
         .sessions
         .find(session)
@@ -275,7 +866,10 @@ async fn revoking_a_device_signs_it_out() {
         .unwrap()
         .unwrap()
         .is_live(now());
-    w.revoke.execute(w.alice.id, device, now()).await.unwrap();
+    w.revoke
+        .execute(&w.signed_in(&w.alice, None).await, device, now())
+        .await
+        .unwrap();
 
     assert!(matches!(by_bob, Err(KeyDirectoryError::DeviceNotFound)));
     assert!(still, "another account's revoke ends nothing");
@@ -283,7 +877,86 @@ async fn revoking_a_device_signs_it_out() {
         w.sessions.reason(session),
         Some(RevokedReason::DeviceRevoked)
     );
-    assert_eq!(w.ended.ended(), vec![session], "its sockets close");
+    let browser = w.sessions.find(session).await.unwrap().unwrap().browser();
+    assert_eq!(
+        w.ended.ended(),
+        [browser.unwrap(), session],
+        "its sockets close, its browser's with them"
+    );
+}
+
+#[tokio::test]
+async fn revoking_a_device_again_ends_what_a_revoke_cut_short_left_signed_in() {
+    let w = world();
+    let device = DeviceId::generate();
+    w.upload(&w.alice, device, batch(1)).await;
+    w.store
+        .revoke(
+            w.alice.id,
+            device,
+            Some(device),
+            time::OffsetDateTime::now_utc(),
+        )
+        .await
+        .unwrap();
+    let session = w.signed_in(&w.alice, None).await.session;
+    w.sessions
+        .link(w.alice.id, session, device, now())
+        .await
+        .unwrap();
+
+    w.revoke
+        .execute(&w.signed_in(&w.alice, None).await, device, now())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        w.sessions.reason(session),
+        Some(RevokedReason::DeviceRevoked),
+        "the flag was set, the sessions not yet"
+    );
+}
+
+#[tokio::test]
+async fn revoking_a_web_apps_device_signs_out_the_browser_it_signed_in_through() {
+    let w = world();
+    let device = DeviceId::generate();
+    w.upload(&w.alice, device, batch(1)).await;
+    let browser = w.sessions.open_browser(w.alice.id, now()).await.unwrap();
+    let under = async |client: Client| {
+        w.sessions
+            .open_under(browser, &client.id, now())
+            .await
+            .unwrap()
+            .unwrap()
+            .id
+    };
+    let on_device = under(web_client()).await;
+    let beside = under(another_web_app()).await;
+    w.sessions
+        .link(w.alice.id, on_device, device, now())
+        .await
+        .unwrap();
+    let elsewhere = w.signed_in(&w.alice, None).await.session;
+
+    w.revoke
+        .execute(&w.signed_in(&w.alice, None).await, device, now())
+        .await
+        .unwrap();
+
+    for ended in [on_device, browser, beside] {
+        assert_eq!(
+            w.sessions.reason(ended),
+            Some(RevokedReason::DeviceRevoked),
+            "{ended}: its cookie would sign the device in again"
+        );
+    }
+    let mut told = w.ended.ended();
+    told.sort();
+    let mut expected = vec![on_device, browser, beside];
+    expected.sort();
+    assert_eq!(told, expected, "their sockets close");
+    assert_eq!(w.sessions.reason(elsewhere), None);
 }
 
 #[tokio::test]
@@ -292,13 +965,26 @@ async fn a_device_is_revoked_by_its_owner_and_not_found_by_anyone_else() {
     let device = DeviceId::generate();
     w.upload(&w.alice, device, batch(1)).await;
 
-    let by_bob = w.revoke.execute(w.bob.id, device, now()).await;
+    let by_bob = w
+        .revoke
+        .execute(&w.signed_in(&w.bob, None).await, device, now())
+        .await;
     let unknown = w
         .revoke
-        .execute(w.alice.id, DeviceId::generate(), now())
+        .execute(
+            &w.signed_in(&w.alice, None).await,
+            DeviceId::generate(),
+            now(),
+        )
         .await;
-    w.revoke.execute(w.alice.id, device, now()).await.unwrap();
-    let again = w.revoke.execute(w.alice.id, device, now()).await;
+    w.revoke
+        .execute(&w.signed_in(&w.alice, None).await, device, now())
+        .await
+        .unwrap();
+    let again = w
+        .revoke
+        .execute(&w.signed_in(&w.alice, None).await, device, now())
+        .await;
 
     assert!(
         matches!(by_bob, Err(KeyDirectoryError::DeviceNotFound)),
@@ -588,23 +1274,38 @@ async fn spent_packages_are_swept_once_their_grace_is_over() {
 async fn a_revoked_device_neither_renews_its_attestation_nor_publishes_key_packages() {
     let w = world();
     let device = DeviceId::generate();
-    w.register
-        .execute(w.alice.id, device, key(1), now())
+    w.register_as(&w.alice, device, 1, None, now())
         .await
         .unwrap();
-    w.revoke.execute(w.alice.id, device, now()).await.unwrap();
+    w.revoke
+        .execute(&w.signed_in(&w.alice, None).await, device, now())
+        .await
+        .unwrap();
+    let revoked = w.store.find(device).await.unwrap();
 
-    let renewal = w.register.execute(w.alice.id, device, key(1), now()).await;
+    let renewal = w.register_as(&w.alice, device, 1, None, now()).await;
+    let with_a_key = w
+        .register_as(
+            &w.alice,
+            device,
+            1,
+            Some(hpke(&w.alice, device, 1, 9)),
+            now(),
+        )
+        .await;
     let upload = w
         .upload
         .execute(w.alice.id, device, phone(), batch(1), now())
         .await;
 
-    assert!(
-        matches!(renewal, Err(KeyDirectoryError::DeviceRevoked)),
-        "{:?}",
-        renewal.err()
-    );
+    for refused in [renewal, with_a_key] {
+        assert!(
+            matches!(refused, Err(KeyDirectoryError::DeviceRevoked)),
+            "{:?}",
+            refused.err()
+        );
+    }
+    assert_eq!(w.store.find(device).await.unwrap(), revoked);
     assert!(
         matches!(upload, Err(KeyDirectoryError::DeviceRevoked)),
         "{upload:?}"
@@ -616,23 +1317,27 @@ async fn a_revoked_device_neither_renews_its_attestation_nor_publishes_key_packa
 async fn a_device_id_another_account_holds_is_neither_registered_nor_stocked() {
     let w = world();
     let device = DeviceId::generate();
-    w.register
-        .execute(w.alice.id, device, key(1), now())
+    w.register_as(&w.alice, device, 1, None, now())
         .await
         .unwrap();
     let alices = w.store.find(device).await.unwrap();
 
-    let registered = w.register.execute(w.bob.id, device, key(2), now()).await;
+    let registered = w.register_as(&w.bob, device, 2, None, now()).await;
+    let with_a_key = w
+        .register_as(&w.bob, device, 2, Some(hpke(&w.bob, device, 2, 9)), now())
+        .await;
     let uploaded = w
         .upload
         .execute(w.bob.id, device, phone(), batch(1), now())
         .await;
 
-    assert!(
-        matches!(registered, Err(KeyDirectoryError::DeviceTaken)),
-        "{:?}",
-        registered.err()
-    );
+    for refused in [registered, with_a_key] {
+        assert!(
+            matches!(refused, Err(KeyDirectoryError::DeviceTaken)),
+            "{:?}",
+            refused.err()
+        );
+    }
     assert!(
         matches!(uploaded, Err(KeyDirectoryError::DeviceTaken)),
         "{uploaded:?}"
@@ -798,4 +1503,52 @@ async fn a_claim_that_finds_no_package_tells_the_owner_to_refill() {
         "{empty:?}"
     );
     assert_eq!(w.notifier.key_packages_low(), vec![w.alice.id]);
+}
+
+#[tokio::test]
+async fn a_device_is_recorded_under_the_label_of_its_first_registration() {
+    let w = world();
+    let (device, bearer) = (DeviceId::generate(), w.signed_in(&w.alice, None).await);
+
+    w.register
+        .execute(&bearer, device, key(1), None, &phone(), now())
+        .await
+        .unwrap();
+    w.register
+        .execute(
+            &bearer,
+            device,
+            key(1),
+            None,
+            &DeviceLabel::unknown(),
+            now(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(w.store.find(device).await.unwrap().unwrap().label, phone());
+}
+
+#[tokio::test]
+async fn an_upload_names_a_device_registered_unnamed_and_no_other() {
+    let w = world();
+    let (unnamed, named) = (DeviceId::generate(), DeviceId::generate());
+    let bearer = w.signed_in(&w.alice, None).await;
+    let laptop = DeviceLabel {
+        name: "Firefox on Linux".to_owned(),
+        kind: DeviceKind::Laptop,
+    };
+    for (device, label) in [(unnamed, DeviceLabel::unknown()), (named, laptop.clone())] {
+        w.register
+            .execute(&bearer, device, key(1), None, &label, now())
+            .await
+            .unwrap();
+    }
+
+    w.upload(&w.alice, unnamed, batch(1)).await;
+    w.upload(&w.alice, named, batch(1)).await;
+
+    let found = |device| w.store.find(device);
+    assert_eq!(found(unnamed).await.unwrap().unwrap().label, phone());
+    assert_eq!(found(named).await.unwrap().unwrap().label, laptop);
 }

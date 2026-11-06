@@ -1,4 +1,3 @@
-use domain::auth::SessionKind;
 use domain::auth::testing::{a_request, signed_up};
 use domain::auth::{
     INVITATION_TTL, Invitations, PasswordResets, RESET_TTL, RefreshTokens, SESSION_IDLE,
@@ -70,20 +69,12 @@ async fn the_sweep_deletes_what_was_spent_a_day_ago_and_the_accounts_never_confi
 async fn a_session_is_swept_a_month_after_it_ended() {
     let w = world().await;
     let now = OffsetDateTime::from_unix_timestamp(1_790_000_000).unwrap();
-    let signed_out = w
-        .sessions
-        .open(w.alice.id, &SessionKind::Browser, now)
-        .await
-        .unwrap();
+    let signed_out = w.sessions.open_browser(w.alice.id, now).await.unwrap();
     w.sessions
         .revoke(signed_out, domain::auth::RevokedReason::SignOut, now)
         .await
         .unwrap();
-    let live = w
-        .sessions
-        .open(w.alice.id, &SessionKind::Browser, now)
-        .await
-        .unwrap();
+    let live = w.sessions.open_browser(w.alice.id, now).await.unwrap();
 
     let a_month_on = w
         .sweep
@@ -102,11 +93,7 @@ async fn a_session_is_swept_a_month_after_it_ended() {
 async fn a_refresh_token_is_swept_after_ninety_days_unused() {
     let w = world().await;
     let now = OffsetDateTime::from_unix_timestamp(1_790_000_000).unwrap();
-    let session = w
-        .sessions
-        .open(w.alice.id, &SessionKind::Browser, now)
-        .await
-        .unwrap();
+    let session = w.sessions.open_browser(w.alice.id, now).await.unwrap();
     let client = a_request().client;
     let abandoned = w.refresh_tokens.start(session, &client, now).await.unwrap();
     let used = w

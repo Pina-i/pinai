@@ -1,14 +1,17 @@
 //! Adapter tests against a real Postgres — one module per port.
 
+mod approval;
 mod auth;
 mod e2ee;
 mod identity;
+mod key_share;
 mod messaging;
 mod presence;
 mod profile;
 mod reach;
 mod settings;
 mod social;
+mod start_over;
 
 use domain::UserId;
 use domain::identity::{Account, ActorUri};
