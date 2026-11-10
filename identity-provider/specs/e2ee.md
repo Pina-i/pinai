@@ -1072,14 +1072,18 @@ under the current generation, by one rule, `domain::e2ee::may_act_beyond_the_pas
 - turning the second factor on (`identity-provider/specs/auth.md § 3`), which would lock the
   user's devices out of their next sign-in;
 - saving to the history backup or clearing it (§ 3.8), which a device added later restores from;
-- signing the other devices out (`identity-provider/specs/auth.md § 1`, "Sessions and devices").
+- signing the other devices out (`identity-provider/specs/auth.md § 1`, "Sessions and devices");
+- a device committing itself into a conversation's MLS group — an external commit (§ 5, "Delivery
+  Service rules") —, which would let someone with the password alone read the user's
+  conversations from then on.
 
 A device not approved, or a session that named none, is refused `403 approval_required` "This
 takes a device approved under the current history key", and nothing is done. What each checks
 before is its own: the recent password the second factor, the clear and the sign-out ask; an
-upload's generation (§ 3.8). An account with no history key has no approved device: any session
-turns the second factor on, clears the backup and signs the others out; an upload is answered as
-§ 3.8 says. Without an approved device at hand, what signs every device out is a new password,
+upload's generation (§ 3.8); a session that named its device, the external commit
+(`403 device_required`). An account with no history key has no approved device: any session
+turns the second factor on, clears the backup and signs the others out, any session naming its
+device commits it into a group; an upload is answered as § 3.8 says. Without an approved device at hand, what signs every device out is a new password,
 the way the instance gives one (`identity-provider/specs/auth.md § 7`, "Changing the password").
 
 **What it holds against.** A thief with the password asks: the user's devices are told, and one tap
@@ -1087,7 +1091,8 @@ cancels it; while the user uses any approved device, it never matures. Revoking 
 devices first is refused. Speaking as an approved device is too: naming a device on a session takes
 its root key's signature over that session, and so does giving it another root key
 (`identity-provider/specs/auth.md § 1`, "Sessions and devices"). So are turning the second
-factor on, saving to the backup or clearing it, and signing the other devices out (above). A
+factor on, saving to the backup or clearing it, signing the other devices out, and joining the
+user's conversations by itself (above). A
 device signed out keeps its last uses, and the user signing in again on it uses it. What it
 doesn't hold against: an account none of whose approved devices is used for 7 days, and the
 instance, which keeps this rule and could set a generation or revoke a device as it likes (§ 2)
@@ -1195,6 +1200,10 @@ start_over_requests      — id, user_id, device_id (asking), generation (the on
 
 mls_commits              — per-conversation commit log
                             UNIQUE (conversation_id, epoch)
+mls_group_infos          — PRIMARY KEY conversation_id: the group's newest
+                            GroupInfo — epoch, group_info BYTEA (opaque),
+                            updated_at; replaced only by a later epoch's, from a
+                            commit stored here
 mls_welcomes             — outbound queue for offline device adds
                             (recipient_user_id, recipient_device_id)
 ```
@@ -1306,8 +1315,9 @@ an unrevoked device of the account (`403 device_required` otherwise; `403` revok
 
 | Endpoint | Description |
 |---|---|
-| `POST /api/mls/groups/:conversation_id/commits` | Append an MLS Commit at the next epoch, then push it to every member — the proposer's own sessions included — and send it to the members' instances, a group's with its roster so it lands there even ahead of the Welcome (`identity-provider/specs/groups.md § 7`). `409` on epoch race carries the winning commit |
+| `POST /api/mls/groups/:conversation_id/commits` | `{ epoch, commit_blob, group_info }`, the blobs in standard base64, neither empty (`400`): `group_info` the GroupInfo of the epoch the commit opens, `epoch`. Only a commit a client makes — a member's or an external one, below — else `400`. Append an MLS Commit at the next epoch, keep its GroupInfo, then push the commit to every member — the proposer's own sessions included — and send it with its GroupInfo to the members' instances, a group's with its roster so it lands there even ahead of the Welcome (`identity-provider/specs/groups.md § 7`). `409` on epoch race carries the winning commit; `409` for any other epoch than the next carries `next_epoch`. An external commit — a device committing itself in — only from a session that named its device (`403 device_required`), approved under the current history key (`403 approval_required`) |
 | `GET /api/mls/groups/:conversation_id/commits?since=<epoch>` | Catch-up: the commits after `since`, in epoch order, 256 a page with `has_more` |
+| `GET /api/mls/groups/:conversation_id/group-info` | Active members only. The group's newest GroupInfo, `{ epoch, group_info }` (standard base64): what a device of the account with none of its devices left in the group joins it by. `404` when none is held — the conversation has no group yet |
 | `GET /api/mls/welcomes?device_id=<uuid>` | Atomically claim every pending Welcome targeted at the calling device |
 | `POST /api/mls/welcomes` | Hand a Welcome bundle to the sender's IdP. The IdP routes off `recipient_actor_uri`: local → row + WS push, remote → signed AP `Create{Note}` with `mlsKind: welcome` (the answer's `id` is then nil). For a group, the Note also carries the roster so the recipient's IdP can materialise the conversation — see `identity-provider/specs/groups.md § 7` |
 
@@ -1323,6 +1333,40 @@ and they hold for what peers deliver as much as for local clients.
   (`400`).
 - **Only active members commit** (`403`). A commit from a peer's actor outside the conversation
   is refused too: it would take an epoch the members need, and the group could not advance.
+- **A member's commit goes at the next epoch** — right after the log's latest, 1 for the
+  group's first (`Epoch::follows`). One at an epoch already taken loses to the commit there
+  (`409 epoch_conflict`); one at any other — past the next, or into a gap — is refused with
+  the epoch to propose at (`409 epoch_not_next`, `next_epoch`). Past the next, the log would
+  hold a gap no member can catch up through: the proposer holds a state the log never saw. A
+  peer's commit is kept at its epoch whatever the latest here: the proposer's instance placed
+  it, and deliveries arrive in any order, a later epoch first — the gap it leaves is the one
+  the earlier delivery fills, so no member here commits into it.
+- **The newest GroupInfo, one a conversation.** A commit comes with the GroupInfo of the epoch it
+  opens — the commit's `epoch` —, which is kept only when the commit is stored: one that lost its
+  epoch belongs to another history. And only when its epoch is later than the one held, a peer's
+  deliveries arriving in any order; the write itself decides (`GroupInfos::keep`), so of two at
+  once the later stays. It travels with the commit to the members' instances (§ 7.5), each
+  keeping it by the same rule, and is what `GET …/group-info` answers. It shows the instance the
+  group's tree — which devices of which accounts —, which it knows already, and holds no key that
+  opens a message.
+- **Only a commit a client makes.** The instance reads each commit's clear header (RFC 9420 § 6:
+  `version` `mls10`, `wire_format`, then `group_id` and `epoch`, then a `PublicMessage`'s sender
+  type or a `PrivateMessage`'s content type) and takes two kinds only (`CommitBlob::kind`): a
+  member's — a `PrivateMessage` whose content is a `commit`, as a group's members send nothing in
+  the clear — and an external commit — a `PublicMessage` from a `new_member_commit` sender.
+  Anything else is refused `400`, from a client or in a peer's delivery, and nothing is stored nor
+  mirrored: a `PublicMessage` from a member, an external sender or a `new_member_proposal` — a
+  device asking to join, which a member's client would keep and fold into its own next commit,
+  adding that device unasked —, a `PrivateMessage` carrying no commit, a Welcome, a GroupInfo, a
+  KeyPackage, another version, bytes the header doesn't read.
+- **A device commits itself in only from an approved device.** An external commit (RFC 9420
+  § 12.4.3.2) adds a device to the group without any device in it. It is taken only from a
+  session that named its device (`403 device_required`), approved under the account's current
+  history key (`403 approval_required`) — the rule of § 3.12, "What else takes an approved
+  device" (`domain::e2ee::may_commit_externally`): someone with only the password must not join
+  the user's conversations. Past that, it is a commit like any other — an active member's, at the
+  next epoch. A member's commit takes no device. A peer's delivery isn't asked again: the
+  proposer's instance did.
 - **A Welcome goes from an active member to an active member** (`403` either way) and never
   changes membership — joining is the group routes' business, with their admin rules. A member's
   own new device is a member already.
@@ -1345,7 +1389,14 @@ and they hold for what peers deliver as much as for local clients.
 | The Welcome's recipient is not an active member | `403` | `the recipient is not a member of this conversation` |
 | The recipient doesn't admit the sender | `403` | `Can't add this person` |
 | Epoch taken | `409` | `epoch_conflict`, with `winning_commit` |
+| Epoch free but not the next | `409` | `epoch_not_next`, with `next_epoch` |
 | The same, from a peer's inbox delivery | `400` | as above |
+| A commit's `commit_blob` or `group_info` not base64, or empty; a peer's commit Note without them (§ 7.5) | `400` | `invalid_request` |
+| A `commit_blob` that is neither a member's commit nor an external one | `400` | `` `commit_blob` is not an MLS commit `` |
+| The same, in a peer's commit Note | `400` | ``MLS commit Note `content` is not an MLS commit`` |
+| An external commit from a session that named no device | `403` | `device_required` |
+| An external commit from a device not approved under the current history key | `403` | `approval_required` |
+| No GroupInfo held (`GET …/group-info`) | `404` | `no GroupInfo is held for this conversation` |
 
 ### History backup
 
@@ -2318,6 +2369,33 @@ horizon. Existing attestations remain verifiable through their
 natural expiry; clients renew through the normal 30-day window;
 new attestations use the new key.
 
+### 7.5 Commit Note (inbox `Create{Note}`, `mlsKind: commit`)
+
+A commit stored here goes to each remote member's inbox as a signed
+`Create{Note}`, the proposer its actor:
+
+```json
+{
+  "type": "Note",
+  "mediaType": "application/mls",
+  "mlsKind": "commit",
+  "context": "<conversation_id>",
+  "content": "<base64 MLS Commit>",
+  "mlsEpoch": 4,
+  "mlsGroupInfo": "<base64 MLS GroupInfo of epoch 4>",
+  "mlsGroup": { "name": "Weekend trip", "nameAt": "…", "members": [ … ] }
+}
+```
+
+`content` is a member's commit or an external one, as § 5 "Delivery
+Service rules" reads them; `mlsEpoch` is the epoch the commit takes in the
+log, `mlsGroupInfo` the GroupInfo of that epoch, both required. A Note
+without them, whose `mlsGroupInfo` isn't non-empty standard base64, or whose
+`content` is no such commit, is refused `400`. `mlsGroup`
+is a group's roster (`identity-provider/specs/groups.md § 7`), left out for a
+DM. The receiving instance stores the commit at `mlsEpoch` and keeps the
+GroupInfo as § 5 "Delivery Service rules" says.
+
 ---
 
 ## 8. Storage architecture summary
@@ -2337,6 +2415,7 @@ flowchart LR
         KP["key_packages:<br/>per-device stash"]
         DM["direct_messages:<br/>mls_ciphertext"]
         MC["mls_commits"]
+        MG["mls_group_infos:<br/>each group's newest GroupInfo"]
         MW["mls_welcomes"]
         HM["history_messages:<br/>opaque archive"]
         HK["history_keys:<br/>generation, salt, check value,<br/>approval public key"]

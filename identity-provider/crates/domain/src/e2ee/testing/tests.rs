@@ -176,6 +176,27 @@ async fn a_commit_at_a_taken_epoch_loses_to_the_one_there() {
 }
 
 #[tokio::test]
+async fn the_latest_epoch_and_the_commit_at_one_are_read_by_group() {
+    contract::the_latest_epoch_and_the_commit_at_one_are_read_by_group(
+        &InMemoryDelivery::default(),
+        ConversationId::generate(),
+        ConversationId::generate(),
+        &crate::identity::testing::account("alice").actor_uri,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_groups_group_info_is_replaced_only_by_a_later_epochs() {
+    contract::a_groups_group_info_is_replaced_only_by_a_later_epochs(
+        &InMemoryDelivery::default(),
+        ConversationId::generate(),
+        ConversationId::generate(),
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn a_welcome_is_claimed_once_and_only_by_its_device() {
     contract::a_welcome_is_claimed_once_and_only_by_its_device(
         &InMemoryDelivery::default(),

@@ -1,7 +1,7 @@
 use anyhow::Context;
 use domain::e2ee::{
-    Append, Commit, CommitBlob, CommitLog, DeliveryStoreError, Epoch, NewCommit, NewWelcome,
-    Welcome, WelcomeBlob, Welcomes,
+    Append, Commit, CommitBlob, CommitLog, DeliveryStoreError, Epoch, GroupInfo, GroupInfoBlob,
+    GroupInfos, NewCommit, NewWelcome, Welcome, WelcomeBlob, Welcomes,
 };
 use domain::identity::ActorUri;
 use domain::{ConversationId, DeviceId, UserId};
@@ -66,15 +66,43 @@ impl CommitLog for PgCommitLog {
         if let Some(row) = stored {
             return Ok(Append::Stored(Commit::try_from(row)?));
         }
-        let winner: CommitRow = sqlx::query_as(&format!(
+        let winner = self
+            .at(commit.conversation, commit.epoch)
+            .await?
+            .context("the commit holding an epoch is gone")?;
+        Ok(Append::Taken(winner))
+    }
+
+    async fn latest(
+        &self,
+        conversation: ConversationId,
+    ) -> Result<Option<Epoch>, DeliveryStoreError> {
+        let latest: Option<i64> =
+            sqlx::query_scalar("SELECT max(epoch) FROM mls_commits WHERE conversation_id = $1")
+                .bind(conversation.as_uuid())
+                .fetch_one(&self.pool)
+                .await
+                .context("read a group's latest epoch")?;
+        Ok(latest
+            .map(Epoch::parse)
+            .transpose()
+            .context("mls_commits.epoch")?)
+    }
+
+    async fn at(
+        &self,
+        conversation: ConversationId,
+        epoch: Epoch,
+    ) -> Result<Option<Commit>, DeliveryStoreError> {
+        let row: Option<CommitRow> = sqlx::query_as(&format!(
             "SELECT {COMMIT_COLUMNS} FROM mls_commits WHERE conversation_id = $1 AND epoch = $2"
         ))
-        .bind(commit.conversation.as_uuid())
-        .bind(commit.epoch.value())
-        .fetch_one(&self.pool)
+        .bind(conversation.as_uuid())
+        .bind(epoch.value())
+        .fetch_optional(&self.pool)
         .await
         .context("find the commit holding an epoch")?;
-        Ok(Append::Taken(Commit::try_from(winner)?))
+        Ok(row.map(Commit::try_from).transpose()?)
     }
 
     async fn since(
@@ -97,6 +125,60 @@ impl CommitLog for PgCommitLog {
             .into_iter()
             .map(Commit::try_from)
             .collect::<Result<_, _>>()?)
+    }
+}
+
+/// `mls_group_infos`: one row a conversation.
+pub struct PgGroupInfos {
+    pool: PgPool,
+}
+
+impl PgGroupInfos {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+}
+
+#[async_trait::async_trait]
+impl GroupInfos for PgGroupInfos {
+    async fn keep(
+        &self,
+        conversation: ConversationId,
+        info: &GroupInfo,
+    ) -> Result<(), DeliveryStoreError> {
+        sqlx::query(
+            "INSERT INTO mls_group_infos (conversation_id, epoch, group_info) VALUES ($1, $2, $3) \
+             ON CONFLICT (conversation_id) DO UPDATE \
+                 SET epoch = excluded.epoch, group_info = excluded.group_info, updated_at = now() \
+                 WHERE excluded.epoch > mls_group_infos.epoch",
+        )
+        .bind(conversation.as_uuid())
+        .bind(info.epoch.value())
+        .bind(info.blob.as_bytes())
+        .execute(&self.pool)
+        .await
+        .context("keep a group's GroupInfo")?;
+        Ok(())
+    }
+
+    async fn newest(
+        &self,
+        conversation: ConversationId,
+    ) -> Result<Option<GroupInfo>, DeliveryStoreError> {
+        let row: Option<(i64, Vec<u8>)> = sqlx::query_as(
+            "SELECT epoch, group_info FROM mls_group_infos WHERE conversation_id = $1",
+        )
+        .bind(conversation.as_uuid())
+        .fetch_optional(&self.pool)
+        .await
+        .context("read a group's GroupInfo")?;
+        let Some((epoch, blob)) = row else {
+            return Ok(None);
+        };
+        Ok(Some(GroupInfo {
+            epoch: Epoch::parse(epoch).context("mls_group_infos.epoch")?,
+            blob: GroupInfoBlob::parse(blob).context("mls_group_infos.group_info")?,
+        }))
     }
 }
 

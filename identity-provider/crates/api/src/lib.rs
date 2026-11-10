@@ -51,7 +51,7 @@ use application::auth::{
 use application::e2ee::{
     AppendCommit, ApproveDevice, ArchiveMessages, AskToStartOver, CatchUpCommits, ClaimKeyPackage,
     ClaimWelcomes, ClearArchive, CloseApprovalRequest, EndStartOver, KeyPackageStatus,
-    ListApprovalRequests, ListDevices, LoadHistoryKey, LoadKeyShare, LoadStartOver,
+    ListApprovalRequests, ListDevices, LoadGroupInfo, LoadHistoryKey, LoadKeyShare, LoadStartOver,
     OpenApprovalRequest, PostApprovalMessage, ReadApprovalMessages, ReadArchive, ReceiveCommit,
     ReceiveWelcome, RegisterDevice, ReportHistoryKey, RevokeDevice, SendWelcome, SetHistoryKey,
     ShareHistoryKey, UploadKeyPackages,
@@ -221,6 +221,7 @@ pub struct AppState {
     pub claim_limiter: Arc<RateLimiter>,
     pub append_commit: Arc<AppendCommit>,
     pub catch_up_commits: Arc<CatchUpCommits>,
+    pub load_group_info: Arc<LoadGroupInfo>,
     pub claim_welcomes: Arc<ClaimWelcomes>,
     pub send_welcome: Arc<SendWelcome>,
     pub archive_messages: Arc<ArchiveMessages>,
@@ -369,6 +370,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/mls/groups/{conversation_id}/commits",
             post(mls::append).get(mls::catch_up),
+        )
+        .route(
+            "/api/mls/groups/{conversation_id}/group-info",
+            get(mls::group_info),
         )
         .route(
             "/api/mls/welcomes",

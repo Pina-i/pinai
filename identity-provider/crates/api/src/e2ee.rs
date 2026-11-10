@@ -32,7 +32,8 @@ pub(crate) fn stale_history_key() -> ApiError {
     )
 }
 
-/// Setting or holding the history key from a session that hasn't named its device.
+/// Setting or holding the history key, or committing a device into a group by itself, from a
+/// session that hasn't named its device.
 pub(crate) fn device_required() -> ApiError {
     ApiError::new(
         StatusCode::FORBIDDEN,
@@ -43,7 +44,7 @@ pub(crate) fn device_required() -> ApiError {
 
 /// What only a device approved under the current generation does: revoke an approved device,
 /// read or cancel another device's start over, turn the second factor on, save to or clear the
-/// history backup, sign the other devices out.
+/// history backup, sign the other devices out, commit itself into a group.
 pub(crate) fn approval_required() -> ApiError {
     ApiError::new(
         StatusCode::FORBIDDEN,

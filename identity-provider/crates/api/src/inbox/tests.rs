@@ -2,6 +2,7 @@ use axum::http::{Method, StatusCode};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use domain::ConversationId;
+use domain::e2ee::testing;
 use domain::identity::testing::{TrustedSignatures, account, remote_actor};
 use domain::identity::{Account, ActorUri, RemoteActor};
 use domain::messaging::testing::MessageNotice;
@@ -665,7 +666,19 @@ async fn a_malformed_mls_note_is_refused_with_what_it_lacks() {
             "MLS commit Note missing `mlsEpoch`",
         ),
         (
-            w.mls_note("commit", json!({ "mlsEpoch": -1 })),
+            w.mls_note("commit", json!({ "mlsEpoch": 1 })),
+            "MLS commit Note missing `mlsGroupInfo`",
+        ),
+        (
+            w.mls_note("commit", json!({ "mlsEpoch": 1, "mlsGroupInfo": "***" })),
+            "MLS commit `mlsGroupInfo` is not non-empty base64",
+        ),
+        (
+            w.mls_note("commit", json!({ "mlsEpoch": 1, "mlsGroupInfo": "" })),
+            "MLS commit `mlsGroupInfo` is not non-empty base64",
+        ),
+        (
+            w.mls_note("commit", json!({ "mlsEpoch": -1, "mlsGroupInfo": "AQID" })),
             "MLS commit `mlsEpoch` is negative",
         ),
         (
@@ -680,6 +693,85 @@ async fn a_malformed_mls_note_is_refused_with_what_it_lacks() {
         assert_eq!(status, StatusCode::BAD_REQUEST, "{reason}");
         assert_eq!(body["error_description"], reason);
     }
+}
+
+impl World {
+    /// A commit Note for a new group of Carol's and Alice's, `content` its MLS message.
+    fn commit_note(&self, group: ConversationId, content: &[u8]) -> Value {
+        self.mls_note(
+            "commit",
+            json!({
+                "context": group.to_string(),
+                "content": B64.encode(content),
+                "mlsEpoch": 1,
+                "mlsGroupInfo": B64.encode([5; 6]),
+                "mlsGroup": {
+                    "name": "crew",
+                    "members": [
+                        { "actorUri": self.carol.actor_uri.as_str(), "role": "admin" },
+                        { "actorUri": self.alice.actor_uri.as_str(), "role": "member" },
+                    ],
+                },
+            }),
+        )
+    }
+}
+
+#[tokio::test]
+async fn a_peers_commit_that_is_no_commit_a_client_makes_is_refused_and_brings_nothing() {
+    let w = world();
+    let group = ConversationId::generate();
+    let note = w.commit_note(group, testing::join_proposal().as_bytes());
+
+    let (status, body) = w
+        .deliver(&w.carol.actor_uri, w.by_carol("Create", note))
+        .await;
+    let read = w
+        .app
+        .call(
+            Method::GET,
+            &format!("/api/mls/groups/{group}/group-info"),
+            Some(w.alice.id),
+            None,
+        )
+        .await
+        .0;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        body["error_description"],
+        "MLS commit Note `content` is not an MLS commit"
+    );
+    assert_eq!(read, StatusCode::NOT_FOUND, "no group mirrored either");
+}
+
+#[tokio::test]
+async fn a_peers_commit_brings_its_group_info_for_the_members_here() {
+    let w = world();
+    let group = ConversationId::generate();
+    let note = w.commit_note(group, testing::member_commit(1).as_bytes());
+
+    let (status, body) = w
+        .deliver(&w.carol.actor_uri, w.by_carol("Create", note))
+        .await;
+    let read = w
+        .app
+        .call(
+            Method::GET,
+            &format!("/api/mls/groups/{group}/group-info"),
+            Some(w.alice.id),
+            None,
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    assert_eq!(
+        read,
+        (
+            StatusCode::OK,
+            json!({ "epoch": 1, "group_info": B64.encode([5; 6]) })
+        )
+    );
 }
 
 // ─── Profiles ──────────────────────────────────────────────────────────────────────────────

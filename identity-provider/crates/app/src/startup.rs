@@ -393,6 +393,8 @@ impl Application {
             Arc::new(infrastructure::postgres::PgHistoryKeys::new(pool.clone()));
         let commits: Arc<dyn domain::e2ee::CommitLog> =
             Arc::new(infrastructure::postgres::PgCommitLog::new(pool.clone()));
+        let group_infos: Arc<dyn domain::e2ee::GroupInfos> =
+            Arc::new(infrastructure::postgres::PgGroupInfos::new(pool.clone()));
         let welcomes: Arc<dyn domain::e2ee::Welcomes> =
             Arc::new(infrastructure::postgres::PgWelcomes::new(pool.clone()));
         let mls_notifier: Arc<dyn domain::e2ee::MlsNotifier> = Arc::new(
@@ -409,6 +411,7 @@ impl Application {
             Arc::clone(&remote_actors),
             Arc::clone(&conversations),
             Arc::clone(&commits),
+            Arc::clone(&group_infos),
             Arc::clone(&reach),
             Arc::clone(&mls_notifier),
             Arc::clone(&group_notifier),
@@ -1147,6 +1150,9 @@ impl Application {
                 Arc::clone(&accounts),
                 Arc::clone(&conversations),
                 Arc::clone(&commits),
+                Arc::clone(&group_infos),
+                Arc::clone(&sessions),
+                Arc::clone(&approvals),
                 Arc::clone(&mls_notifier),
                 Arc::clone(&mls_federation),
             )),
@@ -1154,6 +1160,11 @@ impl Application {
                 Arc::clone(&accounts),
                 Arc::clone(&conversations),
                 commits,
+            )),
+            load_group_info: Arc::new(application::e2ee::LoadGroupInfo::new(
+                Arc::clone(&accounts),
+                Arc::clone(&conversations),
+                group_infos,
             )),
             claim_welcomes: Arc::new(application::e2ee::ClaimWelcomes::new(Arc::clone(&welcomes))),
             archive_messages: Arc::new(application::e2ee::ArchiveMessages::new(

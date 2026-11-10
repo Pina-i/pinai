@@ -1,4 +1,4 @@
-use domain::e2ee::{CommitBlob, Epoch, WelcomeBlob};
+use domain::e2ee::{CommitBlob, Epoch, GroupInfoBlob, WelcomeBlob};
 use domain::identity::testing::{account, remote_actor};
 use domain::messaging::testing::unstamped;
 use domain::messaging::{GroupSnapshot, Member, Role};
@@ -17,6 +17,10 @@ fn commit(proposer: &ActorUri) -> Commit {
     }
 }
 
+fn group_info() -> GroupInfoBlob {
+    GroupInfoBlob::parse(vec![7, 8, 9]).unwrap()
+}
+
 fn welcome(roster: Option<GroupSnapshot>) -> OutgoingWelcome {
     OutgoingWelcome {
         device: DeviceId::generate(),
@@ -27,11 +31,11 @@ fn welcome(roster: Option<GroupSnapshot>) -> OutgoingWelcome {
 }
 
 #[test]
-fn a_commit_travels_as_a_create_whose_note_names_its_epoch() {
+fn a_commit_travels_as_a_create_whose_note_names_its_epoch_and_its_group_info() {
     let (alice, carol) = (account("alice"), remote_actor("carol_k2m9x@idp.carol.test"));
     let c = commit(&alice.actor_uri);
 
-    let activity = commit_activity(&alice.actor_uri, &carol.actor_uri, &c, None);
+    let activity = commit_activity(&alice.actor_uri, &carol.actor_uri, &c, &group_info(), None);
 
     assert_eq!(
         (&activity["type"], &activity["actor"], &activity["to"]),
@@ -47,8 +51,12 @@ fn a_commit_travels_as_a_create_whose_note_names_its_epoch() {
         (&json!("application/mls"), &json!("commit"), &json!(3))
     );
     assert_eq!(
-        (&note["context"], &note["content"]),
-        (&json!(c.conversation.to_string()), &json!("AQID"))
+        (&note["context"], &note["content"], &note["mlsGroupInfo"]),
+        (
+            &json!(c.conversation.to_string()),
+            &json!("AQID"),
+            &json!("BwgJ")
+        )
     );
     assert!(
         activity["id"]
@@ -70,8 +78,14 @@ fn a_groups_commit_carries_its_roster_and_a_dms_none() {
     );
     let c = commit(&alice.actor_uri);
 
-    let group = commit_activity(&alice.actor_uri, &carol.actor_uri, &c, Some(&roster));
-    let dm = commit_activity(&alice.actor_uri, &carol.actor_uri, &c, None);
+    let group = commit_activity(
+        &alice.actor_uri,
+        &carol.actor_uri,
+        &c,
+        &group_info(),
+        Some(&roster),
+    );
+    let dm = commit_activity(&alice.actor_uri, &carol.actor_uri, &c, &group_info(), None);
 
     assert_eq!(group["object"]["mlsGroup"]["name"], json!("Weekend trip"));
     assert_eq!(

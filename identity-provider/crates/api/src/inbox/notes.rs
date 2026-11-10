@@ -8,7 +8,7 @@ use application::e2ee::{IncomingCommit, IncomingWelcome};
 use application::messaging::{IncomingEdit, IncomingMessage};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
-use domain::e2ee::{CommitBlob, DeliveryError, Epoch, WelcomeBlob};
+use domain::e2ee::{CommitBlob, DeliveryError, Epoch, GroupInfoBlob, WelcomeBlob};
 use domain::identity::{Account, ActorUri};
 use domain::messaging::{
     GroupSnapshot, Member, MessagingError, MlsCiphertext, OfferedAttachment, Role, SnapshotMember,
@@ -65,6 +65,17 @@ pub(super) async fn create(
                 .get("mlsEpoch")
                 .and_then(Value::as_i64)
                 .ok_or_else(|| ApiError::bad_request("MLS commit Note missing `mlsEpoch`"))?;
+            let group_info = note
+                .get("mlsGroupInfo")
+                .and_then(Value::as_str)
+                .ok_or_else(|| ApiError::bad_request("MLS commit Note missing `mlsGroupInfo`"))?;
+            let group_info = B64
+                .decode(group_info)
+                .ok()
+                .and_then(|bytes| GroupInfoBlob::parse(bytes).ok())
+                .ok_or_else(|| {
+                    ApiError::bad_request("MLS commit `mlsGroupInfo` is not non-empty base64")
+                })?;
             let incoming = IncomingCommit {
                 recipient: recipient.id,
                 proposer: sender,
@@ -73,6 +84,7 @@ pub(super) async fn create(
                     .map_err(|_| ApiError::bad_request("MLS commit `mlsEpoch` is negative"))?,
                 blob: CommitBlob::parse(blob)
                     .map_err(|_| ApiError::bad_request("MLS Note `content` is empty"))?,
+                group_info,
                 roster: group_snapshot(note),
             };
             state
@@ -263,6 +275,9 @@ fn messaging_refused(error: MessagingError) -> ApiError {
 fn delivery_refused(error: DeliveryError) -> ApiError {
     match error {
         unreachable @ DeliveryError::Unreachable => unreachable.into(),
+        DeliveryError::NotACommit => {
+            ApiError::bad_request("MLS commit Note `content` is not an MLS commit")
+        }
         DeliveryError::Unexpected(e) => ApiError::internal(e),
         other => ApiError::bad_request(other.to_string()),
     }

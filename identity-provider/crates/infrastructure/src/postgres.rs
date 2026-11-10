@@ -37,7 +37,7 @@ pub use auth::{
     PgPasswordResets, PgRefreshTokens, PgSecondFactors, PgSessions, PgSignInAccounts, PgSignUps,
     PgSignupCodes,
 };
-pub use delivery::{PgCommitLog, PgWelcomes};
+pub use delivery::{PgCommitLog, PgGroupInfos, PgWelcomes};
 pub use group_events::PgGroupEvents;
 pub use identity::{PgAccounts, PgSavedIntro};
 pub use key_directory::{PgDevices, PgKeyPackages};

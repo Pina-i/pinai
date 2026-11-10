@@ -4,8 +4,8 @@ use domain::e2ee::{
     HistoryGeneration, HistoryKey, HistoryKeys, HistorySalt, KeyReplace, NewArchiveEntry,
 };
 use infrastructure::postgres::{
-    PgCommitLog, PgDeviceApprovals, PgDevices, PgHistoryArchive, PgHistoryKeys, PgKeyPackages,
-    PgWelcomes,
+    PgCommitLog, PgDeviceApprovals, PgDevices, PgGroupInfos, PgHistoryArchive, PgHistoryKeys,
+    PgKeyPackages, PgWelcomes,
 };
 use sqlx::PgPool;
 
@@ -255,6 +255,30 @@ async fn a_commit_at_a_taken_epoch_loses_to_the_one_there(pool: PgPool) {
         group,
         &alice.actor_uri,
         &bob.actor_uri,
+    )
+    .await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn the_latest_epoch_and_the_commit_at_one_are_read_by_group(pool: PgPool) {
+    let (group, other) = (a_conversation(&pool).await, a_conversation(&pool).await);
+    let alice = an_account(&pool, "alice").await;
+    contract::the_latest_epoch_and_the_commit_at_one_are_read_by_group(
+        &PgCommitLog::new(pool),
+        group,
+        other,
+        &alice.actor_uri,
+    )
+    .await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn a_groups_group_info_is_replaced_only_by_a_later_epochs(pool: PgPool) {
+    let (group, other) = (a_conversation(&pool).await, a_conversation(&pool).await);
+    contract::a_groups_group_info_is_replaced_only_by_a_later_epochs(
+        &PgGroupInfos::new(pool),
+        group,
+        other,
     )
     .await;
 }

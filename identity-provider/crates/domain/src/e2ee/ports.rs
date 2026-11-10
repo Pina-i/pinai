@@ -8,10 +8,11 @@ use super::{
     Append, Approval, ApprovalMessage, ApprovalMessageBody, ApprovalRequest, ApprovalRequired,
     ArchiveCursor, ArchiveEntry, ArchiveStoreError, Attestation, AttestationExpiry,
     CheckedApproval, CheckedShare, Claim, ClaimedKeyPackage, Commit, DeliveryStoreError, Device,
-    DeviceLabel, DeviceRootKey, DeviceTrust, Ed25519PublicKey, Ed25519Signature, Epoch,
-    HeldHistoryKey, HistoryGeneration, HistoryKey, HpkeKeyWrite, KeyShare, KeyStoreError,
-    MessageSeq, NewArchiveEntry, NewCommit, NewKeyPackage, NewWelcome, RemoteClaimError,
-    RequestRefusal, StartOverEnd, StartOverRefusal, StartOverRequest, Welcome, WelcomeBlob,
+    DeviceLabel, DeviceRootKey, DeviceTrust, Ed25519PublicKey, Ed25519Signature, Epoch, GroupInfo,
+    GroupInfoBlob, HeldHistoryKey, HistoryGeneration, HistoryKey, HpkeKeyWrite, KeyShare,
+    KeyStoreError, MessageSeq, NewArchiveEntry, NewCommit, NewKeyPackage, NewWelcome,
+    RemoteClaimError, RequestRefusal, StartOverEnd, StartOverRefusal, StartOverRequest, Welcome,
+    WelcomeBlob,
 };
 
 /// The devices accounts registered, and their attestations.
@@ -182,8 +183,20 @@ pub trait RemoteKeyPackages: Send + Sync {
 /// Each MLS group's commits in epoch order: the order every member's client applies them in.
 #[async_trait::async_trait]
 pub trait CommitLog: Send + Sync {
-    /// Store the commit at its epoch — unless another holds it already, which is returned.
+    /// Store the commit at its epoch, whichever — unless another holds it already, which is
+    /// returned. Whether it may go there is the caller's: [`Epoch::follows`].
     async fn append(&self, commit: &NewCommit) -> Result<Append, DeliveryStoreError>;
+    /// The epoch of the group's latest commit, none before its first.
+    async fn latest(
+        &self,
+        conversation: ConversationId,
+    ) -> Result<Option<Epoch>, DeliveryStoreError>;
+    /// The commit holding `epoch`, if any.
+    async fn at(
+        &self,
+        conversation: ConversationId,
+        epoch: Epoch,
+    ) -> Result<Option<Commit>, DeliveryStoreError>;
     /// The group's commits after `after`, in epoch order, at most `limit`.
     async fn since(
         &self,
@@ -191,6 +204,23 @@ pub trait CommitLog: Send + Sync {
         after: Epoch,
         limit: usize,
     ) -> Result<Vec<Commit>, DeliveryStoreError>;
+}
+
+/// Each MLS group's newest GroupInfo: what a device joins the group by on its own, with an external
+/// commit.
+#[async_trait::async_trait]
+pub trait GroupInfos: Send + Sync {
+    /// Keep `info` as the group's unless one of its epoch or a later one is held — decided by the
+    /// write itself, so of two kept at once the later epoch stays, whichever comes last.
+    async fn keep(
+        &self,
+        conversation: ConversationId,
+        info: &GroupInfo,
+    ) -> Result<(), DeliveryStoreError>;
+    async fn newest(
+        &self,
+        conversation: ConversationId,
+    ) -> Result<Option<GroupInfo>, DeliveryStoreError>;
 }
 
 /// Welcomes waiting for the devices they admit to groups.
@@ -232,13 +262,14 @@ pub struct OutgoingWelcome {
 /// a member catches up only from its own instance's log. A group's commit therefore carries its
 /// roster, so it lands even ahead of the Welcome that would have brought the group there.
 pub trait MlsFederation: Send + Sync {
-    /// To each remote member, reached as `MessageFederation::send_to_group` reaches them;
-    /// `roster` is `None` for a DM.
+    /// To each remote member, reached as `MessageFederation::send_to_group` reaches them, with
+    /// the GroupInfo of the epoch it opens; `roster` is `None` for a DM.
     fn send_commit(
         &self,
         from: &ActorUri,
         to: &[ActorUri],
         commit: &Commit,
+        group_info: &GroupInfoBlob,
         roster: Option<&GroupSnapshot>,
     );
     fn send_welcome(&self, from: &ActorUri, to: &RemoteActor, welcome: &OutgoingWelcome);

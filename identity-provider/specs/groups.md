@@ -207,6 +207,9 @@ snapshot of the sender's roster beside the payload:
 }
 ```
 
+A commit's Note also carries its epoch and the GroupInfo of that epoch
+(`identity-provider/specs/e2ee.md § 7.5`).
+
 The receiving IdP creates the conversation under the advertised `context` UUID
 with `kind = 'group'`, upserts every member, and pushes `group_created` to each
 account of its own the snapshot brings in, once. Each member's inbox gets a
@@ -236,7 +239,7 @@ sequenceDiagram
   A->>IA: POST /api/mls/groups/:id/commits (epoch n adds Pierre)
   A->>IA: POST /api/mls/welcomes (Pierre's device)
   par in no set order
-    IA->>IB: Create{Note} mlsKind=commit + mlsGroup
+    IA->>IB: Create{Note} mlsKind=commit + mlsGroupInfo + mlsGroup
   and
     IA->>IB: Create{Note} mlsKind=welcome + mlsGroup
   end
