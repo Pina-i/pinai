@@ -3,14 +3,14 @@ use std::sync::Arc;
 use domain::identity::{Accounts, RemoteActors};
 use domain::messaging::{
     Conversations, GroupChange, GroupChangeKind, GroupEvent, GroupEvents, GroupFederation,
-    GroupName, GroupNotifier, MessagingError, authorize_admin,
+    GroupName, GroupNotifier, MessagingError, authorize_rename,
 };
 use domain::{ConversationId, UserId};
 
 use super::{GroupView, announce, group_members, local_accounts, profiles};
 use crate::messaging::shared::{Timeline, caller as caller_account};
 
-/// `PATCH /api/groups/{id}`, by an admin.
+/// `PATCH /api/groups/{id}`, by any member.
 pub struct RenameGroup {
     accounts: Arc<dyn Accounts>,
     remote_actors: Arc<dyn RemoteActors>,
@@ -45,10 +45,10 @@ impl RenameGroup {
         group: ConversationId,
         name: GroupName,
     ) -> Result<GroupView, MessagingError> {
-        let admin = caller_account(&*self.accounts, caller).await?;
-        authorize_admin(
+        let renamer = caller_account(&*self.accounts, caller).await?;
+        authorize_rename(
             &group_members(&*self.conversations, group).await?,
-            &admin.actor_uri,
+            &renamer.actor_uri,
         )?;
         let renamed = self
             .conversations
@@ -57,18 +57,26 @@ impl RenameGroup {
             .ok_or(MessagingError::GroupNotFound)?;
         let members = self.conversations.members(group).await?;
         for local in local_accounts(&*self.accounts, &members).await? {
-            self.notifier.renamed(local.id, &renamed, &admin.actor_uri);
+            self.notifier
+                .renamed(local.id, &renamed, &renamer.actor_uri);
         }
         let change = GroupChange {
             group,
-            by: admin.actor_uri.clone(),
+            by: renamer.actor_uri.clone(),
             at: renamed.name_at,
             kind: GroupChangeKind::Renamed(name),
         };
         self.timeline()
             .record(&members, GroupEvent::of(&change))
             .await?;
-        announce(&*self.accounts, &*self.federation, &admin, &members, change).await?;
+        announce(
+            &*self.accounts,
+            &*self.federation,
+            &renamer,
+            &members,
+            change,
+        )
+        .await?;
         Ok(GroupView {
             members: profiles(&*self.accounts, &*self.remote_actors, &members).await?,
             group: renamed,

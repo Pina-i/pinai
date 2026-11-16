@@ -65,12 +65,11 @@ fn joining(name: &str, minute: i64) -> GroupEffect {
 }
 
 #[test]
-fn an_admin_makes_any_change_and_a_member_only_their_own_leave() {
+fn an_admin_makes_any_change_and_a_member_only_a_rename_or_their_own_leave() {
     let members = active(&crew());
     let kinds = [
         GroupChangeKind::Added(uri("dee")),
         GroupChangeKind::Removed(uri("bo")),
-        GroupChangeKind::Renamed(GroupName::parse("new crew").unwrap()),
         GroupChangeKind::RoleChanged(uri("bo"), Role::Admin),
     ];
 
@@ -84,12 +83,16 @@ fn an_admin_makes_any_change_and_a_member_only_their_own_leave() {
             "{kind:?}"
         );
     }
-    assert!(change("bo", 30, GroupChangeKind::Left).is_entitled(&members));
-    assert!(
-        !change("cy", 30, GroupChangeKind::Left).is_entitled(&members),
-        "no longer a member"
-    );
-    assert!(!change("eve", 30, GroupChangeKind::Left).is_entitled(&members));
+    let rename = GroupChangeKind::Renamed(GroupName::parse("new crew").unwrap());
+    for kind in [rename, GroupChangeKind::Left] {
+        assert!(change("ana", 30, kind.clone()).is_entitled(&members));
+        assert!(change("bo", 30, kind.clone()).is_entitled(&members));
+        assert!(
+            !change("cy", 30, kind.clone()).is_entitled(&members),
+            "no longer a member"
+        );
+        assert!(!change("eve", 30, kind).is_entitled(&members));
+    }
 }
 
 #[test]

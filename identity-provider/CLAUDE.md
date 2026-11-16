@@ -197,7 +197,7 @@ connections ──► (no internal deps)
 | `POST /api/groups/:conversation_id/members` | Add a member (Bearer; **admin-gated**). Body: `{ actor_uri }`; 409 when already a member, or `The group is full: it holds at most 50 members`; the same 404 and two 403s as `POST /api/groups`. Emits `member_added`. MLS key delivery happens separately via the welcome the client posts. |
 | `DELETE /api/groups/:conversation_id/members/:actor_uri` | Remove a member (**admin-gated**) or leave (caller == target); the last admin cannot leave while others remain (409). `actor_uri` percent-encoded. Sets `left_at`; emits `member_removed`. A removed member keeps the group in their list as it stood, with its history up to then; one who leaves keeps nothing |
 | `DELETE /api/groups/:conversation_id` | Clear a group the caller was removed from from their list: 204; 409 `Leave the group first` for an active member; 404 otherwise |
-| `PATCH /api/groups/:conversation_id` | Rename a group (Bearer; **admin-gated**). Body: `{ name }` (1–100 characters). Emits `group_renamed`. |
+| `PATCH /api/groups/:conversation_id` | Rename a group (Bearer; any member). Body: `{ name }` (1–50 characters). Emits `group_renamed`. |
 | `POST /api/groups/:conversation_id/members/:actor_uri/role` | Promote/demote a member (**admin-gated**). Body: `{ role: "admin" \| "member" }`; never the last admin (409). Emits `member_role_changed`. |
 | `POST /api/attachments` | Upload up to 5 multipart files; returns orphan attachment IDs. A client-chosen `attachment_id` already taken answers 409 — an id is never written over |
 | `GET /api/attachments/:id` | Returns a token-protected blob URL + metadata (Bearer auth) |
