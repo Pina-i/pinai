@@ -321,7 +321,20 @@ this JSON:
     "expires_at": "2027-05-14T12:00:00Z",
     "signature": "<base64>"
   },
-  "leaf_binding": "<base64>"
+  "leaf_binding": "<base64>",
+  "approvals": [
+    {
+      "by": "passphrase",
+      "generation": 2,
+      "approval_public_key": "<base64>",
+      "signature": "<base64>"
+    },
+    {
+      "by": "device",
+      "device_id": "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+      "signature": "<base64>"
+    }
+  ]
 }
 ```
 
@@ -333,6 +346,30 @@ and the DRK are public, so without the binding anyone holding them — the
 instance first — could pair them with a leaf key of its own in a
 KeyPackage it serves; with it, only the device that holds the DRK makes a
 leaf under its credential.
+
+`approvals` says how the device was approved (§ 3.9) — every approval it holds,
+the words' first, then its partners' by device id:
+
+- **By the words** (`by: "passphrase"`): the approval it makes with the approval
+  key of the generation it holds (§ 3.7) when it comes to hold the words — set by
+  it, typed on it or shared to it —, beside that generation and the key's public
+  half. It carries it while its words give the key in force: words a later
+  generation replaced approve nothing any more.
+- **By a code** (`by: "device"`): its partner's approval from the handshake
+  (§ 3.10), by the partner's root key, `device_id` the partner's — the one the
+  device asking verifies under the root key the exchange gave and keeps as the
+  exchange ends. The device answering, which holds the words, keeps none.
+
+Both are signatures over the `PINAI-DEVICE-APPROVAL-v1` bytes of § 7.2: the actor
+URI, the device id and its DRK — the credential's `drk_pub`. A device approved by a
+code that later gets the words carries both; one with no approval carries none, and
+the key is left out. An approval binds the root key it was made over: once the DRK
+changes, the partners' approvals of the old one leave the credential, and the words'
+approval is made again over the new one. The device takes them from what it keeps —
+its words, its partners' approvals —, never from the device list, and the instance
+can't alter them: the credential is the LeafNode's, signed by the leaf key, itself
+bound to the DRK. An approval a receiver can't read — another kind, a field missing
+— is left out, never a reason to refuse the leaf.
 
 Receivers verify in this order:
 
@@ -378,15 +415,21 @@ device holding the current passphrase.
 After verification, the leaf is trusted as "actor X's device Y." MLS's
 own LeafNode self-signature handles per-message integrity.
 
-**Keeping leaves current.** A leaf carries the attestation of the moment
-its credential was made, and a renewal (§ 6.7) doesn't reach it: a member
-joining once that attestation expired would meet an expired leaf. So
-after each registration, a device commits in every group it holds an
-update of its own leaf, over the same signature key, carrying the
-credential of its current attestation — one commit per group and
-renewal, none where its leaf already carries the credential it would
-make. A refresh that fails is tried again at the next sync, and holds
-back nothing else of it: the user's other devices are still added.
+**Keeping leaves current.** A leaf carries the attestation and the
+approvals of the moment its credential was made, and neither a renewal
+(§ 6.7) nor a new approval reaches it: a member joining once that
+attestation expired would meet an expired leaf, and a leaf made before the
+words came would say nothing of them. So after each registration, and once
+its approvals change — the words typed or shared, a new generation, a
+code's approval landing, words a later generation replaced —, a device
+commits in every group it holds an update of its own leaf, over the same
+signature key, carrying the credential it would make now — one commit per
+group and change, none where its leaf already carries it. The KeyPackages
+it publishes from then on, a group it founds and its external joins
+(§ 6.14) carry that credential too; a leaf added from a package published
+before is brought current the same way. A refresh that fails is tried
+again at the next sync, and holds back nothing else of it: the user's
+other devices are still added.
 
 ### 3.5 KeyPackage
 
@@ -420,11 +463,13 @@ up a missed push on its next start. KeyPackages live 30 days, so a
 device left unopened for longer can't be added to a group until it is
 opened again.
 
-A leaf added from a KeyPackage keeps that KeyPackage's MLS lifetime — openmls's default, 12 weeks
-— until its device commits, and nothing refreshes leaves on a schedule: so no device joining a
-group, by a Welcome or by itself (§ 6.14), checks the lifetime of the leaves already there, or a
-member who never commits would keep every new device out three months on. A KeyPackage is still
-checked when it is added.
+A KeyPackage's MLS lifetime is a year, not openmls's default 12 weeks: every member checks it as it
+applies the add, with no way to skip it, so a member away a few weeks would otherwise be unable to
+apply an add made meanwhile, and stop reading that conversation. A leaf added from a KeyPackage
+keeps that lifetime until its device commits, and nothing refreshes leaves on a schedule: so no
+device joining a group, by a Welcome or by itself (§ 6.14), checks the lifetime of the leaves
+already there, or a member who never commits would keep every new device out a year on. A
+KeyPackage is still checked when it is added.
 
 ### 3.6 24-word recovery passphrase
 
@@ -716,9 +761,10 @@ approved, and the new device's approval of the other is the one it trusts before
 passphrase (§ 3.9). The answering device keeps the asking one as its handshake partner, then
 approves it; the asking device approves the answering one only once the list shows that approval
 of itself, verifying under the key the exchange gave — a refused asker approves nothing — and keeps
-it as its partner (§ 8): the partners are whom a share is sent by and taken from (§ 3.11). Should
-the instance list another key for either device, the approval doesn't verify over it, and is
-refused. A wrong code fails the exchange, and the device that finds it wrong ends the request.
+it as its partner (§ 8), that approval with it, which its leaves carry from then on (§ 3.4): the
+partners are whom a share is sent by and taken from (§ 3.11). Should the instance list another key
+for either device, the approval doesn't verify over it, and is refused. A wrong code fails the
+exchange, and the device that finds it wrong ends the request.
 
 **The rules both devices keep:**
 
@@ -2351,7 +2397,8 @@ PINAI-SESSION-DEVICE-v1\n
 ```
 
 What an approval signs — by another device's DRK, or by the generation's
-approval key —, `device_id` and `drk_public_key` the approved device's:
+approval key; stored by the instance and carried in the approved device's
+leaves (§ 3.4) —, `device_id` and `drk_public_key` the approved device's:
 
 ```
 PINAI-DEVICE-APPROVAL-v1\n
@@ -2502,7 +2549,7 @@ flowchart LR
         IDB --- ident["mls_snapshot:<br/>openmls KV state +<br/>leaf signing keys"]
         IDB --- att["device_attestation:<br/>DRK and HPKE private halves<br/>+ IdP signature"]
         IDB --- pass["recovery_passphrase:<br/>24 words + the generation held<br/>+ the HAK derived for its salt,<br/>words pending, newest generation seen"]
-        IDB --- trust["device_trust:<br/>handshake partners (device id,<br/>DRK, HPKE key), devices seen,<br/>devices found approved<br/>(device id, root key),<br/>revocations seen"]
+        IDB --- trust["device_trust:<br/>handshake partners (device id,<br/>DRK, HPKE key) and their<br/>approvals of it, devices seen,<br/>devices found approved<br/>(device id, root key),<br/>revocations seen"]
     end
     subgraph server ["Server (Postgres)"]
         UD["user_devices:<br/>+ attestation and HPKE key cols"]
@@ -2531,8 +2578,9 @@ Two persistence boundaries:
   messages and prove its identity to peers, and what it keeps of the
   account's devices so the instance can't take it back (§ 3.9): the
   devices it approved in a handshake with the keys the exchange gave, the
-  devices it has seen, those it found approved with their root keys, the
-  newest generation it has seen, the revocations it has seen. Every blob is encrypted
+  approval of it the one it asked made, the devices it has seen, those it
+  found approved with their root keys, the newest generation it has seen,
+  the revocations it has seen. Every blob is encrypted
   under a per-device non-extractable AES-256-GCM `CryptoKey` so that
   full IDB extraction by an attacker without script execution in the
   user's origin yields nothing useful. Each account signed in on a
