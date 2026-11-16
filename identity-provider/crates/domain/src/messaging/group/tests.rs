@@ -87,6 +87,18 @@ fn only_an_admin_manages_a_group() {
 }
 
 #[test]
+fn any_member_renames_a_group() {
+    let members = [member("ana", Role::Admin), member("bo", Role::Member)];
+
+    assert!(authorize_rename(&members, &uri("ana")).is_ok());
+    assert!(authorize_rename(&members, &uri("bo")).is_ok());
+    assert!(matches!(
+        authorize_rename(&members, &uri("eve")),
+        Err(MessagingError::ConversationNotFound)
+    ));
+}
+
+#[test]
 fn a_group_keeps_an_admin_while_it_has_other_members() {
     let alone = [member("ana", Role::Admin)];
     let one_admin = [member("ana", Role::Admin), member("bo", Role::Member)];
@@ -108,15 +120,15 @@ fn a_group_keeps_an_admin_while_it_has_other_members() {
 }
 
 #[test]
-fn a_group_name_holds_at_most_100_characters() {
+fn a_group_name_holds_at_most_50_characters() {
     assert!(
-        GroupName::parse(&"é".repeat(100)).is_ok(),
+        GroupName::parse(&"é".repeat(50)).is_ok(),
         "characters, not bytes"
     );
 
-    let refused = GroupName::parse(&"a".repeat(101)).unwrap_err();
+    let refused = GroupName::parse(&"a".repeat(51)).unwrap_err();
 
-    assert_eq!(refused.reason, "is longer than 100 characters");
+    assert_eq!(refused.reason, "is longer than 50 characters");
 }
 
 #[test]
@@ -129,5 +141,5 @@ fn a_blank_name_at_creation_leaves_the_group_unnamed() {
             .map(|n| n.as_str().to_owned()),
         Some("crew".to_owned())
     );
-    assert!(GroupName::parse_optional(Some(&"a".repeat(101))).is_err());
+    assert!(GroupName::parse_optional(Some(&"a".repeat(51))).is_err());
 }

@@ -11,8 +11,8 @@ client bootstraps/extends the MLS group so keys reach the new members.
 
 `conversation_members.role` is `'admin'` or `'member'` (default `'member'`;
 ignored for DMs). The **creator** of a group becomes its first `admin`. Only
-admins may add/remove members, rename the group, or change roles. Any member
-may leave (self-removal). Removal and leaving are soft — `left_at` is set, never
+admins may add/remove members or change roles. Any member may rename the group
+(`domain::messaging::authorize_rename`), and leave it (self-removal). Removal and leaving are soft — `left_at` is set, never
 a hard delete, so earlier messages stay attached to the conversation.
 
 - **A group always keeps an admin.** Its last admin can neither leave nor be demoted while
@@ -21,18 +21,18 @@ a hard delete, so earlier messages stay attached to the conversation.
 - **Groups only.** Every route below answers `404 Conversation not found` for a DM, exactly as
   for someone outside the group: a DM has no admin, no name and no leaving.
 - **Outsiders see nothing.** A non-member is told the group does not exist (404); a member who
-  is not an admin is refused management (`403 Only group admins can do this`).
+  is not an admin is refused managing members and roles (`403 Only group admins can do this`).
 - **A member removed from a group keeps it**, below; one who leaves doesn't.
 - **50 members at most**, the creator included (`domain::messaging::MAX_MEMBERS`). A creation
   asking for more is `400 A group holds at most 50 members`, before any invitee is looked up; an
   add to a full group is `409 The group is full: it holds at most 50 members`. It also bounds what
   another instance's roster costs this one (§ 7).
-- **Names** are trimmed and 1–100 characters (400 otherwise). A blank name at creation leaves
+- **Names** are trimmed and 1–50 characters (`GroupName`, 400 otherwise). A blank name at creation leaves
   the group unnamed, and clients title it by its members.
 - **Actor URIs** in a request are validated (400 for one that is not an actor URI); a group is
   created with its whole roster in one step, never half.
 
-> **Group name**: optional at creation. When the client sends a blank/absent name the server stores `NULL`, and clients derive the title from the member `display_name` values (e.g. `"Bob, Harry"`) — the list is shown from the local user's perspective, so their own name is omitted. A stored name can be changed via `PATCH /api/groups/:conversation_id` (admin only).
+> **Group name**: optional at creation. When the client sends a blank/absent name the server stores `NULL`, and clients derive the title from the member `display_name` values (e.g. `"Bob, Harry"`) — the list is shown from the local user's perspective, so their own name is omitted. Any member can name it, or rename it, via `PATCH /api/groups/:conversation_id`.
 
 ## 2. Endpoints (Bearer-auth)
 
@@ -42,7 +42,7 @@ a hard delete, so earlier messages stay attached to the conversation.
 | `GET /api/groups/:id/members` | member | Members with `role`, `displayName`, `avatarUrl`. |
 | `POST /api/groups/:id/members` | **admin** | Body `{ actor_uri }`. Adds the member as `member`; a member who left rejoins. Someone already in the group: `409 Already a member`, their role untouched. Emits `member_added`. |
 | `DELETE /api/groups/:id/members/:actor_uri` | **admin** or self | Sets `left_at`. `actor_uri` is percent-encoded; 404 `Member not found` when not a member. Emits `member_removed` to everyone who was a member, the removed one included (`removed_by_actor_uri` is `null` on self-leave). |
-| `PATCH /api/groups/:id` | **admin** | Body `{ name }` (1–100 characters). Renames the group and returns its view. Emits `group_renamed`. |
+| `PATCH /api/groups/:id` | member | Body `{ name }` (1–50 characters). Renames the group and returns its view. Emits `group_renamed`. |
 | `DELETE /api/groups/:id` | removed member | Clears a group the caller was removed from from their list (`dismissed_at`): 204. `409 Leave the group first` for an active member, 404 for anyone else — one who left, a stranger, a DM. |
 | `POST /api/groups/:id/members/:actor_uri/role` | **admin** | Body `{ role: "admin" \| "member" }`. Promote/demote — never the last admin. Emits `member_role_changed`. |
 | `POST /api/groups/:id/messages` | member | Body `{ mls_ciphertext, reply_to_id?, attachment_ids? }`. Attachments follow the DM rules — as many as a DM may carry, each the sender's own upload, unlinked or linked to one of its `'failed'` messages — or the message is refused (400) and nothing is stored. See § 4. |
@@ -207,6 +207,9 @@ snapshot of the sender's roster beside the payload:
 }
 ```
 
+A commit's Note also carries its epoch and the GroupInfo of that epoch
+(`identity-provider/specs/e2ee.md § 7.5`).
+
 The receiving IdP creates the conversation under the advertised `context` UUID
 with `kind = 'group'`, upserts every member, and pushes `group_created` to each
 account of its own the snapshot brings in, once. Each member's inbox gets a
@@ -236,7 +239,7 @@ sequenceDiagram
   A->>IA: POST /api/mls/groups/:id/commits (epoch n adds Pierre)
   A->>IA: POST /api/mls/welcomes (Pierre's device)
   par in no set order
-    IA->>IB: Create{Note} mlsKind=commit + mlsGroup
+    IA->>IB: Create{Note} mlsKind=commit + mlsGroupInfo + mlsGroup
   and
     IA->>IB: Create{Note} mlsKind=welcome + mlsGroup
   end
@@ -316,7 +319,7 @@ goes to the member's inbox as a group message does, and like any activity it is 
 | An admin adds someone | `Add` | the member's actor URI |
 | An admin removes someone | `Remove` | the member's actor URI |
 | A member leaves | `Leave`, by the member | the group's id |
-| An admin renames the group | `Update` | `{ "type": "Group", "name": "…" }` |
+| A member renames the group | `Update` | `{ "type": "Group", "name": "…" }` |
 | An admin changes a role | `Update` | `{ "type": "Membership", "member": "<actor URI>", "role": "admin" }` |
 
 Every one carries the group's id in `context` and the change's stamp in `published` — the
@@ -337,8 +340,8 @@ The receiving IdP takes a change (`application::messaging::ReceiveGroupChange`) 
 - the group is one it holds;
 - it came through the inbox of one of the group's active members here, or of the member it adds
   — a peer acts on a group here only through its members;
-- whoever made it may (`GroupChange::is_entitled`): an active admin as this copy holds them, or for
-  a `Leave`, the member leaving;
+- whoever made it may (`GroupChange::is_entitled`): an active admin as this copy holds them; for
+  an `Update{Group}`, any active member; for a `Leave`, the member leaving;
 - an add that brings in an account of this instance is one that account admits from whoever made
   it, as for an add made here (`identity-provider/specs/social.md § 2`) — another instance's
   account is that instance's to refuse;
@@ -353,7 +356,7 @@ rest to those in it after — `group_created` to a local account the add brings 
 `member_added` to the others, `group_renamed`, `member_role_changed`. A local account removed this
 way keeps the group as § 3 says. Anything else is answered 202 and
 ignored, so a peer learns nothing of who is in a group here; an activity that doesn't parse — no
-`context`, no `published`, a name outside 1–100 characters, a role neither `admin` nor `member` —
+`context`, no `published`, a name outside 1–50 characters, a role neither `admin` nor `member` —
 is 400.
 
 ```mermaid

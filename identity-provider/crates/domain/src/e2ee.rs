@@ -1,6 +1,7 @@
 //! End-to-end encryption as the server sees it: the devices accounts register and the IdP
 //! attests, the KeyPackages peers claim to add those devices to MLS groups, the Delivery
-//! Service — each group's commits in order, and the Welcomes waiting for their devices — and
+//! Service — each group's commits in order, its newest GroupInfo, and the Welcomes waiting for
+//! their devices — and
 //! each account's encrypted history archive, with the key it is sealed under; the approvals the
 //! account's devices give each other, the requests their handshake is relayed over, the
 //! passphrase shared between them, and the requests to start the history over. Every key,
@@ -36,8 +37,9 @@ pub use archive::{
     archive_page_size, check_archive_batch,
 };
 pub use delivery::{
-    Append, CATCH_UP_LIMIT, CLAIMED_WELCOME_GRACE, Commit, CommitBlob, Epoch, NewCommit,
-    NewWelcome, Welcome, WelcomeBlob, check_welcome, may_commit,
+    Append, CATCH_UP_LIMIT, CLAIMED_WELCOME_GRACE, Commit, CommitBlob, CommitKind, Epoch,
+    GroupInfo, GroupInfoBlob, NewCommit, NewWelcome, Welcome, WelcomeBlob, check_welcome,
+    may_commit, may_commit_externally,
 };
 pub use device::{
     ATTESTATION_LIFETIME, Attestation, AttestationExpiry, Device, DeviceKind, DeviceLabel,
@@ -65,8 +67,8 @@ pub use key_share::{
 pub use ports::{
     ApprovalRequests, Approve, Archived, Attest, Cleared, Close, CommitLog, Deposit,
     DeviceApprovals, DeviceAttester, DeviceNotifier, DeviceTrustNotifier, Devices, Ed25519Verifier,
-    HistoryArchive, HistoryKeys, Holding, KeyPackages, KeyReplace, KeyShares, MlsFederation,
-    MlsNotifier, Opened, OutgoingWelcome, Post, Read, RemoteKeyPackages, Revocation,
+    GroupInfos, HistoryArchive, HistoryKeys, Holding, KeyPackages, KeyReplace, KeyShares,
+    MlsFederation, MlsNotifier, Opened, OutgoingWelcome, Post, Read, RemoteKeyPackages, Revocation,
     SignedAttestation, StartOverEnded, StartOverOpened, StartOverRequests, Welcomes,
 };
 pub use start_over::{

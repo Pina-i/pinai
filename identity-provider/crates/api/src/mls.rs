@@ -2,20 +2,23 @@
 
 use std::sync::Arc;
 
-use application::e2ee::{AppendCommit, CatchUpCommits, ClaimWelcomes, SendWelcome};
+use application::e2ee::{AppendCommit, CatchUpCommits, ClaimWelcomes, LoadGroupInfo, SendWelcome};
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
-use domain::e2ee::{Commit, CommitBlob, DeliveryError, Epoch, Welcome, WelcomeBlob};
+use domain::e2ee::{
+    Commit, CommitBlob, DeliveryError, Epoch, GroupInfo, GroupInfoBlob, Welcome, WelcomeBlob,
+};
 use domain::identity::ActorUri;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::ApiError;
-use crate::auth::Authenticated;
+use crate::auth::{Authenticated, SignedIn};
+use crate::e2ee::{approval_required, device_required};
 
 #[derive(Serialize)]
 pub struct CommitView {
@@ -75,6 +78,24 @@ pub struct CommitRequest {
     /// The epoch the proposer believes is next.
     epoch: i64,
     commit_blob: String,
+    /// Base64 of the TLS-encoded GroupInfo of the epoch the commit opens.
+    group_info: String,
+}
+
+#[derive(Serialize)]
+pub struct GroupInfoView {
+    epoch: i64,
+    /// Base64 of the TLS-encoded MLS GroupInfo.
+    group_info: String,
+}
+
+impl From<GroupInfo> for GroupInfoView {
+    fn from(info: GroupInfo) -> Self {
+        Self {
+            epoch: info.epoch.value(),
+            group_info: B64.encode(info.blob.as_bytes()),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -124,20 +145,32 @@ pub struct SentWelcomeBody {
     id: Uuid,
 }
 
-/// `POST /api/mls/groups/{conversation_id}/commits`
+/// `POST /api/mls/groups/{conversation_id}/commits`: the session's, whose device an external
+/// commit adds.
 pub async fn append(
     State(append): State<Arc<AppendCommit>>,
-    Authenticated(user): Authenticated,
+    SignedIn(bearer): SignedIn,
     Path(conversation): Path<Uuid>,
     Json(body): Json<CommitRequest>,
 ) -> Result<(StatusCode, Json<CommitView>), ApiError> {
-    let blob = CommitBlob::parse(blob("commit_blob", &body.commit_blob)?)
+    let commit_blob = CommitBlob::parse(blob("commit_blob", &body.commit_blob)?)
+        .map_err(|e| ApiError::internal(e.into()))?;
+    let group_info = GroupInfoBlob::parse(blob("group_info", &body.group_info)?)
         .map_err(|e| ApiError::internal(e.into()))?;
     let epoch = epoch("epoch", body.epoch)?;
     let commit = append
-        .execute(user, conversation.into(), epoch, blob)
+        .execute(&bearer, conversation.into(), epoch, commit_blob, group_info)
         .await?;
     Ok((StatusCode::CREATED, Json(commit.into())))
+}
+
+/// `GET /api/mls/groups/{conversation_id}/group-info`
+pub async fn group_info(
+    State(load): State<Arc<LoadGroupInfo>>,
+    Authenticated(user): Authenticated,
+    Path(conversation): Path<Uuid>,
+) -> Result<Json<GroupInfoView>, ApiError> {
+    Ok(Json(load.execute(user, conversation.into()).await?.into()))
 }
 
 /// `GET /api/mls/groups/{conversation_id}/commits?since=`
@@ -223,6 +256,20 @@ impl From<DeliveryError> for ApiError {
                 ApiError::new(StatusCode::CONFLICT, "epoch_conflict", description)
                     .with("winning_commit", winning)
             }
+            DeliveryError::EpochNotNext(next) => ApiError::new(
+                StatusCode::CONFLICT,
+                "epoch_not_next",
+                DeliveryError::EpochNotNext(next).to_string(),
+            )
+            .with("next_epoch", next.value()),
+            DeliveryError::NotACommit => {
+                ApiError::bad_request("`commit_blob` is not an MLS commit")
+            }
+            DeliveryError::NoGroupInfo => {
+                ApiError::not_found(DeliveryError::NoGroupInfo.to_string())
+            }
+            DeliveryError::DeviceRequired(_) => device_required(),
+            DeliveryError::ApprovalRequired(_) => approval_required(),
             DeliveryError::Unexpected(e) => ApiError::internal(e),
         }
     }

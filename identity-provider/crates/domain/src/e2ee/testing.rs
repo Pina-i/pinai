@@ -30,10 +30,11 @@ use super::{
 use super::{
     Attest, Attestation, AttestationExpiry, Claim, ClaimedKeyPackage, Commit, CommitLog,
     DeliveryStoreError, Device, DeviceAttester, DeviceLabel, DeviceNotifier, DeviceRootKey,
-    Devices, Ed25519Signature, Ed25519Verifier, Epoch, HeldHpkeKey, HpkeKeyWrite, HpkePublicKey,
-    KeyPackages, KeyStoreError, MlsFederation, MlsNotifier, NewCommit, NewKeyPackage, NewWelcome,
-    OutgoingWelcome, RemoteClaimError, RemoteKeyPackages, Revocation, SignedAttestation,
-    SignedHpkeKey, UnverifiedHpkeKey, Welcome, Welcomes,
+    Devices, Ed25519Signature, Ed25519Verifier, Epoch, GroupInfo, GroupInfoBlob, GroupInfos,
+    HeldHpkeKey, HpkeKeyWrite, HpkePublicKey, KeyPackages, KeyStoreError, MlsFederation,
+    MlsNotifier, NewCommit, NewKeyPackage, NewWelcome, OutgoingWelcome, RemoteClaimError,
+    RemoteKeyPackages, Revocation, SignedAttestation, SignedHpkeKey, UnverifiedHpkeKey, Welcome,
+    Welcomes,
 };
 use crate::auth::Sessions;
 use crate::auth::testing::InMemorySessions;
@@ -623,7 +624,33 @@ impl RemoteKeyPackages for InMemoryRemoteKeyPackages {
     }
 }
 
-/// The commit log and the Welcome queue.
+/// An MLS 1.0 message's header: `wire_format`, a 1-byte group id `group_id`, epoch 7, then `next` —
+/// a `PublicMessage`'s sender type, a `PrivateMessage`'s content type — and a few bytes more.
+fn mls_message(wire_format: u8, group_id: u8, next: u8) -> crate::e2ee::CommitBlob {
+    let mut bytes = vec![0, 1, 0, wire_format, 1, group_id];
+    bytes.extend(7u64.to_be_bytes());
+    bytes.extend([next, 0, 0, 0, 1, 0xaa]);
+    crate::e2ee::CommitBlob::parse(bytes).unwrap()
+}
+
+/// A member's commit as a client sends one — a `PrivateMessage` carrying a commit —, told apart by
+/// `byte`.
+pub fn member_commit(byte: u8) -> crate::e2ee::CommitBlob {
+    mls_message(2, byte, 3)
+}
+
+/// A device committing itself in: a `PublicMessage` from a `new_member_commit` sender.
+pub fn external_commit() -> crate::e2ee::CommitBlob {
+    mls_message(1, 9, 4)
+}
+
+/// A device asking to be added — a `PublicMessage` from a `new_member_proposal` sender —, which
+/// is no commit.
+pub fn join_proposal() -> crate::e2ee::CommitBlob {
+    mls_message(1, 9, 3)
+}
+
+/// The commit log, the groups' GroupInfos and the Welcome queue.
 #[derive(Default)]
 pub struct InMemoryDelivery {
     state: Mutex<DeliveryState>,
@@ -632,6 +659,7 @@ pub struct InMemoryDelivery {
 #[derive(Default)]
 struct DeliveryState {
     commits: Vec<Commit>,
+    group_infos: Vec<(ConversationId, GroupInfo)>,
     /// Each Welcome with when it was claimed.
     welcomes: Vec<(Welcome, Option<OffsetDateTime>)>,
 }
@@ -659,6 +687,32 @@ impl CommitLog for InMemoryDelivery {
         Ok(Append::Stored(stored))
     }
 
+    async fn latest(
+        &self,
+        conversation: ConversationId,
+    ) -> Result<Option<Epoch>, DeliveryStoreError> {
+        let state = self.state.lock().unwrap();
+        Ok(state
+            .commits
+            .iter()
+            .filter(|c| c.conversation == conversation)
+            .map(|c| c.epoch)
+            .max())
+    }
+
+    async fn at(
+        &self,
+        conversation: ConversationId,
+        epoch: Epoch,
+    ) -> Result<Option<Commit>, DeliveryStoreError> {
+        let state = self.state.lock().unwrap();
+        Ok(state
+            .commits
+            .iter()
+            .find(|c| c.conversation == conversation && c.epoch == epoch)
+            .cloned())
+    }
+
     async fn since(
         &self,
         conversation: ConversationId,
@@ -675,6 +729,39 @@ impl CommitLog for InMemoryDelivery {
         commits.sort_by_key(|c| c.epoch);
         commits.truncate(limit);
         Ok(commits)
+    }
+}
+
+#[async_trait::async_trait]
+impl GroupInfos for InMemoryDelivery {
+    async fn keep(
+        &self,
+        conversation: ConversationId,
+        info: &GroupInfo,
+    ) -> Result<(), DeliveryStoreError> {
+        let mut state = self.state.lock().unwrap();
+        match state
+            .group_infos
+            .iter_mut()
+            .find(|(c, _)| *c == conversation)
+        {
+            Some((_, held)) if held.epoch < info.epoch => *held = info.clone(),
+            Some(_) => {}
+            None => state.group_infos.push((conversation, info.clone())),
+        }
+        Ok(())
+    }
+
+    async fn newest(
+        &self,
+        conversation: ConversationId,
+    ) -> Result<Option<GroupInfo>, DeliveryStoreError> {
+        let state = self.state.lock().unwrap();
+        Ok(state
+            .group_infos
+            .iter()
+            .find(|(c, _)| *c == conversation)
+            .map(|(_, info)| info.clone()))
     }
 }
 
@@ -760,6 +847,7 @@ pub enum SentMls {
         from: ActorUri,
         to: ActorUri,
         commit: Commit,
+        group_info: GroupInfoBlob,
         roster: Option<GroupSnapshot>,
     },
     Welcome {
@@ -786,6 +874,7 @@ impl MlsFederation for RecordingMlsFederation {
         from: &ActorUri,
         to: &[ActorUri],
         commit: &Commit,
+        group_info: &GroupInfoBlob,
         roster: Option<&GroupSnapshot>,
     ) {
         let mut sent = self.sent.lock().unwrap();
@@ -793,6 +882,7 @@ impl MlsFederation for RecordingMlsFederation {
             from: from.clone(),
             to: member.clone(),
             commit: commit.clone(),
+            group_info: group_info.clone(),
             roster: roster.cloned(),
         }));
     }
@@ -1830,6 +1920,59 @@ pub mod contract {
                 .unwrap(),
             vec![first]
         );
+    }
+
+    /// `group` and `other` are conversations the store may reference.
+    pub async fn the_latest_epoch_and_the_commit_at_one_are_read_by_group(
+        log: &dyn CommitLog,
+        group: ConversationId,
+        other: ConversationId,
+        alice: &ActorUri,
+    ) {
+        let at = |n| Epoch::parse(n).unwrap();
+        assert_eq!(log.latest(group).await.unwrap(), None);
+        let mut appended = Vec::new();
+        for epoch in [1, 3, 2] {
+            appended.push(stored(
+                log.append(&commit(group, epoch, alice, epoch as u8))
+                    .await
+                    .unwrap(),
+            ));
+        }
+        log.append(&commit(other, 7, alice, 9)).await.unwrap();
+
+        assert_eq!(log.latest(group).await.unwrap(), Some(at(3)));
+        assert_eq!(log.latest(other).await.unwrap(), Some(at(7)));
+        assert_eq!(
+            log.at(group, at(3)).await.unwrap(),
+            Some(appended[1].clone())
+        );
+        assert_eq!(log.at(group, at(4)).await.unwrap(), None);
+        assert_eq!(log.at(other, at(1)).await.unwrap(), None);
+    }
+
+    /// `group` and `other` are conversations the store may reference.
+    pub async fn a_groups_group_info_is_replaced_only_by_a_later_epochs(
+        infos: &dyn GroupInfos,
+        group: ConversationId,
+        other: ConversationId,
+    ) {
+        let info = |epoch, byte| GroupInfo {
+            epoch: Epoch::parse(epoch).unwrap(),
+            blob: GroupInfoBlob::parse(vec![byte; 8]).unwrap(),
+        };
+        assert_eq!(infos.newest(group).await.unwrap(), None);
+
+        for (epoch, byte) in [(2, 1), (1, 2), (2, 3)] {
+            infos.keep(group, &info(epoch, byte)).await.unwrap();
+        }
+        let older_and_same_ignored = infos.newest(group).await.unwrap();
+        infos.keep(group, &info(3, 4)).await.unwrap();
+        infos.keep(other, &info(1, 5)).await.unwrap();
+
+        assert_eq!(older_and_same_ignored, Some(info(2, 1)));
+        assert_eq!(infos.newest(group).await.unwrap(), Some(info(3, 4)));
+        assert_eq!(infos.newest(other).await.unwrap(), Some(info(1, 5)));
     }
 
     pub async fn a_welcome_is_claimed_once_and_only_by_its_device(

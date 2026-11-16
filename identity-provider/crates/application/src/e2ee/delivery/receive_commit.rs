@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use domain::e2ee::{
-    Append, CommitBlob, CommitLog, DeliveryError, Epoch, MlsNotifier, NewCommit, may_commit,
+    Append, CommitBlob, CommitLog, DeliveryError, Epoch, GroupInfo, GroupInfoBlob, GroupInfos,
+    MlsNotifier, NewCommit, may_commit,
 };
 use domain::identity::{Accounts, ActorUri, RemoteActors};
 use domain::messaging::{Conversations, GroupEvents, GroupNotifier, GroupSnapshot};
@@ -19,18 +20,23 @@ pub struct IncomingCommit {
     pub conversation: ConversationId,
     pub epoch: Epoch,
     pub blob: CommitBlob,
+    /// The GroupInfo of the epoch the commit opens.
+    pub group_info: GroupInfoBlob,
     /// A group's roster: the commit adding someone can outrun the Welcome that would bring the
     /// group here.
     pub roster: Option<GroupSnapshot>,
 }
 
-/// The inbox's `Create{Note}` carrying an MLS commit. A commit already at its epoch is a
-/// redelivery, or a race another member won: either way there is nothing more to do.
+/// The inbox's `Create{Note}` carrying an MLS commit and its GroupInfo, kept when newer than the
+/// one held — only a commit a client makes, as the proposer's instance took it. A commit already
+/// at its epoch is a redelivery, or a race another member won: either way there is nothing more
+/// to do.
 pub struct ReceiveCommit {
     accounts: Arc<dyn Accounts>,
     remote_actors: Arc<dyn RemoteActors>,
     conversations: Arc<dyn Conversations>,
     commits: Arc<dyn CommitLog>,
+    group_infos: Arc<dyn GroupInfos>,
     reach: Arc<dyn Reachability>,
     notifier: Arc<dyn MlsNotifier>,
     groups: Arc<dyn GroupNotifier>,
@@ -44,6 +50,7 @@ impl ReceiveCommit {
         remote_actors: Arc<dyn RemoteActors>,
         conversations: Arc<dyn Conversations>,
         commits: Arc<dyn CommitLog>,
+        group_infos: Arc<dyn GroupInfos>,
         reach: Arc<dyn Reachability>,
         notifier: Arc<dyn MlsNotifier>,
         groups: Arc<dyn GroupNotifier>,
@@ -54,6 +61,7 @@ impl ReceiveCommit {
             remote_actors,
             conversations,
             commits,
+            group_infos,
             reach,
             notifier,
             groups,
@@ -62,6 +70,9 @@ impl ReceiveCommit {
     }
 
     pub async fn execute(&self, incoming: IncomingCommit) -> Result<(), DeliveryError> {
+        if incoming.blob.kind().is_none() {
+            return Err(DeliveryError::NotACommit);
+        }
         if let Some(roster) = &incoming.roster {
             let recipient = self
                 .accounts
@@ -109,6 +120,8 @@ impl ReceiveCommit {
         if !may_commit(&members, &incoming.proposer) {
             return Err(DeliveryError::NotAMember);
         }
+        // Mirrored at its epoch, whatever the latest here: the proposer's instance placed it,
+        // and its deliveries can arrive out of order.
         let commit = match self
             .commits
             .append(&NewCommit {
@@ -125,6 +138,15 @@ impl ReceiveCommit {
                 return Ok(());
             }
         };
+        self.group_infos
+            .keep(
+                commit.conversation,
+                &GroupInfo {
+                    epoch: commit.epoch,
+                    blob: incoming.group_info,
+                },
+            )
+            .await?;
         for member in members {
             if let Some(local) = self.accounts.find_by_uri(&member.actor_uri).await? {
                 self.notifier.committed(local.id, &commit);

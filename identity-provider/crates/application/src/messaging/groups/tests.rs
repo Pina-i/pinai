@@ -230,7 +230,6 @@ async fn an_admin_adds_a_member_and_every_local_member_is_told() {
 async fn only_an_admin_manages_a_group() {
     let w = world();
     let group = crew(&w).await;
-    let name = || GroupName::parse("ours").unwrap();
 
     for (who, expected) in [(&w.bob, "NotAnAdmin"), (&w.eve, "ConversationNotFound")] {
         let outcomes = [
@@ -241,7 +240,6 @@ async fn only_an_admin_manages_a_group() {
             remove(&w)
                 .execute(who.id, group, w.alice.actor_uri.clone())
                 .await,
-            rename(&w).execute(who.id, group, name()).await.map(|_| ()),
             set_role(&w)
                 .execute(who.id, group, w.bob.actor_uri.clone(), Role::Admin)
                 .await
@@ -321,12 +319,12 @@ async fn removing_someone_outside_the_group_is_refused() {
 }
 
 #[tokio::test]
-async fn an_admin_renames_the_group_and_its_local_members_are_told() {
+async fn any_member_renames_the_group_and_its_local_members_are_told() {
     let w = world();
     let group = crew(&w).await;
 
     let view = rename(&w)
-        .execute(w.alice.id, group, GroupName::parse("new crew").unwrap())
+        .execute(w.bob.id, group, GroupName::parse("new crew").unwrap())
         .await
         .unwrap();
 
@@ -340,10 +338,23 @@ async fn an_admin_renames_the_group_and_its_local_members_are_told() {
                 a.id,
                 group,
                 Some("new crew".to_owned()),
-                w.alice.actor_uri.clone()
+                w.bob.actor_uri.clone()
             ))
             .collect::<Vec<_>>()
     );
+}
+
+#[tokio::test]
+async fn someone_outside_the_group_renames_nothing() {
+    let w = world();
+    let group = crew(&w).await;
+
+    let refused = rename(&w)
+        .execute(w.eve.id, group, GroupName::parse("ours").unwrap())
+        .await;
+
+    assert!(matches!(refused, Err(MessagingError::ConversationNotFound)));
+    assert!(w.notifier.sent().is_empty());
 }
 
 #[tokio::test]
@@ -1122,6 +1133,27 @@ async fn a_leave_a_rename_and_a_role_made_elsewhere_are_taken() {
         carol.clone(),
         None
     )));
+}
+
+#[tokio::test]
+async fn a_rename_made_elsewhere_by_a_member_who_is_no_admin_is_taken() {
+    let w = world();
+    let roster = [
+        member(&w.alice.actor_uri, Role::Admin),
+        member(&w.carol.actor_uri, Role::Member),
+    ];
+    let name = GroupName::parse("crew").unwrap();
+    let group = w.store.create_group(Some(&name), &roster).await.unwrap().id;
+    let rename = by(
+        &w.carol.actor_uri,
+        group,
+        GroupChangeKind::Renamed(GroupName::parse("new crew").unwrap()),
+    );
+
+    receive(&w).execute(w.alice.id, rename).await.unwrap();
+
+    let group = w.store.find(group).await.unwrap().unwrap();
+    assert_eq!(group.name.as_deref(), Some("new crew"));
 }
 
 #[tokio::test]

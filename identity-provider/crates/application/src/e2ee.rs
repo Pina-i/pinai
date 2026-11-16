@@ -27,7 +27,7 @@ pub use archive::{ArchiveMessages, ArchivePage, ClearArchive, ReadArchive};
 pub use claim_key_package::ClaimKeyPackage;
 pub use delivery::{
     AppendCommit, CatchUpCommits, ClaimWelcomes, CommitPage, IncomingCommit, IncomingWelcome,
-    ReceiveCommit, ReceiveWelcome, SendWelcome, SweepWelcomes,
+    LoadGroupInfo, ReceiveCommit, ReceiveWelcome, SendWelcome, SweepWelcomes,
 };
 pub use history_key::{LoadHistoryKey, ReportHistoryKey, SetHistoryKey};
 pub use key_package_status::{DeviceStash, KeyPackageStatus, StashStatus};

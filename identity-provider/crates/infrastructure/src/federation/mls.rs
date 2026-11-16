@@ -2,7 +2,9 @@
 
 use std::sync::Arc;
 
-use domain::e2ee::{Commit, MlsFederation, OutgoingWelcome};
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as B64;
+use domain::e2ee::{Commit, GroupInfoBlob, MlsFederation, OutgoingWelcome};
 use domain::identity::{ActorUri, RemoteActor};
 use domain::messaging::GroupSnapshot;
 use federation_transport::UrlPolicy;
@@ -34,6 +36,7 @@ impl MlsFederation for ApMlsFederation {
         from: &ActorUri,
         to: &[ActorUri],
         commit: &Commit,
+        group_info: &GroupInfoBlob,
         roster: Option<&GroupSnapshot>,
     ) {
         let posts = to
@@ -41,7 +44,7 @@ impl MlsFederation for ApMlsFederation {
             .map(|member| {
                 (
                     member.clone(),
-                    commit_activity(from, member, commit, roster),
+                    commit_activity(from, member, commit, group_info, roster),
                 )
             })
             .collect();
@@ -74,10 +77,15 @@ fn commit_activity(
     from: &ActorUri,
     to: &ActorUri,
     commit: &Commit,
+    group_info: &GroupInfoBlob,
     group: Option<&GroupSnapshot>,
 ) -> Value {
     let mut extra = Map::new();
     extra.insert("mlsEpoch".to_owned(), json!(commit.epoch.value()));
+    extra.insert(
+        "mlsGroupInfo".to_owned(),
+        json!(B64.encode(group_info.as_bytes())),
+    );
     if let Some(group) = group {
         extra.insert("mlsGroup".to_owned(), roster(group));
     }

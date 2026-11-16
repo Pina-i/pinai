@@ -3,12 +3,12 @@ use crate::identity::ActorUri;
 
 use super::{Member, MessagingError, Role};
 
-/// A group's name as a user gave it: trimmed, 1 to 100 characters.
+/// A group's name as a user gave it: trimmed, 1 to 50 characters.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GroupName(String);
 
 impl GroupName {
-    pub const MAX_CHARS: usize = 100;
+    pub const MAX_CHARS: usize = 50;
 
     pub fn parse(raw: &str) -> Result<Self, ValidationError> {
         let name = raw.trim();
@@ -70,7 +70,17 @@ pub fn has_room(members: &[Member]) -> bool {
     members.len() < MAX_MEMBERS
 }
 
-/// Only an admin manages a group. Someone outside it is told it does not exist.
+/// Any member renames a group. Someone outside it is told it does not exist.
+pub fn authorize_rename(members: &[Member], caller: &ActorUri) -> Result<(), MessagingError> {
+    if members.iter().any(|m| &m.actor_uri == caller) {
+        Ok(())
+    } else {
+        Err(MessagingError::ConversationNotFound)
+    }
+}
+
+/// Only an admin manages a group's members and roles. Someone outside it is told it does not
+/// exist.
 pub fn authorize_admin(members: &[Member], caller: &ActorUri) -> Result<(), MessagingError> {
     match members.iter().find(|m| &m.actor_uri == caller) {
         Some(m) if m.role == Role::Admin => Ok(()),

@@ -172,6 +172,19 @@ pub enum DeliveryError {
     /// Another commit holds the epoch: the proposer applies it and proposes again.
     #[error("another commit already exists at epoch {} for this conversation", .0.epoch.value())]
     EpochTaken(Box<super::Commit>),
+    /// The epoch is free but not the next one: the proposer catches up and proposes again.
+    #[error("this conversation's next commit goes at epoch {}", .0.value())]
+    EpochNotNext(super::Epoch),
+    /// Neither a member's commit nor an external one: [`super::CommitBlob::kind`].
+    #[error("not an MLS commit")]
+    NotACommit,
+    /// The conversation has no MLS group yet, or none of its commits reached this instance.
+    #[error("no GroupInfo is held for this conversation")]
+    NoGroupInfo,
+    #[error(transparent)]
+    DeviceRequired(#[from] DeviceRequired),
+    #[error(transparent)]
+    ApprovalRequired(#[from] ApprovalRequired),
     /// The recipient doesn't admit the sender: a block or its contact setting, never told apart.
     #[error("the recipient cannot be reached")]
     Unreachable,

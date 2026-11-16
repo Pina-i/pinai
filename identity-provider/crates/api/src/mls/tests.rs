@@ -1,6 +1,7 @@
 use axum::http::Method;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
+use domain::e2ee::testing;
 use domain::identity::testing::{account, remote_actor};
 use domain::identity::{Account, RemoteActor};
 use serde_json::{Value, json};
@@ -55,13 +56,28 @@ impl World {
         format!("/api/mls/groups/{}/commits", self.group)
     }
 
+    fn group_info(&self) -> String {
+        format!("/api/mls/groups/{}/group-info", self.group)
+    }
+
     async fn commit(&self, by: &Account, epoch: i64, blob: &str) -> (StatusCode, Value) {
+        self.commit_with_info(by, epoch, blob, &B64.encode([epoch as u8; 4]))
+            .await
+    }
+
+    async fn commit_with_info(
+        &self,
+        by: &Account,
+        epoch: i64,
+        blob: &str,
+        group_info: &str,
+    ) -> (StatusCode, Value) {
         self.app
             .call(
                 Method::POST,
                 &self.commits(),
                 Some(by.id),
-                Some(json!({ "epoch": epoch, "commit_blob": blob })),
+                Some(json!({ "epoch": epoch, "commit_blob": blob, "group_info": group_info })),
             )
             .await
     }
@@ -93,7 +109,7 @@ impl World {
 async fn a_members_commit_answers_201_with_the_stored_commit() {
     let w = world().await;
 
-    let (status, body) = w.commit(&w.alice, 1, &B64.encode([1; 8])).await;
+    let (status, body) = w.commit(&w.alice, 1, &member_commit(1)).await;
 
     assert_eq!(status, StatusCode::CREATED, "{body}");
     assert_eq!(body["conversation_id"], json!(w.group));
@@ -102,7 +118,7 @@ async fn a_members_commit_answers_201_with_the_stored_commit() {
         body["proposer_actor_uri"],
         json!(w.alice.actor_uri.to_string())
     );
-    assert_eq!(body["commit_blob"], json!(B64.encode([1; 8])));
+    assert_eq!(body["commit_blob"], json!(member_commit(1)));
     assert!(body["id"].as_str().unwrap().parse::<Uuid>().is_ok());
     assert!(body["created_at"].is_string());
 }
@@ -110,30 +126,50 @@ async fn a_members_commit_answers_201_with_the_stored_commit() {
 #[tokio::test]
 async fn a_commit_at_a_taken_epoch_answers_409_with_the_winning_commit() {
     let w = world().await;
-    let (_, winner) = w.commit(&w.alice, 2, &B64.encode([1; 8])).await;
+    let (_, winner) = w.commit(&w.alice, 1, &member_commit(1)).await;
 
-    let (status, body) = w.commit(&w.bob, 2, &B64.encode([2; 8])).await;
+    let (status, body) = w.commit(&w.bob, 1, &member_commit(2)).await;
 
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(body["error"], "epoch_conflict");
     assert_eq!(
         body["error_description"],
-        "another commit already exists at epoch 2 for this conversation"
+        "another commit already exists at epoch 1 for this conversation"
     );
     assert_eq!(body["winning_commit"], winner);
+}
+
+#[tokio::test]
+async fn a_commit_past_the_next_epoch_answers_409_with_the_next_one() {
+    let w = world().await;
+    w.commit(&w.alice, 1, &member_commit(1)).await;
+
+    let (status, body) = w.commit(&w.bob, 3, &member_commit(3)).await;
+
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(
+        body,
+        json!({
+            "error": "epoch_not_next",
+            "error_description": "this conversation's next commit goes at epoch 2",
+            "next_epoch": 2,
+        })
+    );
 }
 
 #[tokio::test]
 async fn a_malformed_commit_is_refused() {
     let w = world().await;
 
-    for ((epoch, blob), description) in [
-        ((1, "%%"), "`commit_blob` is not valid base64"),
-        ((1, ""), "`commit_blob` is empty"),
-        ((-1, "AQID"), "`epoch` must be non-negative"),
+    for ((epoch, blob, group_info), description) in [
+        ((1, "%%", "AQID"), "`commit_blob` is not valid base64"),
+        ((1, "", "AQID"), "`commit_blob` is empty"),
+        ((1, "AQID", "%%"), "`group_info` is not valid base64"),
+        ((1, "AQID", ""), "`group_info` is empty"),
+        ((-1, "AQID", "AQID"), "`epoch` must be non-negative"),
     ] {
         assert_eq!(
-            w.commit(&w.alice, epoch, blob).await,
+            w.commit_with_info(&w.alice, epoch, blob, group_info).await,
             (
                 StatusCode::BAD_REQUEST,
                 refusal("invalid_request", description)
@@ -143,11 +179,182 @@ async fn a_malformed_commit_is_refused() {
 }
 
 #[tokio::test]
+async fn a_commit_without_its_group_info_is_refused_and_kept_nowhere() {
+    let w = world().await;
+
+    let (status, _) = w
+        .app
+        .call(
+            Method::POST,
+            &w.commits(),
+            Some(w.alice.id),
+            Some(json!({ "epoch": 1, "commit_blob": "AQID" })),
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    let (_, log) = w
+        .app
+        .call(Method::GET, &w.commits(), Some(w.alice.id), None)
+        .await;
+    assert_eq!(log["commits"], json!([]));
+}
+
+#[tokio::test]
+async fn a_member_reads_the_group_info_the_latest_commit_left() {
+    let w = world().await;
+    let before = w
+        .app
+        .call(Method::GET, &w.group_info(), Some(w.bob.id), None)
+        .await;
+    w.commit_with_info(&w.alice, 1, &member_commit(1), &B64.encode([1; 6]))
+        .await;
+    w.commit_with_info(&w.bob, 2, &member_commit(2), &B64.encode([2; 6]))
+        .await;
+
+    let read = w
+        .app
+        .call(Method::GET, &w.group_info(), Some(w.bob.id), None)
+        .await;
+    let outsider = w
+        .app
+        .call(Method::GET, &w.group_info(), Some(w.dave.id), None)
+        .await;
+    let unknown = w
+        .app
+        .call(
+            Method::GET,
+            &format!("/api/mls/groups/{}/group-info", Uuid::new_v4()),
+            Some(w.bob.id),
+            None,
+        )
+        .await;
+
+    assert_eq!(
+        before,
+        (
+            StatusCode::NOT_FOUND,
+            refusal("not_found", "no GroupInfo is held for this conversation")
+        )
+    );
+    assert_eq!(
+        read,
+        (
+            StatusCode::OK,
+            json!({ "epoch": 2, "group_info": B64.encode([2; 6]) })
+        )
+    );
+    assert_eq!(
+        outsider,
+        (
+            StatusCode::FORBIDDEN,
+            refusal("access_denied", "not a member of this conversation")
+        )
+    );
+    assert_eq!(
+        unknown,
+        (
+            StatusCode::NOT_FOUND,
+            refusal("not_found", "conversation not found")
+        )
+    );
+}
+
+/// The base64 of `domain::e2ee::testing`'s blobs, as a client posts them.
+fn member_commit(byte: u8) -> String {
+    B64.encode(testing::member_commit(byte).as_bytes())
+}
+
+fn external_commit() -> String {
+    B64.encode(testing::external_commit().as_bytes())
+}
+
+#[tokio::test]
+async fn only_a_commit_a_client_makes_is_taken() {
+    let w = world().await;
+
+    for blob in [
+        B64.encode(testing::join_proposal().as_bytes()),
+        "AQID".to_owned(),
+    ] {
+        assert_eq!(
+            w.commit(&w.alice, 1, &blob).await,
+            (
+                StatusCode::BAD_REQUEST,
+                refusal("invalid_request", "`commit_blob` is not an MLS commit")
+            ),
+            "{blob}"
+        );
+    }
+    let (_, log) = w
+        .app
+        .call(Method::GET, &w.commits(), Some(w.alice.id), None)
+        .await;
+    assert_eq!(log["commits"], json!([]));
+}
+
+#[tokio::test]
+async fn an_external_commit_takes_a_session_naming_a_device_approved() {
+    let w = world().await;
+    let (session, laptop) = w.app.on_a_device(w.alice.id).await;
+    let on_the_laptop = w.app.token_in(w.alice.id, session);
+    w.app.keyed_from(&w.alice, &on_the_laptop, laptop).await;
+    let (fresh, _) = w.app.on_a_device(w.alice.id).await;
+    let on_the_fresh_one = w.app.token_in(w.alice.id, fresh);
+    let unnamed = w.app.token(w.alice.id);
+    let body = json!({ "epoch": 1, "commit_blob": external_commit(), "group_info": "AQID" });
+    let uri = w.commits();
+    let mut answers = Vec::new();
+    for token in [&on_the_fresh_one, &unnamed, &on_the_laptop] {
+        answers.push(
+            w.app
+                .call_in(token, Method::POST, &uri, Some(body.clone()))
+                .await,
+        );
+    }
+    let [from_the_fresh_one, from_no_device, (status, committed)] =
+        <[_; 3]>::try_from(answers).unwrap();
+
+    assert_eq!(
+        from_the_fresh_one,
+        (
+            StatusCode::FORBIDDEN,
+            refusal(
+                "approval_required",
+                "This takes a device approved under the current history key"
+            )
+        )
+    );
+    assert_eq!(
+        from_no_device,
+        (
+            StatusCode::FORBIDDEN,
+            refusal("device_required", "Name this session's device first")
+        )
+    );
+    assert_eq!(status, StatusCode::CREATED, "{committed}");
+    assert_eq!(committed["epoch"], 1, "the refusals took no epoch");
+}
+
+#[tokio::test]
+async fn a_members_commit_takes_no_device() {
+    let w = world().await;
+    let (session, laptop) = w.app.on_a_device(w.alice.id).await;
+    w.app
+        .keyed_from(&w.alice, &w.app.token_in(w.alice.id, session), laptop)
+        .await;
+
+    let (status, body) = w.commit(&w.alice, 1, &member_commit(1)).await;
+
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+}
+
+#[tokio::test]
 async fn a_non_members_commit_is_forbidden() {
     let w = world().await;
 
     assert_eq!(
-        w.commit(&w.dave, 1, &B64.encode([1; 8])).await,
+        w.commit(&w.dave, 1, &member_commit(1)).await,
         (
             StatusCode::FORBIDDEN,
             refusal("access_denied", "not a member of this conversation")
@@ -159,8 +366,7 @@ async fn a_non_members_commit_is_forbidden() {
 async fn a_member_catches_up_after_an_epoch() {
     let w = world().await;
     for epoch in 1..=3 {
-        w.commit(&w.alice, epoch, &B64.encode([epoch as u8; 8]))
-            .await;
+        w.commit(&w.alice, epoch, &member_commit(epoch as u8)).await;
     }
 
     let (status, body) = w
@@ -332,6 +538,7 @@ async fn the_delivery_service_needs_a_signed_in_user() {
 
     for (method, uri) in [
         (Method::GET, w.commits()),
+        (Method::GET, w.group_info()),
         (
             Method::GET,
             format!("/api/mls/welcomes?device_id={}", Uuid::new_v4()),
@@ -383,7 +590,11 @@ async fn a_founding_commit_needs_its_conversation() {
             Method::POST,
             &format!("/api/mls/groups/{}/commits", Uuid::new_v4()),
             Some(w.alice.id),
-            Some(json!({ "epoch": 1, "commit_blob": B64.encode([1; 8]) })),
+            Some(json!({
+                "epoch": 1,
+                "commit_blob": member_commit(1),
+                "group_info": "AQID",
+            })),
         )
         .await;
 

@@ -1,14 +1,19 @@
 use std::sync::Arc;
 
+use domain::auth::Sessions;
+use domain::auth::testing::InMemorySessions;
 use domain::e2ee::testing::{
-    InMemoryDelivery, RecordingMlsFederation, RecordingMlsNotifier, SentMls,
+    InMemoryArchive, InMemoryDelivery, InMemoryKeyDirectory, RecordingMlsFederation,
+    RecordingMlsNotifier, SentMls, external_commit, join_proposal, member_commit,
 };
 use domain::e2ee::{
-    CATCH_UP_LIMIT, Commit, CommitBlob, CommitLog, DeliveryError, Epoch, OutgoingWelcome,
-    WelcomeBlob,
+    ApprovalPublicKey, ApprovalRequired, Attestation, CATCH_UP_LIMIT, Commit, CommitBlob,
+    CommitLog, DeliveryError, DeviceLabel, DeviceRequired, DeviceRootKey, Devices, Epoch,
+    GroupInfo, GroupInfoBlob, GroupInfos, HistoryCheckValue, HistoryGeneration, HistoryKey,
+    HistoryKeys, HistorySalt, HpkeKeyWrite, OutgoingWelcome, WelcomeBlob,
 };
 use domain::identity::testing::{InMemoryAccounts, InMemoryRemoteActors, account, remote_actor};
-use domain::identity::{Account, ActorUri, InstanceOrigin, RemoteActor};
+use domain::identity::{Account, ActorUri, Bearer, InstanceOrigin, RemoteActor};
 use domain::messaging::testing::{
     GroupNotice, InMemoryMessaging, RecordingGroupNotifier, unstamped,
 };
@@ -29,12 +34,16 @@ struct World {
     dm: ConversationId,
     store: Arc<InMemoryMessaging>,
     delivery: Arc<InMemoryDelivery>,
+    sessions: Arc<InMemorySessions>,
+    archive: Arc<InMemoryArchive>,
+    devices: Arc<InMemoryKeyDirectory>,
     notifier: Arc<RecordingMlsNotifier>,
     federation: Arc<RecordingMlsFederation>,
     groups: Arc<RecordingGroupNotifier>,
     reach: Arc<StubReachability>,
     append: AppendCommit,
     catch_up: CatchUpCommits,
+    load_group_info: LoadGroupInfo,
     claim: ClaimWelcomes,
     send: SendWelcome,
     receive_commit: ReceiveCommit,
@@ -54,11 +63,15 @@ fn epoch(n: i64) -> Epoch {
 }
 
 fn commit_blob(byte: u8) -> CommitBlob {
-    CommitBlob::parse(vec![byte; 8]).unwrap()
+    member_commit(byte)
 }
 
 fn welcome_blob(byte: u8) -> WelcomeBlob {
     WelcomeBlob::parse(vec![byte; 8]).unwrap()
+}
+
+fn group_info(byte: u8) -> GroupInfoBlob {
+    GroupInfoBlob::parse(vec![byte; 8]).unwrap()
 }
 
 async fn world() -> World {
@@ -91,6 +104,9 @@ async fn world() -> World {
         .await
         .unwrap();
     let delivery = Arc::new(InMemoryDelivery::default());
+    let sessions = Arc::new(InMemorySessions::default());
+    let archive = Arc::new(InMemoryArchive::default());
+    let devices = Arc::new(InMemoryKeyDirectory::keyed_by(archive.clone()));
     let notifier = Arc::new(RecordingMlsNotifier::default());
     let federation = Arc::new(RecordingMlsFederation::default());
     let groups = Arc::new(RecordingGroupNotifier::default());
@@ -100,10 +116,14 @@ async fn world() -> World {
             accounts.clone(),
             store.clone(),
             delivery.clone(),
+            delivery.clone(),
+            sessions.clone(),
+            devices.clone(),
             notifier.clone(),
             federation.clone(),
         ),
         catch_up: CatchUpCommits::new(accounts.clone(), store.clone(), delivery.clone()),
+        load_group_info: LoadGroupInfo::new(accounts.clone(), store.clone(), delivery.clone()),
         claim: ClaimWelcomes::new(delivery.clone()),
         send: SendWelcome::new(
             InstanceOrigin::parse("http://localhost:8080").unwrap(),
@@ -119,6 +139,7 @@ async fn world() -> World {
             accounts.clone(),
             remote_actors.clone(),
             store.clone(),
+            delivery.clone(),
             delivery.clone(),
             reach.clone(),
             notifier.clone(),
@@ -145,6 +166,9 @@ async fn world() -> World {
         dm,
         store,
         delivery,
+        sessions,
+        archive,
+        devices,
         notifier,
         federation,
         groups,
@@ -153,10 +177,42 @@ async fn world() -> World {
 }
 
 impl World {
+    /// A live session of `by`'s, naming no device.
+    fn bearer(&self, by: &Account) -> Bearer {
+        let now = OffsetDateTime::now_utc();
+        Bearer {
+            user: by.id,
+            session: self.sessions.live_at(by.id, now),
+            authenticated_at: now,
+        }
+    }
+
     async fn commit(&self, by: &Account, at: i64) -> Result<Commit, DeliveryError> {
         self.append
-            .execute(by.id, self.group, epoch(at), commit_blob(at as u8))
+            .execute(
+                &self.bearer(by),
+                self.group,
+                epoch(at),
+                commit_blob(at as u8),
+                group_info(at as u8),
+            )
             .await
+    }
+
+    async fn group_info(&self, conversation: ConversationId) -> Option<GroupInfo> {
+        self.delivery.newest(conversation).await.unwrap()
+    }
+
+    fn incoming(&self, at: i64, info: u8) -> IncomingCommit {
+        IncomingCommit {
+            recipient: self.alice.id,
+            proposer: self.carol.actor_uri.clone(),
+            conversation: self.group,
+            epoch: epoch(at),
+            blob: commit_blob(at as u8),
+            group_info: group_info(info),
+            roster: None,
+        }
     }
 
     async fn stored(&self, conversation: ConversationId) -> Vec<Commit> {
@@ -226,6 +282,7 @@ async fn a_members_commit_is_stored_and_reaches_every_member() {
             from: w.alice.actor_uri.clone(),
             to: w.carol.actor_uri.clone(),
             commit,
+            group_info: group_info(1),
             roster: Some(roster),
         }]
     );
@@ -241,7 +298,13 @@ async fn a_dms_commit_travels_without_a_roster() {
         .unwrap();
 
     w.append
-        .execute(w.alice.id, dm, epoch(1), commit_blob(1))
+        .execute(
+            &w.bearer(&w.alice),
+            dm,
+            epoch(1),
+            commit_blob(1),
+            group_info(1),
+        )
         .await
         .unwrap();
 
@@ -254,15 +317,77 @@ async fn a_dms_commit_travels_without_a_roster() {
 #[tokio::test]
 async fn a_commit_at_a_taken_epoch_answers_the_one_there() {
     let w = world().await;
-    let first = w.commit(&w.alice, 2).await.unwrap();
+    let first = w.commit(&w.alice, 1).await.unwrap();
+    let second = w.commit(&w.alice, 2).await.unwrap();
 
-    let lost = w.commit(&w.bob, 2).await;
+    for (at, winner) in [(2, &second), (1, &first)] {
+        let lost = w.commit(&w.bob, at).await;
+
+        assert!(
+            matches!(&lost, Err(DeliveryError::EpochTaken(held)) if **held == *winner),
+            "epoch {at}: {lost:?}"
+        );
+    }
+    assert_eq!(w.stored(w.group).await, vec![first, second]);
+}
+
+#[tokio::test]
+async fn a_members_commit_goes_only_at_the_epoch_after_the_latest() {
+    let w = world().await;
+
+    for (at, next) in [(0, 1), (2, 1)] {
+        let refused = w.commit(&w.alice, at).await;
+
+        assert!(
+            matches!(refused, Err(DeliveryError::EpochNotNext(e)) if e == epoch(next)),
+            "epoch {at}: {refused:?}"
+        );
+    }
+    let first = w.commit(&w.alice, 1).await.unwrap();
+    let ahead = w.commit(&w.bob, 3).await;
+    assert!(
+        matches!(ahead, Err(DeliveryError::EpochNotNext(e)) if e == epoch(2)),
+        "{ahead:?}"
+    );
+    let second = w.commit(&w.bob, 2).await.unwrap();
+
+    assert_eq!(w.stored(w.group).await, vec![first, second]);
+    assert_eq!(w.notifier.committed().len(), 2 * 2, "the stored ones only");
+}
+
+#[tokio::test]
+async fn a_member_never_commits_into_a_gap_the_mirrored_log_holds() {
+    let w = world().await;
+    for at in [1, 3] {
+        w.receive_commit
+            .execute(IncomingCommit {
+                recipient: w.alice.id,
+                proposer: w.carol.actor_uri.clone(),
+                conversation: w.group,
+                epoch: epoch(at),
+                blob: commit_blob(at as u8),
+                group_info: group_info(at as u8),
+                roster: None,
+            })
+            .await
+            .unwrap();
+    }
+
+    let refused = w.commit(&w.alice, 2).await;
 
     assert!(
-        matches!(&lost, Err(DeliveryError::EpochTaken(winner)) if **winner == first),
-        "{lost:?}"
+        matches!(refused, Err(DeliveryError::EpochNotNext(e)) if e == epoch(4)),
+        "{refused:?}"
     );
-    assert_eq!(w.stored(w.group).await, vec![first]);
+    assert_eq!(
+        w.stored(w.group)
+            .await
+            .iter()
+            .map(|c| c.epoch)
+            .collect::<Vec<_>>(),
+        vec![epoch(1), epoch(3)],
+        "the epoch 2 still on its way from Carol's instance is the one to fill it"
+    );
 }
 
 #[tokio::test]
@@ -287,7 +412,13 @@ async fn a_commit_into_an_unknown_conversation_is_refused_at_any_epoch() {
     for at in [0, 1, 2] {
         let refused = w
             .append
-            .execute(w.alice.id, unknown, epoch(at), commit_blob(1))
+            .execute(
+                &w.bearer(&w.alice),
+                unknown,
+                epoch(at),
+                commit_blob(1),
+                group_info(1),
+            )
             .await;
 
         assert!(
@@ -338,6 +469,337 @@ async fn only_a_member_catches_up_on_a_conversation_that_exists() {
         .execute(w.alice.id, ConversationId::generate(), epoch(0))
         .await;
 
+    assert!(
+        matches!(outsider, Err(DeliveryError::NotAMember)),
+        "{outsider:?}"
+    );
+    assert!(
+        matches!(unknown, Err(DeliveryError::ConversationNotFound)),
+        "{unknown:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_stored_commit_keeps_the_group_info_of_the_epoch_it_opens() {
+    let w = world().await;
+
+    w.commit(&w.alice, 1).await.unwrap();
+    let first = w.group_info(w.group).await;
+    w.commit(&w.bob, 2).await.unwrap();
+
+    assert_eq!(
+        first,
+        Some(GroupInfo {
+            epoch: epoch(1),
+            blob: group_info(1)
+        })
+    );
+    assert_eq!(
+        w.group_info(w.group).await,
+        Some(GroupInfo {
+            epoch: epoch(2),
+            blob: group_info(2)
+        })
+    );
+    let sent: Vec<_> = w
+        .federation
+        .sent()
+        .into_iter()
+        .map(|sent| match sent {
+            SentMls::Commit { group_info, .. } => group_info,
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(sent, vec![group_info(1), group_info(2)], "with each commit");
+}
+
+#[tokio::test]
+async fn a_commit_refused_its_epoch_keeps_no_group_info() {
+    let w = world().await;
+    w.commit(&w.alice, 1).await.unwrap();
+
+    let taken = w
+        .append
+        .execute(
+            &w.bearer(&w.bob),
+            w.group,
+            epoch(1),
+            commit_blob(7),
+            group_info(7),
+        )
+        .await;
+    let ahead = w.commit(&w.bob, 3).await;
+
+    assert!(
+        matches!(taken, Err(DeliveryError::EpochTaken(_))),
+        "{taken:?}"
+    );
+    assert!(
+        matches!(ahead, Err(DeliveryError::EpochNotNext(_))),
+        "{ahead:?}"
+    );
+    assert_eq!(
+        w.group_info(w.group).await,
+        Some(GroupInfo {
+            epoch: epoch(1),
+            blob: group_info(1)
+        }),
+        "another history's GroupInfo is never kept"
+    );
+}
+
+impl World {
+    /// Alice holds a history key, her laptop approved by its words and a fresh device nobody
+    /// approved: a session naming each, and one naming none.
+    async fn alice_with_a_history_key(&self) -> (Bearer, Bearer, Bearer) {
+        let key = HistoryKey {
+            generation: HistoryGeneration::parse(1).unwrap(),
+            salt: HistorySalt::parse(&[1; 16]).unwrap(),
+            check_value: HistoryCheckValue::parse(&[2; 32]).unwrap(),
+            approval_public_key: ApprovalPublicKey::parse(&[3; 32]).unwrap(),
+        };
+        let now = OffsetDateTime::now_utc();
+        let (laptop, fresh) = (DeviceId::generate(), DeviceId::generate());
+        for device in [laptop, fresh] {
+            self.devices
+                .attest(
+                    self.alice.id,
+                    device,
+                    &DeviceLabel::unknown(),
+                    None,
+                    &Attestation {
+                        root_key: DeviceRootKey::parse(&[1; 32]).unwrap(),
+                        signature: vec![1; 64],
+                        kid: "key-1".to_owned(),
+                        issued_at: now,
+                        expires_at: now + Duration::days(365),
+                    },
+                    &HpkeKeyWrite::Clear,
+                )
+                .await
+                .unwrap();
+        }
+        self.archive
+            .replace(self.alice.id, &key, laptop, now)
+            .await
+            .unwrap();
+        self.devices
+            .approved_by_words(self.alice.id, laptop, &key)
+            .await;
+        (
+            self.naming(laptop).await,
+            self.naming(fresh).await,
+            self.bearer(&self.alice),
+        )
+    }
+
+    /// A live session of Alice's, naming `device`.
+    async fn naming(&self, device: DeviceId) -> Bearer {
+        let bearer = self.bearer(&self.alice);
+        self.sessions
+            .link(
+                self.alice.id,
+                bearer.session,
+                device,
+                OffsetDateTime::now_utc(),
+            )
+            .await
+            .unwrap();
+        bearer
+    }
+}
+
+#[tokio::test]
+async fn a_device_commits_itself_in_only_from_a_session_naming_it_approved() {
+    let w = world().await;
+    let (on_the_laptop, on_the_fresh_one, unnamed) = w.alice_with_a_history_key().await;
+    let external = |bearer| {
+        w.append
+            .execute(bearer, w.group, epoch(1), external_commit(), group_info(1))
+    };
+
+    let from_the_fresh_one = external(&on_the_fresh_one).await;
+    let from_no_device = external(&unnamed).await;
+    let refused_left = (w.stored(w.group).await, w.group_info(w.group).await);
+    let from_the_laptop = external(&on_the_laptop).await;
+
+    assert!(
+        matches!(
+            from_the_fresh_one,
+            Err(DeliveryError::ApprovalRequired(ApprovalRequired))
+        ),
+        "{from_the_fresh_one:?}"
+    );
+    assert!(
+        matches!(
+            from_no_device,
+            Err(DeliveryError::DeviceRequired(DeviceRequired))
+        ),
+        "{from_no_device:?}"
+    );
+    assert_eq!(refused_left, (Vec::new(), None), "a refusal keeps nothing");
+    assert_eq!(from_the_laptop.unwrap().blob, external_commit());
+    assert_eq!(w.group_info(w.group).await.map(|i| i.epoch), Some(epoch(1)));
+}
+
+#[tokio::test]
+async fn only_a_commit_a_client_makes_is_taken_and_nothing_else_kept() {
+    let w = world().await;
+    let roster = unstamped(
+        Some("crew"),
+        &[
+            member(&w.carol.actor_uri, Role::Admin),
+            member(&w.alice.actor_uri, Role::Member),
+        ],
+    );
+    let group = ConversationId::generate();
+
+    for blob in [join_proposal(), CommitBlob::parse(vec![1; 8]).unwrap()] {
+        let appended = w
+            .append
+            .execute(
+                &w.bearer(&w.alice),
+                w.group,
+                epoch(1),
+                blob.clone(),
+                group_info(1),
+            )
+            .await;
+        let received = w
+            .receive_commit
+            .execute(IncomingCommit {
+                conversation: group,
+                blob,
+                roster: Some(roster.clone()),
+                ..w.incoming(1, 1)
+            })
+            .await;
+
+        assert!(
+            matches!(appended, Err(DeliveryError::NotACommit)),
+            "{appended:?}"
+        );
+        assert!(
+            matches!(received, Err(DeliveryError::NotACommit)),
+            "{received:?}"
+        );
+    }
+    assert!(w.stored(w.group).await.is_empty());
+    assert_eq!(w.group_info(w.group).await, None);
+    assert_eq!(
+        Conversations::find(&*w.store, group).await.unwrap(),
+        None,
+        "nor a roster mirrored"
+    );
+    assert!(w.notifier.committed().is_empty());
+    assert!(w.federation.sent().is_empty());
+}
+
+#[tokio::test]
+async fn a_members_commit_needs_no_device_approved() {
+    let w = world().await;
+    let (_, on_the_fresh_one, unnamed) = w.alice_with_a_history_key().await;
+
+    for (at, bearer) in [(1, on_the_fresh_one), (2, unnamed)] {
+        let committed = w
+            .append
+            .execute(&bearer, w.group, epoch(at), commit_blob(1), group_info(1))
+            .await;
+
+        assert!(committed.is_ok(), "epoch {at}: {committed:?}");
+    }
+}
+
+#[tokio::test]
+async fn an_external_commit_from_outside_the_conversation_is_refused_as_any() {
+    let w = world().await;
+
+    let refused = w
+        .append
+        .execute(
+            &w.bearer(&w.dave),
+            w.group,
+            epoch(1),
+            external_commit(),
+            group_info(1),
+        )
+        .await;
+
+    assert!(
+        matches!(refused, Err(DeliveryError::NotAMember)),
+        "{refused:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_inbound_commit_keeps_its_group_info_only_when_stored_and_newer() {
+    let w = world().await;
+
+    w.receive_commit.execute(w.incoming(3, 3)).await.unwrap();
+    w.receive_commit.execute(w.incoming(2, 2)).await.unwrap();
+    let after_the_older = w.group_info(w.group).await;
+    w.receive_commit.execute(w.incoming(4, 9)).await.unwrap();
+    w.receive_commit.execute(w.incoming(4, 4)).await.unwrap();
+
+    assert_eq!(
+        after_the_older,
+        Some(GroupInfo {
+            epoch: epoch(3),
+            blob: group_info(3)
+        }),
+        "a delivery arriving late keeps the newer"
+    );
+    assert_eq!(
+        w.group_info(w.group).await,
+        Some(GroupInfo {
+            epoch: epoch(4),
+            blob: group_info(9)
+        }),
+        "a commit already at its epoch keeps nothing"
+    );
+}
+
+#[tokio::test]
+async fn an_inbound_external_commit_is_taken_as_any_its_instance_decided() {
+    let w = world().await;
+
+    w.receive_commit
+        .execute(IncomingCommit {
+            blob: external_commit(),
+            ..w.incoming(1, 1)
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(w.stored(w.group).await.len(), 1);
+}
+
+#[tokio::test]
+async fn a_member_reads_the_newest_group_info_once_the_group_has_one() {
+    let w = world().await;
+    let before = w.load_group_info.execute(w.bob.id, w.group).await;
+    for at in 1..=2 {
+        w.commit(&w.alice, at).await.unwrap();
+    }
+
+    let read = w.load_group_info.execute(w.bob.id, w.group).await.unwrap();
+    let outsider = w.load_group_info.execute(w.dave.id, w.group).await;
+    let unknown = w
+        .load_group_info
+        .execute(w.bob.id, ConversationId::generate())
+        .await;
+
+    assert!(
+        matches!(before, Err(DeliveryError::NoGroupInfo)),
+        "{before:?}"
+    );
+    assert_eq!(
+        read,
+        GroupInfo {
+            epoch: epoch(2),
+            blob: group_info(2)
+        }
+    );
     assert!(
         matches!(outsider, Err(DeliveryError::NotAMember)),
         "{outsider:?}"
@@ -541,6 +1003,7 @@ async fn an_inbound_commit_from_outside_the_conversation_is_refused() {
         conversation,
         epoch: epoch(9),
         blob: commit_blob(9),
+        group_info: group_info(9),
         roster: None,
     };
 
@@ -616,6 +1079,7 @@ async fn an_inbound_commit_is_stored_once_and_reaches_the_local_members() {
         conversation: w.group,
         epoch: epoch(5),
         blob: commit_blob(5),
+        group_info: group_info(5),
         roster: None,
     };
 
@@ -1033,6 +1497,7 @@ async fn an_inbound_commit_that_outruns_the_welcome_mirrors_the_group_and_is_sto
             conversation: group,
             epoch: epoch(1),
             blob: commit_blob(1),
+            group_info: group_info(1),
             roster: Some(roster.clone()),
         })
         .await
@@ -1081,6 +1546,7 @@ async fn an_inbound_commit_that_would_bring_someone_in_from_who_they_do_not_admi
                 conversation: group,
                 epoch: epoch(1),
                 blob: commit_blob(1),
+                group_info: group_info(1),
                 roster: Some(crew_with_alice(&w)),
             })
             .await;
@@ -1088,6 +1554,7 @@ async fn an_inbound_commit_that_would_bring_someone_in_from_who_they_do_not_admi
         assert!(dropped.is_ok(), "{dropped:?}");
         assert_eq!(Conversations::find(&*w.store, group).await.unwrap(), None);
         assert!(w.stored(group).await.is_empty());
+        assert_eq!(w.group_info(group).await, None);
         assert!(w.groups.sent().is_empty());
     }
 }

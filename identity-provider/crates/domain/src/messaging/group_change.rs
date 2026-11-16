@@ -10,7 +10,7 @@ use crate::identity::ActorUri;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GroupChange {
     pub group: ConversationId,
-    /// An admin of the group; for a leave, the member leaving.
+    /// An admin of the group; for a rename, any member; for a leave, the member leaving.
     pub by: ActorUri,
     /// When it was made, where it was: its stamp.
     pub at: OffsetDateTime,
@@ -52,12 +52,12 @@ impl GroupChange {
         }
     }
 
-    /// Whether its maker may make it, as this copy holds the group's `members`: an admin, or for a
-    /// leave the member leaving.
+    /// Whether its maker may make it, as this copy holds the group's `members`: any member for a
+    /// rename, the member leaving for a leave, an admin for the rest.
     pub fn is_entitled(&self, members: &[Member]) -> bool {
         let maker = members.iter().find(|m| m.actor_uri == self.by);
         match self.kind {
-            GroupChangeKind::Left => maker.is_some(),
+            GroupChangeKind::Left | GroupChangeKind::Renamed(_) => maker.is_some(),
             _ => maker.is_some_and(|m| m.role == Role::Admin),
         }
     }

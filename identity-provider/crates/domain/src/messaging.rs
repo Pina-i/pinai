@@ -25,7 +25,8 @@ pub use conversation::{
 pub use error::{AttachmentError, MessageStoreError, MessagingError, ObjectStoreError};
 pub use event::{EventWindow, GroupEvent, GroupEventKind, NamedEvent};
 pub use group::{
-    GroupName, MAX_MEMBERS, authorize_admin, has_room, initial_roster, may_stop_being_admin,
+    GroupName, MAX_MEMBERS, authorize_admin, authorize_rename, has_room, initial_roster,
+    may_stop_being_admin,
 };
 pub use group_change::{GroupChange, GroupChangeKind, GroupEffect};
 pub use message::{DeliveryStatus, HistoryCursor, Message, NewMessage};
