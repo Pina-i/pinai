@@ -1348,7 +1348,9 @@ and they hold for what peers deliver as much as for local clients.
   once the later stays. It travels with the commit to the members' instances (§ 7.5), each
   keeping it by the same rule, and is what `GET …/group-info` answers. It shows the instance the
   group's tree — which devices of which accounts —, which it knows already, and holds no key that
-  opens a message.
+  opens a message. A client makes it with each of its commits — an add, a removal, an update, a
+  new credential, an external commit —: openmls's GroupInfo of the new epoch, with the ratchet tree
+  and the `external_pub` key in it, all a device needs to join the group alone.
 - **Only a commit a client makes.** The instance reads each commit's clear header (RFC 9420 § 6:
   `version` `mls10`, `wire_format`, then `group_id` and `epoch`, then a `PublicMessage`'s sender
   type or a `PrivateMessage`'s content type) and takes two kinds only (`CommitBlob::kind`): a
@@ -1356,9 +1358,9 @@ and they hold for what peers deliver as much as for local clients.
   the clear — and an external commit — a `PublicMessage` from a `new_member_commit` sender.
   Anything else is refused `400`, from a client or in a peer's delivery, and nothing is stored nor
   mirrored: a `PublicMessage` from a member, an external sender or a `new_member_proposal` — a
-  device asking to join, which a member's client would keep and fold into its own next commit,
-  adding that device unasked —, a `PrivateMessage` carrying no commit, a Welcome, a GroupInfo, a
-  KeyPackage, another version, bytes the header doesn't read.
+  device asking to join, which a client keeping proposals would fold into its own next commit,
+  adding that device unasked; ours keep none (§ 6.3) —, a `PrivateMessage` carrying no commit, a
+  Welcome, a GroupInfo, a KeyPackage, another version, bytes the header doesn't read.
 - **A device commits itself in only from an approved device.** An external commit (RFC 9420
   § 12.4.3.2) adds a device to the group without any device in it. It is taken only from a
   session that named its device (`403 device_required`), approved under the account's current
@@ -1663,6 +1665,17 @@ five epochs, the keys of the messages it hasn't read yet (openmls
 `max_past_epochs`, set where a group is created and where one is joined):
 such a message decrypts once the commit is applied. Each key is still
 deleted once used, so what has been read stays out of reach.
+
+**A proposal is dropped.** No client of ours sends one: every change to a
+group is a commit of the device making it. A proposal received — a
+member's, or a join proposal from a device outside the group — is read
+and dropped, never kept: openmls folds the proposals a group keeps into
+its next commit, so one kept would let anyone able to put a message in
+the conversation — someone with only a user's password — have a member's
+device commit it, a join proposal adding their device unasked. And a
+device's commit carries only its own proposals, whatever its group holds.
+A commit referring to a proposal sent apart, which none of ours makes,
+doesn't apply.
 
 ### 6.4 Restoring history on a new device
 
