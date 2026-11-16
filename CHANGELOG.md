@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/Pina-i/pinai/compare/v0.3.2...v0.4.0) - 2026-11-16
+
+### Added
+
+- *(e2ee)* [**breaking**] devices rejoin their conversations by themselves ([#14](https://github.com/Pina-i/pinai/pull/14))
+- *(idp)* approved devices and a shared history passphrase ([#10](https://github.com/Pina-i/pinai/pull/10))
+
 ## [0.3.2](https://github.com/Pina-i/pinai/compare/v0.3.1...v0.3.2) - 2026-11-02
 
 ### Fixed
