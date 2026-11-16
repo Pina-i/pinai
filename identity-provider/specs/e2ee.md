@@ -420,6 +420,12 @@ up a missed push on its next start. KeyPackages live 30 days, so a
 device left unopened for longer can't be added to a group until it is
 opened again.
 
+A leaf added from a KeyPackage keeps that KeyPackage's MLS lifetime — openmls's default, 12 weeks
+— until its device commits, and nothing refreshes leaves on a schedule: so no device joining a
+group, by a Welcome or by itself (§ 6.14), checks the lifetime of the leaves already there, or a
+member who never commits would keep every new device out three months on. A KeyPackage is still
+checked when it is added.
+
 ### 3.6 24-word recovery passphrase
 
 A BIP-39 mnemonic of 24 words — 256 random bits — generated client-side by an account's first
@@ -1606,8 +1612,8 @@ for in every conversation.
   adds the siblings missing. It runs when the device list refreshes (the
   `device_joined` and `device_approved` pushes only refresh it), when the
   conversation list changes,
-  and when the device comes to hold a group — founded on a first send or joined
-  from a Welcome (`IE2eePort.onGroupHeld`).
+  and when the device comes to hold a group — founded on a first send, joined
+  from a Welcome or by itself (§ 6.14; `IE2eePort.onGroupHeld`).
 - A device applies a group's commits as the `mls_commit` push announces them
   (`IE2eePort.catchUp`), so its next message is sent at the epoch the others
   are at: one sent from an epoch they left is read by none of them.
@@ -1787,13 +1793,15 @@ holds for a group that adds Bob. A conversation Bob's instance opens in
 Bob's name with a device of its own, where none of Bob's devices is ever
 added, escapes this check (§ 2).
 
-A device founds a conversation's group only when it holds none, and two
-sends at once found it once. If the first add fails — most often because
-another device founded the group first, and the commit at epoch 1 is taken
-(`409`) — the device drops the group it founded rather than keep one that
-holds only itself, where what it sends would be read by nobody. The send
-fails, and the device joins the real group once one of its siblings adds
-it (§ 6.2), or the other side does.
+A device founds a conversation's group only when it holds none and the
+conversation has none — no GroupInfo held (§ 5) —, and two sends at once
+found it once. If the first add fails — most often because another device
+founded the group first, and the commit at epoch 1 is taken (`409`) — the
+device drops the group it founded rather than keep one that holds only
+itself, where what it sends would be read by nobody. A conversation that
+has a group is never founded again: the message waits ("sending") until the
+device is in — added by one of its siblings (§ 6.2), by the other side's
+founding add, or joined by itself (§ 6.14).
 
 ### 6.6 Revoking a compromised device
 
@@ -2195,6 +2203,79 @@ device they never approved (§ 3.9). The way back is the same password change �
 is signed out and can't sign in again —, then a start over from one of the user's devices, a
 request that matures a week after the thief's device was last used.
 
+---
+
+### 6.14 Joining a conversation without a sibling
+
+A device comes into a conversation that already has a group by one of its own devices adding it
+(§ 6.2) or, when none does, by itself: an MLS external commit (RFC 9420 § 12.4.3.2) from the
+group's newest GroupInfo (§ 5), as Wire does. Nobody else has anything to do, or needs to be
+online. Here Alice lost her only phone and typed her 24 words on a new laptop; after a start over
+(§ 6.11), or a code typed on a device that isn't in the conversation, it goes the same way.
+
+```mermaid
+sequenceDiagram
+    participant L as Alice's laptop
+    participant I as IdP
+    participant B as Bob
+    Note over L: in (§ 3.9) — the words typed, approved
+    Note over L: the DM with Bob is in its list, and it holds no group for it
+    L->>I: GET /api/keys/devices
+    Note over L: no other device of Alice's signed in and used in the last hour: no minute to leave it
+    L->>I: GET /api/mls/groups/:id/group-info
+    I-->>L: {epoch: 4, group_info}
+    L->>L: the tree: the lost phone there, the laptop not — the external commit adding its leaf
+    L->>I: POST /api/mls/groups/:id/commits {epoch: 5, commit_blob, group_info}
+    I->>I: an external commit, from a session naming an approved device (§ 5)
+    I-->>L: 201
+    L->>L: keeps the group, checks every leaf of its tree (§ 3.4)
+    I-->>B: WS mls_commit
+    B->>I: GET /api/mls/groups/:id/commits?since=4
+    B->>B: applies it, checks the laptop's leaf as any leaf met (§ 3.4)
+    Note over L,B: they read each other from epoch 5 — what came before, the archive brings back (§ 6.4)
+```
+
+- **Who.** A device that is in (§ 3.9): approved by a code, by the words, or by its own start
+  over. The onboarding gate keeps any other out of the app, and the instance takes an external
+  commit only from a session naming a device approved under the current history key (§ 5): someone
+  with only the password can't come into the user's conversations this way.
+- **Which conversations.** Each of its list it holds no group for, but those the user was removed
+  from; nothing is sent while none is missing. One with no GroupInfo has no group yet: its first
+  send founds it (§ 6.5). Otherwise the GroupInfo's tree decides. With no leaf of the account, the
+  account is yet to be added, and a member's add brings it in with a Welcome: the device joins
+  nothing. A leaf naming this very device is an add made for it whose Welcome is on its way: it
+  leaves that Welcome a minute, then joins all the same. Otherwise — the account's devices there,
+  this one not — it joins.
+- **When.** At each start, when the socket comes back and when the conversation list changes.
+  While another device of the account, approved, is online — signed in and used in the last hour,
+  the device list's `last_active_at`, which an open app moves at each token renewal —, the device
+  leaves it a minute, from when it found the conversation missing, to add it by Welcome (§ 6.2);
+  then it joins.
+- **How.** The external commit adds the device's own leaf, the credential its KeyPackages carry; it
+  is posted at the epoch it opens, with that epoch's GroupInfo. Taken, the device keeps the group
+  and checks every leaf of its tree as a Welcome's; then the rules of a group held take over: its
+  siblings missing are added, a leaf of its own account not approved — the lost devices', after a
+  start over — is committed out (§ 3.4, § 3.9). A `409` — another commit took the epoch: another
+  of the user's devices joining at the same moment, say — reads the newer GroupInfo and builds
+  again, five times at most, then waits for the next try. A refusal for good — a device not
+  approved (`403 approval_required`), no longer a member (`403`), no such conversation (`404`) —
+  stops it for the page load. Anything else — no answer, a session that hasn't named its device
+  yet — is tried again after 5 s, 15 s, a minute, 5 minutes, then every 15 minutes.
+- **An answer lost.** The instance may have taken a commit whose answer never came, and building
+  another would put a second leaf of the device in the group. After a `409` or no answer, the device
+  reads the log at that epoch first: its own commit there, it keeps the group; another's, the epoch
+  was lost; none, it posts the same commit again at the next try. A Welcome reaching it meanwhile
+  settles that commit first.
+- **Its messages.** One written in a conversation the device hasn't joined yet waits ("sending")
+  and goes once the device is in, by a Welcome or by itself; it fails only when the join is refused
+  for good. The user sees nothing new: no screen, no step.
+- **One at a time.** One join of a conversation at a time, in that conversation's turn with the
+  device's other changes to its group (§ 6.2).
+
+The members apply the external commit as any commit, through the usual catch-up, and check the
+newcomer's leaf as any leaf met (§ 3.4). The group brings no past messages: the archive does after
+the words or a code (§ 6.4, § 6.10), nothing after a start over.
+
 ## 7. Wire formats
 
 ### 7.1 MLS leaf credential
@@ -2501,8 +2582,8 @@ threat model as the rest of the IDB content.
   comparing device attestations out of band: contacts trust the user's
   instance's attestation (§ 2, "Trust ceiling"), the user's own devices
   their approvals. An opt-in verification surface would be additive.
-- **A new device after losing every device.** Only the user's own devices
-  add a sibling to their conversations (§ 6.2), so a device that started
-  over with none left joins none of the account's existing conversations —
-  only those opened from then on —, unless an old device, found again,
-  approves it (§ 6.11).
+- **A join's answer lost, then a reload.** A device that reloads before it
+  could read the log after an external commit with no answer (§ 6.14) has lost
+  that commit's keys: if the instance took it, the device finds a leaf of its
+  own in the tree, leaves the Welcome it takes it for a minute, and joins
+  again. The first leaf stays, unused, until the device is revoked (§ 6.6).
