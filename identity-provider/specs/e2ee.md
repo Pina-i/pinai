@@ -23,13 +23,18 @@ Three properties define the system:
    to read them. Which devices the account's existing conversations and its
    passphrase reach is the user's own devices' call: a new device counts once
    one of them approves it with a short code, or once the account's 24 words
-   are typed on it (§ 3.9). Contacts take the IdP's attestation instead — what
+   are typed on it (§ 3.9) — or, when none of them has been used for a week,
+   by its own start over (§ 3.12), which the user's contacts see (§ 6.14). Contacts
+   take the IdP's attestation instead — what
    that leaves open is in § 2. The IdP never holds a message-decryption key,
    the passphrase or the key it derives.
 2. **Per-device, not per-user, identity.** Every device generates its own
    Ed25519 Device Root Key (DRK) and gets a fresh attestation from the IdP.
-   New devices join existing conversations through standard MLS Add commits,
-   which the user's devices make for approved devices only; no master-secret
+   New devices join existing conversations through standard MLS: an Add commit
+   one of the user's devices makes for a device it approved, or — when none of
+   them is left in a conversation — the new device's own external commit, which
+   only an approved device may post, and which its contacts there see unless
+   the conversation holds the proof of its approval (§ 6.14); no master secret
    has to be smuggled around.
 3. **History is on by default, under one passphrase per account.** The
    account's first device mints a 24-word passphrase: the account's history
@@ -91,7 +96,7 @@ rows below that name the instance don't hold ("What is not protected").
 | Another instance reads a conversation it carries | It carries MLS ciphertext only; it reads what a device it attests for one of its own users is let into ("What is not protected") |
 | The instance puts a leaf key of its own under one of the user's devices' credentials, in a KeyPackage it serves, to read a conversation in that device's place | Every leaf credential carries the device's leaf binding, its DRK's signature over the leaf's signature key (§ 3.4), and every device checks it on every add and on every leaf it meets: without the DRK's private half, the instance makes none |
 | A peer instance serves a forged KeyPackage for one of its users | The leaf credential carries the peer's attestation, verified against its JWKS, and the leaf binding, verified against the attested DRK (§ 3.4). A device the peer attests for itself is its users' trust ceiling, as below |
-| The instance slips a device of its own into the user's existing conversations | The user's devices add only devices they approved (§ 3.9): approved with the code, or with the 24 words typed on it. An approval is a signature by an approved device's DRK, or by the passphrase's approval key — the instance holds neither |
+| The instance slips a device of its own into the user's existing conversations | Shown, not prevented — the price of a user who lost every device coming back (§ 6.14). The user's devices add only devices they approved (§ 3.9), but a device can commit itself in: the instance can bring one in through a faked start over, or by attesting a device that joins by itself. Each contact there sees "⚠ Alice is now writing from a new device." unless the newcomer's leaf proves its approval — the words a leaf of the account already there carries, or a code by such a device's DRK (§ 3.4) —, which the instance can't sign; the user's own devices still there announce it and commit it out (§ 3.4, § 3.9). Someone with only the password can't: the instance takes an external commit only from a device approved under the current history key, so they would have to start over, which waits until none of the user's devices has been used for 7 days (§ 3.12) |
 | The instance reads the archive or the passphrase | The HAK derives from the passphrase, which never reaches the instance in the clear: a device shares it only with a device it approved with the code, sealed for that device's HPKE key and signed by its own DRK (§ 3.11) |
 | The instance shows its own device just as the user signs in elsewhere, for the user to approve | Approving takes the 6-digit code the new device shows, the password of a SPAKE2 exchange: without it, the instance gets at most two guesses per code — one against each side —, a one-in-five-hundred-thousand chance, and each guess costs the user a code, asked for or typed: a device draws a new code for each exchange, runs one exchange per code, and opens the next by itself only when nobody answered within ten minutes of its own clock (§ 3.10) |
 | The instance changes the approval public key, to approve a device itself | A device holding the passphrase derives the key itself, compares, trusts nothing new and warns on a mismatch (§ 3.9) |
@@ -115,6 +120,13 @@ rows below that name the instance don't hold ("What is not protected").
   its root key unlisted or unapproved and announces it (§ 3.9) — and it is committed out only if
   the instance carries the commit: the instance's Delivery Service can refuse it, drop it or never
   forward it, and can withhold the Welcomes that would bring the user's devices in.
+- **A device the user's instance brings into the user's existing conversations by itself.** With a
+  faked start over, or its own word that a device of its own is approved, the instance can have
+  that device commit itself into every conversation the user is in (§ 6.14). It reads what is sent
+  there from then on — never before: the group brings no past message, and the archive opens only
+  with the words. Each contact there sees the line "⚠ Alice is now writing from a new device."
+  (§ 6.14); the user's own devices still in the conversation announce it and commit it out, if
+  the instance carries the commit. Where none of them is left, only the line tells.
 - **Conversations the instance opens in the user's name.** With a device of its own and the
   user's account, it can found a DM's group before the user's devices do, befriend someone as the
   user, or create a group as the user: none of the user's devices is ever added there, so none
@@ -187,23 +199,27 @@ An account that lost every device and the 24 words starts over (§ 6.11): a new 
 until none of the account's approved devices has been used for 7 days — they are lost, so none is
 —, then sets the next generation — a recent password, the archive erased — and becomes the
 account's new root of trust, approved by its own new words; the lost devices, approved under no
-generation any more, are revoked from it. It joins none of the account's existing conversations: only the
-user's own devices add a sibling, and none is left (§ 9). Devices that still exist hold the old
+generation any more, are revoked from it. It comes back into the account's existing conversations
+by itself (§ 6.14) and reads them from then on — the group brings no past message, and the
+archive was erased —; each contact there sees "⚠ Alice is now writing from a new device.":
+nothing left in the conversation proves the new device the user's (§ 9, "The line where nothing
+is wrong"). It commits the lost devices' leaves out. Devices that still exist hold the old
 passphrase: they refuse the new generation, as one set by a device they never approved, and warn,
 until the user puts one back — it asks to be approved and its code is typed on the new device (the
-two approve each other, the new device shares the new passphrase, and the old one adds it to its
-conversations) — or types the new words on it.
+two approve each other, the new device shares the new passphrase, and adds it back to the
+conversations it committed it out of) — or types the new words on it.
 
 ### Trust ceiling
 
 To the rest of the network, a device of the user's is one the user's instance attests (§ 3.2):
 contacts trust its attestation, as they trust the instance's OIDC tokens. The instance — or
-whoever holds its signing key — can therefore attest a device of its own. Such a device is kept out
-of the conversations the user's devices add devices to, and of the passphrase. It is let into the
-conversations contacts open with the user — until one of the user's devices, there, meets it and
-commits it out, and only if the instance carries that commit —, and it can open conversations of
-its own in the user's name, where none of the user's devices ever is. This is the ceiling OIDC
-already imposes — a compromised IdP issues access tokens for the user too —, made explicit.
+whoever holds its signing key — can therefore attest a device of its own. The user's devices never
+add such a device to their conversations, nor share the passphrase with it; it can commit itself
+into them, which shows (§ 6.14). It is let into the conversations contacts open with the user —
+until one of the user's devices, there, meets it and commits it out, and only if the instance
+carries that commit —, and it can open conversations of its own in the user's name, where none of
+the user's devices ever is. This is the ceiling OIDC already imposes — a compromised IdP issues
+access tokens for the user too —, made explicit.
 
 What this trust does **not** grant:
 - Reading the messages of a conversation its device wasn't added to — MLS keys live on the
@@ -211,8 +227,9 @@ What this trust does **not** grant:
   of messages it hasn't read yet, from its last five epochs — § 6.3)
 - Reading the history archive or the passphrase — sealed under the HAK, and for approved devices'
   HPKE keys
-- Joining the user's existing conversations, or receiving the passphrase — both take an approval
-  the instance can't sign
+- Joining the user's existing conversations unseen, or receiving the passphrase — the first takes
+  a proof of approval its contacts check in the conversation, the second an approval: the instance
+  can sign neither
 - Speaking in a conversation as one of the user's devices — every leaf it holds is bound to the
   device's DRK (§ 3.4)
 - Approving a device by changing the approval public key — a device holding the passphrase checks
@@ -414,6 +431,27 @@ device holding the current passphrase.
 
 After verification, the leaf is trusted as "actor X's device Y." MLS's
 own LeafNode self-signature handles per-message integrity.
+
+**A newcomer's approvals.** A device that commits itself into a group (an
+external commit, § 6.14) is proven its account's when its credential carries,
+against the group as the commit leaves it — never the device list, which is
+the instance's:
+
+1. **A words approval** whose `approval_public_key` another leaf of the same
+   account in the group carries in a words approval of its own — that one
+   verifying under the key over that leaf's bytes —, at the newest generation
+   the account's leaves there carry, and verifying under that key over the
+   newcomer's own bytes. Words a later generation replaced prove nothing,
+   whoever kept them; an approval that doesn't verify counts no generation.
+2. **Or a code approval** whose `device_id` names another device of the
+   account with a leaf in the group, verifying under that leaf's `drk_pub`
+   over the newcomer's bytes — never under a key the newcomer's own credential
+   carries, nor a leaf carrying the newcomer's DRK.
+
+The member checks every signature itself, over the bytes it rebuilds from each
+credential: an approval read is no proof until it verifies. A newcomer whose
+leaf the checks above show forged is proven by nothing. Anything else is not
+proven, and shows (§ 6.14, "The line").
 
 **Keeping leaves current.** A leaf carries the attestation and the
 approvals of the moment its credential was made, and neither a renewal
@@ -2278,6 +2316,7 @@ sequenceDiagram
     I-->>B: WS mls_commit
     B->>I: GET /api/mls/groups/:id/commits?since=4
     B->>B: applies it, checks the laptop's leaf as any leaf met (§ 3.4)
+    B->>B: the laptop's words approval, under the key the phone's leaf carries: proven, no line
     Note over L,B: they read each other from epoch 5 — what came before, the archive brings back (§ 6.4)
 ```
 
@@ -2318,9 +2357,32 @@ sequenceDiagram
 - **One at a time.** One join of a conversation at a time, in that conversation's turn with the
   device's other changes to its group (§ 6.2).
 
-The members apply the external commit as any commit, through the usual catch-up, and check the
-newcomer's leaf as any leaf met (§ 3.4). The group brings no past messages: the archive does after
-the words or a code (§ 6.4, § 6.10), nothing after a start over.
+**What the members do.** They apply the external commit as any commit, through the usual catch-up,
+and check the newcomer's leaf as any leaf met (§ 3.4). An external commit may remove leaves, which
+RFC 9420 § 12.4.3.2 leaves to the application to accept: openmls removes a leaf carrying the
+joiner's own signature key, and the client's joins remove nothing else. One removing a leaf of
+another account than its joiner's, or naming no account, is refused before it is merged, as an
+invalid commit.
+
+- **The proof.** A newcomer of another account is proven by its leaf's approvals against what the
+  group holds (§ 3.4, "A newcomer's approvals"): the words of the newest generation the account's
+  leaves there carry, or a code from a device of the account still there. Proven, nothing shows:
+  a device approved by the words or by such a code comes back silently, before it holds the words
+  or after.
+- **The line.** Not proven, each member's device adds to that conversation, once, "⚠ Alice is now
+  writing from a new device." — the account's display name, as the conversation names people.
+  Pressing it shows: "This happens when Alice gets a new phone or reinstalls Pīna'i without their
+  old devices. If you weren't expecting it, check with them another way — a call, in person:
+  someone else may be using their account." No button, and nothing else on screen. Every member
+  derives it from the commit and the tree, so all see the same line. It is the device's own entry
+  in the timeline, dated by the commit's `created_at`, kept with its decrypted messages and never
+  archived; one per commit — a commit applied again, or a reload, adds none.
+- **When it never shows.** For a sibling's add (a Welcome, not an external commit), a founding,
+  on the joiner itself, and on the devices of the newcomer's own account: there, a device not
+  approved is announced and committed out (§ 3.4, § 3.9).
+
+The group brings no past messages: the archive does after the words or a code (§ 6.4, § 6.10),
+nothing after a start over.
 
 ## 7. Wire formats
 
@@ -2630,6 +2692,12 @@ threat model as the rest of the IDB content.
   comparing device attestations out of band: contacts trust the user's
   instance's attestation (§ 2, "Trust ceiling"), the user's own devices
   their approvals. An opt-in verification surface would be additive.
+- **The line where nothing is wrong.** A contact's device shows the line (§ 6.14) for every
+  device that comes back after a start over: nothing in the conversation can prove it. It also
+  shows, rarely, for a device the user did approve, when the conversation holds no proof of it:
+  its code came from a device that never was in that conversation, or the words were replaced
+  from a device not in it, so no leaf there carries the generation it holds. The line asks the
+  contact to check another way; the user's own devices show nothing.
 - **A join's answer lost, then a reload.** A device that reloads before it
   could read the log after an external commit with no answer (§ 6.14) has lost
   that commit's keys: if the instance took it, the device finds a leaf of its
