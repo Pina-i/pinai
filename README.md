@@ -556,9 +556,10 @@ docker compose up -d     # the whole platform, configured by .env
 
 ### Releasing
 
-`.github/workflows/ci.yml` runs `make check-all`, then builds the production
-image for amd64 and arm64 on native runners. What it publishes to
-`ghcr.io/pina-i/pinai-idp` depends on what triggered it:
+`.github/workflows/ci.yml` runs `make check-all` and, alongside it, builds the
+production image for amd64 and arm64 on native runners; it publishes only once
+both passed. What it publishes to `ghcr.io/pina-i/pinai-idp` depends on what
+triggered it:
 
 | Trigger | Published |
 |---|---|

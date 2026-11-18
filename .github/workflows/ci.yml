@@ -45,10 +45,10 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: make check-all
 
-  # Each platform on a native runner, pushed by digest (pull requests only build);
-  # publish joins them under the tags.
+  # Each platform on a native runner, pushed by digest (pull requests only build), built
+  # alongside check rather than after it; publish tags them only once check passed too.
   image:
-    needs: check
+    if: github.event_name != 'workflow_dispatch'
     strategy:
       matrix:
         include:
@@ -102,7 +102,7 @@ jobs:
           retention-days: 1
 
   publish:
-    needs: image
+    needs: [check, image]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     permissions:
