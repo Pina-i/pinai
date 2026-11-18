@@ -101,9 +101,14 @@ impl ReceiveGroupChange {
                 at,
                 removed_by,
             } => {
-                self.conversations
+                // Another member's copy of it may have taken it since this one was read.
+                if !self
+                    .conversations
                     .remove_member(group.id, &member, removed_by.as_ref(), Some(at))
-                    .await?;
+                    .await?
+                {
+                    return Ok(());
+                }
                 for local in local_accounts(&*self.accounts, &before).await? {
                     self.notifier
                         .member_removed(local.id, group.id, &member, removed_by.as_ref());
@@ -145,11 +150,17 @@ impl ReceiveGroupChange {
                         }
                     }
                     GroupChangeKind::Renamed(_) => {
+                        if !mirrored.renamed {
+                            return Ok(());
+                        }
                         for local in locals {
                             self.notifier.renamed(local.id, &group, &change.by);
                         }
                     }
                     GroupChangeKind::RoleChanged(member, role) => {
+                        if !mirrored.roles_taken.contains(member) {
+                            return Ok(());
+                        }
                         let member = Member {
                             actor_uri: member.clone(),
                             role: *role,

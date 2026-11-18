@@ -150,6 +150,14 @@ CREATE TABLE conversation_events (
 );
 ```
 
+- **Once per change.** A change is recorded, and pushed, only by the write that took it: an
+  instance holding several members gets a change made elsewhere once per member's inbox, often at
+  the same moment, and each copy decides from what it read before the other wrote. So the stores
+  say what each write took — `remove_member` whether it removed, `mirror_group` whether it took
+  the name, whom it brought in and whose role it took, `add_member` whether it added — each
+  guarded by its row and its stamp, and a copy whose write took nothing tells nobody and writes no
+  line. Two admins adding the same person at once likewise bring them in once: the other is
+  answered `409 Already a member`, as an add of an active member is.
 - **Stamped as the change.** An event's `created_at` is the change's stamp, so it sits where the
   change happened among the messages. It is written right after the change: a crash between the
   two loses the line, never the change. A change taken only from a snapshot records nothing — a
@@ -350,8 +358,9 @@ The receiving IdP takes a change (`application::messaging::ReceiveGroupChange`) 
   since before it — while the copy has room, a role or a name newer than the one held. An add of
   someone already in the group moves their join stamp forward and tells nobody anything.
 
-Then it applies the change with the stamp it carries, and tells its local members as for a change
-made here: `member_removed` to those in the group before (the one removed included), and for the
+Then it applies the change with the stamp it carries — a name, a role or a stamp only moves
+forward, so of two copies of one change taken at once only one takes it (§ 6 "Once per change") —
+and the copy that took it tells its local members as for a change made here: `member_removed` to those in the group before (the one removed included), and for the
 rest to those in it after — `group_created` to a local account the add brings in,
 `member_added` to the others, `group_renamed`, `member_role_changed`. A local account removed this
 way keeps the group as § 3 says. Anything else is answered 202 and

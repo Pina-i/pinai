@@ -38,9 +38,10 @@ pub trait Conversations: Send + Sync {
     ) -> Result<Vec<ConversationId>, MessageStoreError>;
 
     /// Take what another instance's snapshot changed (`GroupSnapshot::changes`): create the group
-    /// when new, under the name the changes carry, and hold each member exactly as given. Several
-    /// can mirror one group at once — each member's inbox gets its own Note — and each member is
-    /// brought in by one of them only.
+    /// when new, under the name the changes carry, and hold each member as given — the name, a
+    /// role or a stamp only when newer than the one held. Several can mirror one group at once —
+    /// each member's inbox gets its own Note — and each change is taken by one of them only: the
+    /// answer says which this write took.
     async fn mirror_group(
         &self,
         id: ConversationId,
@@ -66,13 +67,13 @@ pub trait Conversations: Send + Sync {
         roster: &[Member],
     ) -> Result<Conversation, MessageStoreError>;
 
-    /// Hold `member` in the conversation in its role: joining, rejoining after leaving, or
-    /// taking that role.
+    /// Hold `member` in the conversation in its role: joining, or rejoining after leaving.
+    /// `false` when they are an active member already: nothing is written.
     async fn add_member(
         &self,
         id: ConversationId,
         member: &Member,
-    ) -> Result<(), MessageStoreError>;
+    ) -> Result<bool, MessageStoreError>;
 
     /// `false` when `actor` was not an active member. `removed_by` is the admin who removed them,
     /// `None` when they leave: a removed member keeps the group's name and its other members as

@@ -156,12 +156,17 @@ impl GroupChanges {
     }
 }
 
-/// A copy of a group once changes are taken, and the members taking them brought in: added, or
-/// back from a departure.
+/// A copy of a group once changes are taken, and what this write took of them — the same
+/// changes taken twice at once are taken by one write only.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Mirrored {
     pub group: Conversation,
+    /// The name given, newer than the one held.
+    pub renamed: bool,
+    /// Members added, or back from a departure.
     pub brought_in: Vec<ActorUri>,
+    /// Active members whose role this write took, newer than the one held.
+    pub roles_taken: Vec<ActorUri>,
 }
 
 impl GroupSnapshot {
