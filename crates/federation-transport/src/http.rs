@@ -13,7 +13,7 @@ use futures_util::StreamExt;
 use crate::error::TransportError;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
-const TOTAL_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) const TOTAL_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_REDIRECTS: usize = 2;
 const MAX_BODY_BYTES: usize = 256 * 1024;
 const MAX_REFUSAL_BYTES: usize = 1024;

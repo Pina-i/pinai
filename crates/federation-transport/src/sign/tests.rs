@@ -256,3 +256,72 @@ async fn a_peers_refusal_is_cut_to_one_short_line_without_reading_it_all() {
         "{reason}"
     );
 }
+
+/// A peer on the loopback interface that answers `head` at once, then `rest` after `delay`.
+async fn a_slow_peer(head: &'static str, delay: std::time::Duration, rest: &'static str) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let at = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let _ = socket.read(&mut [0; 4096]).await;
+            let _ = socket.write_all(head.as_bytes()).await;
+            tokio::time::sleep(delay).await;
+            let _ = socket.write_all(rest.as_bytes()).await;
+        }
+    });
+    format!("http://{at}/api/presence/batch")
+}
+
+async fn post_within(
+    target: &str,
+    deadline: std::time::Duration,
+) -> Result<reqwest::Response, TransportError> {
+    let signing_key = SigningKey::from_bytes(&[7; 32]);
+    let signer = Signer {
+        key_id: "http://localhost:8080/actor#main-key",
+        signing_key: &signing_key,
+    };
+    send_signed_post_within(
+        &signer,
+        target,
+        b"{}",
+        "application/json",
+        UrlPolicy::from_issuer("http://localhost:8080"),
+        deadline,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn one_deadline_covers_a_signed_posts_answer() {
+    let peer = a_slow_peer(
+        "",
+        std::time::Duration::from_millis(600),
+        "HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}",
+    )
+    .await;
+
+    let late = post_within(&peer, std::time::Duration::from_millis(300)).await;
+
+    assert!(
+        matches!(&late, Err(TransportError::Upstream(m)) if m.contains("took more than")),
+        "{late:?}"
+    );
+}
+
+#[tokio::test]
+async fn one_deadline_covers_the_body_a_signed_posts_caller_reads() {
+    let peer = a_slow_peer(
+        "HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{",
+        std::time::Duration::from_millis(600),
+        "}",
+    )
+    .await;
+
+    let answer = post_within(&peer, std::time::Duration::from_millis(300))
+        .await
+        .unwrap();
+    let late = crate::http::read_capped(answer).await;
+
+    assert!(late.is_err(), "{late:?}");
+}

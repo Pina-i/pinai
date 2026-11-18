@@ -263,7 +263,7 @@ supplies, an address a user typed. One shared client applies the same bounds to 
 | Bound | Value | Without it |
 |---|---|---|
 | Connect timeout | 3 s | A silent host holds a task indefinitely |
-| Total timeout | 5 s; a GET's over its whole fetch — the screens, every redirect, the body | As above |
+| Total timeout | 5 s over a request's whole fetch — its screens, every redirect a GET follows, the answer's body | As above |
 | Redirects | ≤ 2 for a GET, each on the origin asked and screened before it is asked; none for a POST | A peer sends the request on into private space, or hands its answer to another origin |
 | Body cap | 256 KiB | A chunked response streams until memory runs out |
 
@@ -282,7 +282,7 @@ use a second client with the same screen and download-sized bounds:
 | Bound | Value | Why it differs |
 |---|---|---|
 | Connect timeout | 3 s | — |
-| Total timeout | none | A large file takes what it takes |
+| Total timeout | none past the screen, which takes 5 s at most | A large file takes what it takes |
 | Read timeout | 30 s | A stalled peer still releases the task |
 | Redirects | none | A signed request goes to the URL it was signed for, never on |
 | Body cap | the size the peer announced | The caller caps the stream as bytes arrive (`identity-provider/specs/attachments.md`) |

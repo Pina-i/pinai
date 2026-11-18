@@ -1,9 +1,11 @@
+use std::time::{Duration, Instant};
+
 use ed25519_dalek::SigningKey;
 use http_signatures::{http_date_now, sha256_digest, sign_request, SignParams};
 use tracing::debug;
 
 use crate::error::TransportError;
-use crate::http::{client, download_client, refusal_excerpt, screen_url, UrlPolicy};
+use crate::http::{client, download_client, refusal_excerpt, screen_url, UrlPolicy, TOTAL_TIMEOUT};
 
 /// The identity a signed request is made under.
 pub struct Signer<'a> {
@@ -37,7 +39,8 @@ pub async fn signed_post(
 }
 
 /// [`signed_post`], answering whatever status the peer chose — for callers that tell a
-/// peer's refusals apart.
+/// peer's refusals apart. The screen, the request and the answer's body share one
+/// [`TOTAL_TIMEOUT`].
 pub async fn send_signed_post(
     signer: &Signer<'_>,
     target_url: &str,
@@ -45,14 +48,45 @@ pub async fn send_signed_post(
     content_type: &str,
     policy: UrlPolicy,
 ) -> Result<reqwest::Response, TransportError> {
-    let request = signed_post_request(signer, target_url, body, content_type, policy).await?;
+    send_signed_post_within(
+        signer,
+        target_url,
+        body,
+        content_type,
+        policy,
+        TOTAL_TIMEOUT,
+    )
+    .await
+}
+
+async fn send_signed_post_within(
+    signer: &Signer<'_>,
+    target_url: &str,
+    body: &[u8],
+    content_type: &str,
+    policy: UrlPolicy,
+    deadline: Duration,
+) -> Result<reqwest::Response, TransportError> {
+    let late = || TransportError::Upstream(format!("peer took more than {deadline:?}"));
+    let started = Instant::now();
+    let mut request = tokio::time::timeout(
+        deadline,
+        signed_post_request(signer, target_url, body, content_type, policy),
+    )
+    .await
+    .map_err(|_| late())??;
+    // A request's own timeout runs on through the body its caller reads.
+    *request.timeout_mut() = Some(deadline.saturating_sub(started.elapsed()));
 
     debug!(%target_url, "sending signed POST");
 
-    client()
-        .execute(request)
-        .await
-        .map_err(|e| TransportError::Upstream(format!("signed POST failed: {e}")))
+    client().execute(request).await.map_err(|e| {
+        if e.is_timeout() {
+            late()
+        } else {
+            TransportError::Upstream(format!("signed POST failed: {e}"))
+        }
+    })
 }
 
 async fn signed_post_request(
@@ -103,13 +137,22 @@ async fn signed_post_request(
 }
 
 /// GET a peer's resource as the signer, to download it: the URL is screened like any peer
-/// request, and no redirect is followed, as its target would not be.
+/// request, within [`TOTAL_TIMEOUT`], and no redirect is followed, as its target would not be.
 pub async fn signed_get(
     signer: &Signer<'_>,
     target_url: &str,
     policy: UrlPolicy,
 ) -> Result<reqwest::Response, TransportError> {
-    let request = signed_get_request(signer, target_url, policy).await?;
+    let request = tokio::time::timeout(
+        TOTAL_TIMEOUT,
+        signed_get_request(signer, target_url, policy),
+    )
+    .await
+    .map_err(|_| {
+        TransportError::Upstream(format!(
+            "screening the peer's URL took more than {TOTAL_TIMEOUT:?}"
+        ))
+    })??;
 
     debug!(%target_url, "sending signed GET");
     let resp = download_client()
