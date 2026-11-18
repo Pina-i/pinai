@@ -382,9 +382,7 @@ impl From<MessagingError> for ApiError {
             MessagingError::AttachmentsUnavailable => ApiError::bad_request(
                 "one or more attachment IDs are missing, linked to a delivered message, or not owned by sender",
             ),
-            MessagingError::PeerNotAllowed(reason) => {
-                ApiError::new(StatusCode::FORBIDDEN, "access_denied", reason)
-            }
+            MessagingError::PeerNotAllowed(reason) => ApiError::peer_not_allowed(reason),
             MessagingError::NotAnAdmin => ApiError::new(
                 StatusCode::FORBIDDEN,
                 "access_denied",

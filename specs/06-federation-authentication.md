@@ -110,10 +110,17 @@ flowchart TD
 ```
 
 A rejection is `400` when the request is malformed — no `Signature` header, an
-unparseable one, a `keyId` that does not resolve — and `403` when a check fails on a
-well-formed request: a signature that does not verify (one covering a `Digest` the request
-lacks included), a `Digest` the signature does not cover or the body does not match, an
-actor that is not the signer, or a refetch refused by the rate limit.
+unparseable one — and `403` when a check fails on a well-formed request: a signature that does
+not verify (one covering a `Digest` the request lacks included), a `Digest` the signature does
+not cover or the body does not match, an actor that is not the signer, or a refetch refused by
+the rate limit. A signature whose key can't be had can't be verified yet: a `keyId` whose host
+doesn't answer, whose document has no `publicKeyPem` or one that doesn't parse, or that the peer
+request policy refuses is `401 invalid_signature` with `WWW-Authenticate: Signature`, "signature
+verification failed: the signing key could not be fetched", whatever the reason. A `401`, not a
+`403`: ActivityPub senders retry a `401` (Mastodon retries `401`, `408`, `429` and `5xx`, never
+`403`), so a peer whose key server was briefly down loses no activity. Anyone can send any
+`keyId`, so the reason — which may give the private address a name resolves to — goes to the log
+at debug level only.
 
 #### 1 — Signature
 
@@ -121,8 +128,9 @@ Parse the `Signature` header, resolve `keyId` to its actor document, read
 `publicKey.publicKeyPem`, and verify the signature over the rebuilt signing string. This
 establishes that **some** real actor signed this request.
 
-Rejected: a missing or malformed `Signature` header, a `keyId` that does not resolve, an
-actor document with no `publicKeyPem`, and a signature that does not verify.
+Rejected: a missing or malformed `Signature` header, a `keyId` whose key can't be fetched or
+read — an actor document with no `publicKeyPem` included —, and a signature that does not
+verify.
 
 #### 2 — Digest binding
 
@@ -262,46 +270,76 @@ supplies, an address a user typed. One shared client applies the same bounds to 
 
 | Bound | Value | Without it |
 |---|---|---|
-| Connect timeout | 3 s | A silent host holds a task indefinitely |
-| Total timeout | 5 s; a GET's over its whole fetch — the screens, every redirect, the body | As above |
+| Connect timeout | 3 s, the name's lookup included | A silent host holds a task indefinitely |
+| Total timeout | 5 s over a request's whole fetch — every redirect a GET follows, the answer's body | As above |
 | Redirects | ≤ 2 for a GET, each on the origin asked and screened before it is asked; none for a POST | A peer sends the request on into private space, or hands its answer to another origin |
 | Body cap | 256 KiB | A chunked response streams until memory runs out |
 
 The body cap is enforced as bytes arrive rather than by trusting `Content-Length`, which a
-hostile peer can omit.
+hostile peer can omit, and holds for every answer read from a peer — a document, a presence
+poll, a KeyPackage claim. An answer past it is a peer failing to answer (`TransportError::Upstream`:
+the identity provider's `502`), never a refusal of the peer request policy. A refusal is read less
+still: its first 1 KiB, of which one line of at
+most 200 characters, control characters and line breaks made spaces, goes into the error and the
+log — a peer neither holds the reader for its whole body nor writes lines of its own into this
+instance's logs.
 
 Downloads — attachment bytes fetched from a peer's `/content` endpoint through `signed_get` —
 use a second client with the same screen and download-sized bounds:
 
 | Bound | Value | Why it differs |
 |---|---|---|
-| Connect timeout | 3 s | — |
+| Connect timeout | 3 s, the name's lookup included | — |
 | Total timeout | none | A large file takes what it takes |
 | Read timeout | 30 s | A stalled peer still releases the task |
 | Redirects | none | A signed request goes to the URL it was signed for, never on |
 | Body cap | the size the peer announced | The caller caps the stream as bytes arrive (`identity-provider/specs/attachments.md`) |
 
-Peer URLs are screened before the request is made — the first and every redirect target alike,
-a relative `Location` read against the URL that answered it. A redirect never leaves the origin
+Peer URLs are screened as the request is made — the first and every redirect target alike, a
+relative `Location` read against the URL that answered it. A redirect never leaves the origin
 first asked, so what answers a URL is always its own origin's: the document "Resolving an actor"
 reads, and the key the verifying-key cache keeps, come from the URL's own instance. A target off
 that origin, or one the screen refuses, ends the fetch as a peer that doesn't answer does:
 
 - the scheme must be `https`;
-- the host — an IP literal as written, a name as it resolves — must not be in loopback, private,
-  link-local, carrier-grade-NAT, multicast, reserved, benchmarking or IETF-assigned space, nor be
-  an IPv4-mapped, IPv4-compatible or NAT64 address of one — the classic target being a cloud
-  metadata endpoint.
+- the host — an IP literal as written, a name as it resolves to connect — must not be in
+  loopback, private, link-local, site-local (`fec0::/10`, deprecated yet still routed inside some
+  networks), carrier-grade-NAT, multicast, reserved, benchmarking, documentation, discard
+  (`100::/64`) or IETF-assigned space, nor be an IPv4-mapped, IPv4-compatible, IPv4-translated
+  (SIIT, `::ffff:0:0/96`), NAT64 or 6to4 (`2002::/16`) address of one — the classic target being
+  a cloud metadata endpoint. A Teredo address (`2001::/32`) is refused whatever it embeds: the
+  tunnelling is deprecated, and its addresses don't say which host a relay delivers to.
+
+What a service tells its caller of such a refusal names nothing the screen resolved:
+
+- **A name refused as it is connected to** fails as an instance that doesn't answer does
+  (`TransportError::Upstream`): the identity provider answers `502`, "the account's instance did
+  not answer", and logs it at warn level as it logs any peer that failed to answer, the address
+  the name resolved to included. A signed-in user can't tell a name inside the deployment's
+  network from one that doesn't resolve or doesn't answer, so can't map its internal names one by
+  one (`x@db.internal`).
+- **An IP literal or a scheme the policy refuses** names nothing the user didn't type
+  (`TransportError::Denied`): a friend request, a DM, a group's invitee, a KeyPackage claim or an
+  inbox delivery whose peer is refused for it is `403 access_denied`, "That address can't be
+  reached from this instance", and an address lookup the `502` of an instance that didn't answer
+  (`identity-provider/specs/identity.md § 7`). The reason goes to the log at debug level only:
+  anyone signed in can make it.
 
 Both rules are derived from the local issuer: an `https` issuer is a production deployment
 and gets the strict policy, while a plain-`http` issuer is local development, where the
 `alice`/`bob` pair federates over `localhost`. There is no mixed-mode federation — peers are
 assumed to use the same scheme as this instance, consistent with `Config::scheme()`.
 
-> **Known gap.** The screen resolves DNS, then the HTTP client resolves again when it
-> connects. A hostile resolver can answer differently for each — DNS rebinding. Closing it
-> requires a connector pinned to the screened address; the current policy blocks the direct
-> attempt, not the race.
+A name is screened where it is connected to: the clients resolve peers' names through a
+resolver of their own (`federation_transport::http::PeerResolver`), which refuses a name when
+any address it resolves to is refused — one is enough — and hands the client only the addresses
+it checked. No lookup happens before it, so a DNS server answering a public address to one lookup
+and a private one to the next (DNS rebinding) has no earlier answer to slip past. An IP literal
+never reaches a resolver: it is checked as written, before the request. The clients use no
+proxy, which would connect to an address of its own choosing, and there is one shared client and
+one download client per policy, the policy being their resolver's. The identity provider's
+OAuth client documents (`identity-provider/specs/auth.md § 1` "Clients") are fetched through the
+same resolver.
 
 ---
 

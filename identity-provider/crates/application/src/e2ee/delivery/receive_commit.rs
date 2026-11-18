@@ -4,7 +4,7 @@ use domain::e2ee::{
     Append, CommitBlob, CommitLog, DeliveryError, Epoch, GroupInfo, GroupInfoBlob, GroupInfos,
     MlsNotifier, NewCommit, may_commit,
 };
-use domain::identity::{Accounts, ActorUri, RemoteActors};
+use domain::identity::{Accounts, ActorUri, InstanceOrigin, RemoteActors};
 use domain::messaging::{Conversations, GroupEvents, GroupNotifier, GroupSnapshot};
 use domain::social::Reachability;
 use domain::{ConversationId, UserId};
@@ -32,6 +32,7 @@ pub struct IncomingCommit {
 /// at its epoch is a redelivery, or a race another member won: either way there is nothing more
 /// to do.
 pub struct ReceiveCommit {
+    origin: InstanceOrigin,
     accounts: Arc<dyn Accounts>,
     remote_actors: Arc<dyn RemoteActors>,
     conversations: Arc<dyn Conversations>,
@@ -46,6 +47,7 @@ pub struct ReceiveCommit {
 impl ReceiveCommit {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
+        origin: InstanceOrigin,
         accounts: Arc<dyn Accounts>,
         remote_actors: Arc<dyn RemoteActors>,
         conversations: Arc<dyn Conversations>,
@@ -57,6 +59,7 @@ impl ReceiveCommit {
         events: Arc<dyn GroupEvents>,
     ) -> Self {
         Self {
+            origin,
             accounts,
             remote_actors,
             conversations,
@@ -96,6 +99,7 @@ impl ReceiveCommit {
                 return Ok(());
             }
             Mirror {
+                origin: &self.origin,
                 accounts: &*self.accounts,
                 remote_actors: &*self.remote_actors,
                 conversations: &*self.conversations,

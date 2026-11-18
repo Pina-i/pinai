@@ -1,4 +1,4 @@
-use domain::identity::{Account, Accounts, ActorUri, RemoteActors};
+use domain::identity::{Account, Accounts, ActorUri, InstanceOrigin, RemoteActors};
 use domain::messaging::{
     Conversations, GroupEvent, GroupEvents, GroupNotifier, GroupSnapshot, MAX_MEMBERS, Member,
     MessagingError, NamedEvent,
@@ -138,6 +138,7 @@ pub(crate) struct Newcomer {
 
 /// What mirroring the roster another instance sent reads and tells.
 pub(crate) struct Roster<'a> {
+    pub(crate) origin: &'a InstanceOrigin,
     pub(crate) conversations: &'a dyn Conversations,
     pub(crate) accounts: &'a dyn Accounts,
     pub(crate) reach: &'a dyn Reachability,
@@ -185,10 +186,15 @@ impl Roster<'_> {
             let new_here = !members
                 .iter()
                 .any(|m| m.actor_uri == change.member.actor_uri);
-            let account = match new_here {
+            let ours = new_here && self.origin.owns(&change.member.actor_uri);
+            let account = match ours {
                 true => self.accounts.find_by_uri(&change.member.actor_uri).await?,
                 false => None,
             };
+            // A URI of ours naming no account others reach: nobody to bring in, nor to list.
+            if ours && account.is_none() {
+                continue;
+            }
             if let Some(account) = account {
                 let asked = account.actor_uri == recipient.actor_uri;
                 if !asked && !admits_into_group(self.reach, &account, sender, &listed).await? {

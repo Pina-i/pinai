@@ -578,6 +578,7 @@ impl TestApp {
                 presence.clone(),
             )),
             receive_message: Arc::new(ReceiveMessage::new(
+                origin.clone(),
                 limits.clone(),
                 accounts.clone(),
                 remote_actors.clone(),
@@ -594,6 +595,7 @@ impl TestApp {
                 message_notifier.clone(),
             )),
             receive_commit: Arc::new(ReceiveCommit::new(
+                origin.clone(),
                 accounts.clone(),
                 remote_actors.clone(),
                 store.clone(),
@@ -605,6 +607,7 @@ impl TestApp {
                 store.clone(),
             )),
             receive_welcome: Arc::new(ReceiveWelcome::new(
+                origin.clone(),
                 accounts.clone(),
                 remote_actors.clone(),
                 store.clone(),
@@ -789,6 +792,7 @@ impl TestApp {
             )),
             dismiss_group: Arc::new(DismissGroup::new(accounts.clone(), store.clone())),
             receive_group_change: Arc::new(ReceiveGroupChange::new(
+                origin.clone(),
                 accounts.clone(),
                 remote_actors.clone(),
                 store.clone(),

@@ -7,7 +7,7 @@ use application::social::{LookUpAddress, SearchPeople};
 use axum::Json;
 use axum::extract::{Query, State};
 use domain::identity::InstanceOrigin;
-use domain::social::{FoundPerson, GroupPerson, PeopleFound, SearchQuery, Standing};
+use domain::social::{FoundPerson, GroupPerson, PeopleFound, SearchQuery, SocialError, Standing};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -132,7 +132,14 @@ pub async fn look_up(
         return Err(ApiError::rate_limited());
     }
     let found = match origin.sought(query.address.trim())? {
-        Some(address) => look_up.execute(caller, &address).await?,
+        Some(address) => look_up
+            .execute(caller, &address)
+            .await
+            .map_err(|e| match e {
+                // To the person looking, an instance this one may not ask is one that can't be reached.
+                SocialError::PeerNotAllowed(reason) => ApiError::upstream_not_allowed(reason),
+                other => other.into(),
+            })?,
         None => None,
     };
     let found = found.ok_or_else(|| ApiError::not_found("No account at this address"))?;

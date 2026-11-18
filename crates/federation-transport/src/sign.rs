@@ -1,9 +1,13 @@
+use std::time::Duration;
+
 use ed25519_dalek::SigningKey;
 use http_signatures::{http_date_now, sha256_digest, sign_request, SignParams};
 use tracing::debug;
 
 use crate::error::TransportError;
-use crate::http::{client, download_client, screen_url, UrlPolicy};
+use crate::http::{
+    client, download_client, refusal_excerpt, request_failed, screen_url, UrlPolicy, TOTAL_TIMEOUT,
+};
 
 /// The identity a signed request is made under.
 pub struct Signer<'a> {
@@ -12,11 +16,12 @@ pub struct Signer<'a> {
     pub signing_key: &'a SigningKey,
 }
 
-/// POST a signed body to a peer and return the response; a non-2xx answer is an error.
+/// POST a signed body to a peer and return the response; a non-2xx answer is an error carrying
+/// an excerpt of the peer's refusal.
 ///
 /// Callers choose the content type (`application/activity+json` for AP
 /// delivery, `application/json` for direct peer APIs) and decide what to do
-/// with the body.
+/// with the body, read through [`crate::http::read_capped`].
 pub async fn signed_post(
     signer: &Signer<'_>,
     target_url: &str,
@@ -27,16 +32,17 @@ pub async fn signed_post(
     let resp = send_signed_post(signer, target_url, body, content_type, policy).await?;
     if !resp.status().is_success() {
         let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
+        let excerpt = refusal_excerpt(resp).await;
         return Err(TransportError::Upstream(format!(
-            "peer returned {status}: {text}"
+            "peer returned {status}: {excerpt}"
         )));
     }
     Ok(resp)
 }
 
 /// [`signed_post`], answering whatever status the peer chose — for callers that tell a
-/// peer's refusals apart.
+/// peer's refusals apart. The lookup, the request and the answer's body share one
+/// [`TOTAL_TIMEOUT`].
 pub async fn send_signed_post(
     signer: &Signer<'_>,
     target_url: &str,
@@ -44,24 +50,55 @@ pub async fn send_signed_post(
     content_type: &str,
     policy: UrlPolicy,
 ) -> Result<reqwest::Response, TransportError> {
-    let request = signed_post_request(signer, target_url, body, content_type, policy).await?;
+    send_signed_post_within(
+        signer,
+        target_url,
+        body,
+        content_type,
+        policy,
+        TOTAL_TIMEOUT,
+    )
+    .await
+}
+
+async fn send_signed_post_within(
+    signer: &Signer<'_>,
+    target_url: &str,
+    body: &[u8],
+    content_type: &str,
+    policy: UrlPolicy,
+    deadline: Duration,
+) -> Result<reqwest::Response, TransportError> {
+    let mut request = signed_post_request(signer, target_url, body, content_type, policy)?;
+    // A request's own timeout runs on through the body its caller reads.
+    *request.timeout_mut() = Some(deadline);
 
     debug!(%target_url, "sending signed POST");
 
-    client()
+    client(policy)
         .execute(request)
         .await
-        .map_err(|e| TransportError::Upstream(format!("signed POST failed: {e}")))
+        .map_err(|e| post_failed(e, deadline))
 }
 
-async fn signed_post_request(
+/// Why a signed POST got no answer: its deadline, or what the client met — a connect timeout,
+/// the name's lookup included, told apart from the deadline.
+fn post_failed(error: reqwest::Error, deadline: Duration) -> TransportError {
+    if error.is_timeout() && !error.is_connect() {
+        TransportError::Upstream(format!("peer took more than {deadline:?}"))
+    } else {
+        request_failed("signed POST failed", error)
+    }
+}
+
+fn signed_post_request(
     signer: &Signer<'_>,
     target_url: &str,
     body: &[u8],
     content_type: &str,
     policy: UrlPolicy,
 ) -> Result<reqwest::Request, TransportError> {
-    let url = screen_url(target_url, policy).await?;
+    let url = screen_url(target_url, policy)?;
     let host = url
         .host_str()
         .ok_or_else(|| TransportError::BadRequest("target URL missing host".into()))?;
@@ -90,7 +127,7 @@ async fn signed_post_request(
 
     // No `Host` header: the client writes it from the URL, and over HTTP/2 nginx refuses a
     // request that carries one beside `:authority`.
-    client()
+    client(policy)
         .post(target_url)
         .header("Content-Type", content_type)
         .header("Date", &date)
@@ -108,13 +145,13 @@ pub async fn signed_get(
     target_url: &str,
     policy: UrlPolicy,
 ) -> Result<reqwest::Response, TransportError> {
-    let request = signed_get_request(signer, target_url, policy).await?;
+    let request = signed_get_request(signer, target_url, policy)?;
 
     debug!(%target_url, "sending signed GET");
-    let resp = download_client()
+    let resp = download_client(policy)
         .execute(request)
         .await
-        .map_err(|e| TransportError::Upstream(format!("signed GET failed: {e}")))?;
+        .map_err(|e| request_failed("signed GET failed", e))?;
     if !resp.status().is_success() {
         return Err(TransportError::Upstream(format!(
             "peer returned {}",
@@ -124,12 +161,12 @@ pub async fn signed_get(
     Ok(resp)
 }
 
-async fn signed_get_request(
+fn signed_get_request(
     signer: &Signer<'_>,
     target_url: &str,
     policy: UrlPolicy,
 ) -> Result<reqwest::Request, TransportError> {
-    let url = screen_url(target_url, policy).await?;
+    let url = screen_url(target_url, policy)?;
     let host = url
         .host_str()
         .ok_or_else(|| TransportError::BadRequest("target URL missing host".into()))?;
@@ -154,7 +191,7 @@ async fn signed_get_request(
     .map_err(|e| TransportError::Upstream(format!("HTTP Signature failed: {e}")))?;
 
     // No `Host` header, as for a POST.
-    download_client()
+    download_client(policy)
         .get(url)
         .header("Date", &date)
         .header("Signature", &signature)

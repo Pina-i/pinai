@@ -7,8 +7,8 @@ use crate::ValidationError;
 pub struct Domain(String);
 
 impl Domain {
-    /// Lowercased: hosts are case-insensitive, and a mixed-case copy of our own domain must
-    /// still read as ours.
+    /// Lowercased, the port without leading zeros: hosts are case-insensitive, and a copy of our
+    /// own domain written otherwise must still read as ours.
     pub fn parse(raw: &str) -> Result<Self, ValidationError> {
         let refuse = || ValidationError::new("domain", "a host name, optionally :port");
         let domain = raw.to_ascii_lowercase();
@@ -16,17 +16,19 @@ impl Domain {
             Some((host, port)) => (host, Some(port)),
             None => (domain.as_str(), None),
         };
-        let host_ok = !host.is_empty()
-            && host
-                .chars()
-                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '-')
-            && !host.starts_with(['.', '-'])
-            && !host.ends_with(['.', '-']);
-        let port_ok = port.is_none_or(|p| p.parse::<u16>().is_ok_and(|p| p > 0));
-        if host_ok && port_ok {
-            Ok(Self(domain))
-        } else {
-            Err(refuse())
+        if !is_host_name(host) {
+            return Err(refuse());
+        }
+        let Some(port) = port else {
+            return Ok(Self(domain));
+        };
+        match port
+            .bytes()
+            .all(|b| b.is_ascii_digit())
+            .then(|| port.parse::<u16>())
+        {
+            Some(Ok(port)) if port > 0 => Ok(Self(format!("{host}:{port}"))),
+            _ => Err(refuse()),
         }
     }
 
@@ -38,6 +40,28 @@ impl Domain {
     pub fn host(&self) -> &str {
         host_of(&self.0)
     }
+}
+
+/// A name DNS can answer, at most 253 characters of labels; one ending in a label of digits
+/// only is an IPv4 address or nothing, as a URL reads it.
+fn is_host_name(host: &str) -> bool {
+    let last_is_numeric = host
+        .rsplit('.')
+        .next()
+        .is_some_and(|label| label.bytes().all(|b| b.is_ascii_digit()));
+    host.len() <= 253
+        && host.split('.').all(is_dns_label)
+        && (!last_is_numeric || host.parse::<std::net::Ipv4Addr>().is_ok())
+}
+
+/// 1–63 of `a–z0–9-`, neither starting nor ending with `-`: any other name never resolves.
+fn is_dns_label(label: &str) -> bool {
+    (1..=63).contains(&label.len())
+        && label
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        && !label.starts_with('-')
+        && !label.ends_with('-')
 }
 
 /// An authority's host, `host[:port]` or `[v6][:port]`, without a numeric port.

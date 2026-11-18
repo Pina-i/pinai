@@ -13,7 +13,7 @@ mod source;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod testing;
 
-pub use account::{Account, RemoteActor};
+pub use account::{Account, RemoteActor, has_joined};
 pub use actor_uri::ActorUri;
 pub use address::{Domain, FederatedAddress, host_of};
 pub use gifs::KlipyKey;

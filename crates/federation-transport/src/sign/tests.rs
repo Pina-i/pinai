@@ -7,6 +7,7 @@ use tracing::{Event, Level, Subscriber};
 use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
 
 use super::*;
+use crate::http::{peer_client_builder, PeerResolver};
 
 /// Counts the events at WARN or above.
 #[derive(Clone, Default)]
@@ -86,11 +87,8 @@ async fn a_signed_request_leaves_its_host_to_the_client() {
         "application/activity+json",
         policy,
     )
-    .await
     .unwrap();
-    let get = signed_get_request(&signer, "http://localhost:8081/media/a1", policy)
-        .await
-        .unwrap();
+    let get = signed_get_request(&signer, "http://localhost:8081/media/a1", policy).unwrap();
 
     for request in [post, get] {
         assert!(
@@ -201,4 +199,221 @@ async fn a_signed_post_follows_no_redirect() {
         "{refused:?}"
     );
     assert_eq!(asked.load(Ordering::SeqCst), 1);
+}
+
+/// A peer on the loopback interface answering `403` with a body that never ends.
+async fn a_ranting_peer() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let at = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let _ = socket.read(&mut [0; 4096]).await;
+            let head = "HTTP/1.1 403 Forbidden\r\ntransfer-encoding: chunked\r\n\r\n";
+            if socket.write_all(head.as_bytes()).await.is_err() {
+                continue;
+            }
+            let line = "denied\r\n\x1b[2Jforged log line\n";
+            let chunk = format!("{:x}\r\n{line}\r\n", line.len());
+            while socket.write_all(chunk.as_bytes()).await.is_ok() {}
+        }
+    });
+    format!("http://{at}/users/bob_k2m9x/inbox")
+}
+
+#[tokio::test]
+async fn a_peers_refusal_is_cut_to_one_short_line_without_reading_it_all() {
+    let signing_key = SigningKey::from_bytes(&[7; 32]);
+    let signer = Signer {
+        key_id: "http://localhost:8080/users/alice_k2m9x#main-key",
+        signing_key: &signing_key,
+    };
+
+    let refused = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        signed_post(
+            &signer,
+            &a_ranting_peer().await,
+            b"{}",
+            "application/activity+json",
+            UrlPolicy::from_issuer("http://localhost:8080"),
+        ),
+    )
+    .await
+    .expect("a refusal is not read to its end");
+
+    let Err(TransportError::Upstream(reason)) = refused else {
+        panic!("{refused:?}");
+    };
+    assert!(
+        reason.starts_with("peer returned 403 Forbidden: denied [2Jforged log line denied"),
+        "{reason}"
+    );
+    assert!(reason.ends_with('…'), "{reason}");
+    assert!(
+        !reason.chars().any(char::is_control) && reason.chars().count() < 260,
+        "{reason}"
+    );
+}
+
+/// A peer on the loopback interface that answers `head` at once, then `rest` after `delay`.
+async fn a_slow_peer(head: &'static str, delay: std::time::Duration, rest: &'static str) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let at = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let _ = socket.read(&mut [0; 4096]).await;
+            let _ = socket.write_all(head.as_bytes()).await;
+            tokio::time::sleep(delay).await;
+            let _ = socket.write_all(rest.as_bytes()).await;
+        }
+    });
+    format!("http://{at}/api/presence/batch")
+}
+
+async fn post_within(
+    target: &str,
+    deadline: std::time::Duration,
+) -> Result<reqwest::Response, TransportError> {
+    let signing_key = SigningKey::from_bytes(&[7; 32]);
+    let signer = Signer {
+        key_id: "http://localhost:8080/actor#main-key",
+        signing_key: &signing_key,
+    };
+    send_signed_post_within(
+        &signer,
+        target,
+        b"{}",
+        "application/json",
+        UrlPolicy::from_issuer("http://localhost:8080"),
+        deadline,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn one_deadline_covers_a_signed_posts_answer() {
+    let peer = a_slow_peer(
+        "",
+        std::time::Duration::from_millis(600),
+        "HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}",
+    )
+    .await;
+
+    let late = post_within(&peer, std::time::Duration::from_millis(300)).await;
+
+    assert!(
+        matches!(&late, Err(TransportError::Upstream(m)) if m.contains("took more than")),
+        "{late:?}"
+    );
+}
+
+#[tokio::test]
+async fn one_deadline_covers_the_body_a_signed_posts_caller_reads() {
+    let peer = a_slow_peer(
+        "HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{",
+        std::time::Duration::from_millis(600),
+        "}",
+    )
+    .await;
+
+    let answer = post_within(&peer, std::time::Duration::from_millis(300))
+        .await
+        .unwrap();
+    let late = crate::http::read_capped(answer).await;
+
+    assert!(late.is_err(), "{late:?}");
+}
+
+/// A peer on the loopback interface answering every request `202`, counting its connections.
+async fn a_counting_peer() -> (u16, Arc<AtomicUsize>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let connections = Arc::new(AtomicUsize::new(0));
+    let counted = connections.clone();
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            counted.fetch_add(1, Ordering::SeqCst);
+            let _ = socket.read(&mut [0; 4096]).await;
+            let response =
+                "HTTP/1.1 202 Accepted\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
+            let _ = socket.write_all(response.as_bytes()).await;
+        }
+    });
+    (port, connections)
+}
+
+#[tokio::test]
+async fn a_signed_request_to_a_name_resolving_into_private_space_is_never_sent_in_production() {
+    let signing_key = SigningKey::from_bytes(&[7; 32]);
+    let signer = Signer {
+        key_id: "https://idp.alice.test/actor#main-key",
+        signing_key: &signing_key,
+    };
+    let production = UrlPolicy::from_issuer("https://idp.alice.test");
+    let (port, connections) = a_counting_peer().await;
+
+    let posted = send_signed_post(
+        &signer,
+        &format!("https://localhost:{port}/users/bob_k2m9x/inbox"),
+        b"{}",
+        "application/activity+json",
+        production,
+    )
+    .await;
+    let got = signed_get(
+        &signer,
+        &format!("https://localhost:{port}/api/presence/stream"),
+        production,
+    )
+    .await;
+
+    for refused in [posted.map(|_| ()), got.map(|_| ())] {
+        assert!(
+            matches!(&refused, Err(TransportError::Upstream(m)) if m.contains("private address space")),
+            "{refused:?}"
+        );
+    }
+    assert_eq!(connections.load(Ordering::SeqCst), 0);
+}
+
+/// A client whose lookups take a second, and connects within `connect`.
+fn a_client_slow_to_resolve(connect: std::time::Duration) -> reqwest::ClientBuilder {
+    let resolver =
+        PeerResolver::with_lookup(UrlPolicy::from_issuer("http://localhost:8080"), |_| async {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            Ok(vec!["127.0.0.1".parse().unwrap()])
+        });
+    peer_client_builder(resolver).connect_timeout(connect)
+}
+
+#[tokio::test]
+async fn a_signed_posts_connect_timeout_is_told_from_its_deadline() {
+    let unconnected = a_client_slow_to_resolve(std::time::Duration::from_millis(50))
+        .build()
+        .unwrap()
+        .post("http://slow.test:1/users/bob_k2m9x/inbox")
+        .send()
+        .await
+        .unwrap_err();
+    let unanswered = a_client_slow_to_resolve(std::time::Duration::from_secs(3))
+        .timeout(std::time::Duration::from_millis(50))
+        .build()
+        .unwrap()
+        .post("http://slow.test:1/users/bob_k2m9x/inbox")
+        .send()
+        .await
+        .unwrap_err();
+
+    let deadline = std::time::Duration::from_secs(5);
+    let connect = post_failed(unconnected, deadline);
+    let late = post_failed(unanswered, deadline);
+
+    assert!(
+        matches!(&connect, TransportError::Upstream(m) if m.contains("took too long to connect")),
+        "{connect:?}"
+    );
+    assert!(
+        matches!(&late, TransportError::Upstream(m) if m == "peer took more than 5s"),
+        "{late:?}"
+    );
 }

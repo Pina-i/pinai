@@ -32,6 +32,22 @@ async fn an_internal_error_never_shows_its_cause() {
 }
 
 #[tokio::test]
+async fn a_peer_the_policy_refuses_is_refused_without_the_reason() {
+    let reason = "peer URL resolves into private address space (10.0.0.5)".to_owned();
+
+    let response = ApiError::peer_not_allowed(reason).into_response();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        json_body(response).await,
+        json!({
+            "error": "access_denied",
+            "error_description": "That address can't be reached from this instance"
+        })
+    );
+}
+
+#[tokio::test]
 async fn extra_fields_sit_beside_the_error() {
     let response = ApiError::new(StatusCode::CONFLICT, "conflict", "Epoch already taken")
         .with("winning_commit", json!({ "epoch": 4 }))
@@ -60,6 +76,19 @@ async fn a_peer_that_failed_to_answer_is_a_bad_gateway_without_its_cause() {
     let cause = anyhow::anyhow!("peer returned 500: {{\"detail\":\"db password hunter2\"}}");
 
     let response = ApiError::upstream(cause).into_response();
+
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    assert_eq!(
+        json_body(response).await,
+        json!({ "error": "bad_gateway", "error_description": "the account's instance did not answer" })
+    );
+}
+
+#[tokio::test]
+async fn a_peer_the_policy_refuses_told_as_one_that_did_not_answer_never_shows_the_reason() {
+    let reason = "peer URL resolves into private address space (10.0.0.5)".to_owned();
+
+    let response = ApiError::upstream_not_allowed(reason).into_response();
 
     assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
     assert_eq!(

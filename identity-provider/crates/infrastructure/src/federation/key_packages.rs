@@ -8,10 +8,12 @@ use domain::e2ee::{
     Claim, ClaimedKeyPackage, KeyPackageBytes, RemoteClaimError, RemoteKeyPackages,
 };
 use domain::identity::ActorUri;
+use federation_transport::http::{read_capped, refusal_excerpt};
 use federation_transport::{Signer, TransportError, UrlPolicy, send_signed_post};
 use jwt_utils::EdKeyPair;
 use reqwest::StatusCode;
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use time::OffsetDateTime;
 
 /// Claims from the instance hosting the account, signed as the local account asking — a
@@ -101,13 +103,19 @@ impl SignedRemoteKeyPackages {
             StatusCode::TOO_MANY_REQUESTS => Err(RemoteClaimError::Busy),
             StatusCode::FORBIDDEN => Err(RemoteClaimError::Unreachable),
             status => {
-                let text = response.text().await.unwrap_or_default();
+                let excerpt = refusal_excerpt(response).await;
                 Err(RemoteClaimError::Unavailable(anyhow::anyhow!(
-                    "the peer answered a claim with {status}: {text}"
+                    "the peer answered a claim with {status}: {excerpt}"
                 )))
             }
         }
     }
+}
+
+/// A peer's answer, read within the peer body cap.
+async fn read_json<T: DeserializeOwned>(response: reqwest::Response) -> anyhow::Result<T> {
+    let body = read_capped(response).await.context("read the answer")?;
+    serde_json::from_slice(&body).context("decode the answer")
 }
 
 #[async_trait::async_trait]
@@ -125,8 +133,7 @@ impl RemoteKeyPackages for SignedRemoteKeyPackages {
         let response = self
             .ask(sender, target, "/api/keys/packages/claim", body)
             .await?;
-        let claimed: ClaimedDto = response
-            .json()
+        let claimed: ClaimedDto = read_json(response)
             .await
             .context("read a peer's KeyPackage claim")?;
         claimed.try_into()
@@ -141,8 +148,7 @@ impl RemoteKeyPackages for SignedRemoteKeyPackages {
         let response = self
             .ask(sender, target, "/api/keys/packages/claim/devices", body)
             .await?;
-        let claimed: ClaimsDto = response
-            .json()
+        let claimed: ClaimsDto = read_json(response)
             .await
             .context("read a peer's KeyPackage claims")?;
         claimed.claims.into_iter().map(Claim::try_from).collect()

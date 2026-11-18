@@ -39,7 +39,9 @@ The whole profile — name, avatar, pronouns and bio — federates to the accoun
 - `friends_since` — when the friendship was accepted on the caller's side (RFC 3339,
   `identity-provider/specs/social.md § 1`), `null` unless they are friends.
 
-An account of this instance is shown to every account here, as its `Person` is to anyone (§ 3).
+An account of this instance is shown to every account here, as its `Person` is to anyone (§ 3) —
+once it has joined: a sign-up still to confirm its address has no card
+(`identity-provider/specs/social.md § 2` "An account still signing up").
 One of another instance is shown from `remote_actors`, and only to a caller who counts it among
 their accepted friends or shares a conversation with it, both still members — the rule presence
 follows (`identity-provider/specs/presence.md`, What a peer is told). Any other actor is `404 not_found` (`User not
@@ -51,6 +53,13 @@ A non-friend's cached profile is only as fresh as the last time anyone here reso
 friend's misses an `Update{Person}` that was lost. So a card whose `remote_actors.fetched_at` is
 more than 24 h old is answered as cached, and the account is discovered again in the background
 (`identity-provider/specs/identity.md § 2`) for the next read.
+
+Only a document read makes the profile fresh again: a discovery its instance didn't answer, or
+answered what no instance would, or that the peer request policy refused, leaves `fetched_at` as it
+was, so the card stays stale and the next read asks again. An account is asked for at most once an
+hour, whatever came of it (`BackgroundProfileRefresh`), so a dead peer costs one fetch an hour
+however often its card is read. The hour is held in memory — one process per instance, as the
+presence board assumes —: a restart forgets it, at the cost of one more fetch per account.
 
 ### Avatar storage
 

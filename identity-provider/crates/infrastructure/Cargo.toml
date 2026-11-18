@@ -55,6 +55,7 @@ redis                = { version = "0.27", features = ["aio", "tokio-comp", "con
 domain          = { package = "idp-domain", path = "../domain", features = ["test-utils"] }
 http-signatures = { workspace = true }
 tokio    = { workspace = true }
+tracing-subscriber = { workspace = true }
 uuid     = { workspace = true }
 wiremock = { workspace = true }
 

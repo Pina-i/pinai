@@ -833,3 +833,35 @@ async fn a_peers_html_bio_is_kept_as_text_with_pronouns_this_instance_knows() {
     assert_eq!(kept.pronouns, Some(domain::profile::Pronouns::NonBinary));
     assert_eq!(unknown.unwrap().pronouns, None);
 }
+
+#[tokio::test]
+async fn a_follow_from_an_instance_this_one_may_not_ask_says_nothing_of_where_it_leads() {
+    let alice = account("alice");
+    let app = TestApp::knowing(
+        [alice.clone()],
+        domain::identity::testing::InMemoryRemoteActors::default().and_refused("10.0.0.5"),
+    );
+    let dave = ActorUri::parse("https://10.0.0.5/users/dave_k2m9x").unwrap();
+    let follow = json!({
+        "@context": "https://www.w3.org/ns/activitystreams",
+        "id": format!("{dave}/activities/{}", uuid::Uuid::new_v4()),
+        "type": "Follow",
+        "actor": dave.as_str(),
+        "object": alice.actor_uri.as_str(),
+    });
+
+    let answer = app
+        .call_as_peer(Method::POST, "/users/alice_t3st0/inbox", &dave, follow)
+        .await;
+
+    assert_eq!(
+        answer,
+        (
+            StatusCode::FORBIDDEN,
+            json!({
+                "error": "access_denied",
+                "error_description": "That address can't be reached from this instance"
+            })
+        )
+    );
+}

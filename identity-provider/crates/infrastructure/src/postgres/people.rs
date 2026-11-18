@@ -100,7 +100,7 @@ impl PeopleSearch for PgPeopleSearch {
         query: &SearchQuery,
         limit: i64,
     ) -> Result<PeopleFound, SocialStoreError> {
-        // Confirmed or admitted, as the members list: never a sign-up still to confirm.
+        let joined = super::has_joined("u");
         let server: Vec<PersonRow> = sqlx::query_as(&format!(
             "WITH {QUERY}, \
              p AS ( \
@@ -111,7 +111,7 @@ impl PeopleSearch for PgPeopleSearch {
                FROM users u CROSS JOIN q \
                CROSS JOIN LATERAL (SELECT lower(unaccent(u.display_name)) AS folded) n \
                WHERE u.id <> $1 AND u.actor_uri IS NOT NULL \
-                 AND (u.email_verified_at IS NOT NULL OR u.admitted_at IS NOT NULL)) \
+                 AND {joined}) \
              SELECT p.actor_uri, p.display_name, p.avatar_url, {TIES} \
              FROM p {SIDE} WHERE p.tier IS NOT NULL {ORDER} LIMIT $3"
         ))
@@ -176,8 +176,8 @@ impl PeopleSearch for PgPeopleSearch {
         let row: Option<PersonRow> = sqlx::query_as(&format!(
             "SELECT p.actor_uri, p.display_name, p.avatar_url, {TIES} \
              FROM users p {SIDE} \
-             WHERE p.username = $2 AND p.actor_uri IS NOT NULL \
-               AND (p.email_verified_at IS NOT NULL OR p.admitted_at IS NOT NULL)"
+             WHERE p.username = $2 AND p.actor_uri IS NOT NULL AND {}",
+            super::has_joined("p")
         ))
         .bind(caller.as_uuid())
         .bind(handle.as_str())

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use domain::UserId;
-use domain::identity::{Accounts, ActorUri, RemoteActors};
+use domain::identity::{Accounts, ActorUri, InstanceOrigin, RemoteActors};
 use domain::messaging::{
     ConversationKind, Conversations, GroupChange, GroupChangeKind, GroupEffect, GroupEvent,
     GroupEvents, GroupNotifier, Member, MessagingError, Role,
@@ -15,6 +15,7 @@ use crate::messaging::shared::{Timeline, caller};
 /// when its maker may make it and it is newer than what this copy holds, ignored otherwise —
 /// a peer learns nothing of who is in a group here.
 pub struct ReceiveGroupChange {
+    origin: InstanceOrigin,
     accounts: Arc<dyn Accounts>,
     remote_actors: Arc<dyn RemoteActors>,
     conversations: Arc<dyn Conversations>,
@@ -25,6 +26,7 @@ pub struct ReceiveGroupChange {
 
 impl ReceiveGroupChange {
     pub fn new(
+        origin: InstanceOrigin,
         accounts: Arc<dyn Accounts>,
         remote_actors: Arc<dyn RemoteActors>,
         conversations: Arc<dyn Conversations>,
@@ -33,6 +35,7 @@ impl ReceiveGroupChange {
         events: Arc<dyn GroupEvents>,
     ) -> Self {
         Self {
+            origin,
             accounts,
             remote_actors,
             conversations,
@@ -42,12 +45,16 @@ impl ReceiveGroupChange {
         }
     }
 
-    /// As for an add made here: an account of this instance comes in only by someone it admits.
-    /// Another instance's account is that instance's to refuse.
+    /// As for an add made here: an account of this instance comes in only by someone it admits,
+    /// and a URI of ours naming no account others reach never does. Another instance's account is
+    /// that instance's to refuse.
     async fn admits(&self, added: &ActorUri, by: &ActorUri) -> Result<bool, MessagingError> {
+        if !self.origin.owns(added) {
+            return Ok(true);
+        }
         Ok(match self.accounts.find_by_uri(added).await? {
             Some(local) => self.reach.relation(local.id, by).await?.admits().is_ok(),
-            None => true,
+            None => false,
         })
     }
 
@@ -94,9 +101,14 @@ impl ReceiveGroupChange {
                 at,
                 removed_by,
             } => {
-                self.conversations
+                // Another member's copy of it may have taken it since this one was read.
+                if !self
+                    .conversations
                     .remove_member(group.id, &member, removed_by.as_ref(), Some(at))
-                    .await?;
+                    .await?
+                {
+                    return Ok(());
+                }
                 for local in local_accounts(&*self.accounts, &before).await? {
                     self.notifier
                         .member_removed(local.id, group.id, &member, removed_by.as_ref());
@@ -138,11 +150,17 @@ impl ReceiveGroupChange {
                         }
                     }
                     GroupChangeKind::Renamed(_) => {
+                        if !mirrored.renamed {
+                            return Ok(());
+                        }
                         for local in locals {
                             self.notifier.renamed(local.id, &group, &change.by);
                         }
                     }
                     GroupChangeKind::RoleChanged(member, role) => {
+                        if !mirrored.roles_taken.contains(member) {
+                            return Ok(());
+                        }
                         let member = Member {
                             actor_uri: member.clone(),
                             role: *role,

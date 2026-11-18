@@ -327,15 +327,117 @@ async fn a_group_is_created_with_its_whole_roster(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "infrastructure::MIGRATOR")]
-async fn an_added_member_takes_the_given_role_and_one_who_left_rejoins(pool: PgPool) {
+async fn adding_an_active_member_writes_nothing_and_one_who_left_rejoins(pool: PgPool) {
     let alice = an_account(&pool, "alice").await;
     let bob = an_account(&pool, "bob").await;
-    contract::an_added_member_takes_the_given_role_and_one_who_left_rejoins(
+    contract::adding_an_active_member_writes_nothing_and_one_who_left_rejoins(
         &PgConversations::new(pool),
         &alice,
         &bob,
     )
     .await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn a_change_mirrored_twice_is_taken_once_and_an_older_one_never(pool: PgPool) {
+    let alice = an_account(&pool, "alice").await;
+    contract::a_change_mirrored_twice_is_taken_once_and_an_older_one_never(
+        &PgConversations::new(pool),
+        &alice,
+    )
+    .await;
+}
+
+/// Each member here gets its own copy of a change made elsewhere, often at the same moment: one
+/// write takes it, and says so.
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn a_change_taken_by_two_copies_at_once_is_taken_by_one(pool: PgPool) {
+    let conversations = PgConversations::new(pool);
+    let now = time::OffsetDateTime::now_utc();
+    let later = now + time::Duration::minutes(1);
+    let actor =
+        |name: &str| ActorUri::parse(&format!("https://idp.remote.test/users/{name}")).unwrap();
+    let held = |name: &str, role, role_at| Membership {
+        member: Member {
+            actor_uri: actor(name),
+            role,
+        },
+        joined_at: now,
+        role_at,
+        left_at: None,
+    };
+    let change = GroupChanges {
+        name: Some(StampedName {
+            name: Some("new crew".to_owned()),
+            at: later,
+        }),
+        members: vec![held("bea", Role::Admin, later)],
+    };
+
+    for _ in 0..20 {
+        let id = ConversationId::generate();
+        conversations
+            .mirror_group(
+                id,
+                &GroupChanges {
+                    name: Some(StampedName {
+                        name: Some("crew".to_owned()),
+                        at: now,
+                    }),
+                    members: vec![
+                        held("ana", Role::Admin, now),
+                        held("bea", Role::Member, now),
+                        held("cy", Role::Member, now),
+                    ],
+                },
+            )
+            .await
+            .unwrap();
+        let (cy, by) = (actor("cy"), actor("ana"));
+
+        let (first, second) = tokio::join!(
+            conversations.mirror_group(id, &change),
+            conversations.mirror_group(id, &change),
+        );
+        let removed = tokio::join!(
+            conversations.remove_member(id, &cy, Some(&by), Some(later)),
+            conversations.remove_member(id, &cy, Some(&by), Some(later)),
+        );
+        let dee = Member {
+            actor_uri: actor("dee"),
+            role: Role::Member,
+        };
+        let added = tokio::join!(
+            conversations.add_member(id, &dee),
+            conversations.add_member(id, &dee),
+        );
+
+        let (first, second) = (first.unwrap(), second.unwrap());
+        assert_eq!(
+            [first.renamed, second.renamed]
+                .iter()
+                .filter(|r| **r)
+                .count(),
+            1,
+            "renamed by one"
+        );
+        assert_eq!(
+            [first.roles_taken, second.roles_taken].concat(),
+            vec![actor("bea")],
+            "bea's role taken by one"
+        );
+        let one = |taken: [bool; 2]| taken.iter().filter(|t| **t).count();
+        assert_eq!(
+            one([removed.0.unwrap(), removed.1.unwrap()]),
+            1,
+            "cy removed by one"
+        );
+        assert_eq!(
+            one([added.0.unwrap(), added.1.unwrap()]),
+            1,
+            "dee added by one"
+        );
+    }
 }
 
 #[sqlx::test(migrator = "infrastructure::MIGRATOR")]

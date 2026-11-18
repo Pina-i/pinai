@@ -41,6 +41,9 @@ You need:
   later;
 - a reverse proxy that serves the domain over HTTPS, with its certificate: Caddy,
   nginx, Traefik…;
+- outbound HTTPS from the server to other instances, made directly: the instance
+  ignores `HTTP_PROXY`, `HTTPS_PROXY` and `ALL_PROXY`, because the address it checks
+  (never one inside your network) must be the address it connects to;
 - for a public instance, an SMTP relay, over STARTTLS (port 587) or TLS (port 465):
   sign-up codes are mailed. `deploy/README.md` lists some, with their settings.
 

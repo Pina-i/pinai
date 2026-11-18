@@ -353,11 +353,45 @@ async fn an_instance_that_does_not_answer_is_a_502() {
 }
 
 #[tokio::test]
+async fn an_instance_this_one_may_not_ask_is_a_502_as_one_that_does_not_answer() {
+    let alice = account("alice");
+    let app = TestApp::knowing(
+        [alice.clone()],
+        InMemoryRemoteActors::default().and_refused("reef.chat"),
+    );
+
+    let (status, body) = app
+        .call(
+            Method::GET,
+            &lookup_of("mahealani_q1x8c@reef.chat"),
+            Some(alice.id),
+            None,
+        )
+        .await;
+
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+    assert_eq!(
+        body,
+        json!({ "error": "bad_gateway", "error_description": "the account's instance did not answer" })
+    );
+}
+
+#[tokio::test]
 async fn what_is_no_address_is_a_400() {
     let alice = account("alice");
     let app = TestApp::with([alice.clone()], []);
 
-    for address in ["", "@", "hoku@", "a@b@c", "not an address"] {
+    for address in [
+        "",
+        "@",
+        "hoku@",
+        "a@b@c",
+        "not an address",
+        "x@reef..chat",
+        "x@a.-b",
+        "x@reef.123",
+        "x@reef.chat:+443",
+    ] {
         let (status, body) = app
             .call(Method::GET, &lookup_of(address), Some(alice.id), None)
             .await;

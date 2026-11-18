@@ -3,6 +3,7 @@ use axum::http::{HeaderName, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use domain::ValidationError;
 use serde_json::{Map, Value};
+use tracing::Level;
 
 /// The one error type handlers return. Each context's `impl From<XError> for ApiError`
 /// is its status-code policy; the body is `{ "error", "error_description", ..extra }`.
@@ -11,7 +12,8 @@ pub struct ApiError {
     status: StatusCode,
     code: &'static str,
     description: String,
-    source: Option<anyhow::Error>,
+    /// The cause, for the log only, and the level it is logged at.
+    source: Option<(anyhow::Error, Level)>,
     extra: Map<String, Value>,
     headers: Vec<(HeaderName, HeaderValue)>,
 }
@@ -82,10 +84,22 @@ impl ApiError {
         )
     }
 
-    /// A 500 whose cause goes to the logs, never to the client.
+    /// A 403 for an instance the peer request policy keeps this one from asking. The reason may
+    /// name what the instance's address resolves to, so it goes to the log only.
+    pub fn peer_not_allowed(reason: String) -> Self {
+        Self::new(
+            StatusCode::FORBIDDEN,
+            "access_denied",
+            "That address can't be reached from this instance",
+        )
+        .refused_because(reason)
+    }
+
+    /// A 500 whose cause goes to the logs at error level, never to the client: this instance
+    /// failed.
     pub fn internal(source: anyhow::Error) -> Self {
         Self {
-            source: Some(source),
+            source: Some((source, Level::ERROR)),
             ..Self::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "server_error",
@@ -94,16 +108,35 @@ impl ApiError {
         }
     }
 
-    /// A 502 for another instance that failed to answer; the cause goes to the logs.
+    /// A 502 for another instance that failed to answer. Its cause goes to the logs at warn
+    /// level: the peer failed, not this instance, and anyone can name a dead one.
     pub fn upstream(source: anyhow::Error) -> Self {
         Self {
-            source: Some(source),
-            ..Self::new(
-                StatusCode::BAD_GATEWAY,
-                "bad_gateway",
-                "the account's instance did not answer",
-            )
+            source: Some((source, Level::WARN)),
+            ..Self::bad_gateway()
         }
+    }
+
+    /// A 502, as [`Self::upstream`], for an instance the peer request policy keeps this one from
+    /// asking, where the caller is told no more than that it didn't answer; the reason is logged
+    /// as [`Self::peer_not_allowed`]'s.
+    pub fn upstream_not_allowed(reason: String) -> Self {
+        Self::bad_gateway().refused_because(reason)
+    }
+
+    fn bad_gateway() -> Self {
+        Self::new(
+            StatusCode::BAD_GATEWAY,
+            "bad_gateway",
+            "the account's instance did not answer",
+        )
+    }
+
+    /// The reason for a refusal, for the log at debug level only: it may name what the
+    /// requester must not learn, and anyone can make it.
+    pub fn refused_because(mut self, reason: impl Into<String>) -> Self {
+        self.source = Some((anyhow::anyhow!(reason.into()), Level::DEBUG));
+        self
     }
 
     pub fn description(&self) -> &str {
@@ -126,10 +159,16 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         // Logged once, here, where the error is handled.
         match &self.source {
-            Some(source) if self.status.is_server_error() => {
+            Some((source, level)) if *level == Level::ERROR => {
                 tracing::error!(error = ?source, "request failed")
             }
-            _ => tracing::debug!(status = %self.status, code = self.code, "request refused"),
+            Some((source, level)) if *level == Level::WARN => {
+                tracing::warn!(status = %self.status, error = %format_args!("{source:#}"), "a peer failed to answer")
+            }
+            Some((source, _)) => {
+                tracing::debug!(status = %self.status, code = self.code, error = %source, "request refused")
+            }
+            None => tracing::debug!(status = %self.status, code = self.code, "request refused"),
         }
         let mut body = self.extra;
         body.insert("error".into(), self.code.into());

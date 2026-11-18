@@ -14,6 +14,7 @@ struct World {
     alice: Account,
     bob: Account,
     remote_carol: RemoteActor,
+    accounts: Arc<InMemoryAccounts>,
     graph: Arc<InMemorySocialGraph>,
     notifier: Arc<RecordingSocialNotifier>,
     federation: Arc<RecordingSocialFederation>,
@@ -28,8 +29,9 @@ fn world() -> World {
     let notifier = Arc::new(RecordingSocialNotifier::default());
     let federation = Arc::new(RecordingSocialFederation::default());
     let reach = Arc::new(StubReachability::default());
+    let accounts = Arc::new(InMemoryAccounts::with([alice.clone(), bob.clone()]));
     let send = SendFriendRequest::new(
-        Arc::new(InMemoryAccounts::with([alice.clone(), bob.clone()])),
+        accounts.clone(),
         Arc::new(InMemoryRemoteActors::with([remote_carol.clone()])),
         graph.clone(),
         reach.clone(),
@@ -40,6 +42,7 @@ fn world() -> World {
         alice,
         bob,
         remote_carol,
+        accounts,
         graph,
         notifier,
         federation,
@@ -106,6 +109,25 @@ async fn a_request_to_an_unknown_local_name_finds_no_user() {
         "{refused:?}"
     );
     assert!(w.notifier.sent().is_empty());
+}
+
+#[tokio::test]
+async fn a_request_to_a_sign_up_still_to_confirm_finds_no_user() {
+    let w = world();
+    let kai = account("kai");
+    w.accounts.signing_up(kai.clone());
+
+    let refused = w.send.execute(w.alice.id, local(&kai)).await;
+
+    assert!(
+        matches!(refused, Err(SocialError::UserNotFound)),
+        "{refused:?}"
+    );
+    assert!(w.notifier.sent().is_empty());
+    assert_eq!(
+        w.graph.between(w.alice.id, &kai.actor_uri).await.unwrap(),
+        None
+    );
 }
 
 #[tokio::test]

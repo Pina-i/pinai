@@ -1808,15 +1808,16 @@ impl InstanceMembers for PgInstanceMembers {
     async fn list(&self, now: OffsetDateTime) -> Result<Vec<InstanceMember>, AuthError> {
         // A live session is unrevoked and used within `SESSION_IDLE`, as `Session::is_live` says;
         // a member is an account that needs no code (`SignInAccount::needs_code`).
-        let rows: Vec<MemberRow> = sqlx::query_as(
+        let rows: Vec<MemberRow> = sqlx::query_as(&format!(
             "SELECT u.id, u.actor_uri, u.display_name, u.is_admin, \
                     MAX(s.last_used_at) FILTER (WHERE s.revoked_at IS NULL AND s.last_used_at > $1) \
                         AS last_active_at \
              FROM users u LEFT JOIN sessions s ON s.user_id = u.id \
-             WHERE u.email_verified_at IS NOT NULL OR u.admitted_at IS NOT NULL \
+             WHERE {} \
              GROUP BY u.id \
              ORDER BY last_active_at DESC NULLS LAST, u.id",
-        )
+            super::has_joined("u")
+        ))
         .bind(now - SESSION_IDLE)
         .fetch_all(&self.pool)
         .await

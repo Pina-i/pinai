@@ -54,6 +54,43 @@ pub trait Uploads: Send + Sync {
 #[derive(Default)]
 pub struct InMemoryMessaging {
     state: Mutex<State>,
+    interleaving: bool,
+}
+
+impl InMemoryMessaging {
+    /// A store whose group reads and writes first let the other tasks run: two flows working on
+    /// one group at once, joined, interleave as they do on a real store.
+    pub fn interleaving() -> Self {
+        Self {
+            interleaving: true,
+            ..Self::default()
+        }
+    }
+
+    async fn let_others_run(&self) {
+        if self.interleaving {
+            YieldOnce(false).await;
+        }
+    }
+}
+
+/// Pending once, so that whatever is joined with the task runs before it goes on.
+struct YieldOnce(bool);
+
+impl std::future::Future for YieldOnce {
+    type Output = ();
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<()> {
+        if self.0 {
+            return std::task::Poll::Ready(());
+        }
+        self.0 = true;
+        cx.waker().wake_by_ref();
+        std::task::Poll::Pending
+    }
 }
 
 #[derive(Default)]
@@ -348,15 +385,18 @@ impl Conversations for InMemoryMessaging {
     }
 
     async fn find(&self, id: ConversationId) -> Result<Option<Conversation>, MessageStoreError> {
+        self.let_others_run().await;
         let state = self.state.lock().unwrap();
         Ok(state.conversations.iter().find(|c| c.id == id).cloned())
     }
 
     async fn members(&self, id: ConversationId) -> Result<Vec<Member>, MessageStoreError> {
+        self.let_others_run().await;
         Ok(self.state.lock().unwrap().active_members(id))
     }
 
     async fn memberships(&self, id: ConversationId) -> Result<Vec<Membership>, MessageStoreError> {
+        self.let_others_run().await;
         let state = self.state.lock().unwrap();
         Ok(state
             .members
@@ -388,36 +428,50 @@ impl Conversations for InMemoryMessaging {
         id: ConversationId,
         changes: &GroupChanges,
     ) -> Result<Mirrored, MessageStoreError> {
+        self.let_others_run().await;
         let mut state = self.state.lock().unwrap();
-        match state.conversations.iter_mut().find(|c| c.id == id) {
-            Some(existing) => {
-                if let Some(named) = &changes.name
-                    && existing.kind == ConversationKind::Group
+        let renamed = match state.conversations.iter_mut().find(|c| c.id == id) {
+            Some(existing) => match &changes.name {
+                Some(named)
+                    if existing.kind == ConversationKind::Group && named.at > existing.name_at =>
                 {
                     existing.name = named.name.clone();
                     existing.name_at = named.at;
+                    true
                 }
-            }
+                _ => false,
+            },
             None => {
                 let (name, at) = changes.name.as_ref().map_or_else(
                     || (None, OffsetDateTime::now_utc()),
                     |named| (named.name.clone(), named.at),
                 );
                 state.create(id, ConversationKind::Group, name, at);
+                changes.name.is_some()
             }
-        }
-        let mut brought_in = Vec::new();
+        };
+        let (mut brought_in, mut roles_taken) = (Vec::new(), Vec::new());
         for membership in &changes.members {
             let actor = &membership.member.actor_uri;
             if !state.is_active(id, actor) {
                 brought_in.push(actor.clone());
+                state.hold(id, membership);
+                continue;
             }
-            state.hold(id, membership);
+            let held = state.held_mut(id, actor).expect("an active member");
+            if membership.role_at > held.role_at {
+                held.member.role = membership.member.role;
+                held.role_at = membership.role_at;
+                roles_taken.push(actor.clone());
+            }
+            held.joined_at = held.joined_at.max(membership.joined_at);
         }
         let group = state.conversations.iter().find(|c| c.id == id).cloned();
         Ok(Mirrored {
             group: group.expect("just mirrored"),
+            renamed,
             brought_in,
+            roles_taken,
         })
     }
 
@@ -540,9 +594,14 @@ impl Conversations for InMemoryMessaging {
         &self,
         id: ConversationId,
         member: &Member,
-    ) -> Result<(), MessageStoreError> {
-        self.state.lock().unwrap().add_in_role(id, member);
-        Ok(())
+    ) -> Result<bool, MessageStoreError> {
+        self.let_others_run().await;
+        let mut state = self.state.lock().unwrap();
+        if state.is_active(id, &member.actor_uri) {
+            return Ok(false);
+        }
+        state.add_in_role(id, member);
+        Ok(true)
     }
 
     async fn remove_member(
@@ -552,6 +611,7 @@ impl Conversations for InMemoryMessaging {
         removed_by: Option<&ActorUri>,
         at: Option<OffsetDateTime>,
     ) -> Result<bool, MessageStoreError> {
+        self.let_others_run().await;
         let mut state = self.state.lock().unwrap();
         let name = state
             .conversations
@@ -1723,7 +1783,7 @@ pub mod contract {
         );
     }
 
-    pub async fn an_added_member_takes_the_given_role_and_one_who_left_rejoins(
+    pub async fn adding_an_active_member_writes_nothing_and_one_who_left_rejoins(
         conversations: &dyn Conversations,
         alice: &Account,
         bob: &Account,
@@ -1739,34 +1799,87 @@ pub mod contract {
                 .map(|m| m.role)
         };
 
-        conversations
+        let added = conversations
             .add_member(group.id, &member(&bob.actor_uri, Role::Member))
             .await
             .unwrap();
-        assert_eq!(
-            role_of(conversations.members(group.id).await.unwrap()),
-            Some(Role::Member)
-        );
-        conversations
+        let again = conversations
             .add_member(group.id, &member(&bob.actor_uri, Role::Admin))
             .await
             .unwrap();
+        assert_eq!((added, again), (true, false));
         assert_eq!(
             role_of(conversations.members(group.id).await.unwrap()),
-            Some(Role::Admin)
+            Some(Role::Member),
+            "nothing written"
         );
         conversations
             .remove_member(group.id, &bob.actor_uri, None, None)
             .await
             .unwrap();
-        conversations
-            .add_member(group.id, &member(&bob.actor_uri, Role::Member))
+        let back = conversations
+            .add_member(group.id, &member(&bob.actor_uri, Role::Admin))
             .await
             .unwrap();
 
+        assert!(back);
         assert_eq!(
             role_of(conversations.members(group.id).await.unwrap()),
-            Some(Role::Member)
+            Some(Role::Admin)
+        );
+    }
+
+    pub async fn a_change_mirrored_twice_is_taken_once_and_an_older_one_never(
+        conversations: &dyn Conversations,
+        alice: &Account,
+    ) {
+        let id = ConversationId::generate();
+        conversations
+            .mirror_group(
+                id,
+                &GroupChanges {
+                    name: named("crew", 10),
+                    members: vec![
+                        holding(&remote("ana"), Role::Admin, 0, 0),
+                        holding(&alice.actor_uri, Role::Member, 5, 5),
+                    ],
+                },
+            )
+            .await
+            .unwrap();
+        let change = GroupChanges {
+            name: named("new crew", 20),
+            members: vec![holding(&alice.actor_uri, Role::Admin, 5, 15)],
+        };
+        let taken = |m: &super::Mirrored| (m.renamed, m.brought_in.clone(), m.roles_taken.clone());
+
+        let first = conversations.mirror_group(id, &change).await.unwrap();
+        let second = conversations.mirror_group(id, &change).await.unwrap();
+        let older = conversations
+            .mirror_group(
+                id,
+                &GroupChanges {
+                    name: named("old crew", 15),
+                    members: vec![holding(&alice.actor_uri, Role::Member, 1, 12)],
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(taken(&first), (true, vec![], vec![alice.actor_uri.clone()]));
+        assert_eq!(taken(&second), (false, vec![], vec![]));
+        assert_eq!(taken(&older), (false, vec![], vec![]));
+        assert_eq!(
+            (older.group.name.as_deref(), older.group.name_at),
+            (Some("new crew"), stamp(20))
+        );
+        assert!(
+            by_actor(conversations.memberships(id).await.unwrap()).contains(&holding(
+                &alice.actor_uri,
+                Role::Admin,
+                5,
+                15
+            ))
         );
     }
 

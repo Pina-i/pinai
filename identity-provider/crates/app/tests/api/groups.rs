@@ -358,7 +358,12 @@ async fn a_groups_changes_reach_the_other_instance() {
             .map(|_| ())
     })
     .await;
-    let (_, timeline) = b.get(&dave, &format!("/api/dm/{id}?include=events")).await;
+    // The line is written after the removal itself: wait for it, not for `removed_at`.
+    let timeline = eventually("the removal in dave's timeline", || async {
+        let (_, timeline) = b.get(&dave, &format!("/api/dm/{id}?include=events")).await;
+        (timeline[0]["event"] == "removed").then_some(timeline)
+    })
+    .await;
     assert_eq!(
         (
             &timeline[0]["event"],
@@ -372,13 +377,19 @@ async fn a_groups_changes_reach_the_other_instance() {
         ),
         "{timeline}"
     );
-    assert!(
+    // Dave's instance holds Carol too: each change reached it twice, and is written once.
+    let lines_of = |event: &str| {
         timeline
             .as_array()
             .unwrap()
             .iter()
-            .any(|item| item["event"] == "renamed"),
-        "the rename he saw, made on alice's instance: {timeline}"
+            .filter(|item| item["event"] == event)
+            .count()
+    };
+    assert_eq!(
+        (lines_of("removed"), lines_of("renamed")),
+        (1, 1),
+        "the rename he saw, made on alice's instance, and his removal, once each: {timeline}"
     );
 
     let (left, body) = b

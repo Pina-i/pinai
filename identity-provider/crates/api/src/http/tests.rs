@@ -52,34 +52,35 @@ mod logging {
     use crate::ApiError;
     use crate::http::trace;
 
+    /// How many events were logged at error and at warn level.
     #[derive(Clone, Default)]
-    struct Errors(Arc<AtomicUsize>);
+    struct Loud {
+        errors: Arc<AtomicUsize>,
+        warnings: Arc<AtomicUsize>,
+    }
 
-    impl<S: Subscriber> Layer<S> for Errors {
+    impl<S: Subscriber> Layer<S> for Loud {
         fn on_event(&self, event: &Event<'_>, _: Context<'_, S>) {
-            if *event.metadata().level() == Level::ERROR {
-                self.0.fetch_add(1, Ordering::SeqCst);
-            }
+            match *event.metadata().level() {
+                Level::ERROR => self.errors.fetch_add(1, Ordering::SeqCst),
+                Level::WARN => self.warnings.fetch_add(1, Ordering::SeqCst),
+                _ => 0,
+            };
         }
     }
 
-    #[tokio::test]
-    async fn a_server_error_is_logged_once() {
-        let errors = Errors::default();
+    /// The status `error` is answered with, and how many error and warn lines it logged.
+    async fn logged(error: fn() -> ApiError) -> (StatusCode, usize, usize) {
+        let loud = Loud::default();
         // tracing-core's callsite registry: with one dispatcher alone, a callsite another test
         // thread registers first is asked of that thread's default and cached as never enabled;
         // with two, of every dispatcher.
         let _second_dispatcher =
             tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
         let _guard =
-            tracing::subscriber::set_default(tracing_subscriber::registry().with(errors.clone()));
+            tracing::subscriber::set_default(tracing_subscriber::registry().with(loud.clone()));
         let app = Router::new()
-            .route(
-                "/boom",
-                get(|| async {
-                    Err::<(), _>(ApiError::internal(anyhow::anyhow!("the store is down")))
-                }),
-            )
+            .route("/boom", get(move || async move { Err::<(), _>(error()) }))
             .layer(trace());
 
         let response = app
@@ -87,8 +88,53 @@ mod logging {
             .await
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(errors.0.load(Ordering::SeqCst), 1);
+        (
+            response.status(),
+            loud.errors.load(Ordering::SeqCst),
+            loud.warnings.load(Ordering::SeqCst),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_server_error_is_logged_once() {
+        let logged = logged(|| ApiError::internal(anyhow::anyhow!("the store is down"))).await;
+
+        assert_eq!(logged, (StatusCode::INTERNAL_SERVER_ERROR, 1, 0));
+    }
+
+    #[tokio::test]
+    async fn a_peers_failure_is_logged_once_as_a_warning() {
+        let logged = logged(|| ApiError::upstream(anyhow::anyhow!("connection refused"))).await;
+
+        assert_eq!(logged, (StatusCode::BAD_GATEWAY, 0, 1));
+    }
+
+    const PRIVATE: &str = "peer URL resolves into private address space (10.0.0.5)";
+
+    #[tokio::test]
+    async fn the_reason_of_a_refusal_anyone_can_cause_is_never_logged_loud() {
+        let refusals: [(fn() -> ApiError, StatusCode); 3] = [
+            (
+                || ApiError::upstream_not_allowed(PRIVATE.to_owned()),
+                StatusCode::BAD_GATEWAY,
+            ),
+            (
+                || ApiError::peer_not_allowed(PRIVATE.to_owned()),
+                StatusCode::FORBIDDEN,
+            ),
+            (
+                || {
+                    ApiError::from(domain::identity::SignatureError::KeyUnavailable(
+                        PRIVATE.to_owned(),
+                    ))
+                },
+                StatusCode::UNAUTHORIZED,
+            ),
+        ];
+
+        for (refusal, status) in refusals {
+            assert_eq!(logged(refusal).await, (status, 0, 0));
+        }
     }
 }
 

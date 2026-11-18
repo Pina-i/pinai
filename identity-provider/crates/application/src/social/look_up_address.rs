@@ -32,10 +32,6 @@ impl LookUpAddress {
         let actor = match self.remote_actors.resolve(address).await {
             Ok(actor) => actor,
             Err(RemoteActorsError::NotFound) => return Ok(None),
-            // To the person looking, an instance this one may not ask is one that can't be reached.
-            Err(RemoteActorsError::Refused(reason)) => {
-                return Err(SocialError::PeerUnavailable(reason));
-            }
             Err(other) => return Err(other.into()),
         };
         let ties = self.people.ties(caller, &actor.actor_uri).await?;

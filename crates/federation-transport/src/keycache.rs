@@ -12,7 +12,7 @@ use std::time::Duration;
 use ed25519_dalek::pkcs8::DecodePublicKey;
 use ed25519_dalek::VerifyingKey;
 use moka::future::Cache;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::error::TransportError;
 use crate::http::{get_json_screened, UrlPolicy};
@@ -125,10 +125,8 @@ async fn fetch_key(key_id: &str, policy: UrlPolicy) -> Result<VerifyingKey, Tran
         .and_then(|v| v.as_str())
         .ok_or_else(|| TransportError::BadRequest("actor has no publicKeyPem".into()))?;
 
-    VerifyingKey::from_public_key_pem(pem).map_err(|e| {
-        warn!(%key_id, "actor publicKeyPem did not parse");
-        TransportError::BadRequest(format!("actor publicKeyPem did not parse: {e}"))
-    })
+    VerifyingKey::from_public_key_pem(pem)
+        .map_err(|e| TransportError::BadRequest(format!("actor publicKeyPem did not parse: {e}")))
 }
 
 #[cfg(test)]

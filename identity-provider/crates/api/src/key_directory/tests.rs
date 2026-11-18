@@ -886,3 +886,23 @@ async fn a_claim_for_each_device_answers_one_package_of_every_device_that_has_on
     expected.sort_by_key(|d| d.to_string());
     assert_eq!(devices, expected);
 }
+
+#[tokio::test]
+async fn a_claim_from_an_instance_this_one_may_not_ask_says_nothing_of_where_it_leads() {
+    let refused = ApiError::from(KeyDirectoryError::PeerNotAllowed(
+        domain::identity::testing::PRIVATE_ADDRESS_REFUSAL.into(),
+    ));
+
+    let (status, body) = TestApp::body_of(refused).await;
+
+    assert_eq!(
+        (status, body),
+        (
+            axum::http::StatusCode::FORBIDDEN,
+            refusal(
+                "access_denied",
+                "That address can't be reached from this instance"
+            )
+        )
+    );
+}

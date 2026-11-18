@@ -1147,9 +1147,16 @@ pub mod contract {
     use super::*;
     use crate::e2ee::{DeviceApprovals, DeviceKind, KeyPackageBytes};
 
+    thread_local! {
+        // Read once per test, each on a thread of its own: two times a test names never straddle
+        // a second boundary.
+        static STARTED: i64 = OffsetDateTime::now_utc().unix_timestamp();
+    }
+
+    /// `offset` from the second the test started at.
     pub(super) fn at(offset: Duration) -> OffsetDateTime {
-        let now = OffsetDateTime::now_utc().unix_timestamp();
-        OffsetDateTime::from_unix_timestamp(now).unwrap() + offset
+        let started = STARTED.with(|started| *started);
+        OffsetDateTime::from_unix_timestamp(started).unwrap() + offset
     }
 
     pub(super) fn label(name: &str) -> DeviceLabel {

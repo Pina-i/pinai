@@ -219,6 +219,17 @@ impl From<SignatureError> for ApiError {
             SignatureError::Refused(reason) => {
                 ApiError::new(axum::http::StatusCode::FORBIDDEN, "access_denied", reason)
             }
+            // 401, not 403: senders retry it, and the key may be fetched the next time.
+            SignatureError::KeyUnavailable(reason) => ApiError::new(
+                axum::http::StatusCode::UNAUTHORIZED,
+                "invalid_signature",
+                "signature verification failed: the signing key could not be fetched",
+            )
+            .with_header(
+                axum::http::header::WWW_AUTHENTICATE,
+                axum::http::HeaderValue::from_static("Signature"),
+            )
+            .refused_because(reason),
             SignatureError::Unexpected(e) => ApiError::internal(e),
         }
     }

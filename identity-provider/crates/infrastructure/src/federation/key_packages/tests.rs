@@ -218,3 +218,68 @@ async fn a_peers_refusal_of_a_claim_for_each_device_comes_back_as_what_it_means(
         "{refused:?}"
     );
 }
+
+#[tokio::test]
+async fn a_claim_past_the_body_cap_is_refused() {
+    let padding = "x".repeat(300 * 1024);
+    let oversized = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n\
+         {{\"key_package\":\"AQID\",\"padding\":\"{padding}\"}}"
+    );
+
+    let refused = claim_from(oversized).await;
+
+    assert!(
+        matches!(&refused, Err(RemoteClaimError::Unavailable(e)) if format!("{e:#}").contains("byte cap")),
+        "{refused:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_long_refusal_is_cut_to_one_short_line() {
+    let rant = "the logs are mine now\n".repeat(50 * 1024);
+
+    let failed = claim_from(refusing("500 Internal Server Error", &rant)).await;
+
+    let Err(RemoteClaimError::Unavailable(e)) = failed else {
+        panic!("{failed:?}");
+    };
+    let said = e.to_string();
+    assert!(
+        said.starts_with(
+            "the peer answered a claim with 500 Internal Server Error: the logs are mine now"
+        ),
+        "{said}"
+    );
+    assert!(said.ends_with('…'), "{said}");
+    assert!(!said.contains('\n') && said.chars().count() < 300, "{said}");
+}
+
+#[tokio::test]
+async fn a_name_resolving_into_private_space_is_an_instance_that_does_not_answer() {
+    let (address, received) = peer(answer("{}")).await;
+    let named = ActorUri::parse(&format!(
+        "https://localhost:{}/users/bob_t3st0",
+        address.port()
+    ))
+    .unwrap();
+    let literal = ActorUri::parse(&format!("https://{address}/users/bob_t3st0")).unwrap();
+    let production = remote("https://idp.alice.test");
+
+    let unanswered = production.claim(&alice(), &named, None).await;
+    let refused = production.claim(&alice(), &literal, None).await;
+
+    assert!(
+        matches!(unanswered, Err(RemoteClaimError::Unavailable(_))),
+        "{unanswered:?}"
+    );
+    assert!(
+        matches!(refused, Err(RemoteClaimError::NotAllowed(_))),
+        "{refused:?}"
+    );
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(200), received)
+            .await
+            .is_err()
+    );
+}

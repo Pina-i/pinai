@@ -1,7 +1,9 @@
 //! `Update{Person}`, delivered best-effort — see
 //! identity-provider/specs/event-delivery.md § 2 — and a stale cached profile, asked for again.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use activitypub::Activity;
 use domain::identity::{Account, ActorUri, RemoteActor, RemoteActors};
@@ -33,20 +35,44 @@ impl ProfileFederation for ApProfileFederation {
     }
 }
 
+/// How long after asking for an actor's profile it is asked for again, whatever came of it.
+const RETRY_AFTER: Duration = Duration::from_secs(60 * 60);
+
 /// Rediscovers the account in the background, so the card that found it stale is answered from
-/// the cache at once.
+/// the cache at once. An account is asked for at most once an hour: a dead peer's profile stays
+/// stale, and must not cost a fetch on every view of its card.
 pub struct BackgroundProfileRefresh {
     actors: Arc<dyn RemoteActors>,
+    retry_after: Duration,
+    asked: Mutex<HashMap<ActorUri, Instant>>,
 }
 
 impl BackgroundProfileRefresh {
     pub fn new(actors: Arc<dyn RemoteActors>) -> Self {
-        Self { actors }
+        Self {
+            actors,
+            retry_after: RETRY_AFTER,
+            asked: Mutex::default(),
+        }
+    }
+
+    /// Whether `actor` may be asked for now, counting this ask if so.
+    fn may_ask(&self, actor: &ActorUri) -> bool {
+        let mut asked = self.asked.lock().unwrap();
+        asked.retain(|_, at| at.elapsed() < self.retry_after);
+        if asked.contains_key(actor) {
+            return false;
+        }
+        asked.insert(actor.clone(), Instant::now());
+        true
     }
 }
 
 impl ProfileRefresh for BackgroundProfileRefresh {
     fn refresh(&self, actor: &ActorUri) {
+        if !self.may_ask(actor) {
+            return;
+        }
         let (actors, actor) = (Arc::clone(&self.actors), actor.clone());
         tokio::spawn(async move {
             if let Err(e) = actors.discover(&actor).await {

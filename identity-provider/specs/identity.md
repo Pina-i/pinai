@@ -57,8 +57,10 @@ CREATE TABLE remote_actors (
   avatar_url    TEXT,
   pronouns      TEXT CHECK (pronouns IN ('he', 'she', 'non-binary')),
   bio           TEXT,                       -- the Person's `summary`, as text
-  fetched_at    TIMESTAMPTZ NOT NULL DEFAULT now(),  -- last resolved or discovered; a profile card
-                                                     -- older than 24 h discovers the actor again
+  fetched_at    TIMESTAMPTZ NOT NULL DEFAULT now(),  -- when its document was last read, resolved
+                                                     -- or discovered; the epoch if it never was.
+                                                     -- A profile card older than 24 h discovers
+                                                     -- the actor again, at most once an hour
   updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -99,9 +101,14 @@ another's accounts. A resolution the actor's instance fails — it doesn't answe
 no instance would send: a WebFinger or actor document breaking that rule, an `id` that is no
 actor URI (§ 4), or an inbox URL past an actor URI's 2 KiB (`RemoteActor::parse_inbox`) — is
 `502 the account's instance did not answer`, and nothing of its answer is written: for a friend
-request, a DM to an address not cached here, and a group invitee (with its `actor_uri`). An
-instance that answers it knows no such account is `404`. A discovery whose document breaks the
-rule, or brings such an inbox, reads as an unreachable peer's: what was cached stays.
+request, a DM to an address not cached here, and a group invitee (with its `actor_uri`). The
+failure is logged at warn level, never error: the peer failed, not this instance, and anyone can
+name a dead one. An instance that answers it knows no such account is `404`. A discovery whose document breaks the
+rule, or brings such an inbox, reads as an unreachable peer's: what was cached stays. Only a
+document read makes the actor fresh: a discovery that reads none — the peer didn't answer, answered
+what no instance would, or the peer request policy refused it — leaves `fetched_at` as it was, the
+epoch for an actor first met so, and its profile card asks again
+(`identity-provider/specs/profile-and-settings.md § 1`).
 
 A group's members reach this instance in the rosters other members' instances send, so a member
 may be someone nobody here has met. What goes to each remote member — a group message, an edit,
@@ -115,7 +122,10 @@ instance is never looked up.
 ## 3. What peers read of an account
 
 `GET /.well-known/webfinger?resource=acct:{handle}@{domain}` points at the account's actor, for
-an account of this instance only (`404 User not found` for any other). `GET /users/{handle}` is
+an account of this instance only (`404 User not found` for any other). Only an account that has
+joined — its address confirmed, or admitted — is read so: a sign-up still to confirm its address is
+`404 User not found` on every route here, its inbox included
+(`identity-provider/specs/social.md § 2` "An account still signing up"). `GET /users/{handle}` is
 its `Person` — display name (else the handle), inbox, `icon` when it has an avatar, `summary` and
 `pronouns` when it has a bio and pronouns (`identity-provider/specs/profile-and-settings.md § 3`),
 and the instance key as `publicKey`; `GET /actor` is the instance's `Application` actor, whose key signs
@@ -125,6 +135,19 @@ empty: nothing is published, and whom an account is friends with is not for anyo
 ## 4. Federated address format
 
 The canonical address format used throughout the system is `username@domain` (e.g. `alice_xk9mp@idp.alice.com`), **without** a leading `@` — `/userinfo` answers it as `address`. Clients receive actor URIs (`https://idp.alice.com/users/alice_xk9mp`) in some events and normalise them to `username@domain` via `actorUriToAddress()` before using them as conversation keys.
+
+The domain is a host name, lowercased, then optionally `:port` — 1–65535 in digits, kept without
+leading zeros, so `:0443` is `:443` (`domain::identity::Domain`). The host is 253 characters at
+most, its labels between the dots 1–63 of `a–z0–9-`, none starting or ending with `-` — the names
+DNS can answer —, and a last label of digits only is an IPv4 address or nothing, as a URL reads
+it. `x@reef..chat`, `x@a.-b`, `x@reef.123` or `x@reef.chat:+443` is no address (`400`), never an
+instance that didn't answer.
+
+This instance's own domain matches in any case, and with its scheme's default port written out —
+`hoku_xk9mp@idp.alice.com:443` on an `https` instance, `:80` on an `http` one, name the same
+account as `hoku_xk9mp@idp.alice.com` (`InstanceOrigin`): such an address is never looked up as
+another instance's, in a request, a lookup or a WebFinger `resource`. Any other port is another
+instance.
 
 An actor URI is an `http(s)` URL with a host, no user name or password, no query and no fragment,
 of 2 KiB at most once normalised (`domain::identity::ActorUri`) — whether a peer or a user hands it
@@ -168,7 +191,7 @@ every fediverse server publishes about itself.
 |---|---|
 | Name | What an admin saved in Settings → Instance; otherwise `INSTANCE_NAME`. Trimmed, 40 characters at most; blank or unset, the instance's domain |
 | Description | What an admin saved in Settings → Instance; otherwise `INSTANCE_DESCRIPTION`. Trimmed, 90 characters at most; blank or unset, none |
-| People | Every local account, counted at most a minute ago (`Accounts::count`) |
+| People | Every local account that has joined — its address confirmed, or admitted —, counted at most a minute ago (`Accounts::count`) |
 | Open registration | `REGISTRATIONS`: yes for `open`, no for `invite`, the default (`identity-provider/specs/auth.md § 6`) |
 | Source | `SOURCE_URL`, an `http(s)` URL; unset or blank, Pīna'i's own repository, `https://github.com/Pina-i/pinai` (`PINAI_SOURCE_URL`) |
 
@@ -411,7 +434,7 @@ Scenarios:
 `GET /api/users/lookup?address=`, Bearer, 60 a caller then one a second (`429 too_many_requests`,
 `api::LookupLimiter`): each may ask another instance twice and write to its cache. `address` is
 trimmed and read by `InstanceOrigin::sought`: a bare name is this instance's, a leading `@` is
-dropped, and an address on this instance's own domain, in any case, is one of its accounts. Only
+dropped, and an address on this instance's own domain (§ 4) is one of its accounts. Only
 what is no address at all is `400`; a name on this instance that no handle could be — `alice`,
 `Hoku_T3ST0@{domain}` — is `404 No account at this address`, as it would be on any other instance.
 

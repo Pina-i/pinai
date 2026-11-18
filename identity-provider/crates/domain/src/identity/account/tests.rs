@@ -16,3 +16,11 @@ fn an_inbox_is_an_http_url_of_2_kib_at_most() {
         );
     }
 }
+
+#[test]
+fn an_account_has_joined_once_its_address_is_confirmed_or_it_was_admitted() {
+    assert!(has_joined(true, false));
+    assert!(has_joined(false, true));
+    assert!(has_joined(true, true));
+    assert!(!has_joined(false, false));
+}

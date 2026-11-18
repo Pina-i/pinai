@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use domain::e2ee::{DeliveryError, MlsNotifier, NewWelcome, WelcomeBlob, Welcomes, check_welcome};
-use domain::identity::{Accounts, ActorUri, RemoteActors};
+use domain::identity::{Accounts, ActorUri, InstanceOrigin, RemoteActors};
 use domain::messaging::{
     ConversationKind, Conversations, GroupEvents, GroupNotifier, GroupSnapshot,
 };
@@ -23,6 +23,7 @@ pub struct IncomingWelcome {
 
 /// The inbox's `Create{Note}` carrying an MLS Welcome.
 pub struct ReceiveWelcome {
+    origin: InstanceOrigin,
     accounts: Arc<dyn Accounts>,
     remote_actors: Arc<dyn RemoteActors>,
     conversations: Arc<dyn Conversations>,
@@ -36,6 +37,7 @@ pub struct ReceiveWelcome {
 impl ReceiveWelcome {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
+        origin: InstanceOrigin,
         accounts: Arc<dyn Accounts>,
         remote_actors: Arc<dyn RemoteActors>,
         conversations: Arc<dyn Conversations>,
@@ -46,6 +48,7 @@ impl ReceiveWelcome {
         events: Arc<dyn GroupEvents>,
     ) -> Self {
         Self {
+            origin,
             accounts,
             remote_actors,
             conversations,
@@ -86,6 +89,7 @@ impl ReceiveWelcome {
         }
         if let Some(roster) = &incoming.roster {
             Mirror {
+                origin: &self.origin,
                 accounts: &*self.accounts,
                 remote_actors: &*self.remote_actors,
                 conversations: &*self.conversations,

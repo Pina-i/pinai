@@ -298,10 +298,11 @@ impl ProfileCards for InMemoryProfiles {
             let active = |who: &ActorUri| members.iter().any(|(a, active)| a == who && *active);
             active(&viewer.actor_uri) && active(actor)
         });
+        // The seeds admit nobody: an account here has joined once its address is confirmed.
         let local = world
             .accounts
             .iter()
-            .find(|a| a.actor_uri.as_ref() == Some(actor))
+            .find(|a| a.actor_uri.as_ref() == Some(actor) && a.email_verified)
             .and_then(OwnProfile::public)
             .map(|profile| (profile, None));
         let remote = || {
@@ -678,6 +679,26 @@ pub mod contract {
             .unwrap()
             .unwrap();
         assert_eq!(facts.profile, carols);
+    }
+
+    pub async fn no_card_for_a_sign_up_still_to_confirm(
+        cards: &dyn ProfileCards,
+        seeds: &dyn ProfileSeeds,
+    ) {
+        let alice = own_profile("alice");
+        let kai = OwnProfile {
+            email_verified: false,
+            ..own_profile("kai")
+        };
+        seeds.sign_up(&alice).await;
+        seeds.sign_up(&kai).await;
+
+        let facts = cards
+            .facts(&alice.account().unwrap(), kai.actor_uri.as_ref().unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(facts, None);
     }
 
     pub async fn no_card_for_an_account_this_instance_does_not_hold(

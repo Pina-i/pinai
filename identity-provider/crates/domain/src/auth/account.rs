@@ -39,7 +39,7 @@ pub struct SignInAccount {
 impl SignInAccount {
     /// Its address must be confirmed with a mailed code before it signs in.
     pub fn needs_code(&self) -> bool {
-        !self.email_verified && !self.admitted
+        !crate::identity::has_joined(self.email_verified, self.admitted)
     }
 
     /// What a mail to the account calls it: its display name, else its handle.

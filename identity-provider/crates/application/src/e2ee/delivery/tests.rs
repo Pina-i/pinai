@@ -85,6 +85,8 @@ async fn world() -> World {
         bob.clone(),
         dave.clone(),
     ]));
+    // Kai signed up here and hasn't confirmed his address.
+    accounts.signing_up(account("kai"));
     let remote_actors = Arc::new(InMemoryRemoteActors::with([carol.clone(), eve.clone()]));
     let store = Arc::new(InMemoryMessaging::default());
     let group = store
@@ -136,6 +138,7 @@ async fn world() -> World {
             federation.clone(),
         ),
         receive_commit: ReceiveCommit::new(
+            InstanceOrigin::parse("http://localhost:8080").unwrap(),
             accounts.clone(),
             remote_actors.clone(),
             store.clone(),
@@ -147,6 +150,7 @@ async fn world() -> World {
             store.clone(),
         ),
         receive_welcome: ReceiveWelcome::new(
+            InstanceOrigin::parse("http://localhost:8080").unwrap(),
             accounts,
             remote_actors.clone(),
             store.clone(),
@@ -1211,6 +1215,39 @@ async fn a_roster_brings_in_every_member_here_it_lists_and_announces_each_once()
         expected.sort_by_key(|line| format!("{line:?}"));
         assert_eq!(lines, expected, "each one's line, once");
     }
+}
+
+#[tokio::test]
+async fn a_roster_lists_no_uri_of_ours_that_names_no_account_others_reach() {
+    let w = world().await;
+    let group = ConversationId::generate();
+    let kai = account("kai").actor_uri;
+    let nobody = ActorUri::parse("http://localhost:8080/users/nobody_t3st0").unwrap();
+    let roster = unstamped(
+        Some("crew"),
+        &[
+            member(&w.carol.actor_uri, Role::Admin),
+            member(&w.alice.actor_uri, Role::Member),
+            member(&kai, Role::Member),
+            member(&nobody, Role::Member),
+        ],
+    );
+
+    w.receive_welcome
+        .execute(w.incoming_welcome(&w.carol.actor_uri, group, Some(roster)))
+        .await
+        .unwrap();
+
+    let members: Vec<ActorUri> = w
+        .store
+        .members(group)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|m| m.actor_uri)
+        .collect();
+    assert_eq!(members.len(), 2, "carol and alice: {members:?}");
+    assert!(!members.contains(&kai) && !members.contains(&nobody));
 }
 
 #[tokio::test]

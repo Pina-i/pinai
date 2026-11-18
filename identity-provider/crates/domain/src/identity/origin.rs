@@ -73,14 +73,14 @@ impl InstanceOrigin {
         } else {
             FederatedAddress::parse(&format!("{named}@{}", self.domain))?
         };
-        if *address.domain() != self.domain {
+        if !self.is_ours(address.domain()) {
             return Ok(Some(Recipient::Remote(address)));
         }
         Ok(Handle::parse(address.user()).ok().map(Recipient::Local))
     }
 
     pub fn recipient(&self, address: &FederatedAddress) -> Result<Recipient, ValidationError> {
-        if *address.domain() == self.domain {
+        if self.is_ours(address.domain()) {
             Ok(Recipient::Local(Handle::parse(address.user())?))
         } else {
             Ok(Recipient::Remote(address.clone()))
@@ -113,7 +113,14 @@ impl InstanceOrigin {
     }
 
     pub fn owns(&self, uri: &ActorUri) -> bool {
-        uri.scheme() == self.scheme && *uri.domain() == self.domain
+        uri.scheme() == self.scheme && self.is_ours(uri.domain())
+    }
+
+    /// Our domain, or our host with our scheme's default port written out (`idp.alice.com:443`
+    /// over https): both name this instance. A domain's port is kept without leading zeros.
+    fn is_ours(&self, domain: &Domain) -> bool {
+        let default_port = if self.scheme == "https" { 443 } else { 80 };
+        *domain == self.domain || domain.as_str() == format!("{}:{default_port}", self.domain)
     }
 }
 

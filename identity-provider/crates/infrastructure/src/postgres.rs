@@ -31,6 +31,11 @@ async fn lock_account(c: &mut sqlx::PgConnection, user: UserId) -> anyhow::Resul
         .context("lock an account")?;
     Ok(())
 }
+
+/// `domain::identity::has_joined` of the `users` row `table` names: an account others may reach.
+fn has_joined(table: &str) -> String {
+    format!("({table}.email_verified_at IS NOT NULL OR {table}.admitted_at IS NOT NULL)")
+}
 pub use archive::{PgHistoryArchive, PgHistoryKeys};
 pub use attachments::PgAttachments;
 pub use auth::{

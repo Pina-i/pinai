@@ -33,3 +33,16 @@ async fn a_slug_naming_no_account_finds_none() {
         );
     }
 }
+
+#[tokio::test]
+async fn a_sign_up_still_to_confirm_is_found_by_nobody() {
+    let kai = account("kai");
+    let accounts = InMemoryAccounts::default();
+    accounts.signing_up(kai.clone());
+    let find = FindAccount::new(
+        InstanceOrigin::parse("http://localhost:8080").unwrap(),
+        Arc::new(accounts),
+    );
+
+    assert_eq!(find.execute(&kai.username).await.unwrap(), None);
+}

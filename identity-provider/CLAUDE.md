@@ -277,7 +277,8 @@ Don't mention any "phase" development or what is currently being worked on. The 
 - **`actor_uri`** is the universal federation key (e.g. `https://idp.alice.com/users/alice_xk9mp`).
 - **Parsing** an address or an actor URI, or deciding whether one is local, goes through
   `domain::identity` — never `split('@')`, `starts_with("{issuer}/users/")` or path slicing. A bare
-  name means a local account; our own domain matches in any case. An `ActorUri` is 2 KiB at most
+  name means a local account; our own domain matches in any case, and with its scheme's default
+  port written out (`:443` on https, `:80` on http). An `ActorUri` is 2 KiB at most
   once normalised: every writer stores what it is handed. A handle (`Handle`: 2–32 of
   `a–z0–9_.` + `_` + 5 of `a–z0–9`) is derived from the display name at registration, never
   typed.

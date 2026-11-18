@@ -26,7 +26,8 @@ impl FederatedRemoteActors {
     // a document this instance won't take, must not erase what was read before. A name, an
     // avatar or a bio outside the peer profile limits counts as none. The pronouns and bio of a
     // document that was read are taken as it gives them, cleared when it has none; with no
-    // document, the cached ones stay.
+    // document, the cached ones stay, and so does `fetched_at` — the epoch for an actor never
+    // read —, so the profile card asks again rather than holding it fresh for a day.
     async fn remember(
         &self,
         actor: &ActorUri,
@@ -45,15 +46,17 @@ impl FederatedRemoteActors {
         .within_limits();
         let row: RemoteActorRow = sqlx::query_as(
             "INSERT INTO remote_actors \
-                (actor_uri, inbox_url, instance, display_name, avatar_url, pronouns, bio) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7) \
+                (actor_uri, inbox_url, instance, display_name, avatar_url, pronouns, bio, \
+                 fetched_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, \
+                     CASE WHEN $8 THEN now() ELSE 'epoch'::timestamptz END) \
              ON CONFLICT (actor_uri) DO UPDATE SET \
                 inbox_url    = COALESCE(EXCLUDED.inbox_url, remote_actors.inbox_url), \
                 display_name = COALESCE(EXCLUDED.display_name, remote_actors.display_name), \
                 avatar_url   = COALESCE(EXCLUDED.avatar_url, remote_actors.avatar_url), \
                 pronouns     = CASE WHEN $8 THEN EXCLUDED.pronouns ELSE remote_actors.pronouns END, \
                 bio          = CASE WHEN $8 THEN EXCLUDED.bio ELSE remote_actors.bio END, \
-                fetched_at   = now(), \
+                fetched_at   = CASE WHEN $8 THEN now() ELSE remote_actors.fetched_at END, \
                 updated_at   = now() \
              RETURNING actor_uri, inbox_url, display_name, avatar_url",
         )

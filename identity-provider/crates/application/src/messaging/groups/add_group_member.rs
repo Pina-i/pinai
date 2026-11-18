@@ -71,7 +71,10 @@ impl AddGroupMember {
             actor_uri: actor,
             role: Role::Member,
         };
-        self.conversations.add_member(group, &added).await?;
+        // Another admin's add may have brought them in since the members were read.
+        if !self.conversations.add_member(group, &added).await? {
+            return Err(MessagingError::AlreadyAMember);
+        }
         let held = self.conversations.memberships(group).await?;
         let joined_at = held
             .iter()

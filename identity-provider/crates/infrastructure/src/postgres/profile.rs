@@ -230,7 +230,7 @@ impl ProfileCards for PgProfileCards {
         viewer: &Account,
         actor: &ActorUri,
     ) -> Result<Option<CardFacts>, ProfileError> {
-        let row: Option<CardRow> = sqlx::query_as(
+        let row: Option<CardRow> = sqlx::query_as(&format!(
             "SELECT COALESCE(u.display_name, ra.display_name) AS display_name, \
                     COALESCE(u.avatar_url, ra.avatar_url) AS avatar_url, \
                     COALESCE(u.pronouns, ra.pronouns) AS pronouns, \
@@ -246,12 +246,13 @@ impl ProfileCards for PgProfileCards {
                           AND theirs.actor_uri = $3 AND theirs.left_at IS NULL \
                     )) AS known \
              FROM (SELECT $3::text AS actor_uri) target \
-             LEFT JOIN users u ON u.actor_uri = target.actor_uri \
+             LEFT JOIN users u ON u.actor_uri = target.actor_uri AND {} \
              LEFT JOIN remote_actors ra ON ra.actor_uri = target.actor_uri \
              LEFT JOIN friendships f ON f.owner_user_id = $1 \
                   AND f.friend_actor_uri = target.actor_uri AND f.status = 'accepted' \
              WHERE u.id IS NOT NULL OR ra.actor_uri IS NOT NULL",
-        )
+            super::has_joined("u")
+        ))
         .bind(viewer.id.as_uuid())
         .bind(viewer.actor_uri.as_str())
         .bind(actor.as_str())

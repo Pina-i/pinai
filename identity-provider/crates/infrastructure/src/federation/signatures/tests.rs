@@ -138,3 +138,16 @@ async fn a_body_its_signed_digest_does_not_match_is_refused() {
         "{refused:?}"
     );
 }
+
+#[tokio::test]
+async fn a_signing_key_that_cannot_be_fetched_leaves_the_request_unverified() {
+    let (request, _) = a_peer_signing(br#"{"actors":[]}"#).await;
+
+    // The production policy refuses a keyId on the loopback interface, as any in private space.
+    let refused = verifier().verify(&request).await;
+
+    assert!(
+        matches!(refused, Err(SignatureError::KeyUnavailable(_))),
+        "{refused:?}"
+    );
+}

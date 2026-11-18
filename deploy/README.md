@@ -17,6 +17,9 @@ set `WEB_APP_ORIGIN` in `.env` to its address.
   and cannot change once people have signed up.
 - A reverse proxy that serves the domain over HTTPS, with its certificate: Caddy,
   nginx, Traefik… See [Put your proxy in front](#put-your-proxy-in-front).
+- Outbound HTTPS from the server to other instances, made directly: the instance
+  ignores `HTTP_PROXY`, `HTTPS_PROXY` and `ALL_PROXY`, because the address it checks
+  (never one inside your network) must be the address it connects to.
 - For a public instance, an SMTP relay, over STARTTLS (port 587) or TLS (port 465):
   sign-up codes are mailed. See [Mail relay](#mail-relay).
 - For an invite-only instance, the default, its first admin's address and password.

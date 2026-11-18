@@ -38,12 +38,33 @@ async fn an_account_is_found_by_id_handle_and_actor_uri(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "infrastructure::MIGRATOR")]
-async fn every_account_counts(pool: PgPool) {
+async fn a_sign_up_still_to_confirm_is_found_by_its_id_only(pool: PgPool) {
+    let alice = an_account(&pool, "alice").await;
+    let admitted = an_account(&pool, "kai").await;
+    sqlx::query("UPDATE users SET email_verified_at = NULL, admitted_at = now() WHERE id = $1")
+        .bind(admitted.id.as_uuid())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let signing_up = super::a_sign_up(&pool, "kaiah").await;
+
+    domain::identity::testing::contract::a_sign_up_still_to_confirm_is_found_by_its_id_only(
+        &PgAccounts::new(pool),
+        &[alice, admitted],
+        &signing_up,
+    )
+    .await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn every_account_that_joined_counts(pool: PgPool) {
     an_account(&pool, "alice").await;
     an_account(&pool, "bob").await;
+    super::a_sign_up(&pool, "kai").await;
     super::a_user(&pool).await;
 
-    domain::identity::testing::contract::every_account_counts(&PgAccounts::new(pool)).await;
+    domain::identity::testing::contract::every_account_that_joined_counts(&PgAccounts::new(pool))
+        .await;
 }
 
 #[sqlx::test(migrator = "infrastructure::MIGRATOR")]
@@ -190,6 +211,61 @@ async fn an_actor_is_discovered_even_when_its_instance_is_unreachable(pool: PgPo
 
     assert_eq!(discovered.inbox.as_str(), format!("{UNREACHABLE}/inbox"));
     assert_eq!(actors.find(&dave).await.unwrap(), Some(discovered));
+}
+
+async fn fetched_at(pool: &PgPool, actor: &str) -> OffsetDateTime {
+    sqlx::query_scalar("SELECT fetched_at FROM remote_actors WHERE actor_uri = $1")
+        .bind(actor)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn a_discovery_that_reads_no_document_leaves_the_profile_as_old_as_it_was(pool: PgPool) {
+    a_cached_actor(&pool, UNREACHABLE, None).await;
+    let two_days_ago = OffsetDateTime::now_utc() - time::Duration::days(2);
+    sqlx::query("UPDATE remote_actors SET fetched_at = $1")
+        .bind(two_days_ago)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let held = fetched_at(&pool, UNREACHABLE).await;
+
+    remote_actors(pool.clone())
+        .discover(&ActorUri::parse(UNREACHABLE).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(fetched_at(&pool, UNREACHABLE).await, held);
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn an_actor_whose_document_was_never_read_is_as_old_as_can_be(pool: PgPool) {
+    remote_actors(pool.clone())
+        .discover(&ActorUri::parse(UNREACHABLE).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        fetched_at(&pool, UNREACHABLE).await,
+        OffsetDateTime::UNIX_EPOCH
+    );
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn a_discovery_that_reads_the_document_makes_the_profile_fresh(pool: PgPool) {
+    let dave = a_peer_serving_dave("Dave", None, None, None).await;
+    remembered_with(&pool, &dave, "he", "old").await;
+    sqlx::query("UPDATE remote_actors SET fetched_at = 'epoch'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let before = OffsetDateTime::now_utc() - time::Duration::seconds(5);
+
+    remote_actors(pool.clone()).discover(&dave).await.unwrap();
+
+    assert!(fetched_at(&pool, dave.as_str()).await > before);
 }
 
 #[sqlx::test(migrator = "infrastructure::MIGRATOR")]

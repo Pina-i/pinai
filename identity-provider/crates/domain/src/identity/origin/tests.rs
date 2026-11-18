@@ -154,3 +154,74 @@ fn a_name_on_this_instance_that_no_handle_could_be_is_sought_as_no_account() {
         assert!(origin().sought(no_address).is_err(), "{no_address:?}");
     }
 }
+
+fn https_origin() -> InstanceOrigin {
+    InstanceOrigin::parse("https://idp.alice.test").unwrap()
+}
+
+#[test]
+fn our_host_with_our_schemes_default_port_is_ours() {
+    let alice = Recipient::Local(Handle::parse("alice_x1y2z").unwrap());
+    for ours in [
+        "alice_x1y2z@idp.alice.test:443",
+        "alice_x1y2z@IDP.Alice.test:0443",
+    ] {
+        assert_eq!(
+            https_origin().recipient(&address(ours)).unwrap(),
+            alice,
+            "{ours}"
+        );
+        assert_eq!(
+            https_origin().sought(ours).unwrap(),
+            Some(alice.clone()),
+            "{ours}"
+        );
+    }
+    assert_eq!(
+        InstanceOrigin::parse("http://idp.alice.test")
+            .unwrap()
+            .recipient(&address("alice_x1y2z@idp.alice.test:80"))
+            .unwrap(),
+        alice
+    );
+}
+
+#[test]
+fn our_port_written_with_leading_zeros_is_still_ours() {
+    let alice = Recipient::Local(Handle::parse("alice_x1y2z").unwrap());
+
+    for (origin, ours) in [
+        (origin(), "alice_x1y2z@localhost:08080"),
+        (https_origin(), "alice_x1y2z@idp.alice.test:00443"),
+    ] {
+        assert_eq!(origin.recipient(&address(ours)).unwrap(), alice, "{ours}");
+        assert_eq!(origin.sought(ours).unwrap(), Some(alice.clone()), "{ours}");
+    }
+    assert_eq!(
+        origin().sought("alice_x1y2z@localhost:080").unwrap(),
+        Some(Recipient::Remote(address("alice_x1y2z@localhost:80")))
+    );
+}
+
+#[test]
+fn our_host_with_another_port_is_another_instance() {
+    for elsewhere in [
+        "alice_x1y2z@idp.alice.test:80",
+        "alice_x1y2z@idp.alice.test:8443",
+        "alice_x1y2z@alice.test:443",
+    ] {
+        assert_eq!(
+            https_origin().recipient(&address(elsewhere)).unwrap(),
+            Recipient::Remote(address(elsewhere)),
+            "{elsewhere}"
+        );
+    }
+    for elsewhere in ["alice_x1y2z@localhost", "alice_x1y2z@localhost:80"] {
+        assert_eq!(
+            origin().recipient(&address(elsewhere)).unwrap(),
+            Recipient::Remote(address(elsewhere)),
+            "{elsewhere}"
+        );
+    }
+    assert!(!https_origin().owns(&uri("http://idp.alice.test:443/users/alice_x1y2z")));
+}

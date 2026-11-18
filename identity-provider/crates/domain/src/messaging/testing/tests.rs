@@ -185,12 +185,22 @@ async fn a_group_is_created_with_its_whole_roster() {
 }
 
 #[tokio::test]
-async fn an_added_member_takes_the_given_role_and_one_who_left_rejoins() {
+async fn adding_an_active_member_writes_nothing_and_one_who_left_rejoins() {
     let store = InMemoryMessaging::default();
-    contract::an_added_member_takes_the_given_role_and_one_who_left_rejoins(
+    contract::adding_an_active_member_writes_nothing_and_one_who_left_rejoins(
         &store,
         &account("alice"),
         &account("bob"),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_change_mirrored_twice_is_taken_once_and_an_older_one_never() {
+    let store = InMemoryMessaging::default();
+    contract::a_change_mirrored_twice_is_taken_once_and_an_older_one_never(
+        &store,
+        &account("alice"),
     )
     .await;
 }

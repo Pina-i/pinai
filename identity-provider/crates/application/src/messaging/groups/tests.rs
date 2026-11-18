@@ -664,6 +664,35 @@ async fn an_invitee_who_names_no_account_is_refused_and_nothing_written() {
 }
 
 #[tokio::test]
+async fn a_sign_up_still_to_confirm_is_no_invitee() {
+    let w = world();
+    let kai = account("kai");
+    w.accounts.signing_up(kai.clone());
+
+    let refused = create(&w)
+        .execute(
+            w.alice.id,
+            None,
+            vec![w.bob.actor_uri.clone(), kai.actor_uri.clone()],
+        )
+        .await;
+    assert!(
+        matches!(&refused, Err(MessagingError::InviteeNotFound(a)) if *a == kai.actor_uri),
+        "{:?}",
+        refused.map(|_| ())
+    );
+    assert_eq!(w.groups_of(&w.alice).await, 0);
+
+    let id = crew(&w).await;
+    let refused = add(&w).execute(w.alice.id, id, kai.actor_uri.clone()).await;
+    assert!(
+        matches!(&refused, Err(MessagingError::InviteeNotFound(a)) if *a == kai.actor_uri),
+        "{:?}",
+        refused.map(|_| ())
+    );
+}
+
+#[tokio::test]
 async fn an_invitee_whose_instance_does_not_answer_is_refused_naming_them() {
     let mut w = world();
     w.remote_actors =
@@ -943,6 +972,7 @@ async fn a_change_to_a_group_held_only_here_goes_nowhere() {
 
 fn receive(w: &World) -> ReceiveGroupChange {
     ReceiveGroupChange::new(
+        InstanceOrigin::parse("http://localhost:8080").unwrap(),
         w.accounts.clone(),
         w.remote_actors.clone(),
         w.store.clone(),
@@ -1187,6 +1217,36 @@ async fn an_add_made_elsewhere_brings_in_no_account_here_who_does_not_admit_its_
 }
 
 #[tokio::test]
+async fn an_add_made_elsewhere_brings_in_no_uri_of_ours_that_names_no_account_others_reach() {
+    let w = world();
+    let group = carols(&w).await;
+    let kai = account("kai");
+    w.accounts.signing_up(kai.clone());
+    w.reach
+        .set(kai.id, &w.carol.actor_uri, KEPT_OUT_BY_THE_SETTING);
+    let nobody = ActorUri::parse("http://localhost:8080/users/nobody_t3st0").unwrap();
+
+    for added in [&kai.actor_uri, &nobody] {
+        let add = by(
+            &w.carol.actor_uri,
+            group,
+            GroupChangeKind::Added(added.clone()),
+        );
+        receive(&w).execute(w.alice.id, add).await.unwrap();
+    }
+
+    let members = w.store.members(group).await.unwrap();
+    assert!(
+        !members
+            .iter()
+            .any(|m| m.actor_uri == kai.actor_uri || m.actor_uri == nobody),
+        "{members:?}"
+    );
+    assert!(w.notifier.sent().is_empty(), "{:?}", w.notifier.sent());
+    assert!(lines(&w, group).await.is_empty());
+}
+
+#[tokio::test]
 async fn an_add_of_someone_already_in_the_group_only_moves_their_stamp() {
     let w = world();
     let group = carols(&w).await;
@@ -1206,6 +1266,108 @@ async fn an_add_of_someone_already_in_the_group_only_moves_their_stamp() {
         added.at
     );
     assert!(w.notifier.sent().is_empty(), "nobody joined");
+}
+
+#[tokio::test]
+async fn two_admins_adding_someone_at_once_bring_them_in_once() {
+    let w = World {
+        store: Arc::new(InMemoryMessaging::interleaving()),
+        ..world()
+    };
+    let roster = [
+        member(&w.alice.actor_uri, Role::Admin),
+        member(&w.bob.actor_uri, Role::Admin),
+    ];
+    let group = w.store.create_group(None, &roster).await.unwrap().id;
+
+    let (alices, bobs) = (add(&w), add(&w));
+
+    let (by_alice, by_bob) = tokio::join!(
+        alices.execute(w.alice.id, group, w.eve.actor_uri.clone()),
+        bobs.execute(w.bob.id, group, w.eve.actor_uri.clone()),
+    );
+
+    let refused = [&by_alice, &by_bob]
+        .iter()
+        .filter(|r| matches!(r, Err(MessagingError::AlreadyAMember)))
+        .count();
+    assert_eq!(
+        (by_alice.is_ok() as usize + by_bob.is_ok() as usize, refused),
+        (1, 1)
+    );
+    assert_eq!(
+        lines(&w, group).await,
+        [("added", Some(w.eve.actor_uri.clone()))]
+    );
+    assert_eq!(w.federation.sent().len(), 0, "nobody elsewhere");
+}
+
+fn told(notice: &GroupNotice) -> UserId {
+    match notice {
+        GroupNotice::Joined(to, ..)
+        | GroupNotice::MemberAdded(to, ..)
+        | GroupNotice::MemberRemoved(to, ..)
+        | GroupNotice::Renamed(to, ..)
+        | GroupNotice::RoleChanged(to, ..) => *to,
+    }
+}
+
+/// Each change reaches this instance once per member here — through Alice's inbox and Bob's —,
+/// one copy after the other or both at once: whichever takes it tells each member and writes the
+/// line, the other nothing.
+#[tokio::test]
+async fn a_change_delivered_to_each_member_here_is_told_and_written_once() {
+    for at_once in [false, true] {
+        for kind in [
+            GroupChangeKind::Renamed(GroupName::parse("new crew").unwrap()),
+            GroupChangeKind::RoleChanged(account("bob").actor_uri, Role::Admin),
+            GroupChangeKind::Removed(account("bob").actor_uri),
+            GroupChangeKind::Added(account("eve").actor_uri),
+        ] {
+            let w = World {
+                store: Arc::new(InMemoryMessaging::interleaving()),
+                ..world()
+            };
+            let group = carols(&w).await;
+            let kind = match kind {
+                GroupChangeKind::RoleChanged(_, role) => {
+                    GroupChangeKind::RoleChanged(w.bob.actor_uri.clone(), role)
+                }
+                GroupChangeKind::Removed(_) => GroupChangeKind::Removed(w.bob.actor_uri.clone()),
+                GroupChangeKind::Added(_) => GroupChangeKind::Added(w.eve.actor_uri.clone()),
+                renamed => renamed,
+            };
+            let change = by(&w.carol.actor_uri, group, kind);
+            let (through_alice, through_bob) = (receive(&w), receive(&w));
+
+            if at_once {
+                let (first, second) = tokio::join!(
+                    through_alice.execute(w.alice.id, change.clone()),
+                    through_bob.execute(w.bob.id, change.clone()),
+                );
+                first.unwrap();
+                second.unwrap();
+            } else {
+                through_alice
+                    .execute(w.alice.id, change.clone())
+                    .await
+                    .unwrap();
+                through_bob.execute(w.bob.id, change.clone()).await.unwrap();
+            }
+
+            let what = format!("{:?}, at once: {at_once}", change.kind);
+            assert_eq!(lines(&w, group).await.len(), 1, "{what}");
+            let mut told: Vec<UserId> = w.notifier.sent().iter().map(told).collect();
+            let mut pushed: Vec<UserId> = w.notifier.events().iter().map(|(to, _)| *to).collect();
+            for each in [&mut told, &mut pushed] {
+                let all = each.len();
+                each.sort();
+                each.dedup();
+                assert_eq!(each.len(), all, "{what}: someone told twice");
+            }
+            assert!(!told.is_empty() && !pushed.is_empty(), "{what}");
+        }
+    }
 }
 
 /// What `group`'s conversation shows, oldest first: each event's kind and subject.

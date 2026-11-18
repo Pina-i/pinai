@@ -112,3 +112,25 @@ fn the_cache_drops_the_soonest_to_expire_once_full() {
     assert!((0..3).all(|i| !cache.contains_key(&id(i))));
     assert!(cache.contains_key(&id(MAX_ENTRIES + 2)));
 }
+
+#[tokio::test]
+async fn a_production_instance_never_fetches_a_name_resolving_into_private_space() {
+    let production = UrlPolicy {
+        require_https: true,
+        allow_private_networks: false,
+    };
+    let names = PeerResolver::with_lookup(production, |_| async {
+        Ok(vec!["10.0.0.5".parse().unwrap()])
+    });
+    let clients = MetadataClients::resolving(production, Vec::new(), names);
+    let id = ClientId::parse("https://app.internal.test/oauth-client.json").unwrap();
+
+    let refused = clients.fetch(&id).await;
+
+    assert!(
+        refused
+            .as_ref()
+            .is_err_and(|e| format!("{e:#}").contains("private address space (10.0.0.5)")),
+        "{refused:?}"
+    );
+}

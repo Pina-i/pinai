@@ -24,14 +24,26 @@ fn classifies_private_and_public_addresses() {
         "255.255.255.255",
         "198.18.0.1", // benchmarking
         "198.19.255.255",
-        "192.0.0.8",          // IETF protocol assignments
-        "0.1.2.3",            // this network
-        "::ffff:10.0.0.5",    // v4-mapped private
-        "::10.0.0.5",         // v4-compatible private
-        "64:ff9b::a00:5",     // NAT64 of 10.0.0.5
-        "64:ff9b::a9fe:a9fe", // NAT64 of 169.254.169.254
-        "64:ff9b:1::8.8.8.8", // local-use NAT64
-        "ff02::1",            // multicast
+        "192.0.0.8",                            // IETF protocol assignments
+        "0.1.2.3",                              // this network
+        "::ffff:10.0.0.5",                      // v4-mapped private
+        "::10.0.0.5",                           // v4-compatible private
+        "64:ff9b::a00:5",                       // NAT64 of 10.0.0.5
+        "64:ff9b::a9fe:a9fe",                   // NAT64 of 169.254.169.254
+        "64:ff9b:1::8.8.8.8",                   // local-use NAT64
+        "ff02::1",                              // multicast
+        "2002:a00:5::1",                        // 6to4 of 10.0.0.5
+        "2002:7f00:1::",                        // 6to4 of 127.0.0.1
+        "2002:a9fe:a9fe:1::1",                  // 6to4 of 169.254.169.254
+        "2001:0:4136:e378:8000:63bf:3fff:fdd2", // Teredo, its server and client public
+        "2001:0:a00:5:8000:63bf:f5ff:fffa",     // Teredo, its server 10.0.0.5
+        "2001::1",
+        "fec0::1", // site local
+        "fef0::1",
+        "100::1",          // discard
+        "2001:db8::1",     // documentation
+        "::ffff:0:a00:5",  // SIIT of 10.0.0.5
+        "::ffff:0:7f00:1", // SIIT of 127.0.0.1
     ] {
         assert!(is_private(&ip(s)), "{s} should be rejected");
     }
@@ -45,6 +57,11 @@ fn classifies_private_and_public_addresses() {
         "223.255.255.255",
         "::ffff:1.1.1.1",
         "64:ff9b::101:101", // NAT64 of 1.1.1.1
+        "2002:101:101::1",  // 6to4 of 1.1.1.1
+        "2001:4860:4860::8888",
+        "::ffff:0:101:101", // SIIT of 1.1.1.1
+        "100:0:0:1::1",
+        "2001:db9::1",
     ] {
         assert!(!is_private(&ip(s)), "{s} should be allowed");
     }
@@ -70,7 +87,7 @@ async fn rejects_plaintext_peers_in_production() {
         require_https: true,
         allow_private_networks: false,
     };
-    assert!(screen_url("http://evil.example/actor", p).await.is_err());
+    assert!(screen_url("http://evil.example/actor", p).is_err());
 }
 
 #[tokio::test]
@@ -79,8 +96,8 @@ async fn rejects_non_http_schemes() {
         require_https: false,
         allow_private_networks: true,
     };
-    assert!(screen_url("file:///etc/passwd", p).await.is_err());
-    assert!(screen_url("gopher://example.com/", p).await.is_err());
+    assert!(screen_url("file:///etc/passwd", p).is_err());
+    assert!(screen_url("gopher://example.com/", p).is_err());
 }
 
 /// The SSRF case: a keyId pointing back into the deployment's own network.
@@ -90,10 +107,8 @@ async fn rejects_peers_resolving_into_private_space() {
         require_https: false,
         allow_private_networks: false,
     };
-    assert!(screen_url("http://127.0.0.1:8080/actor", p).await.is_err());
-    assert!(screen_url("http://169.254.169.254/latest/meta-data", p)
-        .await
-        .is_err());
+    assert!(screen_url("http://127.0.0.1:8080/actor", p).is_err());
+    assert!(screen_url("http://169.254.169.254/latest/meta-data", p).is_err());
 }
 
 #[tokio::test]
@@ -102,7 +117,7 @@ async fn allows_loopback_only_when_the_policy_does() {
         require_https: false,
         allow_private_networks: true,
     };
-    assert!(screen_url("http://127.0.0.1:8080/actor", p).await.is_ok());
+    assert!(screen_url("http://127.0.0.1:8080/actor", p).is_ok());
 }
 
 #[tokio::test]
@@ -116,17 +131,17 @@ async fn an_ip_literal_is_checked_as_written_without_a_lookup() {
         "https://[fe80::1]/actor",
         "https://[::ffff:10.0.0.5]/actor",
         "https://[64:ff9b::a9fe:a9fe]/latest/meta-data",
+        "https://[2002:a9fe:a9fe::1]/latest/meta-data",
+        "https://[2001:0:a00:5:8000:63bf:f5ff:fffa]/actor",
     ] {
-        let refused = screen_url(private, p).await;
+        let refused = screen_url(private, p);
 
         assert!(
             matches!(&refused, Err(TransportError::Denied(m)) if m.contains("private address space")),
             "{private}: {refused:?}"
         );
     }
-    assert!(screen_url("https://[2606:4700:4700::1111]/actor", p)
-        .await
-        .is_ok());
+    assert!(screen_url("https://[2606:4700:4700::1111]/actor", p).is_ok());
 }
 
 const PRODUCTION: UrlPolicy = UrlPolicy {
@@ -145,9 +160,7 @@ async fn redirected(
     policy: UrlPolicy,
 ) -> Result<String, TransportError> {
     let location = reqwest::header::HeaderValue::from_str(location).unwrap();
-    redirect_target(&from.parse().unwrap(), Some(&location), policy)
-        .await
-        .map(String::from)
+    redirect_target(&from.parse().unwrap(), Some(&location), policy).map(String::from)
 }
 
 fn refused_for(refused: &Result<String, TransportError>, reason: &str) -> bool {
@@ -216,8 +229,8 @@ async fn a_redirect_without_a_target_says_what_it_lacks() {
     let from: url::Url = "http://127.0.0.1:8080/users/dave".parse().unwrap();
     let not_ascii = reqwest::header::HeaderValue::from_bytes("/caf\u{e9}".as_bytes()).unwrap();
 
-    let without = redirect_target(&from, None, DEVELOPMENT).await;
-    let unreadable = redirect_target(&from, Some(&not_ascii), DEVELOPMENT).await;
+    let without = redirect_target(&from, None, DEVELOPMENT);
+    let unreadable = redirect_target(&from, Some(&not_ascii), DEVELOPMENT);
 
     assert!(
         matches!(&without, Err(TransportError::Upstream(m)) if m.contains("without a Location")),
@@ -405,12 +418,236 @@ async fn one_deadline_covers_the_body() {
     );
 }
 
+/// A peer on the loopback interface answering every request `200` with a body one byte past the
+/// cap — announced in `Content-Length`, or streamed without it.
+async fn an_oversized_peer(announced: bool) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let at = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let _ = socket.read(&mut [0; 4096]).await;
+            let length = if announced {
+                format!("content-length: {}\r\n", MAX_BODY_BYTES + 1)
+            } else {
+                String::new()
+            };
+            let head = format!("HTTP/1.1 200 OK\r\n{length}connection: close\r\n\r\n");
+            let _ = socket.write_all(head.as_bytes()).await;
+            let _ = socket.write_all(&vec![b' '; MAX_BODY_BYTES + 1]).await;
+        }
+    });
+    format!("http://{at}/.well-known/webfinger")
+}
+
+#[tokio::test]
+async fn an_answer_past_the_body_cap_is_a_peer_failing_not_a_refusal() {
+    for announced in [true, false] {
+        let url = an_oversized_peer(announced).await;
+
+        let oversized = get_json_screened(&url, "application/json", DEVELOPMENT).await;
+
+        assert!(
+            matches!(&oversized, Err(TransportError::Upstream(m)) if m.contains("byte cap")),
+            "announced {announced}: {oversized:?}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn the_shared_client_follows_no_redirect_itself() {
     let (at, mut paths) = a_redirecting_peer(|_| vec![("/a", "302 Found", "/b".to_owned())]).await;
 
-    let answer = client().get(format!("http://{at}/a")).send().await.unwrap();
+    let answer = client(DEVELOPMENT)
+        .get(format!("http://{at}/a"))
+        .send()
+        .await
+        .unwrap();
 
     assert_eq!(answer.status(), reqwest::StatusCode::FOUND);
     assert_eq!(asked(&mut paths), ["/a"]);
+}
+
+/// A client whose resolver finds `addresses` for any name.
+fn a_client_resolving(policy: UrlPolicy, addresses: &[&str]) -> reqwest::Client {
+    let addresses: Vec<IpAddr> = addresses.iter().map(|a| ip(a)).collect();
+    let resolver = PeerResolver::with_lookup(policy, move |_| {
+        let addresses = addresses.clone();
+        async move { Ok(addresses) }
+    });
+    peer_client_builder(resolver).build().unwrap()
+}
+
+/// A peer on the loopback interface answering every request `200`, counting its connections.
+async fn a_counting_peer() -> (u16, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let connections = std::sync::Arc::new(AtomicUsize::new(0));
+    let counted = connections.clone();
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            counted.fetch_add(1, Ordering::SeqCst);
+            let _ = socket.read(&mut [0; 4096]).await;
+            let response = "HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}";
+            let _ = socket.write_all(response.as_bytes()).await;
+        }
+    });
+    (port, connections)
+}
+
+fn connected(connections: &std::sync::atomic::AtomicUsize) -> usize {
+    connections.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[tokio::test]
+async fn a_name_resolving_into_private_space_fails_at_connect_in_production() {
+    let (port, connections) = a_counting_peer().await;
+    let client = a_client_resolving(PRODUCTION, &["127.0.0.1"]);
+
+    let refused = client
+        .get(format!("http://rebound.test:{port}/users/dave"))
+        .send()
+        .await
+        .map_err(|e| request_failed("fetch failed", e));
+
+    assert!(
+        matches!(&refused, Err(TransportError::Upstream(m)) if m.contains("private address space (127.0.0.1)")),
+        "{refused:?}"
+    );
+    assert_eq!(connected(&connections), 0);
+}
+
+#[tokio::test]
+async fn one_private_address_fails_a_name_whatever_else_it_resolves_to() {
+    let client = a_client_resolving(PRODUCTION, &["93.184.216.34", "2002:a00:5::1"]);
+
+    let refused = client
+        .get("https://mixed.test/users/dave")
+        .send()
+        .await
+        .map_err(|e| request_failed("fetch failed", e));
+
+    assert!(
+        matches!(&refused, Err(TransportError::Upstream(m)) if m.contains("(2002:a00:5::1)")),
+        "{refused:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_name_resolving_into_private_space_is_reached_in_development() {
+    let (port, connections) = a_counting_peer().await;
+    let client = a_client_resolving(DEVELOPMENT, &["127.0.0.1"]);
+
+    let answer = client
+        .get(format!("http://rebound.test:{port}/users/dave"))
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(answer.status(), reqwest::StatusCode::OK);
+    assert_eq!(connected(&connections), 1);
+}
+
+#[tokio::test]
+async fn the_shared_clients_screen_a_name_as_they_resolve_it() {
+    let (port, connections) = a_counting_peer().await;
+    let at = format!("https://localhost:{port}/users/dave");
+
+    let fetched = get_json_screened(&at, "application/activity+json", PRODUCTION).await;
+    let downloaded = download_client(PRODUCTION)
+        .get(&at)
+        .send()
+        .await
+        .map_err(|e| request_failed("signed GET failed", e));
+
+    assert!(
+        matches!(&fetched, Err(TransportError::Upstream(m)) if m.contains("private address space")),
+        "{fetched:?}"
+    );
+    assert!(
+        matches!(&downloaded, Err(TransportError::Upstream(m)) if m.contains("private address space")),
+        "{downloaded:?}"
+    );
+    assert_eq!(connected(&connections), 0);
+}
+
+#[tokio::test]
+async fn a_refused_name_reads_as_a_peer_that_does_not_answer_a_refused_literal_as_refused() {
+    let (port, connections) = a_counting_peer().await;
+
+    let name = get_json_screened(
+        &format!("https://localhost:{port}/users/dave"),
+        "application/activity+json",
+        PRODUCTION,
+    )
+    .await;
+    let literal = get_json_screened(
+        &format!("https://127.0.0.1:{port}/users/dave"),
+        "application/activity+json",
+        PRODUCTION,
+    )
+    .await;
+
+    assert!(
+        matches!(&name, Err(TransportError::Upstream(_))),
+        "{name:?}"
+    );
+    assert!(
+        matches!(&literal, Err(TransportError::Denied(m)) if m.contains("private address space (127.0.0.1)")),
+        "{literal:?}"
+    );
+    assert_eq!(connected(&connections), 0);
+}
+
+#[tokio::test]
+async fn a_failed_lookup_is_named_in_the_failure() {
+    let resolver = PeerResolver::with_lookup(PRODUCTION, |_| async {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "no such host",
+        ))
+    });
+    let client = peer_client_builder(resolver).build().unwrap();
+
+    let failed = client
+        .get("https://nowhere.test/users/dave")
+        .send()
+        .await
+        .map_err(|e| request_failed("fetch failed", e));
+
+    assert!(
+        matches!(&failed, Err(TransportError::Upstream(m)) if m.ends_with("dns error: no such host")),
+        "{failed:?}"
+    );
+}
+
+/// A client whose lookups take a second, and connects within `connect`.
+fn a_client_slow_to_resolve(connect: Duration) -> reqwest::ClientBuilder {
+    let resolver = PeerResolver::with_lookup(DEVELOPMENT, |_| async {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        Ok(vec![ip("127.0.0.1")])
+    });
+    peer_client_builder(resolver).connect_timeout(connect)
+}
+
+#[tokio::test]
+async fn a_connect_timeout_is_named_in_the_failure() {
+    let client = a_client_slow_to_resolve(Duration::from_millis(50))
+        .build()
+        .unwrap();
+
+    let failed = client
+        .get("http://slow.test:1/users/dave")
+        .send()
+        .await
+        .map_err(|e| request_failed("fetch failed", e));
+
+    assert!(
+        matches!(&failed, Err(TransportError::Upstream(m)) if m.contains("took too long to connect, its name's lookup included")),
+        "{failed:?}"
+    );
 }

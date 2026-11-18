@@ -6,6 +6,7 @@ use domain::messaging::{
     MessageStoreError, Messages, Mirrored, MlsCiphertext, NewMessage, RemoteAttachment, Role,
 };
 use domain::{ConversationId, MessageId, UserId};
+use sqlx::postgres::PgQueryResult;
 use sqlx::{PgConnection, PgPool};
 use time::OffsetDateTime;
 
@@ -144,15 +145,23 @@ async fn hold_member(
     Ok(())
 }
 
-/// Holds a membership exactly as another instance stamped it.
-/// Whether holding `membership` brought the member in: a new row, or one back from a departure.
-/// Each statement waits for a concurrent mirror's row and then sees it, so of two mirrors taking
-/// the same member at once, one brings them in.
+/// What holding a mirrored membership took.
+#[derive(PartialEq, Eq)]
+enum Held {
+    BroughtIn,
+    RoleTaken,
+    Nothing,
+}
+
+/// Holds a membership as another instance stamped it: a new row, one back from a departure, or
+/// an active one whose role and join stamps move forward only. Each statement waits for a
+/// concurrent mirror's row and then sees it, so of two mirrors taking the same change at once,
+/// one takes it.
 async fn hold_membership(
     c: &mut PgConnection,
     id: uuid::Uuid,
     membership: &Membership,
-) -> Result<bool, MessageStoreError> {
+) -> Result<Held, MessageStoreError> {
     let bind = |sql: &'static str| {
         sqlx::query(sql)
             .bind(id)
@@ -169,7 +178,7 @@ async fn hold_membership(
     .await
     .context("add a mirrored member")?;
     if added.rows_affected() == 1 {
-        return Ok(true);
+        return Ok(Held::BroughtIn);
     }
     let back = bind(
         "UPDATE conversation_members SET left_at = NULL, role = $3, joined_at = $4, role_at = $5 \
@@ -179,16 +188,27 @@ async fn hold_membership(
     .await
     .context("bring a mirrored member back")?;
     if back.rows_affected() == 1 {
-        return Ok(true);
+        return Ok(Held::BroughtIn);
     }
-    bind(
-        "UPDATE conversation_members SET role = $3, joined_at = $4, role_at = $5 \
-         WHERE conversation_id = $1 AND actor_uri = $2",
+    let role = bind(
+        "UPDATE conversation_members SET role = $3, role_at = $5 \
+         WHERE conversation_id = $1 AND actor_uri = $2 AND left_at IS NULL AND role_at < $5",
     )
     .execute(&mut *c)
     .await
-    .context("hold a mirrored membership")?;
-    Ok(false)
+    .context("take a mirrored member's role")?;
+    bind(
+        "UPDATE conversation_members SET joined_at = $4 \
+         WHERE conversation_id = $1 AND actor_uri = $2 AND left_at IS NULL AND joined_at < $4",
+    )
+    .execute(&mut *c)
+    .await
+    .context("move a mirrored member's join stamp")?;
+    Ok(if role.rows_affected() == 1 {
+        Held::RoleTaken
+    } else {
+        Held::Nothing
+    })
 }
 
 async fn find_conversation(
@@ -320,7 +340,7 @@ impl Conversations for PgConversations {
         changes: &GroupChanges,
     ) -> Result<Mirrored, MessageStoreError> {
         let mut tx = self.pool.begin().await.context("begin mirror_group")?;
-        if find_conversation(&mut tx, id.as_uuid()).await?.is_none() {
+        let named = if find_conversation(&mut tx, id.as_uuid()).await?.is_none() {
             // Two Notes can bring a group new here at the same moment: the one that loses the
             // race takes the other's row, and the newer name, as a snapshot would.
             sqlx::query(
@@ -334,29 +354,41 @@ impl Conversations for PgConversations {
             .bind(changes.name.as_ref().map(|n| n.at))
             .execute(&mut *tx)
             .await
-            .context("create a mirrored group")?;
+            .context("create a mirrored group")?
         } else if let Some(named) = &changes.name {
+            // Guarded by the stamp: of two copies of one rename at once, one takes it.
             sqlx::query(
-                "UPDATE conversations SET name = $2, name_at = $3 WHERE id = $1 AND kind = 'group'",
+                "UPDATE conversations SET name = $2, name_at = $3 \
+                 WHERE id = $1 AND kind = 'group' AND name_at < $3",
             )
             .bind(id.as_uuid())
             .bind(named.name.as_deref())
             .bind(named.at)
             .execute(&mut *tx)
             .await
-            .context("rename a mirrored group")?;
-        }
-        let mut brought_in = Vec::new();
+            .context("rename a mirrored group")?
+        } else {
+            PgQueryResult::default()
+        };
+        let (mut brought_in, mut roles_taken) = (Vec::new(), Vec::new());
         for membership in &changes.members {
-            if hold_membership(&mut tx, id.as_uuid(), membership).await? {
-                brought_in.push(membership.member.actor_uri.clone());
+            let actor = membership.member.actor_uri.clone();
+            match hold_membership(&mut tx, id.as_uuid(), membership).await? {
+                Held::BroughtIn => brought_in.push(actor),
+                Held::RoleTaken => roles_taken.push(actor),
+                Held::Nothing => {}
             }
         }
         let group = find_conversation(&mut tx, id.as_uuid())
             .await?
             .context("the mirrored group is gone")?;
         tx.commit().await.context("commit mirror_group")?;
-        Ok(Mirrored { group, brought_in })
+        Ok(Mirrored {
+            group,
+            renamed: changes.name.is_some() && named.rows_affected() == 1,
+            brought_in,
+            roles_taken,
+        })
     }
 
     async fn list_for(
@@ -491,9 +523,22 @@ impl Conversations for PgConversations {
         &self,
         id: ConversationId,
         member: &Member,
-    ) -> Result<(), MessageStoreError> {
-        let mut c = self.pool.acquire().await.context("acquire")?;
-        hold_member(&mut c, id.as_uuid(), member).await
+    ) -> Result<bool, MessageStoreError> {
+        // An active member's row is left as it is: of two adds at once, one brings them in.
+        let added = sqlx::query(
+            "INSERT INTO conversation_members (conversation_id, actor_uri, role) \
+             VALUES ($1, $2, $3) \
+             ON CONFLICT (conversation_id, actor_uri) DO UPDATE SET \
+                 joined_at = now(), left_at = NULL, role = EXCLUDED.role, role_at = now() \
+             WHERE conversation_members.left_at IS NOT NULL",
+        )
+        .bind(id.as_uuid())
+        .bind(member.actor_uri.as_str())
+        .bind(member.role.as_str())
+        .execute(&self.pool)
+        .await
+        .context("add a conversation member")?;
+        Ok(added.rows_affected() == 1)
     }
 
     async fn remove_member(
