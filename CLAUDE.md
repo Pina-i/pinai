@@ -113,7 +113,7 @@ Run from the repo root:
 | `make check` | fmt-check + `readme-compose` + clippy `-D warnings` (every target, every feature) + tests — no Docker |
 | `make readme-compose` | the root `README.md` shows `deploy/compose.yaml` verbatim: change the file, then copy it into the README |
 | `make test-integration` | throwaway Postgres, Redis and RustFS (`compose.test.yml`, ports 55432, 56479 and 59000), then every test including the Docker-gated ones |
-| `make check-all` | both — the gate before merging |
+| `make check-all` | `check`'s fmt, `readme-compose` and clippy, then `test-integration`: every test run once — the gate before merging |
 | `make fmt` | rustfmt the workspace |
 | `make alice` / `make bob` | run a full dev instance |
 | `cargo run -p idp-app` | run the identity provider (the `idp-server` binary) |

@@ -653,7 +653,8 @@ All `make` targets are run from the repo root.
 | `make check` | `fmt-check` + `readme-compose` + `lint` + `cargo test --workspace` — no Docker; run before every commit |
 | `make readme-compose` | Check that the `compose.yaml` this README shows is `deploy/compose.yaml`: change the file, then copy it into the README |
 | `make test-integration` | Throwaway Postgres, Redis and RustFS (`compose.test.yml`), then every test, the Docker-gated ones included |
-| `make check-all` | `check` + `test-integration` — what CI runs, the gate before merging |
+| `make check-static` | `fmt-check` + `readme-compose` + `lint`, no test run |
+| `make check-all` | `check-static` + `test-integration`, every test run once — what CI runs, the gate before merging |
 
 ### Cargo
 

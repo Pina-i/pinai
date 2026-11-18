@@ -9,7 +9,7 @@ SHELL := bash
         alice-docker-dev bob-docker-dev \
         alice-docker-win bob-docker-win \
         alice-down bob-down alice-down-v bob-down-v \
-        fmt fmt-check lint readme-compose check \
+        fmt fmt-check lint readme-compose check-static check \
         test-integration test-integration-down check-all
 
 # ── Instance environment ─────────────────────────────────────────────────────
@@ -189,7 +189,9 @@ lint:
 readme-compose:
 	sh scripts/check-readme-compose.sh
 
-check: fmt-check readme-compose lint
+check-static: fmt-check readme-compose lint
+
+check: check-static
 	cargo test --workspace
 
 # ── Integration tests (Docker) ────────────────────────────────────────────────
@@ -212,4 +214,5 @@ test-integration:
 test-integration-down:
 	docker compose -f compose.test.yml --project-name pinai-test down
 
-check-all: check test-integration
+# One test run: `--all-features` already runs every test `check` would.
+check-all: check-static test-integration
