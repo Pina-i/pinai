@@ -92,10 +92,16 @@ tell them who on this instance has met whom. Where a user names an arbitrary act
 invitees — the actor is resolved anew on its own instance, cached or not
 (`identity-provider/specs/groups.md § 2`).
 
-A resolution the actor's instance fails — it doesn't answer, or answers a WebFinger or actor
-document no instance would send — is `502 the account's instance did not answer`: for a friend
+What a peer answers is kept only as `specs/06-federation-authentication.md` "Resolving an actor"
+has it: an address resolves only to an actor of the instance it names, and a document describes
+only the actor at the URL it was asked at — so no instance changes what this one holds of
+another's accounts. A resolution the actor's instance fails — it doesn't answer, or answers what
+no instance would send: a WebFinger or actor document breaking that rule, an `id` that is no
+actor URI (§ 4), or an inbox URL past an actor URI's 2 KiB (`RemoteActor::parse_inbox`) — is
+`502 the account's instance did not answer`, and nothing of its answer is written: for a friend
 request, a DM to an address not cached here, and a group invitee (with its `actor_uri`). An
-instance that answers it knows no such account is `404`.
+instance that answers it knows no such account is `404`. A discovery whose document breaks the
+rule, or brings such an inbox, reads as an unreachable peer's: what was cached stays.
 
 A group's members reach this instance in the rosters other members' instances send, so a member
 may be someone nobody here has met. What goes to each remote member — a group message, an edit,
@@ -120,9 +126,10 @@ empty: nothing is published, and whom an account is friends with is not for anyo
 
 The canonical address format used throughout the system is `username@domain` (e.g. `alice_xk9mp@idp.alice.com`), **without** a leading `@` — `/userinfo` answers it as `address`. Clients receive actor URIs (`https://idp.alice.com/users/alice_xk9mp`) in some events and normalise them to `username@domain` via `actorUriToAddress()` before using them as conversation keys.
 
-An actor URI is an `http(s)` URL with a host, no query and no fragment, of 2 KiB at most once
-normalised (`domain::identity::ActorUri`) — whether a peer or a user hands it over, anything else is
-refused.
+An actor URI is an `http(s)` URL with a host, no user name or password, no query and no fragment,
+of 2 KiB at most once normalised (`domain::identity::ActorUri`) — whether a peer or a user hands it
+over, anything else is refused: `http://reef.chat@evil.example/users/x` is evil.example's, and
+would name one account by two URIs.
 
 ## 5. `username` vs `display_name`
 

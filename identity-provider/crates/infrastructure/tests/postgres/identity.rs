@@ -1,14 +1,19 @@
 use std::net::SocketAddr;
 
 use domain::identity::{
-    Accounts, ActorUri, Handle, IntroText, RemoteActors, RemoteActorsError, SavedIntro,
+    Accounts, ActorUri, FederatedAddress, Handle, IntroText, RemoteActors, RemoteActorsError,
+    SavedIntro,
 };
 use federation_transport::UrlPolicy;
 use infrastructure::federation::FederatedRemoteActors;
 use infrastructure::postgres::{PgAccounts, PgSavedIntro};
+use serde_json::{Value, json};
 use sqlx::PgPool;
+use time::OffsetDateTime;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+use wiremock::matchers::{path, path_regex};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use super::an_account;
 
@@ -368,4 +373,180 @@ async fn a_document_without_them_clears_the_bio_and_pronouns_and_an_unreachable_
         (None, None),
         "an unknown pronoun is none"
     );
+}
+
+/// A peer answering WebFinger with the first of what `answers` gives for the address it listens
+/// at, and its actor documents with the second.
+async fn a_peer_answering(answers: impl FnOnce(&str) -> (Value, Value)) -> MockServer {
+    let peer = MockServer::start().await;
+    let (finger, document) = answers(&peer.address().to_string());
+    Mock::given(path("/.well-known/webfinger"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(finger))
+        .mount(&peer)
+        .await;
+    Mock::given(path_regex("^/users/"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(document))
+        .mount(&peer)
+        .await;
+    peer
+}
+
+fn finger_to(actor: &str) -> Value {
+    json!({
+        "subject": "acct:someone",
+        "links": [{ "rel": "self", "type": "application/activity+json", "href": actor }],
+    })
+}
+
+fn person_at(at: &str, handle: &str, name: &str) -> Value {
+    serde_json::to_value(activitypub::Actor::person(
+        &format!("http://{at}"),
+        handle,
+        name,
+        "-----BEGIN PUBLIC KEY-----",
+    ))
+    .unwrap()
+}
+
+const MAHEALANI: &str = "http://127.0.0.1:9/users/mahealani_q1x8c";
+
+type Held = (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    OffsetDateTime,
+);
+
+async fn held_of(pool: &PgPool, actor: &str) -> Option<Held> {
+    sqlx::query_as(
+        "SELECT inbox_url, display_name, avatar_url, fetched_at FROM remote_actors \
+         WHERE actor_uri = $1",
+    )
+    .bind(actor)
+    .fetch_optional(pool)
+    .await
+    .unwrap()
+}
+
+async fn remembered(pool: &PgPool) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM remote_actors")
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn an_instance_describing_another_instances_actor_leaves_what_is_held_of_them(pool: PgPool) {
+    sqlx::query(
+        "INSERT INTO remote_actors (actor_uri, inbox_url, instance, display_name, avatar_url) \
+         VALUES ($1, $1 || '/inbox', '127.0.0.1:9', 'Mahealani', $1 || '.png')",
+    )
+    .bind(MAHEALANI)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let held = held_of(&pool, MAHEALANI).await;
+    let evil = a_peer_answering(|at| {
+        let mut document = person_at(at, "x_k2m9x", "Not Mahealani");
+        document["id"] = json!(MAHEALANI);
+        document["inbox"] = json!(format!("http://{at}/inbox"));
+        (finger_to(&format!("http://{at}/users/x_k2m9x")), document)
+    })
+    .await;
+    let x = FederatedAddress::parse(&format!("x_k2m9x@{}", evil.address())).unwrap();
+
+    let refused = remote_actors(pool.clone()).resolve(&x).await;
+
+    assert!(
+        matches!(refused, Err(RemoteActorsError::Unavailable(_))),
+        "{refused:?}"
+    );
+    assert_eq!(held_of(&pool, MAHEALANI).await, held);
+    assert_eq!(remembered(&pool).await, 1);
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn an_answer_no_instance_would_give_is_unavailable_and_nothing_is_remembered(pool: PgPool) {
+    let too_long = format!("/users/{}", "d".repeat(ActorUri::MAX_BYTES));
+    for (actor, inbox) in [
+        ("/users/dave_k2m9x?page=1", "/users/dave_k2m9x/inbox"),
+        (too_long.as_str(), "/users/dave_k2m9x/inbox"),
+        ("/users/dave_k2m9x", "dave_k2m9x/inbox"),
+        ("/users/dave_k2m9x", too_long.as_str()),
+    ] {
+        let peer = a_peer_answering(|at| {
+            let mut document = person_at(at, "dave_k2m9x", "Dave");
+            document["id"] = json!(format!("http://{at}{actor}"));
+            document["inbox"] = json!(if inbox.starts_with('/') {
+                format!("http://{at}{inbox}")
+            } else {
+                inbox.to_owned()
+            });
+            (finger_to(&format!("http://{at}{actor}")), document)
+        })
+        .await;
+        let dave = FederatedAddress::parse(&format!("dave_k2m9x@{}", peer.address())).unwrap();
+
+        let refused = remote_actors(pool.clone()).resolve(&dave).await;
+
+        assert!(
+            matches!(refused, Err(RemoteActorsError::Unavailable(_))),
+            "{actor} {inbox}: {refused:?}"
+        );
+    }
+    assert_eq!(remembered(&pool).await, 0);
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn a_document_naming_another_actor_is_not_taken_on_discovery(pool: PgPool) {
+    let peer = a_peer_answering(|at| {
+        let mut document = person_at(at, "dave_k2m9x", "Not Dave");
+        document["id"] = json!(MAHEALANI);
+        (json!({}), document)
+    })
+    .await;
+    let dave = format!("http://{}/users/dave_k2m9x", peer.address());
+    a_cached_actor(&pool, &dave, None).await;
+
+    let discovered = remote_actors(pool.clone())
+        .discover(&ActorUri::parse(&dave).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(discovered.display_name.as_deref(), Some("dave"));
+    assert_eq!(held_of(&pool, MAHEALANI).await, None);
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn an_actor_is_discovered_at_the_inbox_its_document_gives_within_the_limits(pool: PgPool) {
+    let shared = a_peer_answering(|at| {
+        let mut document = person_at(at, "dave_k2m9x", "Dave");
+        document["inbox"] = json!(format!("http://{at}/inbox"));
+        (json!({}), document)
+    })
+    .await;
+    let too_long = a_peer_answering(|at| {
+        let mut document = person_at(at, "dave_k2m9x", "Not Dave");
+        document["inbox"] = json!(format!("http://{at}/{}", "i".repeat(ActorUri::MAX_BYTES)));
+        (json!({}), document)
+    })
+    .await;
+    let dave_at = |peer: &MockServer| {
+        ActorUri::parse(&format!("http://{}/users/dave_k2m9x", peer.address())).unwrap()
+    };
+    a_cached_actor(&pool, dave_at(&too_long).as_str(), None).await;
+    let actors = remote_actors(pool);
+
+    let discovered = actors.discover(&dave_at(&shared)).await.unwrap();
+    let kept = actors.discover(&dave_at(&too_long)).await.unwrap();
+
+    assert_eq!(
+        discovered.inbox.as_str(),
+        format!("http://{}/inbox", shared.address())
+    );
+    assert_eq!(
+        kept.inbox.as_str(),
+        format!("{}/inbox", dave_at(&too_long).as_str())
+    );
+    assert_eq!(kept.display_name.as_deref(), Some("dave"));
 }

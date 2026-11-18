@@ -1,6 +1,8 @@
 use base64::Engine as _;
 use reqwest::Method;
 use serde_json::json;
+use wiremock::matchers::path;
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use crate::helpers::{Account, TestApp, eventually, spawn_app};
 
@@ -151,6 +153,81 @@ async fn a_profile_edited_while_a_request_is_pending_reaches_the_new_friend() {
     assert_eq!(alices["pronouns"], "she");
     assert!(alices["friends_since"].is_string(), "{alices}");
 
+    a.stop().await.unwrap();
+    b.stop().await.unwrap();
+}
+
+/// An instance whose WebFinger names its own `mallory`, whose document says it is `victim`.
+async fn an_instance_passing_off(victim: &Account) -> MockServer {
+    let peer = MockServer::start().await;
+    let mallory = format!("{}/users/mallory", peer.uri());
+    Mock::given(path("/.well-known/webfinger"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "subject": format!("acct:mallory@{}", peer.address()),
+            "links": [{ "rel": "self", "type": "application/activity+json", "href": mallory }],
+        })))
+        .mount(&peer)
+        .await;
+    Mock::given(path("/users/mallory"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "@context": "https://www.w3.org/ns/activitystreams",
+            "id": victim.actor_uri,
+            "type": "Person",
+            "preferredUsername": "mallory",
+            "name": "Not Bob",
+            "inbox": format!("{}/inbox", peer.uri()),
+            "outbox": format!("{mallory}/outbox"),
+            "followers": format!("{mallory}/followers"),
+            "following": format!("{mallory}/following"),
+            "publicKey": {
+                "id": format!("{mallory}#main-key"),
+                "owner": mallory,
+                "publicKeyPem": "-----BEGIN PUBLIC KEY-----",
+            },
+        })))
+        .mount(&peer)
+        .await;
+    peer
+}
+
+#[tokio::test]
+async fn an_instance_passing_off_another_instances_account_is_a_bad_gateway_and_changes_nothing() {
+    let (a, b) = (spawn_app().await, spawn_app().await);
+    let (alice, bob) = (a.sign_up("alice").await, b.sign_up("bob").await);
+    let (asked, body) = a
+        .send(
+            Method::POST,
+            &alice,
+            "/api/friends/request",
+            json!({ "address": bob.address(&b) }),
+        )
+        .await;
+    assert_eq!(asked, 201, "{body}");
+    let bob_as_held = format!(
+        "SELECT count(*) FROM remote_actors WHERE actor_uri = '{0}' \
+         AND inbox_url = '{0}/inbox' AND display_name = 'bob'",
+        bob.actor_uri
+    );
+    assert_eq!(a.count(&bob_as_held).await, 1);
+    let evil = an_instance_passing_off(&bob).await;
+
+    let (refused, body) = a
+        .send(
+            Method::POST,
+            &alice,
+            "/api/friends/request",
+            json!({ "address": format!("mallory@{}", evil.address()) }),
+        )
+        .await;
+
+    assert_eq!(refused, 502, "{body}");
+    let fetched = evil.received_requests().await.unwrap();
+    assert!(
+        fetched.iter().any(|r| r.url.path() == "/users/mallory"),
+        "the document was read"
+    );
+    assert_eq!(a.count(&bob_as_held).await, 1);
+    assert_eq!(a.count("SELECT count(*) FROM remote_actors").await, 1);
     a.stop().await.unwrap();
     b.stop().await.unwrap();
 }

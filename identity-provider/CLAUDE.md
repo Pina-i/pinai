@@ -324,7 +324,7 @@ Don't mention any "phase" development or what is currently being worked on. The 
 
 ### Federation
 - **Outbound AP delivery** is best-effort, inline `tokio::spawn` per remote inbox — no persistent outbox queue. A delivery never fails the request that caused it: friendship activities go through the fire-and-forget `SocialFederation` port. Each activity owns its own reconciliation story (the next profile change, idempotent retry, a failed 1:1 DM reported to its sender). See `identity-provider/specs/event-delivery.md § 2`.
-- **`remote_actors.inbox_url`** is cached on first WebFinger resolution. Every writer (`remote_actors::upsert()`, `FederatedRemoteActors`) uses `COALESCE(EXCLUDED.inbox_url, remote_actors.inbox_url)` — never overwrite a cached value with `None`.
+- **`remote_actors.inbox_url`** is cached from the actor document, at resolution or discovery, only as `specs/06-federation-authentication.md` "Resolving an actor" admits it. Every writer (`remote_actors::upsert()`, `FederatedRemoteActors`) uses `COALESCE(EXCLUDED.inbox_url, remote_actors.inbox_url)` — never overwrite a cached value with `None`.
 - **A group's changes travel on their own**: an add, removal, leave, rename or role change made
   here is sent to the group's remote members as `Add`, `Remove`, `Leave` or `Update`, stamped
   (`GroupFederation`, `ReceiveGroupChange`; `identity-provider/specs/groups.md § 8`).

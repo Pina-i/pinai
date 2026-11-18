@@ -214,10 +214,51 @@ Further rules, each closing an abuse of an attacker-chosen `keyId`:
 
 ---
 
+### Resolving an actor
+
+An address, `username@domain`, names an account of the instance at `domain`, and only that
+instance says who the account is. Resolution (`federation_transport::resolve_remote_actor`)
+takes an answer only when it comes from that instance and describes one of its actors:
+
+1. `GET {scheme}://{domain}/.well-known/webfinger?resource=acct:{username}@{domain}`, the
+   resource percent-encoded — a `#`, `&` or `?` in the name stays in it. The `self` link typed
+   `application/activity+json` must be on the address's origin, `{scheme}://{domain}`: the same
+   scheme, host and port (`localhost:8081` included).
+2. `GET` that link (`federation_transport::fetch_remote_actor`). The document is the actor's
+   only when its `id` is the URL asked, and its `inbox` an `http(s)` URL on the same origin.
+
+An actor met by its URI rather than its address — the signer of a `Follow`, a friend whose
+profile is read again — is fetched by step 2 alone, held to the same rule.
+
+```mermaid
+flowchart TD
+  A["mahealani_q1x8c@reef.chat"] --> W["GET reef.chat's WebFinger"]
+  W --> L{"self link on reef.chat?"}
+  L -->|no| X["refused: nothing kept"]
+  L -->|yes| D["GET the self link"]
+  D --> I{"id = the URL asked,<br/>inbox on reef.chat?"}
+  I -->|no| X
+  I -->|yes| K["the actor, as reef.chat describes it"]
+```
+
+An answer that breaks a rule is one no instance would send, refused as an instance that doesn't
+answer is (`TransportError::Upstream`), and nothing of it is kept. Without the rules any instance
+could describe another's accounts: asked for `x@evil.example`, it would answer a document whose
+`id` is `https://reef.chat/users/mahealani_q1x8c` and whose `inbox` is its own, and the asking
+instance would deliver Mahealani's messages to evil.example and show her friends the name and
+avatar it chose. A service may refuse more on top — the identity provider takes only an `id`
+that is an actor URI by its own rules (`identity-provider/specs/identity.md § 4`).
+
+Pina'i has no split domains: an account's actor lives on the origin its address names
+(`InstanceOrigin::conventional_uri`), so an actor is never checked back against an address by a
+second WebFinger request.
+
+---
+
 ### Peer request policy
 
-Every outbound fetch above goes to an address an attacker chose, because `keyId` is supplied
-by the caller. One shared client applies the same bounds to all of them.
+Every outbound fetch above goes to an address an attacker chose: a `keyId` the caller
+supplies, an address a user typed. One shared client applies the same bounds to all of them.
 
 | Bound | Value | Without it |
 |---|---|---|
@@ -265,4 +306,5 @@ assumed to use the same scheme as this instance, consistent with `Config::scheme
 - Inbound requests pass signature, digest binding and actor binding before any state changes.
 - A verified signature alone is not authorisation to speak for an actor.
 - The key cache treats a verification failure, not a clock, as the signal that a key rotated.
+- An address resolves only to an actor of the instance it names, whose document names itself as the URL asked.
 - Every peer URL is attacker-chosen and is bounded and screened accordingly.
