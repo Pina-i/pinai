@@ -137,3 +137,22 @@ async fn a_dm_to_an_instance_that_does_not_answer_is_a_bad_gateway() {
 
     assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
 }
+
+#[tokio::test]
+async fn a_dm_to_an_address_this_instance_may_not_ask_says_nothing_of_where_it_leads() {
+    let alice = account("alice");
+    let app = TestApp::knowing(
+        [alice.clone()],
+        domain::identity::testing::InMemoryRemoteActors::default().and_refused("db.internal.test"),
+    );
+
+    let answer = dm(&app, &alice, "dave_k2m9x@db.internal.test").await;
+
+    assert_eq!(
+        answer,
+        (
+            StatusCode::FORBIDDEN,
+            refusal("That address can't be reached from this instance")
+        )
+    );
+}

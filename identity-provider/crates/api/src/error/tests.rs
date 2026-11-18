@@ -32,6 +32,22 @@ async fn an_internal_error_never_shows_its_cause() {
 }
 
 #[tokio::test]
+async fn a_peer_the_policy_refuses_is_refused_without_the_reason() {
+    let reason = "peer URL resolves into private address space (10.0.0.5)".to_owned();
+
+    let response = ApiError::peer_not_allowed(reason).into_response();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        json_body(response).await,
+        json!({
+            "error": "access_denied",
+            "error_description": "That address can't be reached from this instance"
+        })
+    );
+}
+
+#[tokio::test]
 async fn extra_fields_sit_beside_the_error() {
     let response = ApiError::new(StatusCode::CONFLICT, "conflict", "Epoch already taken")
         .with("winning_commit", json!({ "epoch": 4 }))

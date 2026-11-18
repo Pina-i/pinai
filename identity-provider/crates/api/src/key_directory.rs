@@ -540,7 +540,7 @@ impl From<KeyDirectoryError> for ApiError {
             KeyDirectoryError::PeerMustTargetLocal => {
                 ApiError::bad_request("peer-authenticated claim must target a local actor")
             }
-            KeyDirectoryError::PeerNotAllowed(reason) => ApiError::bad_request(reason),
+            KeyDirectoryError::PeerNotAllowed(reason) => ApiError::peer_not_allowed(reason),
             KeyDirectoryError::PeerBusy => ApiError::rate_limited(),
             KeyDirectoryError::PeerUnavailable(e) => ApiError::upstream(e),
             KeyDirectoryError::Unreachable => ApiError::new(

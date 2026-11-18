@@ -299,6 +299,13 @@ that origin, or one the screen refuses, ends the fetch as a peer that doesn't an
   an IPv4-mapped, IPv4-compatible or NAT64 address of one — the classic target being a cloud
   metadata endpoint.
 
+What a service tells its caller of such a refusal names nothing the screen resolved: the
+identity provider answers a friend request, a DM, a group's invitee, a KeyPackage claim or an
+inbox delivery whose peer it may not ask with `403 access_denied`, "That address can't be
+reached from this instance", whatever the reason. The reason, which may give the private
+address a name resolves to, goes to the log at debug level only — otherwise a signed-in user
+could map the deployment's internal names one by one (`x@db.internal` → its address).
+
 Both rules are derived from the local issuer: an `https` issuer is a production deployment
 and gets the strict policy, while a plain-`http` issuer is local development, where the
 `alice`/`bob` pair federates over `localhost`. There is no mixed-mode federation — peers are

@@ -334,7 +334,9 @@ async fn unfriending_answers_204_then_404_once_they_are_no_longer_friends() {
 
 #[tokio::test]
 async fn a_peer_the_url_policy_refuses_is_a_403() {
-    let refused = ApiError::from(SocialError::PeerNotAllowed("private address".into()));
+    let refused = ApiError::from(SocialError::PeerNotAllowed(
+        domain::identity::testing::PRIVATE_ADDRESS_REFUSAL.into(),
+    ));
 
     let (status, body) = TestApp::body_of(refused).await;
 
@@ -342,7 +344,10 @@ async fn a_peer_the_url_policy_refuses_is_a_403() {
         (status, body),
         (
             StatusCode::FORBIDDEN,
-            refusal("access_denied", "private address")
+            refusal(
+                "access_denied",
+                "That address can't be reached from this instance"
+            )
         )
     );
 }
@@ -407,6 +412,35 @@ async fn a_request_to_an_instance_that_does_not_answer_is_a_bad_gateway() {
         (
             StatusCode::BAD_GATEWAY,
             refusal("bad_gateway", "the account's instance did not answer")
+        )
+    );
+}
+
+#[tokio::test]
+async fn a_request_to_an_address_this_instance_may_not_ask_says_nothing_of_where_it_leads() {
+    let alice = account("alice");
+    let app = TestApp::knowing(
+        [alice.clone()],
+        InMemoryRemoteActors::default().and_refused("db.internal.test"),
+    );
+
+    let answer = app
+        .call(
+            Method::POST,
+            "/api/friends/request",
+            Some(alice.id),
+            Some(json!({ "address": "dave_k2m9x@db.internal.test" })),
+        )
+        .await;
+
+    assert_eq!(
+        answer,
+        (
+            StatusCode::FORBIDDEN,
+            refusal(
+                "access_denied",
+                "That address can't be reached from this instance"
+            )
         )
     );
 }

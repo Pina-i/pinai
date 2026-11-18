@@ -181,9 +181,7 @@ impl From<SocialError> for ApiError {
             SocialError::BlockListFull => {
                 ApiError::bad_request(format!("You can't block more than {MAX_BLOCKS} people"))
             }
-            SocialError::PeerNotAllowed(reason) => {
-                ApiError::new(StatusCode::FORBIDDEN, "access_denied", reason)
-            }
+            SocialError::PeerNotAllowed(reason) => ApiError::peer_not_allowed(reason),
             SocialError::PeerUnavailable(reason) => ApiError::upstream(anyhow::anyhow!(reason)),
             SocialError::Unexpected(e) => ApiError::internal(e),
         }

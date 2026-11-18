@@ -1352,8 +1352,12 @@ All Bearer-auth except where noted. Cross-IdP paths use HTTP Signatures — see
   at once, then one a second (`429`). A local user's claim for a remote account is signed as that
   user and sent to the account's instance, whose refusals come back as they are: `404` no such
   account, `403` the claimer kept out, `409` no KeyPackage left, `429` rate-limited. An instance
-  that fails to answer is `502`. A peer's own claim must name an account of this instance (`400`)
-  — peers never relay through another instance.
+  that fails to answer is `502`, as is one whose name resolves inside this instance's network; one
+  at an address the peer request policy refuses as written — an IP literal in private space, a
+  scheme it doesn't take — is `403` "That address can't be reached from this instance", naming
+  nothing it resolved (`specs/06-federation-authentication.md` "Peer request policy"). A peer's
+  own claim must name an account of this instance (`400`) — peers never relay through another
+  instance.
 - **A claim tells the owner to refill** when it leaves one of their devices at the refill
   threshold, or finds no package left: `key_packages_low` to their live sessions (§ 3.5).
 - **A claim is how someone adds a device to a group**, so it follows who may add the account
@@ -1364,11 +1368,11 @@ All Bearer-auth except where noted. Cross-IdP paths use HTTP Signatures — see
 | Claim answer | Meaning |
 |---|---|
 | `200` | `{ key_package, device_id, expires_at, remaining_count, needs_refill }` — the Welcome targets `device_id` |
-| `403` | The account doesn't admit the claimer |
+| `403` | The account doesn't admit the claimer (`Can't add this person`), or its instance is at an address the peer request policy refuses as written — an IP literal in private space, a scheme it doesn't take (`That address can't be reached from this instance`) |
 | `404` | No such account |
 | `409` | The account has no KeyPackage left on any unrevoked device |
 | `429` | Too many claims from this requester, or the account's instance is rate-limiting this one |
-| `502` | The account's instance did not answer |
+| `502` | The account's instance did not answer, or its name resolves inside this instance's network |
 
 ### Approvals
 

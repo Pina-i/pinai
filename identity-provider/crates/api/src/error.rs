@@ -82,6 +82,19 @@ impl ApiError {
         )
     }
 
+    /// A 403 for an instance the peer request policy keeps this one from asking. The reason may
+    /// name what the instance's address resolves to, so it goes to the log only.
+    pub fn peer_not_allowed(reason: String) -> Self {
+        Self {
+            source: Some(anyhow::anyhow!(reason)),
+            ..Self::new(
+                StatusCode::FORBIDDEN,
+                "access_denied",
+                "That address can't be reached from this instance",
+            )
+        }
+    }
+
     /// A 500 whose cause goes to the logs, never to the client.
     pub fn internal(source: anyhow::Error) -> Self {
         Self {
@@ -129,7 +142,10 @@ impl IntoResponse for ApiError {
             Some(source) if self.status.is_server_error() => {
                 tracing::error!(error = ?source, "request failed")
             }
-            _ => tracing::debug!(status = %self.status, code = self.code, "request refused"),
+            Some(source) => {
+                tracing::debug!(status = %self.status, code = self.code, error = %source, "request refused")
+            }
+            None => tracing::debug!(status = %self.status, code = self.code, "request refused"),
         }
         let mut body = self.extra;
         body.insert("error".into(), self.code.into());

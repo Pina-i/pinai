@@ -143,6 +143,8 @@ pub struct InMemoryRemoteActors {
     uncached: Mutex<Vec<RemoteActor>>,
     /// Instances that fail to answer.
     down: Mutex<Vec<String>>,
+    /// Instances the peer request policy keeps this one from asking.
+    refused: Mutex<Vec<String>>,
     /// How many times an instance was asked.
     lookups: Mutex<usize>,
 }
@@ -177,11 +179,31 @@ impl InMemoryRemoteActors {
         self.cached_only.lock().unwrap().extend(cached);
         self
     }
+
+    /// `domain` resolves into private space: resolving or discovering anyone there is
+    /// `Refused`, for [`PRIVATE_ADDRESS_REFUSAL`].
+    pub fn and_refused(self, domain: &str) -> Self {
+        self.refused.lock().unwrap().push(domain.to_owned());
+        self
+    }
+
+    fn refuses(&self, domain: &str) -> Result<(), RemoteActorsError> {
+        if self.refused.lock().unwrap().iter().any(|d| d == domain) {
+            return Err(RemoteActorsError::Refused(
+                PRIVATE_ADDRESS_REFUSAL.to_owned(),
+            ));
+        }
+        Ok(())
+    }
 }
+
+/// Why the transport refuses an instance resolving into private space, naming the address.
+pub const PRIVATE_ADDRESS_REFUSAL: &str = "peer URL resolves into private address space (10.0.0.5)";
 
 #[async_trait::async_trait]
 impl RemoteActors for InMemoryRemoteActors {
     async fn discover(&self, uri: &ActorUri) -> Result<RemoteActor, RemoteActorsError> {
+        self.refuses(uri.domain().as_str())?;
         self.actors
             .lock()
             .unwrap()
@@ -216,6 +238,7 @@ impl RemoteActors for InMemoryRemoteActors {
                 "connection refused".to_owned(),
             ));
         }
+        self.refuses(address.domain().as_str())?;
         let named = |a: &RemoteActor| a.actor_uri.federated_address().as_ref() == Some(address);
         if let Some(known) = self.actors.lock().unwrap().iter().find(|a| named(a)) {
             return Ok(known.clone());

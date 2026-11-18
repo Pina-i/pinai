@@ -102,9 +102,7 @@ fn friendship_refused(error: SocialError) -> ApiError {
     match error {
         // The follower's URI names no account this instance can address.
         SocialError::UserNotFound => ApiError::bad_request("Cannot parse remote actor URL"),
-        SocialError::PeerNotAllowed(reason) => {
-            ApiError::new(StatusCode::FORBIDDEN, "access_denied", reason)
-        }
+        SocialError::PeerNotAllowed(reason) => ApiError::peer_not_allowed(reason),
         SocialError::Unexpected(e) => ApiError::internal(e),
         other => ApiError::bad_request(other.to_string()),
     }
