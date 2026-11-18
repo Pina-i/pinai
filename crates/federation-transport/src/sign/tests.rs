@@ -158,3 +158,47 @@ async fn a_signed_post_verifies_against_the_host_the_client_writes() {
     )
     .unwrap();
 }
+
+/// A peer on the loopback interface answering every request `307` to `/elsewhere`, counting them.
+async fn a_redirecting_peer() -> (String, Arc<AtomicUsize>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let at = listener.local_addr().unwrap();
+    let asked = Arc::new(AtomicUsize::new(0));
+    let counted = asked.clone();
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let mut request = [0; 4096];
+            let _ = socket.read(&mut request).await;
+            counted.fetch_add(1, Ordering::SeqCst);
+            let response = "HTTP/1.1 307 Temporary Redirect\r\nlocation: /elsewhere\r\n\
+                            content-length: 0\r\nconnection: close\r\n\r\n";
+            let _ = socket.write_all(response.as_bytes()).await;
+        }
+    });
+    (format!("http://{at}/users/bob_k2m9x/inbox"), asked)
+}
+
+#[tokio::test]
+async fn a_signed_post_follows_no_redirect() {
+    let signing_key = SigningKey::from_bytes(&[7; 32]);
+    let signer = Signer {
+        key_id: "http://localhost:8080/users/alice_k2m9x#main-key",
+        signing_key: &signing_key,
+    };
+    let (inbox, asked) = a_redirecting_peer().await;
+
+    let refused = signed_post(
+        &signer,
+        &inbox,
+        b"{}",
+        "application/activity+json",
+        UrlPolicy::from_issuer("http://localhost:8080"),
+    )
+    .await;
+
+    assert!(
+        matches!(&refused, Err(TransportError::Upstream(reason)) if reason.starts_with("peer returned 307")),
+        "{refused:?}"
+    );
+    assert_eq!(asked.load(Ordering::SeqCst), 1);
+}

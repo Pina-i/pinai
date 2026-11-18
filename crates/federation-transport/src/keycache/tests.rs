@@ -81,3 +81,70 @@ async fn a_failed_fetch_is_negatively_cached() {
         "the failure should be cached so a dead keyId costs one fetch, not one per request"
     );
 }
+
+/// Serves on `listener`: `/users/dave` answers `302` to `moved_to`, any other path an actor
+/// document publishing `key`.
+fn serve_dave(listener: tokio::net::TcpListener, moved_to: String, key: VerifyingKey) {
+    use ed25519_dalek::pkcs8::spki::der::pem::LineEnding;
+    use ed25519_dalek::pkcs8::EncodePublicKey;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let pem = key.to_public_key_pem(LineEnding::LF).unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let mut request = [0; 4096];
+            let read = socket.read(&mut request).await.unwrap_or(0);
+            let request = String::from_utf8_lossy(&request[..read]);
+            let response = if request.split(' ').nth(1) == Some("/users/dave") {
+                format!(
+                    "HTTP/1.1 302 Found\r\nlocation: {moved_to}\r\ncontent-length: 0\r\n\
+                     connection: close\r\n\r\n"
+                )
+            } else {
+                let body = serde_json::json!({ "publicKey": { "publicKeyPem": pem } }).to_string();
+                format!(
+                    "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+            };
+            let _ = socket.write_all(response.as_bytes()).await;
+        }
+    });
+}
+
+fn a_dev_cache() -> KeyCache {
+    KeyCache::new(UrlPolicy::from_issuer("http://localhost"))
+}
+
+#[tokio::test]
+async fn a_key_another_instance_serves_through_a_redirect_is_refused() {
+    let victim = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let evil = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let (at, evil_at) = (victim.local_addr().unwrap(), evil.local_addr().unwrap());
+    serve_dave(evil, "/".to_owned(), a_key());
+    serve_dave(victim, format!("http://{evil_at}/keys/dave"), a_key());
+
+    let refused = a_dev_cache()
+        .get(&format!("http://{at}/users/dave#main-key"))
+        .await;
+
+    assert!(
+        matches!(&refused, Err(TransportError::Upstream(m)) if m.contains("off its origin")),
+        "{refused:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_key_moved_within_its_instance_is_still_read() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let at = listener.local_addr().unwrap();
+    serve_dave(listener, "/keys/dave".to_owned(), a_key());
+
+    let (key, from_cache) = a_dev_cache()
+        .get(&format!("http://{at}/users/dave#main-key"))
+        .await
+        .unwrap();
+
+    assert_eq!(key, a_key());
+    assert!(!from_cache);
+}

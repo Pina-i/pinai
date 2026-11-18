@@ -319,3 +319,75 @@ async fn an_unknown_account_is_told_apart_from_an_instance_that_does_not_answer(
         "{unreachable:?}"
     );
 }
+
+/// Serves on `listener`: the path `moved` names answers `302` to its target, any other `document`.
+fn serve(listener: TcpListener, moved: (&'static str, String), document: Value) {
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let mut request = [0; 4096];
+            let read = socket.read(&mut request).await.unwrap_or(0);
+            let request = String::from_utf8_lossy(&request[..read]);
+            let response = if request.split(' ').nth(1) == Some(moved.0) {
+                format!(
+                    "HTTP/1.1 302 Found\r\nlocation: {}\r\ncontent-length: 0\r\n\
+                     connection: close\r\n\r\n",
+                    moved.1
+                )
+            } else {
+                let body = document.to_string();
+                format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                     content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+            };
+            let _ = socket.write_all(response.as_bytes()).await;
+        }
+    });
+}
+
+#[tokio::test]
+async fn a_document_another_instance_serves_through_a_redirect_is_refused() {
+    let victim = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let evil = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let (at, evil_at) = (victim.local_addr().unwrap(), evil.local_addr().unwrap());
+    let (_, passing_off) = dave_at(&at.to_string());
+    serve(evil, ("/", String::new()), passing_off);
+    serve(
+        victim,
+        ("/users/dave", format!("http://{evil_at}/users/dave")),
+        json!({}),
+    );
+
+    let refused = fetch_remote_actor(
+        &format!("http://{at}/users/dave"),
+        UrlPolicy::from_issuer("http://localhost"),
+    )
+    .await;
+
+    assert!(
+        matches!(&refused, Err(TransportError::Upstream(m)) if m.contains("off its origin")),
+        "{refused:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_document_moved_within_its_instance_is_still_read() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let at = listener.local_addr().unwrap();
+    let (_, document) = dave_at(&at.to_string());
+    serve(
+        listener,
+        ("/users/dave", "/actors/dave".to_owned()),
+        document,
+    );
+
+    let dave = fetch_remote_actor(
+        &format!("http://{at}/users/dave"),
+        UrlPolicy::from_issuer("http://localhost"),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(dave.actor_url.as_str(), format!("http://{at}/users/dave"));
+}

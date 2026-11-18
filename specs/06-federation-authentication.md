@@ -263,8 +263,8 @@ supplies, an address a user typed. One shared client applies the same bounds to 
 | Bound | Value | Without it |
 |---|---|---|
 | Connect timeout | 3 s | A silent host holds a task indefinitely |
-| Total timeout | 5 s | As above |
-| Redirects | ≤ 2 | A redirect chain walks past the screened URL |
+| Total timeout | 5 s; a GET's over its whole fetch — the screens, every redirect, the body | As above |
+| Redirects | ≤ 2 for a GET, each on the origin asked and screened before it is asked; none for a POST | A peer sends the request on into private space, or hands its answer to another origin |
 | Body cap | 256 KiB | A chunked response streams until memory runs out |
 
 The body cap is enforced as bytes arrive rather than by trusting `Content-Length`, which a
@@ -278,14 +278,20 @@ use a second client with the same screen and download-sized bounds:
 | Connect timeout | 3 s | — |
 | Total timeout | none | A large file takes what it takes |
 | Read timeout | 30 s | A stalled peer still releases the task |
-| Redirects | none | The redirect target would not be screened |
+| Redirects | none | A signed request goes to the URL it was signed for, never on |
 | Body cap | the size the peer announced | The caller caps the stream as bytes arrive (`identity-provider/specs/attachments.md`) |
 
-Peer URLs are screened before the request is made:
+Peer URLs are screened before the request is made — the first and every redirect target alike,
+a relative `Location` read against the URL that answered it. A redirect never leaves the origin
+first asked, so what answers a URL is always its own origin's: the document "Resolving an actor"
+reads, and the key the verifying-key cache keeps, come from the URL's own instance. A target off
+that origin, or one the screen refuses, ends the fetch as a peer that doesn't answer does:
 
 - the scheme must be `https`;
-- the host must not resolve into loopback, private, link-local or carrier-grade-NAT space —
-  the classic target being a cloud metadata endpoint.
+- the host — an IP literal as written, a name as it resolves — must not be in loopback, private,
+  link-local, carrier-grade-NAT, multicast, reserved, benchmarking or IETF-assigned space, nor be
+  an IPv4-mapped, IPv4-compatible or NAT64 address of one — the classic target being a cloud
+  metadata endpoint.
 
 Both rules are derived from the local issuer: an `https` issuer is a production deployment
 and gets the strict policy, while a plain-`http` issuer is local development, where the
