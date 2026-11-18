@@ -15,6 +15,8 @@ use super::{
     SocialFederation, SocialGraph, SocialNotifier, SocialStoreError, Unfriended,
 };
 
+pub mod people;
+
 /// Changes a local account as its owner does — outside the graph, which only reads it.
 #[async_trait::async_trait]
 pub trait AccountEdits: Send + Sync {

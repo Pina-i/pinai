@@ -213,6 +213,8 @@ impl Application {
         let contact_policies: Arc<dyn domain::social::ContactPolicies> = Arc::new(
             infrastructure::postgres::PgContactPolicies::new(pool.clone()),
         );
+        let people: Arc<dyn domain::social::PeopleSearch> =
+            Arc::new(infrastructure::postgres::PgPeopleSearch::new(pool.clone()));
         let social_notifier: Arc<dyn domain::social::SocialNotifier> = Arc::new(
             infrastructure::realtime::HubSocialNotifier::new(Arc::clone(&hub)),
         );
@@ -845,9 +847,12 @@ impl Application {
                 origin.clone(),
                 Arc::clone(&accounts),
             )),
-            search_accounts: Arc::new(application::identity::SearchAccounts::new(Arc::clone(
-                &accounts,
-            ))),
+            search_people: Arc::new(application::social::SearchPeople::new(Arc::clone(&people))),
+            look_up_address: Arc::new(application::social::LookUpAddress::new(
+                Arc::clone(&people),
+                Arc::clone(&remote_actors),
+            )),
+            lookup_limiter: api::LookupLimiter::new(),
             receive_follow,
             receive_accept,
             receive_reject,

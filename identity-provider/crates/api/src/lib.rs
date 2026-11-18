@@ -22,6 +22,7 @@ mod messaging;
 mod mls;
 mod nodeinfo;
 mod pages;
+mod people;
 mod presence;
 mod privacy;
 mod profile;
@@ -56,9 +57,7 @@ use application::e2ee::{
     ReceiveWelcome, RegisterDevice, ReportHistoryKey, RevokeDevice, SendWelcome, SetHistoryKey,
     ShareHistoryKey, UploadKeyPackages,
 };
-use application::identity::{
-    DescribeInstance, EditIntro, FindAccount, SearchAccounts, ShowIntro, WebFinger,
-};
+use application::identity::{DescribeInstance, EditIntro, FindAccount, ShowIntro, WebFinger};
 use application::messaging::{
     AddGroupMember, CreateGroup, DeliverDirectMessage, DismissGroup, EditMessage,
     ListConversations, ListGroupMembers, LoadHistory, MarkRead, OpenAttachment, ReadBlob,
@@ -76,8 +75,8 @@ use application::profile::{
 use application::settings::UpdateSettings;
 use application::social::{
     AcceptFriendRequest, Block, DeclineFriendRequest, ListBlocks, ListFriends,
-    ListIncomingRequests, ReceiveAccept, ReceiveFollow, ReceiveReject, ReceiveUndoFollow,
-    SendFriendRequest, SetContactPolicy, Unblock, Unfriend,
+    ListIncomingRequests, LookUpAddress, ReceiveAccept, ReceiveFollow, ReceiveReject,
+    ReceiveUndoFollow, SearchPeople, SendFriendRequest, SetContactPolicy, Unblock, Unfriend,
 };
 use axum::extract::{DefaultBodyLimit, FromRef};
 use axum::middleware;
@@ -94,6 +93,7 @@ use tokio_util::sync::CancellationToken;
 pub use actors::PublicKeyPem;
 pub use error::ApiError;
 pub use pages::SignInPages;
+pub use people::LookupLimiter;
 pub use rate_limit::RateLimiter;
 pub use sign_in::{Jwks, LoginAttempts};
 
@@ -154,7 +154,9 @@ pub struct AppState {
     pub find_account: Arc<FindAccount>,
     pub show_person: Arc<application::profile::ShowPerson>,
     pub web_finger: Arc<WebFinger>,
-    pub search_accounts: Arc<SearchAccounts>,
+    pub search_people: Arc<SearchPeople>,
+    pub look_up_address: Arc<LookUpAddress>,
+    pub lookup_limiter: LookupLimiter,
     /// What the inbox receives.
     pub receive_follow: Arc<ReceiveFollow>,
     pub receive_accept: Arc<ReceiveAccept>,
@@ -270,7 +272,8 @@ pub fn router(state: AppState) -> Router {
         .route("/users/{slug}/outbox", get(actors::outbox))
         .route("/users/{slug}/followers", get(actors::followers))
         .route("/users/{slug}/following", get(actors::following))
-        .route("/api/users/search", get(accounts::search))
+        .route("/api/users/search", get(people::search))
+        .route("/api/users/lookup", get(people::look_up))
         .route("/.well-known/openid-configuration", get(sign_in::discovery))
         .route("/.well-known/jwks.json", get(sign_in::jwks))
         .route(

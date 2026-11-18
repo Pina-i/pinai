@@ -73,6 +73,15 @@ impl ApiError {
         )
     }
 
+    /// A 429 for a requester past its rate limit.
+    pub fn rate_limited() -> Self {
+        Self::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "too_many_requests",
+            "rate limit exceeded",
+        )
+    }
+
     /// A 500 whose cause goes to the logs, never to the client.
     pub fn internal(source: anyhow::Error) -> Self {
         Self {

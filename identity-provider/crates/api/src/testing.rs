@@ -18,7 +18,7 @@ use application::e2ee::{
     ShareHistoryKey, UploadKeyPackages,
 };
 use application::identity::{
-    DescribeInstance, EditIntro, FindAccount, IntroInForce, SearchAccounts, ShowIntro, WebFinger,
+    DescribeInstance, EditIntro, FindAccount, IntroInForce, ShowIntro, WebFinger,
 };
 use application::messaging::{
     AddGroupMember, CreateGroup, DeliverDirectMessage, DismissGroup, EditMessage,
@@ -36,8 +36,8 @@ use application::profile::{
 use application::settings::UpdateSettings;
 use application::social::{
     AcceptFriendRequest, Block, DeclineFriendRequest, ListBlocks, ListFriends,
-    ListIncomingRequests, ReceiveAccept, ReceiveFollow, ReceiveReject, ReceiveUndoFollow,
-    SendFriendRequest, SetContactPolicy, Unblock, Unfriend,
+    ListIncomingRequests, LookUpAddress, ReceiveAccept, ReceiveFollow, ReceiveReject,
+    ReceiveUndoFollow, SearchPeople, SendFriendRequest, SetContactPolicy, Unblock, Unfriend,
 };
 use axum::Router;
 use axum::body::Body;
@@ -80,6 +80,7 @@ use domain::profile::testing::{
     RecordingProfileRefresh,
 };
 use domain::settings::testing::{InMemorySettingsStore, RecordingSettingsNotifier};
+use domain::social::testing::people::InMemoryPeopleSearch;
 use domain::social::testing::{
     InMemoryContactPolicies, InMemorySocialGraph, RecordingFriendPresence,
     RecordingSocialFederation, RecordingSocialNotifier, StubReachability,
@@ -158,6 +159,8 @@ pub struct TestApp {
     pub peers: PeerFakes,
     /// Open to every pair until a test says otherwise.
     pub reach: Arc<StubReachability>,
+    /// What a search by name finds, as tests seed it.
+    pub people: Arc<InMemoryPeopleSearch>,
     /// The presence states the instance has heard.
     pub board: Arc<PresenceBoard>,
     /// The reset links asked for, waiting for [`Self::serve_reset_requests`]: the background's work.
@@ -321,6 +324,7 @@ impl TestApp {
         ]));
         let shutdown = tokio_util::sync::CancellationToken::new();
         let reach = Arc::new(StubReachability::default());
+        let people = Arc::new(InMemoryPeopleSearch::default());
         let contact_policies = Arc::new(InMemoryContactPolicies::default());
         let peers = PeerFakes {
             graph: graph.clone(),
@@ -545,7 +549,9 @@ impl TestApp {
                 profile.profiles.clone(),
             )),
             web_finger: Arc::new(WebFinger::new(origin.clone(), accounts.clone())),
-            search_accounts: Arc::new(SearchAccounts::new(accounts.clone())),
+            search_people: Arc::new(SearchPeople::new(people.clone())),
+            look_up_address: Arc::new(LookUpAddress::new(people.clone(), remote_actors.clone())),
+            lookup_limiter: crate::LookupLimiter::new(),
             receive_follow: Arc::new(ReceiveFollow::new(
                 accounts.clone(),
                 remote_actors.clone(),
@@ -1030,6 +1036,7 @@ impl TestApp {
             profile,
             peers,
             reach,
+            people,
             board,
             reset_queue: tokio::sync::Mutex::new(reset_queue),
             request_reset,

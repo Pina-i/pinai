@@ -6,6 +6,7 @@ mod e2ee;
 mod identity;
 mod key_share;
 mod messaging;
+mod people;
 mod presence;
 mod profile;
 mod reach;

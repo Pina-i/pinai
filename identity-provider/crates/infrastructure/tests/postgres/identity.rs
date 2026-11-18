@@ -38,33 +38,6 @@ async fn an_account_is_found_by_id_handle_and_actor_uri(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "infrastructure::MIGRATOR")]
-async fn a_search_finds_the_handles_holding_the_query(pool: PgPool) {
-    let (alice, bob) = (
-        an_account(&pool, "alice").await,
-        an_account(&pool, "bob").await,
-    );
-    super::a_user(&pool).await;
-
-    domain::identity::testing::contract::a_search_finds_the_handles_holding_the_query(
-        &PgAccounts::new(pool),
-        &alice,
-        &bob,
-    )
-    .await;
-}
-
-#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
-async fn a_search_takes_its_query_literally(pool: PgPool) {
-    let alice = an_account(&pool, "alice").await;
-
-    domain::identity::testing::contract::a_search_takes_its_query_literally(
-        &PgAccounts::new(pool),
-        &alice,
-    )
-    .await;
-}
-
-#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
 async fn every_account_counts(pool: PgPool) {
     an_account(&pool, "alice").await;
     an_account(&pool, "bob").await;

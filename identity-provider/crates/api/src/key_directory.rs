@@ -364,7 +364,7 @@ pub async fn claim(
     };
     if !limiter.allow(&bucket) {
         tracing::warn!(%bucket, "rate-limited claim request");
-        return Err(rate_limited());
+        return Err(ApiError::rate_limited());
     }
     let target = ActorUri::parse(&body.actor_uri)
         .map_err(|_| ApiError::bad_request("`actor_uri` is not a valid URL"))?;
@@ -387,7 +387,7 @@ pub async fn claim_each_device(
     };
     if !limiter.allow(&bucket) {
         tracing::warn!(%bucket, "rate-limited claim request");
-        return Err(rate_limited());
+        return Err(ApiError::rate_limited());
     }
     let target = ActorUri::parse(&body.actor_uri)
         .map_err(|_| ApiError::bad_request("`actor_uri` is not a valid URL"))?;
@@ -428,14 +428,6 @@ pub async fn status(
         refill_threshold: stash.refill_threshold,
         cap: stash.cap,
     }))
-}
-
-fn rate_limited() -> ApiError {
-    ApiError::new(
-        StatusCode::TOO_MANY_REQUESTS,
-        "too_many_requests",
-        "rate limit exceeded",
-    )
 }
 
 fn no_root_key() -> ApiError {
@@ -549,7 +541,7 @@ impl From<KeyDirectoryError> for ApiError {
                 ApiError::bad_request("peer-authenticated claim must target a local actor")
             }
             KeyDirectoryError::PeerNotAllowed(reason) => ApiError::bad_request(reason),
-            KeyDirectoryError::PeerBusy => rate_limited(),
+            KeyDirectoryError::PeerBusy => ApiError::rate_limited(),
             KeyDirectoryError::PeerUnavailable(e) => ApiError::upstream(e),
             KeyDirectoryError::Unreachable => ApiError::new(
                 StatusCode::FORBIDDEN,

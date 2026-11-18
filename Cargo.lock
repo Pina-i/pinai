@@ -2200,6 +2200,7 @@ dependencies = [
  "thiserror",
  "time",
  "tokio",
+ "unicode-normalization",
  "url",
  "uuid",
 ]

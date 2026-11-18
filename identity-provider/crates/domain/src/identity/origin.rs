@@ -64,6 +64,21 @@ impl InstanceOrigin {
         }
     }
 
+    /// What a user typed to find an account, read as [`Self::resolve`] reads it — except that a
+    /// name on this instance no handle could be is no account here (`None`), not no address.
+    pub fn sought(&self, raw: &str) -> Result<Option<Recipient>, ValidationError> {
+        let named = raw.strip_prefix('@').unwrap_or(raw);
+        let address = if named.contains('@') {
+            FederatedAddress::parse(named)?
+        } else {
+            FederatedAddress::parse(&format!("{named}@{}", self.domain))?
+        };
+        if *address.domain() != self.domain {
+            return Ok(Some(Recipient::Remote(address)));
+        }
+        Ok(Handle::parse(address.user()).ok().map(Recipient::Local))
+    }
+
     pub fn recipient(&self, address: &FederatedAddress) -> Result<Recipient, ValidationError> {
         if *address.domain() == self.domain {
             Ok(Recipient::Local(Handle::parse(address.user())?))

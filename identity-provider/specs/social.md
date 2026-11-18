@@ -43,6 +43,10 @@ CREATE TABLE friendships (
 > A request to someone who blocked the requester never reaches them, and the requester can't tell:
 > their own side is recorded `pending`, as for any request still unanswered (§ 2).
 
+Where a user finds people to befriend, each person comes with their `relation` to the user —
+`blocked`, `friend`, `request_received`, `request_sent` or `none` —, read from the user's own side
+and blocks: `identity-provider/specs/identity.md § 7` defines it.
+
 ### Querying the friends list
 
 Using `actor_uri` as the universal key, a JOIN across `users` and `remote_actors` gives the full friends list, whether local or federated:
@@ -164,6 +168,7 @@ always ends the friendship, looks like an unfriend.
 | Groups they already share | Unchanged: both read and write as before. Bob's messages don't count as unread for Alice |
 | New groups | Bob can't add Alice to one, nor she him. Others still can add both, if Alice admits them |
 | Presence | As after an unfriend — hiding more would tell Bob he is blocked |
+| Finding people | Alice finds Bob `blocked`; Bob finds Alice as anyone else (`identity-provider/specs/identity.md § 7`) |
 
 ### The contact setting
 
