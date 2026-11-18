@@ -360,7 +360,11 @@ watched conversation has a member there. A dropped stream is opened again after 
 off to 30 s.
 
 What arrives is checked (§ What is taken from a peer), then published on the local bus: a
-presence state on `presence:<domain>`, a typing indicator on `typing:<convId>`.
+presence state on `presence:<domain>`, a typing indicator on `typing:<convId>`. Signals wait for
+the bus in one queue of 256, shared by every stream: room for a stream's replay, and while it is
+full a stream reads no more, so a peer sending faster than the bus takes them is held back on its
+own connection. A frame that names `presence` or `typing` but doesn't decode is dropped; the
+first of a stream is logged, not the ones after it.
 
 #### Authentication — HTTP Signatures
 
@@ -385,7 +389,10 @@ before it is fetched (`specs/06-federation-authentication.md` § Peer request po
 | Total timeout | 5 s | none — a stream stays open |
 | Read timeout | — | 30 s: two missed keep-alives end the stream, which is then opened again |
 | Redirects | none | none |
-| Body cap | 256 KiB | frames are read one at a time |
+| Body cap | 256 KiB | 16 KiB a frame: a longer one ends the stream, which is then opened again |
+
+A presence or typing frame is about 2.3 KiB at most — an actor URI is 2 KiB at most — so 16 KiB
+leaves room, while a peer that sends bytes without ever ending a frame holds no more than that.
 
 #### Scenarios
 

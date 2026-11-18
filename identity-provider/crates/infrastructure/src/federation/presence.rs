@@ -21,6 +21,11 @@ use crate::presence::{decode_presence, decode_typing};
 
 const RECONNECT_INITIAL: Duration = Duration::from_secs(2);
 const RECONNECT_MAX: Duration = Duration::from_secs(30);
+/// A presence or typing frame is about 2.3 KiB at most, its actor URI 2 KiB of it.
+const MAX_FRAME_BYTES: usize = 16 * 1024;
+/// Signals heard but not yet on the bus, every peer's together: room for a stream's replay of
+/// last states, while a peer outpacing the bus waits on its own connection.
+const HEARD_BOUND: usize = 256;
 
 /// Asks as the instance: the peer answers for the accounts its own users may see.
 fn key_id(origin: &InstanceOrigin) -> String {
@@ -114,7 +119,7 @@ struct Source {
     keypair: Arc<EdKeyPair>,
     origin: InstanceOrigin,
     policy: UrlPolicy,
-    heard: mpsc::UnboundedSender<(Domain, Signal)>,
+    heard: mpsc::Sender<(Domain, Signal)>,
 }
 
 #[derive(Default)]
@@ -144,7 +149,7 @@ impl SsePeerStreams {
         origin: InstanceOrigin,
         policy: UrlPolicy,
     ) -> (Self, BoxStream<'static, (Domain, Signal)>) {
-        let (heard, mut received) = mpsc::unbounded_channel();
+        let (heard, mut received) = mpsc::channel(HEARD_BOUND);
         let streams = Self {
             source: Arc::new(Source {
                 keypair,
@@ -240,16 +245,27 @@ impl Source {
             .await
             .context("open a peer's presence stream")?;
         let mut frames = Frames::default();
+        let mut malformed = 0_usize;
         while let Some(chunk) = response
             .chunk()
             .await
             .context("read a peer's presence stream")?
         {
-            for frame in frames.push(&chunk) {
-                let Some(signal) = read_frame(&frame) else {
-                    continue;
+            for frame in frames.push(&chunk)? {
+                let signal = match read_frame(&frame) {
+                    Ok(Some(signal)) => signal,
+                    Ok(None) => continue,
+                    Err(Malformed(event)) => {
+                        malformed += 1;
+                        // A few bytes buy a malformed frame: the first a stream sends is enough.
+                        if malformed == 1 {
+                            tracing::warn!(%peer, event, "malformed signal on a peer's presence stream, the stream's next ones not logged");
+                        }
+                        continue;
+                    }
                 };
-                if self.heard.send((peer.clone(), signal)).is_err() {
+                // Waits while the bus is behind, so the peer's connection is what backs up.
+                if self.heard.send((peer.clone(), signal)).await.is_err() {
                     return Ok(());
                 }
             }
@@ -264,27 +280,53 @@ struct Frames {
     buffer: Vec<u8>,
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("a frame on the peer's presence stream is over {MAX_FRAME_BYTES} bytes")]
+struct FrameTooLong;
+
 impl Frames {
-    fn push(&mut self, chunk: &[u8]) -> Vec<String> {
+    fn push(&mut self, chunk: &[u8]) -> Result<Vec<String>, FrameTooLong> {
+        // What was held holds no separator, though one may begin in its last 3 bytes.
+        let mut from = self.buffer.len().saturating_sub(3);
         self.buffer.extend_from_slice(chunk);
+        let mut start = 0;
         let mut frames = Vec::new();
-        loop {
-            let lf = self.buffer.windows(2).position(|w| w == b"\n\n");
-            let crlf = self.buffer.windows(4).position(|w| w == b"\r\n\r\n");
-            let (end, separator) = match (lf, crlf) {
-                (Some(lf), Some(crlf)) if crlf < lf => (crlf, 4),
-                (Some(lf), _) => (lf, 2),
-                (None, Some(crlf)) => (crlf, 4),
-                (None, None) => return frames,
-            };
-            let frame: Vec<u8> = self.buffer.drain(..end + separator).collect();
-            frames.push(String::from_utf8_lossy(&frame[..end]).into_owned());
+        while let Some((end, separator)) = frame_end(&self.buffer[from..]) {
+            let end = from + end;
+            if end - start > MAX_FRAME_BYTES {
+                return Err(FrameTooLong);
+            }
+            frames.push(String::from_utf8_lossy(&self.buffer[start..end]).into_owned());
+            start = end + separator;
+            from = start;
         }
+        self.buffer.drain(..start);
+        if self.buffer.len() > MAX_FRAME_BYTES {
+            return Err(FrameTooLong);
+        }
+        Ok(frames)
     }
 }
 
-/// A `presence` or `typing` event; comments, keep-alives and anything malformed are nothing.
-fn read_frame(frame: &str) -> Option<Signal> {
+/// Where the first blank line starts, and its length.
+fn frame_end(bytes: &[u8]) -> Option<(usize, usize)> {
+    (0..bytes.len()).find_map(|at| {
+        if bytes[at..].starts_with(b"\r\n\r\n") {
+            Some((at, 4))
+        } else if bytes[at..].starts_with(b"\n\n") {
+            Some((at, 2))
+        } else {
+            None
+        }
+    })
+}
+
+/// A `presence` or `typing` event whose data doesn't decode.
+#[derive(Debug, PartialEq)]
+struct Malformed(&'static str);
+
+/// A `presence` or `typing` event; comments, keep-alives and other events are nothing.
+fn read_frame(frame: &str) -> Result<Option<Signal>, Malformed> {
     let mut event = None;
     let mut data = Vec::new();
     for line in frame.lines() {
@@ -295,15 +337,13 @@ fn read_frame(frame: &str) -> Option<Signal> {
         }
     }
     let data = data.join("\n");
-    let signal = match event? {
-        "presence" => decode_presence(&data),
-        "typing" => decode_typing(&data),
-        _ => return None,
-    };
-    if signal.is_none() {
-        tracing::warn!(event = ?event, "malformed signal on a peer's presence stream");
+    match event {
+        Some("presence") => decode_presence(&data)
+            .ok_or(Malformed("presence"))
+            .map(Some),
+        Some("typing") => decode_typing(&data).ok_or(Malformed("typing")).map(Some),
+        _ => Ok(None),
     }
-    signal
 }
 
 #[cfg(test)]
