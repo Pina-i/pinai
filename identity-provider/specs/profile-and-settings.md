@@ -39,7 +39,9 @@ The whole profile — name, avatar, pronouns and bio — federates to the accoun
 - `friends_since` — when the friendship was accepted on the caller's side (RFC 3339,
   `identity-provider/specs/social.md § 1`), `null` unless they are friends.
 
-An account of this instance is shown to every account here, as its `Person` is to anyone (§ 3).
+An account of this instance is shown to every account here, as its `Person` is to anyone (§ 3) —
+once it has joined: a sign-up still to confirm its address has no card
+(`identity-provider/specs/social.md § 2` "An account still signing up").
 One of another instance is shown from `remote_actors`, and only to a caller who counts it among
 their accepted friends or shares a conversation with it, both still members — the rule presence
 follows (`identity-provider/specs/presence.md`, What a peer is told). Any other actor is `404 not_found` (`User not

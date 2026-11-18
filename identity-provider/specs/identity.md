@@ -115,7 +115,10 @@ instance is never looked up.
 ## 3. What peers read of an account
 
 `GET /.well-known/webfinger?resource=acct:{handle}@{domain}` points at the account's actor, for
-an account of this instance only (`404 User not found` for any other). `GET /users/{handle}` is
+an account of this instance only (`404 User not found` for any other). Only an account that has
+joined — its address confirmed, or admitted — is read so: a sign-up still to confirm its address is
+`404 User not found` on every route here, its inbox included
+(`identity-provider/specs/social.md § 2` "An account still signing up"). `GET /users/{handle}` is
 its `Person` — display name (else the handle), inbox, `icon` when it has an avatar, `summary` and
 `pronouns` when it has a bio and pronouns (`identity-provider/specs/profile-and-settings.md § 3`),
 and the instance key as `publicKey`; `GET /actor` is the instance's `Application` actor, whose key signs
@@ -181,7 +184,7 @@ every fediverse server publishes about itself.
 |---|---|
 | Name | What an admin saved in Settings → Instance; otherwise `INSTANCE_NAME`. Trimmed, 40 characters at most; blank or unset, the instance's domain |
 | Description | What an admin saved in Settings → Instance; otherwise `INSTANCE_DESCRIPTION`. Trimmed, 90 characters at most; blank or unset, none |
-| People | Every local account, counted at most a minute ago (`Accounts::count`) |
+| People | Every local account that has joined — its address confirmed, or admitted —, counted at most a minute ago (`Accounts::count`) |
 | Open registration | `REGISTRATIONS`: yes for `open`, no for `invite`, the default (`identity-provider/specs/auth.md § 6`) |
 | Source | `SOURCE_URL`, an `http(s)` URL; unset or blank, Pīna'i's own repository, `https://github.com/Pina-i/pinai` (`PINAI_SOURCE_URL`) |
 

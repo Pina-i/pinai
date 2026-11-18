@@ -7,10 +7,15 @@ use super::{Account, ActorUri, FederatedAddress, Handle, IntroText, RemoteActor}
 /// The local accounts other contexts address.
 #[async_trait::async_trait]
 pub trait Accounts: Send + Sync {
+    /// Any account, joined or not: an account acting as itself.
     async fn find(&self, id: UserId) -> Result<Option<Account>, AccountsError>;
+    /// The account others name so, once it has joined ([`has_joined`](super::has_joined)): a
+    /// sign-up still to confirm its address is no account to anyone else.
     async fn find_by_handle(&self, handle: &Handle) -> Result<Option<Account>, AccountsError>;
+    /// As [`Self::find_by_handle`]: an account that joined.
     async fn find_by_uri(&self, uri: &ActorUri) -> Result<Option<Account>, AccountsError>;
-    /// How many local accounts there are.
+    /// How many local accounts have joined: a sign-up still to confirm its address isn't one of
+    /// the instance's people yet.
     async fn count(&self) -> Result<u64, AccountsError>;
 }
 

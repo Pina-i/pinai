@@ -70,3 +70,22 @@ async fn our_domain_with_our_schemes_default_port_is_ours() {
         None
     );
 }
+
+#[tokio::test]
+async fn a_sign_up_still_to_confirm_is_not_found() {
+    let kai = account("kai");
+    let accounts = InMemoryAccounts::default();
+    accounts.signing_up(kai.clone());
+    let web_finger = WebFinger::new(
+        InstanceOrigin::parse("http://localhost:8080").unwrap(),
+        Arc::new(accounts),
+    );
+
+    assert_eq!(
+        web_finger
+            .execute("acct:kai_t3st0@localhost:8080")
+            .await
+            .unwrap(),
+        None
+    );
+}

@@ -47,6 +47,7 @@ pub(crate) fn world() -> World {
 
 fn receive(w: &World) -> ReceiveMessage {
     ReceiveMessage::new(
+        domain::identity::InstanceOrigin::parse("http://localhost:8080").unwrap(),
         AttachmentLimits {
             max_files: 5,
             max_bytes: 1_000,
@@ -252,6 +253,42 @@ async fn a_group_messages_roster_leaves_out_a_member_here_who_does_not_admit_its
         )]
     );
     assert_eq!(told(&w), [w.alice.id]);
+}
+
+#[tokio::test]
+async fn a_groups_roster_brings_in_no_uri_of_ours_that_names_no_account_others_reach() {
+    let w = world();
+    let kai = account("kai");
+    w.accounts.signing_up(kai.clone());
+    let nobody = ActorUri::parse("http://localhost:8080/users/nobody_t3st0").unwrap();
+    let mut roster = crew(&w);
+    for uri in [&kai.actor_uri, &nobody] {
+        roster.members.push(SnapshotMember {
+            member: Member {
+                actor_uri: uri.clone(),
+                role: Role::Member,
+            },
+            ..roster.members[1].clone()
+        });
+    }
+    let group = ConversationId::generate();
+
+    receive(&w)
+        .execute(IncomingMessage {
+            group: Some(roster),
+            ..from_carol(&w, group)
+        })
+        .await
+        .unwrap();
+
+    let members = w.store.members(group).await.unwrap();
+    assert!(is_member(&members, &w.alice) && is_member(&members, &w.bob));
+    assert!(
+        !members
+            .iter()
+            .any(|m| m.actor_uri == kai.actor_uri || m.actor_uri == nobody),
+        "{members:?}"
+    );
 }
 
 #[tokio::test]

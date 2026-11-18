@@ -170,6 +170,33 @@ always ends the friendship, looks like an unfriend.
 | Presence | As after an unfriend — hiding more would tell Bob he is blocked |
 | Finding people | Alice finds Bob `blocked`; Bob finds Alice as anyone else (`identity-provider/specs/identity.md § 7`) |
 
+### An account still signing up
+
+Only an account that has joined — its address confirmed, or admitted without
+(`domain::identity::has_joined`, the rule the members list and the people search hold to) — is
+anyone's to reach. A sign-up still to confirm its address is no account to anyone but itself: the
+accounts of this instance are looked up by handle or actor URI only among those that joined
+(`Accounts::find_by_handle`, `find_by_uri`), so every path naming it answers as for an account
+that doesn't exist. Whether an actor URI is this instance's is read from the URI itself
+(`InstanceOrigin::owns`), never from that lookup: a URI of ours it doesn't answer is nobody,
+never another instance's account.
+
+| Path | Answer for a sign-up still to confirm |
+|---|---|
+| `POST /api/friends/request` | 404 `User not found`, nothing recorded |
+| `POST /api/dm` | 404 `Recipient not found`, nothing stored; WS `send_dm` drops it |
+| `POST /api/groups`, `POST /api/groups/:id/members` | 404 `User not found` with its `actor_uri`, nothing written |
+| `POST /api/keys/packages/claim` (and `/devices`), by a user or a peer | 404 `User not found` |
+| WebFinger, `GET /users/{handle}` and its collections, its inbox | 404 `User not found` (`identity-provider/specs/identity.md § 3`) |
+| The people search and the lookup | Not listed; `404 No account at this address` (`identity-provider/specs/identity.md § 7`) |
+| The profile card, `GET /api/profiles` | 404 `User not found` (`identity-provider/specs/profile-and-settings.md § 1`) |
+| Another instance's `Add` naming it, or a roster listing it (a group message, a commit, a Welcome) | Not brought into the group, whatever its contact setting; nobody is told, no line is written |
+| NodeInfo's and the sign-in pages' count of people | Not counted (`identity-provider/specs/identity.md § 6`) |
+
+Once it confirms its address, or an admin admits it, it is reached like any other. The account
+itself is unaffected: it is read by its own id, and signs in as `identity-provider/specs/auth.md`
+says.
+
 ### The contact setting
 
 "Who can message you or add you to a group", one value per account, `users.contact_policy`:

@@ -664,6 +664,35 @@ async fn an_invitee_who_names_no_account_is_refused_and_nothing_written() {
 }
 
 #[tokio::test]
+async fn a_sign_up_still_to_confirm_is_no_invitee() {
+    let w = world();
+    let kai = account("kai");
+    w.accounts.signing_up(kai.clone());
+
+    let refused = create(&w)
+        .execute(
+            w.alice.id,
+            None,
+            vec![w.bob.actor_uri.clone(), kai.actor_uri.clone()],
+        )
+        .await;
+    assert!(
+        matches!(&refused, Err(MessagingError::InviteeNotFound(a)) if *a == kai.actor_uri),
+        "{:?}",
+        refused.map(|_| ())
+    );
+    assert_eq!(w.groups_of(&w.alice).await, 0);
+
+    let id = crew(&w).await;
+    let refused = add(&w).execute(w.alice.id, id, kai.actor_uri.clone()).await;
+    assert!(
+        matches!(&refused, Err(MessagingError::InviteeNotFound(a)) if *a == kai.actor_uri),
+        "{:?}",
+        refused.map(|_| ())
+    );
+}
+
+#[tokio::test]
 async fn an_invitee_whose_instance_does_not_answer_is_refused_naming_them() {
     let mut w = world();
     w.remote_actors =
@@ -943,6 +972,7 @@ async fn a_change_to_a_group_held_only_here_goes_nowhere() {
 
 fn receive(w: &World) -> ReceiveGroupChange {
     ReceiveGroupChange::new(
+        InstanceOrigin::parse("http://localhost:8080").unwrap(),
         w.accounts.clone(),
         w.remote_actors.clone(),
         w.store.clone(),
@@ -1184,6 +1214,36 @@ async fn an_add_made_elsewhere_brings_in_no_account_here_who_does_not_admit_its_
         assert!(w.notifier.sent().is_empty(), "{:?}", w.notifier.sent());
         assert!(lines(&w, group).await.is_empty());
     }
+}
+
+#[tokio::test]
+async fn an_add_made_elsewhere_brings_in_no_uri_of_ours_that_names_no_account_others_reach() {
+    let w = world();
+    let group = carols(&w).await;
+    let kai = account("kai");
+    w.accounts.signing_up(kai.clone());
+    w.reach
+        .set(kai.id, &w.carol.actor_uri, KEPT_OUT_BY_THE_SETTING);
+    let nobody = ActorUri::parse("http://localhost:8080/users/nobody_t3st0").unwrap();
+
+    for added in [&kai.actor_uri, &nobody] {
+        let add = by(
+            &w.carol.actor_uri,
+            group,
+            GroupChangeKind::Added(added.clone()),
+        );
+        receive(&w).execute(w.alice.id, add).await.unwrap();
+    }
+
+    let members = w.store.members(group).await.unwrap();
+    assert!(
+        !members
+            .iter()
+            .any(|m| m.actor_uri == kai.actor_uri || m.actor_uri == nobody),
+        "{members:?}"
+    );
+    assert!(w.notifier.sent().is_empty(), "{:?}", w.notifier.sent());
+    assert!(lines(&w, group).await.is_empty());
 }
 
 #[tokio::test]

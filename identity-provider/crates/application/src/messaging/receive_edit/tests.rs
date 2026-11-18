@@ -10,6 +10,7 @@ async fn a_message_from_carol(w: &crate::messaging::receive_message::tests::Worl
     let incoming = from_carol(w, ConversationId::generate());
     let activity = incoming.activity_uri.clone();
     ReceiveMessage::new(
+        domain::identity::InstanceOrigin::parse("http://localhost:8080").unwrap(),
         AttachmentLimits {
             max_files: 5,
             max_bytes: 1_000,

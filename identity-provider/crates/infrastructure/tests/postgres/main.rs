@@ -42,8 +42,20 @@ async fn a_user(pool: &PgPool) -> UserId {
     id.into()
 }
 
-/// A local account with its actor URI, for the contexts that address accounts by URI.
+/// A local account with its actor URI and its address confirmed, for the contexts that address
+/// accounts by URI.
 async fn an_account(pool: &PgPool, name: &str) -> Account {
+    let account = a_sign_up(pool, name).await;
+    sqlx::query("UPDATE users SET email_verified_at = now() WHERE id = $1")
+        .bind(account.id.as_uuid())
+        .execute(pool)
+        .await
+        .expect("confirm an account");
+    account
+}
+
+/// As [`an_account`], still to confirm its address.
+async fn a_sign_up(pool: &PgPool, name: &str) -> Account {
     let username = format!("{name}_{}", &uuid::Uuid::new_v4().simple().to_string()[..5]);
     let actor_uri = format!("http://localhost:8080/users/{username}");
     let id: uuid::Uuid = sqlx::query_scalar(

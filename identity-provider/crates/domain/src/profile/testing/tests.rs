@@ -55,6 +55,12 @@ async fn a_card_knows_another_instances_account_by_a_friendship_or_a_conversatio
 }
 
 #[tokio::test]
+async fn no_card_for_a_sign_up_still_to_confirm() {
+    let profiles = InMemoryProfiles::default();
+    contract::no_card_for_a_sign_up_still_to_confirm(&profiles, &profiles).await;
+}
+
+#[tokio::test]
 async fn no_card_for_an_account_this_instance_does_not_hold() {
     let profiles = InMemoryProfiles::default();
     contract::no_card_for_an_account_this_instance_does_not_hold(&profiles, &profiles).await;

@@ -25,20 +25,40 @@ pub fn account(name: &str) -> Account {
     }
 }
 
+/// Accounts that joined, unless added with [`InMemoryAccounts::signing_up`].
 #[derive(Default)]
 pub struct InMemoryAccounts {
     accounts: Mutex<Vec<Account>>,
+    signing_up: Mutex<Vec<UserId>>,
 }
 
 impl InMemoryAccounts {
     pub fn with(accounts: impl IntoIterator<Item = Account>) -> Self {
         Self {
             accounts: Mutex::new(accounts.into_iter().collect()),
+            ..Self::default()
         }
     }
 
     pub fn add(&self, account: Account) {
         self.accounts.lock().unwrap().push(account);
+    }
+
+    /// An account still to confirm its address, not admitted.
+    pub fn signing_up(&self, account: Account) {
+        self.signing_up.lock().unwrap().push(account.id);
+        self.add(account);
+    }
+
+    fn joined(&self, found: impl Fn(&Account) -> bool) -> Option<Account> {
+        let signing_up = self.signing_up.lock().unwrap();
+        self.accounts
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|a| found(a))
+            .filter(|a| !signing_up.contains(&a.id))
+            .cloned()
     }
 }
 
@@ -55,27 +75,20 @@ impl Accounts for InMemoryAccounts {
     }
 
     async fn find_by_uri(&self, uri: &ActorUri) -> Result<Option<Account>, AccountsError> {
-        Ok(self
-            .accounts
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|a| &a.actor_uri == uri)
-            .cloned())
+        Ok(self.joined(|a| &a.actor_uri == uri))
     }
 
     async fn find_by_handle(&self, handle: &Handle) -> Result<Option<Account>, AccountsError> {
-        Ok(self
-            .accounts
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|a| a.username == handle.as_str())
-            .cloned())
+        Ok(self.joined(|a| a.username == handle.as_str()))
     }
 
     async fn count(&self) -> Result<u64, AccountsError> {
-        Ok(self.accounts.lock().unwrap().len() as u64)
+        let signing_up = self.signing_up.lock().unwrap();
+        let accounts = self.accounts.lock().unwrap();
+        Ok(accounts
+            .iter()
+            .filter(|a| !signing_up.contains(&a.id))
+            .count() as u64)
     }
 }
 
@@ -352,7 +365,7 @@ pub mod contract {
     use time::OffsetDateTime;
 
     use crate::UserId;
-    use crate::identity::{Accounts, IntroText, SavedIntro};
+    use crate::identity::{Account, Accounts, Handle, IntroText, SavedIntro};
 
     /// Takes a store nobody saved to.
     pub async fn nothing_is_saved_until_an_admin_saves(intro: &dyn SavedIntro) {
@@ -374,9 +387,43 @@ pub mod contract {
         );
     }
 
-    /// Takes the store holding exactly `alice` and `bob`.
-    pub async fn every_account_counts(accounts: &dyn Accounts) {
+    /// Takes the store holding exactly `alice` and `bob`, who joined, and a sign-up still to
+    /// confirm its address.
+    pub async fn every_account_that_joined_counts(accounts: &dyn Accounts) {
         assert_eq!(accounts.count().await.unwrap(), 2);
+    }
+
+    /// Takes `joined`, confirmed or admitted, and `signing_up`, still to confirm its address.
+    pub async fn a_sign_up_still_to_confirm_is_found_by_its_id_only(
+        accounts: &dyn Accounts,
+        joined: &[Account],
+        signing_up: &Account,
+    ) {
+        for account in joined {
+            let handle = Handle::parse(&account.username).unwrap();
+            assert_eq!(
+                accounts.find_by_handle(&handle).await.unwrap().as_ref(),
+                Some(account)
+            );
+            assert_eq!(
+                accounts
+                    .find_by_uri(&account.actor_uri)
+                    .await
+                    .unwrap()
+                    .as_ref(),
+                Some(account)
+            );
+        }
+        let handle = Handle::parse(&signing_up.username).unwrap();
+        assert_eq!(accounts.find_by_handle(&handle).await.unwrap(), None);
+        assert_eq!(
+            accounts.find_by_uri(&signing_up.actor_uri).await.unwrap(),
+            None
+        );
+        assert_eq!(
+            accounts.find(signing_up.id).await.unwrap().as_ref(),
+            Some(signing_up)
+        );
     }
 }
 

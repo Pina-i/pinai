@@ -101,6 +101,7 @@ fn world() -> World {
         needs_refill: false,
     };
     let accounts = Arc::new(InMemoryAccounts::with([alice.clone(), bob.clone()]));
+    accounts.signing_up(account("kai"));
     let store = Arc::new(InMemoryKeyDirectory::default());
     let sessions = Arc::new(InMemorySessions::default());
     let ended = Arc::new(RecordingSessionNotifier::default());
@@ -1179,6 +1180,27 @@ async fn a_claim_names_no_user_or_no_package_when_there_is_none() {
         matches!(empty, Err(KeyDirectoryError::NoKeyPackage)),
         "{empty:?}"
     );
+}
+
+#[tokio::test]
+async fn a_claim_for_a_sign_up_still_to_confirm_names_no_user() {
+    let w = world();
+    let kai = account("kai").actor_uri;
+    let carols = Requester::Peer(w.carol.actor_uri.clone());
+
+    for requester in [Requester::User(w.alice.id), carols] {
+        let one = w.claim.execute(&requester, &kai, None).await;
+        let each = w.claim.each_device(&requester, &kai).await;
+
+        assert!(
+            matches!(one, Err(KeyDirectoryError::UserNotFound)),
+            "{one:?}"
+        );
+        assert!(
+            matches!(each, Err(KeyDirectoryError::UserNotFound)),
+            "{each:?}"
+        );
+    }
 }
 
 #[tokio::test]

@@ -34,3 +34,17 @@ async fn a_person_shows_the_accounts_pronouns_and_bio() {
     );
     assert_eq!(show.execute("nobody_x1y2z").await.unwrap(), None);
 }
+
+#[tokio::test]
+async fn a_sign_up_still_to_confirm_has_no_person() {
+    let kai = account("kai");
+    let accounts = InMemoryAccounts::default();
+    accounts.signing_up(kai.clone());
+    let show = ShowPerson::new(
+        InstanceOrigin::parse("http://localhost:8080").unwrap(),
+        Arc::new(accounts),
+        Arc::new(InMemoryProfiles::default()),
+    );
+
+    assert_eq!(show.execute(&kai.username).await.unwrap(), None);
+}

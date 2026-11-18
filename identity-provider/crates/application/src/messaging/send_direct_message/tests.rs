@@ -26,10 +26,12 @@ fn world() -> World {
     let store = Arc::new(InMemoryMessaging::default());
     let notifier = Arc::new(RecordingMessageNotifier::default());
     let reach = Arc::new(StubReachability::default());
+    let accounts = InMemoryAccounts::with([alice.clone(), bob.clone()]);
+    accounts.signing_up(account("kai"));
     let send = SendDirectMessage::new(
         InstanceOrigin::parse("http://localhost:8080").unwrap(),
         2,
-        Arc::new(InMemoryAccounts::with([alice.clone(), bob.clone()])),
+        Arc::new(accounts),
         Arc::new(InMemoryRemoteActors::with([carol.clone()])),
         store.clone(),
         store.clone(),
@@ -208,6 +210,10 @@ async fn a_message_that_cannot_be_sent_is_refused_and_stores_nothing() {
     let cases = [
         (
             to(Recipient::Local(Handle::parse("nobody_t3st0").unwrap())),
+            "RecipientNotFound",
+        ),
+        (
+            to(Recipient::Local(Handle::parse("kai_t3st0").unwrap())),
             "RecipientNotFound",
         ),
         (

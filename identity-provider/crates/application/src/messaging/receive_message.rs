@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use domain::identity::{Accounts, ActorUri, RemoteActors};
+use domain::identity::{Accounts, ActorUri, InstanceOrigin, RemoteActors};
 use domain::messaging::{
     AttachmentLimits, ConversationKind, Conversations, GroupNotifier, GroupSnapshot, Member,
     MessageEvent, MessageNotifier, Messages, MessagingError, MlsCiphertext, NewMessage,
@@ -28,6 +28,7 @@ pub struct IncomingMessage {
 
 /// The inbox's `Create{Note}` carrying an MLS application message.
 pub struct ReceiveMessage {
+    origin: InstanceOrigin,
     limits: AttachmentLimits,
     accounts: Arc<dyn Accounts>,
     remote_actors: Arc<dyn RemoteActors>,
@@ -41,6 +42,7 @@ pub struct ReceiveMessage {
 impl ReceiveMessage {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
+        origin: InstanceOrigin,
         limits: AttachmentLimits,
         accounts: Arc<dyn Accounts>,
         remote_actors: Arc<dyn RemoteActors>,
@@ -51,6 +53,7 @@ impl ReceiveMessage {
         groups: Arc<dyn GroupNotifier>,
     ) -> Self {
         Self {
+            origin,
             limits,
             accounts,
             remote_actors,
@@ -80,6 +83,7 @@ impl ReceiveMessage {
                 return Ok(());
             }
             Roster {
+                origin: &self.origin,
                 conversations: &*self.conversations,
                 accounts: &*self.accounts,
                 reach: &*self.reach,

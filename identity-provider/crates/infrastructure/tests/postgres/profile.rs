@@ -204,6 +204,15 @@ async fn a_card_knows_another_instances_account_by_a_friendship_or_a_conversatio
 }
 
 #[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn no_card_for_a_sign_up_still_to_confirm(pool: PgPool) {
+    contract::no_card_for_a_sign_up_still_to_confirm(
+        &PgProfileCards::new(pool.clone()),
+        &PgProfileSeeds(pool),
+    )
+    .await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
 async fn no_card_for_an_account_this_instance_does_not_hold(pool: PgPool) {
     contract::no_card_for_an_account_this_instance_does_not_hold(
         &PgProfileCards::new(pool.clone()),

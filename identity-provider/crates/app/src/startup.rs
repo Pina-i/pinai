@@ -273,6 +273,7 @@ impl Application {
             Arc::clone(&message_notifier),
         ));
         let receive_message = Arc::new(ReceiveMessage::new(
+            origin.clone(),
             attachment_limits.clone(),
             Arc::clone(&accounts),
             Arc::clone(&remote_actors),
@@ -409,6 +410,7 @@ impl Application {
                 Arc::clone(&inboxes),
             ));
         let receive_commit = Arc::new(application::e2ee::ReceiveCommit::new(
+            origin.clone(),
             Arc::clone(&accounts),
             Arc::clone(&remote_actors),
             Arc::clone(&conversations),
@@ -420,6 +422,7 @@ impl Application {
             Arc::clone(&group_events),
         ));
         let receive_welcome = Arc::new(application::e2ee::ReceiveWelcome::new(
+            origin.clone(),
             Arc::clone(&accounts),
             Arc::clone(&remote_actors),
             Arc::clone(&conversations),
@@ -998,6 +1001,7 @@ impl Application {
                 Arc::clone(&conversations),
             )),
             receive_group_change: Arc::new(ReceiveGroupChange::new(
+                origin.clone(),
                 Arc::clone(&accounts),
                 Arc::clone(&remote_actors),
                 Arc::clone(&conversations),

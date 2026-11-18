@@ -59,29 +59,37 @@ impl Accounts for PgAccounts {
     }
 
     async fn find_by_handle(&self, handle: &Handle) -> Result<Option<Account>, AccountsError> {
-        let row = sqlx::query_as(&format!("SELECT {COLUMNS} FROM users WHERE username = $1"))
-            .bind(handle.as_str())
-            .fetch_optional(&self.pool)
-            .await
-            .context("find an account by handle")?;
+        let row = sqlx::query_as(&format!(
+            "SELECT {COLUMNS} FROM users WHERE username = $1 AND {}",
+            super::has_joined("users")
+        ))
+        .bind(handle.as_str())
+        .fetch_optional(&self.pool)
+        .await
+        .context("find an account by handle")?;
         account(row)
     }
 
     async fn find_by_uri(&self, uri: &ActorUri) -> Result<Option<Account>, AccountsError> {
-        let row = sqlx::query_as(&format!("SELECT {COLUMNS} FROM users WHERE actor_uri = $1"))
-            .bind(uri.as_str())
-            .fetch_optional(&self.pool)
-            .await
-            .context("find an account by actor URI")?;
+        let row = sqlx::query_as(&format!(
+            "SELECT {COLUMNS} FROM users WHERE actor_uri = $1 AND {}",
+            super::has_joined("users")
+        ))
+        .bind(uri.as_str())
+        .fetch_optional(&self.pool)
+        .await
+        .context("find an account by actor URI")?;
         account(row)
     }
 
     async fn count(&self) -> Result<u64, AccountsError> {
-        let count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE actor_uri IS NOT NULL")
-                .fetch_one(&self.pool)
-                .await
-                .context("count the accounts")?;
+        let count: i64 = sqlx::query_scalar(&format!(
+            "SELECT COUNT(*) FROM users WHERE actor_uri IS NOT NULL AND {}",
+            super::has_joined("users")
+        ))
+        .fetch_one(&self.pool)
+        .await
+        .context("count the accounts")?;
         Ok(u64::try_from(count).unwrap_or(0))
     }
 }

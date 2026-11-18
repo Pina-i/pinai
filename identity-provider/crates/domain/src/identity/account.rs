@@ -12,6 +12,14 @@ pub struct Account {
     pub avatar_url: Option<String>,
 }
 
+/// Whether an account has joined the instance — its address confirmed, or admitted without — rather
+/// than still signing up. Only an account that joined is others' to reach: found, asked, messaged,
+/// invited, its keys claimed, delivered to; one still to confirm its address is nobody's but its
+/// own.
+pub fn has_joined(email_verified: bool, admitted: bool) -> bool {
+    email_verified || admitted
+}
+
 /// An account on another instance, as far as this one knows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteActor {

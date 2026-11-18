@@ -38,12 +38,33 @@ async fn an_account_is_found_by_id_handle_and_actor_uri(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "infrastructure::MIGRATOR")]
-async fn every_account_counts(pool: PgPool) {
+async fn a_sign_up_still_to_confirm_is_found_by_its_id_only(pool: PgPool) {
+    let alice = an_account(&pool, "alice").await;
+    let admitted = an_account(&pool, "kai").await;
+    sqlx::query("UPDATE users SET email_verified_at = NULL, admitted_at = now() WHERE id = $1")
+        .bind(admitted.id.as_uuid())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let signing_up = super::a_sign_up(&pool, "kaiah").await;
+
+    domain::identity::testing::contract::a_sign_up_still_to_confirm_is_found_by_its_id_only(
+        &PgAccounts::new(pool),
+        &[alice, admitted],
+        &signing_up,
+    )
+    .await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn every_account_that_joined_counts(pool: PgPool) {
     an_account(&pool, "alice").await;
     an_account(&pool, "bob").await;
+    super::a_sign_up(&pool, "kai").await;
     super::a_user(&pool).await;
 
-    domain::identity::testing::contract::every_account_counts(&PgAccounts::new(pool)).await;
+    domain::identity::testing::contract::every_account_that_joined_counts(&PgAccounts::new(pool))
+        .await;
 }
 
 #[sqlx::test(migrator = "infrastructure::MIGRATOR")]

@@ -1,6 +1,6 @@
 use domain::ConversationId;
 use domain::e2ee::DeliveryError;
-use domain::identity::{Account, Accounts, ActorUri, RemoteActors};
+use domain::identity::{Account, Accounts, ActorUri, InstanceOrigin, RemoteActors};
 use domain::messaging::{
     ConversationKind, Conversations, GroupChangeKind, GroupEvent, GroupEventKind, GroupEvents,
     GroupNotifier, GroupSnapshot,
@@ -26,6 +26,7 @@ pub(super) async fn roster_of(
 
 /// What mirroring a roster another instance sent takes.
 pub(super) struct Mirror<'a> {
+    pub(super) origin: &'a InstanceOrigin,
     pub(super) accounts: &'a dyn Accounts,
     pub(super) remote_actors: &'a dyn RemoteActors,
     pub(super) conversations: &'a dyn Conversations,
@@ -45,6 +46,7 @@ impl Mirror<'_> {
         roster: &GroupSnapshot,
     ) -> Result<(), DeliveryError> {
         let newcomers = Roster {
+            origin: self.origin,
             conversations: self.conversations,
             accounts: self.accounts,
             reach: self.reach,
