@@ -49,9 +49,7 @@ fn refusal(error: TransportError) -> SignatureError {
             SignatureError::Malformed(reason)
         }
         TransportError::Denied(reason) => SignatureError::Refused(reason),
-        TransportError::Upstream(reason) => {
-            SignatureError::Unexpected(anyhow::anyhow!("fetch a signing key: {reason}"))
-        }
+        TransportError::Upstream(reason) => SignatureError::KeyUnavailable(reason),
     }
 }
 

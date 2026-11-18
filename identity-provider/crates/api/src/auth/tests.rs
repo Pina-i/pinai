@@ -90,3 +90,26 @@ async fn a_sensitive_action_takes_a_password_typed_in_the_last_ten_minutes() {
         assert_ne!(done.status(), StatusCode::UNAUTHORIZED, "{uri}");
     }
 }
+
+#[tokio::test]
+async fn a_signing_key_that_cannot_be_fetched_is_a_401_its_sender_retries_without_the_reason() {
+    use axum::response::IntoResponse;
+    use domain::identity::SignatureError;
+    use http_body_util::BodyExt;
+    use serde_json::{Value, json};
+
+    let reason = "peer URL resolves into private address space (10.0.0.5)".to_owned();
+
+    let response = crate::ApiError::from(SignatureError::KeyUnavailable(reason)).into_response();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(response.headers()[header::WWW_AUTHENTICATE], "Signature");
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&bytes).unwrap(),
+        json!({
+            "error": "invalid_signature",
+            "error_description": "signature verification failed: the signing key could not be fetched"
+        })
+    );
+}

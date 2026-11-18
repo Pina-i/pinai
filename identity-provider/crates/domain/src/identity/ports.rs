@@ -143,6 +143,10 @@ pub enum SignatureError {
     Malformed(String),
     #[error("{0}")]
     Refused(String),
+    /// The key its `keyId` names couldn't be fetched or read, so the signature can't be
+    /// verified. The reason may name where an address anyone chooses leads.
+    #[error("the signing key could not be fetched: {0}")]
+    KeyUnavailable(String),
     #[error(transparent)]
     Unexpected(#[from] anyhow::Error),
 }

@@ -99,8 +99,9 @@ another's accounts. A resolution the actor's instance fails — it doesn't answe
 no instance would send: a WebFinger or actor document breaking that rule, an `id` that is no
 actor URI (§ 4), or an inbox URL past an actor URI's 2 KiB (`RemoteActor::parse_inbox`) — is
 `502 the account's instance did not answer`, and nothing of its answer is written: for a friend
-request, a DM to an address not cached here, and a group invitee (with its `actor_uri`). An
-instance that answers it knows no such account is `404`. A discovery whose document breaks the
+request, a DM to an address not cached here, and a group invitee (with its `actor_uri`). The
+failure is logged at warn level, never error: the peer failed, not this instance, and anyone can
+name a dead one. An instance that answers it knows no such account is `404`. A discovery whose document breaks the
 rule, or brings such an inbox, reads as an unreachable peer's: what was cached stays.
 
 A group's members reach this instance in the rosters other members' instances send, so a member

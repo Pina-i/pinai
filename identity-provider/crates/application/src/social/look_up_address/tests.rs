@@ -114,7 +114,8 @@ impl RemoteActors for Refusing {
 }
 
 #[tokio::test]
-async fn an_instance_that_does_not_answer_or_may_not_be_asked_is_unavailable() {
+async fn an_instance_that_does_not_answer_is_unavailable_and_one_that_may_not_be_asked_not_allowed()
+{
     let alice = account("alice");
     let people = Arc::new(InMemoryPeopleSearch::default());
     let down = LookUpAddress::new(
@@ -122,17 +123,19 @@ async fn an_instance_that_does_not_answer_or_may_not_be_asked_is_unavailable() {
         Arc::new(InMemoryRemoteActors::default().and_down("reef.chat")),
     );
     let refused = LookUpAddress::new(people, Arc::new(Refusing));
+    let mahealani = remote("mahealani_q1x8c@reef.chat");
 
-    for look_up in [down, refused] {
-        let failed = look_up
-            .execute(alice.id, &remote("mahealani_q1x8c@reef.chat"))
-            .await;
+    let unavailable = down.execute(alice.id, &mahealani).await;
+    let not_allowed = refused.execute(alice.id, &mahealani).await;
 
-        assert!(
-            matches!(failed, Err(SocialError::PeerUnavailable(_))),
-            "{failed:?}"
-        );
-    }
+    assert!(
+        matches!(unavailable, Err(SocialError::PeerUnavailable(_))),
+        "{unavailable:?}"
+    );
+    assert!(
+        matches!(not_allowed, Err(SocialError::PeerNotAllowed(_))),
+        "{not_allowed:?}"
+    );
 }
 
 #[tokio::test]

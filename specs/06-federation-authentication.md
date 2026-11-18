@@ -110,10 +110,17 @@ flowchart TD
 ```
 
 A rejection is `400` when the request is malformed — no `Signature` header, an
-unparseable one, a `keyId` that does not resolve — and `403` when a check fails on a
-well-formed request: a signature that does not verify (one covering a `Digest` the request
-lacks included), a `Digest` the signature does not cover or the body does not match, an
-actor that is not the signer, or a refetch refused by the rate limit.
+unparseable one — and `403` when a check fails on a well-formed request: a signature that does
+not verify (one covering a `Digest` the request lacks included), a `Digest` the signature does
+not cover or the body does not match, an actor that is not the signer, or a refetch refused by
+the rate limit. A signature whose key can't be had can't be verified yet: a `keyId` whose host
+doesn't answer, whose document has no `publicKeyPem` or one that doesn't parse, or that the peer
+request policy refuses is `401 invalid_signature` with `WWW-Authenticate: Signature`, "signature
+verification failed: the signing key could not be fetched", whatever the reason. A `401`, not a
+`403`: ActivityPub senders retry a `401` (Mastodon retries `401`, `408`, `429` and `5xx`, never
+`403`), so a peer whose key server was briefly down loses no activity. Anyone can send any
+`keyId`, so the reason — which may give the private address a name resolves to — goes to the log
+at debug level only.
 
 #### 1 — Signature
 
@@ -121,8 +128,9 @@ Parse the `Signature` header, resolve `keyId` to its actor document, read
 `publicKey.publicKeyPem`, and verify the signature over the rebuilt signing string. This
 establishes that **some** real actor signed this request.
 
-Rejected: a missing or malformed `Signature` header, a `keyId` that does not resolve, an
-actor document with no `publicKeyPem`, and a signature that does not verify.
+Rejected: a missing or malformed `Signature` header, a `keyId` whose key can't be fetched or
+read — an actor document with no `publicKeyPem` included —, and a signature that does not
+verify.
 
 #### 2 — Digest binding
 
