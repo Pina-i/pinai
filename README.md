@@ -564,7 +564,7 @@ triggered it:
 | Trigger | Published |
 |---|---|
 | A pull request | nothing |
-| A push to `main` | `edge` and `sha-<short>`, for testing only |
+| A push to `main` | nothing: the image is built, unpublished, to keep the cache a tag's build reads |
 | A tag `vX.Y.Z` | `X.Y.Z`, `X.Y` and `latest`, then a GitHub release carrying `pinai-deploy.tar.gz`: `deploy/` and `LICENSE`, its `compose.yaml` running `X.Y`; its notes are the version's section of `CHANGELOG.md` |
 | A tag `vX.Y.Z-rc.1` | `X.Y.Z-rc.1`, then a pre-release with the bundle pinned to it |
 

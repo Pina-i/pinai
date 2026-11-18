@@ -153,9 +153,10 @@ and runs as the non-root user 65532, so `idp-keygen` makes the instance key
 group-readable by 65532. The dev image runs as root and reads the host's keys as
 they are.
 
-`.github/workflows/ci.yml` publishes the image: `edge` from `main`, and on a tag
-`vX.Y.Z` (`idp-api`'s version) the release tags and a GitHub release carrying
-the `deploy/` bundle; the root `README.md` § Releasing has the table. The tags
+`.github/workflows/ci.yml` publishes on a tag `vX.Y.Z` (`idp-api`'s version) only: the
+image under the release tags and a GitHub release carrying the `deploy/` bundle; `main`
+builds the image unpublished, to keep the cache a tag's build reads. The root `README.md`
+§ Releasing has the table. The tags
 come from release-plz (`.github/workflows/release-plz.yml`), so commit messages
 are Conventional Commits, or from a run of `ci.yml` by hand, which only tags. The Rust toolchain is pinned in both Dockerfiles and
 both workflows: change the four together.

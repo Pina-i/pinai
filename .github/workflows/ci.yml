@@ -16,11 +16,11 @@ on:
 permissions:
   contents: read
 
-# A newer push waits for the run under way rather than racing it: edge is always main's latest.
-# The event keeps a manual run apart from main's pushes, whose pending run it would cancel.
+# A newer push replaces the run under way, which publishes nothing; a tag's run, which
+# publishes, always finishes. The event keeps a manual run apart from main's pushes.
 concurrency:
   group: ci-${{ github.event_name }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' && !startsWith(github.ref, 'refs/tags/') }}
 
 env:
   # The toolchain of the Dockerfiles' cargo-chef image.
@@ -50,8 +50,9 @@ jobs:
         env:
           NEXTEST_PROFILE: ci
 
-  # Each platform on a native runner, pushed by digest (pull requests only build), built
-  # alongside check rather than after it; publish tags them only once check passed too.
+  # Each platform on a native runner, built alongside check rather than after it. Only a tag
+  # pushes, by digest, for publish to tag once check passed too; main builds to keep the cache a
+  # tag reads.
   image:
     if: github.event_name != 'workflow_dispatch'
     strategy:
@@ -73,7 +74,7 @@ jobs:
         with:
           images: ${{ env.IMAGE }}
           labels: org.opencontainers.image.licenses=AGPL-3.0-or-later
-      - if: github.event_name != 'pull_request'
+      - if: startsWith(github.ref, 'refs/tags/v')
         uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
@@ -87,18 +88,18 @@ jobs:
           file: identity-provider/docker/Dockerfile
           platforms: linux/${{ matrix.arch }}
           labels: ${{ steps.meta.outputs.labels }}
-          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=${{ github.event_name != 'pull_request' }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=${{ startsWith(github.ref, 'refs/tags/v') }}
           # Written from main only, as rust-cache is; pull requests and tags read main's.
           cache-from: type=gha,scope=idp-${{ matrix.arch }}
           cache-to: ${{ github.ref == 'refs/heads/main' && format('type=gha,scope=idp-{0},mode=max', matrix.arch) || '' }}
       - name: Keep the digest for publish
-        if: github.event_name != 'pull_request'
+        if: startsWith(github.ref, 'refs/tags/v')
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           mkdir -p "$RUNNER_TEMP/digests"
           touch "$RUNNER_TEMP/digests/${DIGEST#sha256:}"
-      - if: github.event_name != 'pull_request'
+      - if: startsWith(github.ref, 'refs/tags/v')
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: digests-${{ matrix.arch }}
@@ -108,7 +109,7 @@ jobs:
 
   publish:
     needs: [check, image]
-    if: github.event_name != 'pull_request'
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -128,8 +129,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-      # main: edge and sha-<short>. A tag: 0.1.0, 0.1 and latest; a release candidate
-      # (v0.2.0-rc.1) only its own version.
+      # A tag: 0.1.0, 0.1 and latest; a release candidate (v0.2.0-rc.1) only its own version.
       - id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         env:
@@ -137,8 +137,6 @@ jobs:
         with:
           images: ${{ env.IMAGE }}
           tags: |
-            type=edge,branch=main
-            type=sha,enable=${{ github.ref == 'refs/heads/main' }}
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
           annotations: org.opencontainers.image.licenses=AGPL-3.0-or-later
