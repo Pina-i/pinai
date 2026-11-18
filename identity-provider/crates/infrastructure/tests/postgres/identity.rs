@@ -213,6 +213,61 @@ async fn an_actor_is_discovered_even_when_its_instance_is_unreachable(pool: PgPo
     assert_eq!(actors.find(&dave).await.unwrap(), Some(discovered));
 }
 
+async fn fetched_at(pool: &PgPool, actor: &str) -> OffsetDateTime {
+    sqlx::query_scalar("SELECT fetched_at FROM remote_actors WHERE actor_uri = $1")
+        .bind(actor)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn a_discovery_that_reads_no_document_leaves_the_profile_as_old_as_it_was(pool: PgPool) {
+    a_cached_actor(&pool, UNREACHABLE, None).await;
+    let two_days_ago = OffsetDateTime::now_utc() - time::Duration::days(2);
+    sqlx::query("UPDATE remote_actors SET fetched_at = $1")
+        .bind(two_days_ago)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let held = fetched_at(&pool, UNREACHABLE).await;
+
+    remote_actors(pool.clone())
+        .discover(&ActorUri::parse(UNREACHABLE).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(fetched_at(&pool, UNREACHABLE).await, held);
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn an_actor_whose_document_was_never_read_is_as_old_as_can_be(pool: PgPool) {
+    remote_actors(pool.clone())
+        .discover(&ActorUri::parse(UNREACHABLE).unwrap())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        fetched_at(&pool, UNREACHABLE).await,
+        OffsetDateTime::UNIX_EPOCH
+    );
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn a_discovery_that_reads_the_document_makes_the_profile_fresh(pool: PgPool) {
+    let dave = a_peer_serving_dave("Dave", None, None, None).await;
+    remembered_with(&pool, &dave, "he", "old").await;
+    sqlx::query("UPDATE remote_actors SET fetched_at = 'epoch'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let before = OffsetDateTime::now_utc() - time::Duration::seconds(5);
+
+    remote_actors(pool.clone()).discover(&dave).await.unwrap();
+
+    assert!(fetched_at(&pool, dave.as_str()).await > before);
+}
+
 #[sqlx::test(migrator = "infrastructure::MIGRATOR")]
 async fn a_uri_naming_no_account_cannot_be_discovered(pool: PgPool) {
     let not_an_account = ActorUri::parse("http://127.0.0.1:9/groups/7").unwrap();

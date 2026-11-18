@@ -57,8 +57,10 @@ CREATE TABLE remote_actors (
   avatar_url    TEXT,
   pronouns      TEXT CHECK (pronouns IN ('he', 'she', 'non-binary')),
   bio           TEXT,                       -- the Person's `summary`, as text
-  fetched_at    TIMESTAMPTZ NOT NULL DEFAULT now(),  -- last resolved or discovered; a profile card
-                                                     -- older than 24 h discovers the actor again
+  fetched_at    TIMESTAMPTZ NOT NULL DEFAULT now(),  -- when its document was last read, resolved
+                                                     -- or discovered; the epoch if it never was.
+                                                     -- A profile card older than 24 h discovers
+                                                     -- the actor again, at most once an hour
   updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -102,7 +104,11 @@ actor URI (§ 4), or an inbox URL past an actor URI's 2 KiB (`RemoteActor::parse
 request, a DM to an address not cached here, and a group invitee (with its `actor_uri`). The
 failure is logged at warn level, never error: the peer failed, not this instance, and anyone can
 name a dead one. An instance that answers it knows no such account is `404`. A discovery whose document breaks the
-rule, or brings such an inbox, reads as an unreachable peer's: what was cached stays.
+rule, or brings such an inbox, reads as an unreachable peer's: what was cached stays. Only a
+document read makes the actor fresh: a discovery that reads none — the peer didn't answer, answered
+what no instance would, or the peer request policy refused it — leaves `fetched_at` as it was, the
+epoch for an actor first met so, and its profile card asks again
+(`identity-provider/specs/profile-and-settings.md § 1`).
 
 A group's members reach this instance in the rosters other members' instances send, so a member
 may be someone nobody here has met. What goes to each remote member — a group message, an edit,

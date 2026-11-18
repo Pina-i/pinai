@@ -88,3 +88,39 @@ async fn a_refresh_rediscovers_the_account_off_the_request() {
     let rediscovered = tokio::time::timeout(Duration::from_secs(5), heard.recv()).await;
     assert_eq!(rediscovered.unwrap(), Some(carol));
 }
+
+#[tokio::test]
+async fn an_account_is_asked_for_at_most_once_an_hour_whatever_came_of_it() {
+    let (asked, mut heard) = mpsc::unbounded_channel();
+    let carol = remote_actor("carol_k2m9x@idp.carol.test").actor_uri;
+    let dave = remote_actor("dave_k2m9x@idp.dave.test").actor_uri;
+    let refresh = BackgroundProfileRefresh::new(Arc::new(Rediscovering(asked)));
+
+    for actor in [&carol, &carol, &dave, &carol] {
+        refresh.refresh(actor);
+    }
+
+    let mut rediscovered = Vec::new();
+    while let Ok(Some(actor)) = tokio::time::timeout(Duration::from_millis(200), heard.recv()).await
+    {
+        rediscovered.push(actor);
+    }
+    rediscovered.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+    assert_eq!(rediscovered, [carol, dave]);
+}
+
+#[tokio::test]
+async fn an_account_is_asked_for_again_once_the_hour_is_over() {
+    let (asked, mut heard) = mpsc::unbounded_channel();
+    let carol = remote_actor("carol_k2m9x@idp.carol.test").actor_uri;
+    let mut refresh = BackgroundProfileRefresh::new(Arc::new(Rediscovering(asked)));
+    refresh.retry_after = Duration::ZERO;
+
+    refresh.refresh(&carol);
+    refresh.refresh(&carol);
+
+    for _ in 0..2 {
+        let rediscovered = tokio::time::timeout(Duration::from_secs(5), heard.recv()).await;
+        assert_eq!(rediscovered.unwrap().as_ref(), Some(&carol));
+    }
+}

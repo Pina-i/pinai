@@ -54,6 +54,13 @@ friend's misses an `Update{Person}` that was lost. So a card whose `remote_actor
 more than 24 h old is answered as cached, and the account is discovered again in the background
 (`identity-provider/specs/identity.md § 2`) for the next read.
 
+Only a document read makes the profile fresh again: a discovery its instance didn't answer, or
+answered what no instance would, or that the peer request policy refused, leaves `fetched_at` as it
+was, so the card stays stale and the next read asks again. An account is asked for at most once an
+hour, whatever came of it (`BackgroundProfileRefresh`), so a dead peer costs one fetch an hour
+however often its card is read. The hour is held in memory — one process per instance, as the
+presence board assumes —: a restart forgets it, at the cost of one more fetch per account.
+
 ### Avatar storage
 
 The IdP keeps one object per account and type in the avatars bucket, named `{user_id}.{ext}`
