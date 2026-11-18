@@ -726,3 +726,12 @@ async fn the_trust_read_holds_the_accounts_devices_approvals_and_generation() {
     )
     .await;
 }
+
+#[test]
+fn the_times_a_test_names_agree_across_a_second_boundary() {
+    let before = contract::at(time::Duration::ZERO);
+    let into_next_second = 1_000_000_000 - OffsetDateTime::now_utc().nanosecond() + 10_000_000;
+    std::thread::sleep(std::time::Duration::from_nanos(u64::from(into_next_second)));
+
+    assert_eq!(contract::at(time::Duration::ZERO), before);
+}
