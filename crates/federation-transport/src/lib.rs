@@ -15,7 +15,7 @@ pub mod keycache;
 pub mod sign;
 pub mod verify;
 
-pub use actor::{resolve_remote_actor, RemoteActor};
+pub use actor::{fetch_remote_actor, resolve_remote_actor, RemoteActor};
 pub use error::TransportError;
 pub use http::UrlPolicy;
 pub use keycache::KeyCache;

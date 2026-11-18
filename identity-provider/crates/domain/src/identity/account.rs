@@ -1,4 +1,4 @@
-use crate::UserId;
+use crate::{UserId, ValidationError};
 
 use super::ActorUri;
 
@@ -20,3 +20,20 @@ pub struct RemoteActor {
     pub display_name: Option<String>,
     pub avatar_url: Option<String>,
 }
+
+impl RemoteActor {
+    /// A peer's inbox URL as this instance stores it: `http(s)`, held to an actor URI's 2 KiB, as
+    /// every writer stores what a peer hands it.
+    pub fn parse_inbox(raw: &str) -> Result<url::Url, ValidationError> {
+        let refuse = || ValidationError::new("inbox", "an http(s) URL of 2 KiB at most");
+        let url = url::Url::parse(raw).map_err(|_| refuse())?;
+        if matches!(url.scheme(), "http" | "https") && url.as_str().len() <= ActorUri::MAX_BYTES {
+            Ok(url)
+        } else {
+            Err(refuse())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests;

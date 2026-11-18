@@ -1,9 +1,11 @@
 use time::OffsetDateTime;
 
-use crate::identity::{Account, ActorUri, RemoteActor};
+use crate::identity::{Account, ActorUri, Handle, RemoteActor};
 use crate::{ConversationId, FriendshipId, UserId};
 
-use super::{BlockedActor, ContactPolicy, Friendship, Relation};
+use super::{
+    BlockedActor, ContactPolicy, FoundPerson, Friendship, PeopleFound, Relation, SearchQuery, Ties,
+};
 
 /// The friend graph. Each method is one business operation, atomic on its own.
 #[async_trait::async_trait]
@@ -130,6 +132,31 @@ pub trait Reachability: Send + Sync {
     /// Whether the owner blocked any of `among` — a group's roster.
     async fn blocks_any(&self, owner: UserId, among: &[ActorUri])
     -> Result<bool, SocialStoreError>;
+}
+
+/// Finding people for the caller to befriend: by name, or one by their address.
+#[async_trait::async_trait]
+pub trait PeopleSearch: Send + Sync {
+    /// Each section at most `limit`, in order, the caller's ties to each person read in the same
+    /// query. Never the caller, an account still to confirm its address, nor anyone without an
+    /// address.
+    async fn search(
+        &self,
+        caller: UserId,
+        query: &SearchQuery,
+        limit: i64,
+    ) -> Result<PeopleFound, SocialStoreError>;
+
+    /// The account of this instance with that handle, confirmed or admitted — the caller's own
+    /// too —, with the caller's ties to it read in the same query.
+    async fn local(
+        &self,
+        caller: UserId,
+        handle: &Handle,
+    ) -> Result<Option<FoundPerson>, SocialStoreError>;
+
+    /// The caller's ties to `actor`, of this instance or another.
+    async fn ties(&self, caller: UserId, actor: &ActorUri) -> Result<Ties, SocialStoreError>;
 }
 
 /// The contact setting of local accounts.

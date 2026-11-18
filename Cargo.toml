@@ -50,6 +50,7 @@ base32     = "0.5"
 argon2     = "0.5"
 rand       = "0.8"
 deunicode  = "1"
+unicode-normalization = "0.1"
 askama     = "0.16"
 
 # Shared crates (were the core-libs repo, pulled in as unpinned git deps)

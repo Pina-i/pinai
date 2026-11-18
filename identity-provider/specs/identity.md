@@ -92,10 +92,16 @@ tell them who on this instance has met whom. Where a user names an arbitrary act
 invitees — the actor is resolved anew on its own instance, cached or not
 (`identity-provider/specs/groups.md § 2`).
 
-A resolution the actor's instance fails — it doesn't answer, or answers a WebFinger or actor
-document no instance would send — is `502 the account's instance did not answer`: for a friend
+What a peer answers is kept only as `specs/06-federation-authentication.md` "Resolving an actor"
+has it: an address resolves only to an actor of the instance it names, and a document describes
+only the actor at the URL it was asked at — so no instance changes what this one holds of
+another's accounts. A resolution the actor's instance fails — it doesn't answer, or answers what
+no instance would send: a WebFinger or actor document breaking that rule, an `id` that is no
+actor URI (§ 4), or an inbox URL past an actor URI's 2 KiB (`RemoteActor::parse_inbox`) — is
+`502 the account's instance did not answer`, and nothing of its answer is written: for a friend
 request, a DM to an address not cached here, and a group invitee (with its `actor_uri`). An
-instance that answers it knows no such account is `404`.
+instance that answers it knows no such account is `404`. A discovery whose document breaks the
+rule, or brings such an inbox, reads as an unreachable peer's: what was cached stays.
 
 A group's members reach this instance in the rosters other members' instances send, so a member
 may be someone nobody here has met. What goes to each remote member — a group message, an edit,
@@ -120,9 +126,10 @@ empty: nothing is published, and whom an account is friends with is not for anyo
 
 The canonical address format used throughout the system is `username@domain` (e.g. `alice_xk9mp@idp.alice.com`), **without** a leading `@` — `/userinfo` answers it as `address`. Clients receive actor URIs (`https://idp.alice.com/users/alice_xk9mp`) in some events and normalise them to `username@domain` via `actorUriToAddress()` before using them as conversation keys.
 
-An actor URI is an `http(s)` URL with a host, no query and no fragment, of 2 KiB at most once
-normalised (`domain::identity::ActorUri`) — whether a peer or a user hands it over, anything else is
-refused.
+An actor URI is an `http(s)` URL with a host, no user name or password, no query and no fragment,
+of 2 KiB at most once normalised (`domain::identity::ActorUri`) — whether a peer or a user hands it
+over, anything else is refused: `http://reef.chat@evil.example/users/x` is evil.example's, and
+would name one account by two URIs.
 
 ## 5. `username` vs `display_name`
 
@@ -288,3 +295,162 @@ sequenceDiagram
     K-->>C: results, then the GIF's bytes
     Note over C: the GIF is sent as an attachment,<br/>encrypted like any other file
 ```
+
+## 7. Finding people
+
+A user finds whom to befriend two ways: by name, among the people this instance already holds —
+its own accounts, and the people of other instances the user shares a group with —, and by exact
+address, anywhere. Nothing asks another instance by name: only an exact address goes out, as a
+friend request's does.
+
+### How a person is answered
+
+```json
+{
+  "actor_uri": "https://reef.chat/users/mahealani_q1x8c",
+  "address": "mahealani_q1x8c@reef.chat",
+  "display_name": "Mahealani",
+  "avatar_url": null,
+  "relation": "request_received",
+  "friendship_id": "7b1e…"
+}
+```
+
+- `address` is § 4's `username@domain`. A search never lists someone whose actor URI names no
+  address (`ActorUri::federated_address`: not `…/users/{handle}`): no friend request could name
+  them. A lookup answers an account of this instance with its own address — a bare handle comes
+  back with this instance's domain —, and another instance's with the address as looked up.
+- `display_name` and `avatar_url` are another instance's account's as this instance holds them.
+  `display_name` is `null` in a search only for an account of this instance that has none, found
+  by its handle — another instance's account whose name the cache doesn't hold never matches —; in
+  a lookup, also for another instance's account that never gave one.
+- `relation` is how the person stands with the caller, from the caller's side: the first that
+  holds, read from the caller's own rows (`domain::social::Ties::standing`) — in a search, with the
+  person in the same query.
+
+  | `relation` | Holds when |
+  |---|---|
+  | `blocked` | the caller blocked them |
+  | `friend` | the caller's side of a friendship with them is `accepted` |
+  | `request_received` | it is `pending` and `incoming`: they asked |
+  | `request_sent` | it is `pending` and `outgoing`: the caller asked |
+  | `none` | none of these |
+
+  A block the person made on the caller never shows: they read like anyone else, as nobody can
+  tell a block (`identity-provider/specs/social.md § 2`).
+- `friendship_id` is the caller's `incoming` side, the id `POST /api/friends/:id/accept` takes:
+  with `request_received` only, `null` otherwise.
+
+### Searching by name
+
+`GET /api/users/search?q=&limit=`, Bearer. `q` is trimmed, then holds 2 characters at least
+besides combining marks — which folding drops, so `a` and an accent is one letter —, 100 characters
+at most, marks included, and no control character (`domain::social::SearchQuery`); anything else
+is `400`. It is taken literally — `%`, `_` and `\` are characters like any other. `limit` counts
+per section: 20 by default, clamped to 1–50.
+
+```json
+{ "server": [Person], "groups": [Person & { "group": "Federation lab" }] }
+```
+
+| Section | Who is listed |
+|---|---|
+| `server` | This instance's accounts with their address confirmed, or admitted — the members list's rule (`identity-provider/specs/auth.md § 4` "The members list"). Never the caller, never a sign-up still to confirm its address |
+| `groups` | Other instances' accounts that are active members of a conversation of kind `group` the caller is an active member of — not a 1:1, not a group either of them left. A co-member of this instance is in `server` only. `group` is the name of the most recently created group the two share, `null` when that group has none |
+
+**Accents and case never matter**, on both sides of the comparison: a name and `q` are folded
+alike — Postgres's `unaccent`, an extension a migration enables, then lower case — so "hoku" finds
+"Hōkū", and "Hōkū" finds "Hoku". A person is listed in the first tier that holds:
+
+| Tier | Holds when |
+|---|---|
+| 0 | the folded display name starts with `q` |
+| 1 | it holds `q` |
+| 2 (`server` only) | the handle holds `q` — handles are ASCII and lower case already |
+
+Anyone else is not listed; another instance's handle is never searched. The order is the tier,
+then the folded display name (byte order, a missing name last), then the actor URI, so the same
+search lists the same people in the same order.
+
+Each section is one query (`PgPeopleSearch`): the candidates from `users`, or from
+`conversation_members` and the `remote_actors` cache, with the caller's `friendships` side and
+`user_blocks` row for each.
+
+```mermaid
+flowchart TD
+    C[someone this instance holds] --> L{an account of this instance?}
+    L -- yes --> V{confirmed or admitted, and not the caller?}
+    V -- no --> X[not listed]
+    V -- yes --> T{the name starts with q, holds it, or the handle holds it?}
+    T -- no --> X
+    T -- yes --> S["server, tier 0, 1 or 2"]
+    L -- no --> G{an active member of a group the caller is active in?}
+    G -- no --> X
+    G -- yes --> N{the name starts with q, or holds it?}
+    N -- no --> X
+    N -- yes --> A{an address?}
+    A -- no --> X
+    A -- yes --> GR["groups, tier 0 or 1, with the latest group's name"]
+```
+
+Scenarios:
+
+- **Alice types "hoku".** Hōkū, on her instance, is in `server`; Hoku from reef.chat, whom she
+  met in "Federation lab", is in `groups`, with `group: "Federation lab"`.
+- **Hōkū asked Alice to be friends.** He is listed `request_received` with the id of Alice's side,
+  so her client accepts there rather than asking him back.
+- **Alice blocked Pua.** Pua is listed `blocked`: a request to her would be refused with
+  `Unblock this user first` (`identity-provider/specs/social.md § 2`).
+- **Pua blocked Alice.** Alice finds Pua as she finds anyone, `none` or whatever her own side says.
+- **Kai signed up but hasn't confirmed his address.** Nobody finds him until he does.
+- **Alice left the group she shared with Mahina.** Mahina is no longer in her `groups` section,
+  unless they share another group.
+
+### Looking up an address
+
+`GET /api/users/lookup?address=`, Bearer, 60 a caller then one a second (`429 too_many_requests`,
+`api::LookupLimiter`): each may ask another instance twice and write to its cache. `address` is
+trimmed and read by `InstanceOrigin::sought`: a bare name is this instance's, a leading `@` is
+dropped, and an address on this instance's own domain, in any case, is one of its accounts. Only
+what is no address at all is `400`; a name on this instance that no handle could be — `alice`,
+`Hoku_T3ST0@{domain}` — is `404 No account at this address`, as it would be on any other instance.
+
+| Where | Answer |
+|---|---|
+| This instance | The account with that handle, confirmed or admitted — the members list's rule, as in a search —, else `404 No account at this address`. The caller's own address is answered like anyone's: the client tells it apart |
+| Another instance | Resolved there — WebFinger, then the actor document — every time, never answered from the cache, and remembered as a friend request remembers it (§ 2): the name and avatar answered are the document's, or, when it gives none, those held before — `null` only when none was ever known. An instance that knows no such account is `404 No account at this address`; one that doesn't answer, answers what no instance would, or that this instance may not ask (`specs/06-federation-authentication.md` "Peer request policy") is `502 the account's instance did not answer`, whatever the cache holds of the account |
+
+`200` is one person, as above, its `relation` read from the caller's `user_blocks` and
+`friendships` rows: for this instance, in the query that finds the account (`PeopleSearch::local`);
+for another, once it is resolved (`PeopleSearch::ties`).
+
+```mermaid
+sequenceDiagram
+    participant C as Alice's client
+    participant A as idp.alice.com
+    participant R as reef.chat
+    C->>A: GET /api/users/lookup?address=mahealani_q1x8c@reef.chat
+    A->>R: WebFinger, then the actor document
+    alt an account
+        R-->>A: the Person
+        A->>A: remember it in remote_actors, read Alice's ties to it
+        A-->>C: 200 Person
+    else no such account
+        R-->>A: 404
+        A-->>C: 404 No account at this address
+    else no answer
+        A-->>C: 502 the account's instance did not answer
+    end
+```
+
+Scenarios:
+
+- **Alice types Mahealani's full address.** Her instance asks reef.chat, which describes her: she
+  is answered with `relation: "none"`, with the name her document gives — or, when it gives none,
+  the one this instance held before, `null` if it never knew one.
+- **Alice already asked her.** The answer is `request_sent`; on reef.chat, Mahealani looking up
+  Alice's address gets `request_received` and the id to accept with.
+- **Alice types her own address.** She is answered like anyone, `none`; her client says it's her.
+- **Alice types `kai@` her own domain, without the suffix.** No handle reads so: `404`, as the
+  same typed for another instance would be.
+- **reef.chat is down.** `502`, whatever its cache here says of Mahealani.

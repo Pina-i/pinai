@@ -74,21 +74,6 @@ impl Accounts for InMemoryAccounts {
             .cloned())
     }
 
-    async fn search(&self, fragment: &str, limit: i64) -> Result<Vec<Account>, AccountsError> {
-        let fragment = fragment.to_lowercase();
-        let mut found: Vec<Account> = self
-            .accounts
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|a| a.username.to_lowercase().contains(&fragment))
-            .cloned()
-            .collect();
-        found.sort_by(|a, b| a.username.cmp(&b.username));
-        found.truncate(usize::try_from(limit).unwrap_or(0));
-        Ok(found)
-    }
-
     async fn count(&self) -> Result<u64, AccountsError> {
         Ok(self.accounts.lock().unwrap().len() as u64)
     }
@@ -344,7 +329,7 @@ pub mod contract {
     use time::OffsetDateTime;
 
     use crate::UserId;
-    use crate::identity::{Account, Accounts, IntroText, SavedIntro};
+    use crate::identity::{Accounts, IntroText, SavedIntro};
 
     /// Takes a store nobody saved to.
     pub async fn nothing_is_saved_until_an_admin_saves(intro: &dyn SavedIntro) {
@@ -366,46 +351,9 @@ pub mod contract {
         );
     }
 
-    /// `alice` and `bob` are named so: `lic` is in the first handle only.
-    pub async fn a_search_finds_the_handles_holding_the_query(
-        accounts: &dyn Accounts,
-        alice: &Account,
-        bob: &Account,
-    ) {
-        let both = vec![alice.clone(), bob.clone()];
-
-        assert_eq!(
-            accounts.search("lic", 20).await.unwrap(),
-            vec![alice.clone()]
-        );
-        assert_eq!(
-            accounts.search("LIC", 20).await.unwrap(),
-            vec![alice.clone()],
-            "in any case"
-        );
-        assert_eq!(accounts.search("_", 20).await.unwrap(), both, "by handle");
-        assert_eq!(
-            accounts.search("_", 1).await.unwrap(),
-            vec![alice.clone()],
-            "at most the limit"
-        );
-        assert!(accounts.search("zzz", 20).await.unwrap().is_empty());
-    }
-
     /// Takes the store holding exactly `alice` and `bob`.
     pub async fn every_account_counts(accounts: &dyn Accounts) {
         assert_eq!(accounts.count().await.unwrap(), 2);
-    }
-
-    /// `%` and `_` are no wildcards: `alice` holds `lic`, not `l_c` nor `%e`.
-    pub async fn a_search_takes_its_query_literally(accounts: &dyn Accounts, alice: &Account) {
-        for query in ["l_c", "%e", "\\"] {
-            assert!(
-                accounts.search(query, 20).await.unwrap().is_empty(),
-                "{query:?} matched {}",
-                alice.username
-            );
-        }
     }
 }
 

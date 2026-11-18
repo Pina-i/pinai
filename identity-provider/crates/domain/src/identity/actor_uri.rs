@@ -29,6 +29,8 @@ impl ActorUri {
             && url.as_str().len() <= Self::MAX_BYTES
             && matches!(url.scheme(), "http" | "https")
             && url.host_str().is_some_and(|host| !host.is_empty())
+            && url.username().is_empty()
+            && url.password().is_none()
             && url.query().is_none()
             && url.fragment().is_none();
         if !plain {

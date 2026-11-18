@@ -9,7 +9,6 @@ mod handle;
 mod intro;
 mod origin;
 mod ports;
-mod search;
 mod source;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod testing;
@@ -28,5 +27,4 @@ pub use ports::{
     SavedIntro, SavedIntroError, SignatureError, SignatureVerifier, SignedRequest, TokenError,
     TokenVerifier,
 };
-pub use search::SearchQuery;
 pub use source::{PINAI_SOURCE_URL, SourceUrl};

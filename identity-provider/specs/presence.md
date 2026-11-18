@@ -384,7 +384,7 @@ before it is fetched (`specs/06-federation-authentication.md` § Peer request po
 | Connect timeout | 3 s | 3 s |
 | Total timeout | 5 s | none — a stream stays open |
 | Read timeout | — | 30 s: two missed keep-alives end the stream, which is then opened again |
-| Redirects | ≤ 2 | none |
+| Redirects | none | none |
 | Body cap | 256 KiB | frames are read one at a time |
 
 #### Scenarios

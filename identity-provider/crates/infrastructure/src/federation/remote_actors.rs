@@ -1,8 +1,8 @@
 use anyhow::Context;
+use domain::ValidationError;
 use domain::identity::{ActorUri, FederatedAddress, RemoteActor, RemoteActors, RemoteActorsError};
 use domain::profile::{Pronouns, PublicProfile};
-use federation_transport::http::get_json_screened;
-use federation_transport::{TransportError, UrlPolicy, resolve_remote_actor};
+use federation_transport::{TransportError, UrlPolicy, fetch_remote_actor, resolve_remote_actor};
 use sqlx::PgPool;
 
 /// Remote accounts: resolved over WebFinger, remembered in `remote_actors`.
@@ -22,8 +22,8 @@ impl FederatedRemoteActors {
         }
     }
 
-    // A fetch that brings no inbox, name or avatar keeps the cached one: a peer that is down,
-    // or an actor first seen through a Follow, must not erase what WebFinger resolved. A name, an
+    // A fetch that brings no inbox, name or avatar keeps the cached one: a peer that is down, or
+    // a document this instance won't take, must not erase what was read before. A name, an
     // avatar or a bio outside the peer profile limits counts as none. The pronouns and bio of a
     // document that was read are taken as it gives them, cleared when it has none; with no
     // document, the cached ones stay.
@@ -71,21 +71,18 @@ impl FederatedRemoteActors {
         Ok(row.try_into()?)
     }
 
-    /// What the actor's document shows, if it can be read.
-    async fn shown_by(&self, actor: &ActorUri) -> Option<Shown> {
-        let document = get_json_screened(actor.as_str(), "application/activity+json", self.policy)
+    /// The actor's inbox and what its document shows, if it can be read, names the actor and
+    /// keeps within the limits.
+    async fn read(&self, actor: &ActorUri) -> Option<(url::Url, Shown)> {
+        let found = fetch_remote_actor(actor.as_str(), self.policy)
             .await
+            .map_err(|e| e.to_string())
+            .and_then(|found| kept(found).map_err(|e| e.to_string()))
             .inspect_err(
                 |e| tracing::debug!(error = %e, %actor, "remote actor document unavailable"),
             )
             .ok()?;
-        let actor = serde_json::from_value::<activitypub::Actor>(document).ok()?;
-        Some(Shown {
-            avatar_url: actor.icon_url().map(str::to_owned),
-            bio: actor.bio(),
-            display_name: Some(actor.name).filter(|name| !name.is_empty()),
-            pronouns: actor.pronouns,
-        })
+        Some(found)
     }
 }
 
@@ -96,6 +93,23 @@ struct Shown {
     avatar_url: Option<String>,
     pronouns: Option<String>,
     bio: Option<String>,
+}
+
+/// The inbox and what is shown of an actor its instance described, the inbox as it is stored.
+fn kept(found: federation_transport::RemoteActor) -> Result<(url::Url, Shown), ValidationError> {
+    let inbox = RemoteActor::parse_inbox(found.inbox.as_str())?;
+    let shown = Shown {
+        display_name: found.display_name,
+        avatar_url: found.avatar_url,
+        pronouns: found.pronouns,
+        bio: found.bio,
+    };
+    Ok((inbox, shown))
+}
+
+/// What a peer answered that this instance won't store: no instance would answer it.
+fn unanswerable(e: ValidationError) -> RemoteActorsError {
+    RemoteActorsError::Unavailable(format!("the peer answered no valid {e}"))
 }
 
 #[derive(sqlx::FromRow)]
@@ -144,14 +158,10 @@ impl RemoteActors for FederatedRemoteActors {
         )
         .await
         .map_err(refusal)?;
-        let actor = ActorUri::parse(&found.actor_url).context("the peer's actor id")?;
-        let shown = Shown {
-            display_name: found.display_name,
-            avatar_url: found.avatar_url,
-            pronouns: found.pronouns,
-            bio: found.bio,
-        };
-        self.remember(&actor, Some(&found.inbox), Some(shown)).await
+        let actor = ActorUri::parse(found.actor_url.as_str()).map_err(unanswerable)?;
+        let (inbox, shown) = kept(found).map_err(unanswerable)?;
+        self.remember(&actor, Some(inbox.as_str()), Some(shown))
+            .await
     }
 
     async fn find(&self, uri: &ActorUri) -> Result<Option<RemoteActor>, RemoteActorsError> {
@@ -170,8 +180,9 @@ impl RemoteActors for FederatedRemoteActors {
         if uri.federated_address().is_none() {
             return Err(RemoteActorsError::NotFound);
         }
-        let shown = self.shown_by(uri).await;
-        self.remember(uri, None, shown).await
+        let (inbox, shown) = self.read(uri).await.unzip();
+        self.remember(uri, inbox.as_ref().map(url::Url::as_str), shown)
+            .await
     }
 }
 

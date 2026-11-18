@@ -126,3 +126,31 @@ fn an_instance_is_reached_at_its_scheme_and_domain() {
         "https://idp.alice.test"
     );
 }
+
+#[test]
+fn a_name_on_this_instance_that_no_handle_could_be_is_sought_as_no_account() {
+    let alice = Recipient::Local(Handle::parse("alice_x1y2z").unwrap());
+    for found_here in ["alice_x1y2z", "@alice_x1y2z", "alice_x1y2z@LOCALHOST:8080"] {
+        assert_eq!(
+            origin().sought(found_here).unwrap(),
+            Some(alice.clone()),
+            "{found_here}"
+        );
+    }
+    assert_eq!(
+        origin().sought("bob@idp.example").unwrap(),
+        Some(Recipient::Remote(address("bob@idp.example")))
+    );
+
+    for no_handle in [
+        "alice",
+        "Hoku_T3ST0",
+        "alice@localhost:8080",
+        "Hoku_T3ST0@localhost:8080",
+    ] {
+        assert_eq!(origin().sought(no_handle).unwrap(), None, "{no_handle}");
+    }
+    for no_address in ["", "@", "hoku@", "a@b@c", "not an address", "a/b"] {
+        assert!(origin().sought(no_address).is_err(), "{no_address:?}");
+    }
+}

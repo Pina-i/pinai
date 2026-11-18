@@ -37,7 +37,7 @@ lives in that service's own `specs/` folder, listed by its `CLAUDE.md`.
 | File | Contents | Read when working on… |
 |---|---|---|
 | `specs/02-architecture-diagram.md` | Mermaid flowchart of the whole platform — clients, both IdPs, and their infrastructure | Understanding the global picture; add a component here whenever one is introduced |
-| `specs/06-federation-authentication.md` | The two credentials (Bearer JWT vs HTTP Signature), the signing scheme, the three inbound checks, the verifying-key cache, and the peer request policy | Anything server-to-server, in any service: inboxes, inter-IdP calls, HTTP Signatures, key rotation |
+| `specs/06-federation-authentication.md` | The two credentials (Bearer JWT vs HTTP Signature), the signing scheme, the three inbound checks, the verifying-key cache, resolving an address to an actor (what a peer's answer must satisfy), and the peer request policy | Anything server-to-server, in any service: inboxes, inter-IdP calls, HTTP Signatures, key rotation, WebFinger and actor documents |
 
 A spec belongs at the root when a second service would need the same document — the
 federation transport in `crates/federation-transport/` is described once and implemented by
