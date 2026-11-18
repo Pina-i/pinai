@@ -1,0 +1,11 @@
+# cargo-nextest, which `make check` and `make test-integration` use when it is installed: every
+# test in a process of its own, the test binaries' tests run at once rather than one binary after
+# another. No retries: a flaky test must fail where it is seen.
+
+[profile.default]
+# A test still running after five minutes is hung: end it rather than wait out the CI job.
+slow-timeout = { period = "60s", terminate-after = 5 }
+
+# CI (`NEXTEST_PROFILE=ci`): every failure of the run, not only the first.
+[profile.ci]
+fail-fast = false

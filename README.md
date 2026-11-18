@@ -556,9 +556,10 @@ docker compose up -d     # the whole platform, configured by .env
 
 ### Releasing
 
-`.github/workflows/ci.yml` runs `make check-all`, then builds the production
-image for amd64 and arm64 on native runners. What it publishes to
-`ghcr.io/pina-i/pinai-idp` depends on what triggered it:
+`.github/workflows/ci.yml` runs `make check-all` and, alongside it, builds the
+production image for amd64 and arm64 on native runners; it publishes only once
+both passed. What it publishes to `ghcr.io/pina-i/pinai-idp` depends on what
+triggered it:
 
 | Trigger | Published |
 |---|---|
@@ -649,10 +650,11 @@ All `make` targets are run from the repo root.
 | `make fmt` | `cargo fmt --all` |
 | `make fmt-check` | Check formatting without writing |
 | `make lint` | `cargo clippy --workspace --all-targets --all-features -- -D warnings` |
-| `make check` | `fmt-check` + `readme-compose` + `lint` + `cargo test --workspace` — no Docker; run before every commit |
+| `make check` | `fmt-check` + `readme-compose` + `lint` + the workspace's tests — no Docker; run before every commit. The tests run with [cargo-nextest](https://nexte.st) when it is installed (`cargo install --locked cargo-nextest`), `cargo test` otherwise |
 | `make readme-compose` | Check that the `compose.yaml` this README shows is `deploy/compose.yaml`: change the file, then copy it into the README |
 | `make test-integration` | Throwaway Postgres, Redis and RustFS (`compose.test.yml`), then every test, the Docker-gated ones included |
-| `make check-all` | `check` + `test-integration` — what CI runs, the gate before merging |
+| `make check-static` | `fmt-check` + `readme-compose` + `lint`, no test run |
+| `make check-all` | `check-static` + `test-integration`, every test run once — what CI runs, the gate before merging |
 
 ### Cargo
 

@@ -102,6 +102,9 @@ A test that needs Docker (Postgres, Redis, RustFS) sits in a `[[test]]` target w
 test-integration` runs it against the throwaway Postgres, Redis and RustFS of
 `compose.test.yml`. The identity provider's end-to-end journeys — whole applications spawned
 on loopback ports — are `identity-provider/crates/app/tests/api`.
+Both targets run the tests with cargo-nextest when it is installed (`.config/nextest.toml`:
+a process a test, every binary's tests at once), `cargo test` otherwise; nextest runs no
+doctests, so none are written.
 The test tiers and how to write each are in `.claude/skills/rust-backend-architecture`.
 
 ## Commands
@@ -113,7 +116,7 @@ Run from the repo root:
 | `make check` | fmt-check + `readme-compose` + clippy `-D warnings` (every target, every feature) + tests — no Docker |
 | `make readme-compose` | the root `README.md` shows `deploy/compose.yaml` verbatim: change the file, then copy it into the README |
 | `make test-integration` | throwaway Postgres, Redis and RustFS (`compose.test.yml`, ports 55432, 56479 and 59000), then every test including the Docker-gated ones |
-| `make check-all` | both — the gate before merging |
+| `make check-all` | `check`'s fmt, `readme-compose` and clippy, then `test-integration`: every test run once — the gate before merging |
 | `make fmt` | rustfmt the workspace |
 | `make alice` / `make bob` | run a full dev instance |
 | `cargo run -p idp-app` | run the identity provider (the `idp-server` binary) |

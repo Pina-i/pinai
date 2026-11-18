@@ -9,7 +9,7 @@ SHELL := bash
         alice-docker-dev bob-docker-dev \
         alice-docker-win bob-docker-win \
         alice-down bob-down alice-down-v bob-down-v \
-        fmt fmt-check lint readme-compose check \
+        fmt fmt-check lint readme-compose check-static check \
         test-integration test-integration-down check-all
 
 # ── Instance environment ─────────────────────────────────────────────────────
@@ -189,8 +189,14 @@ lint:
 readme-compose:
 	sh scripts/check-readme-compose.sh
 
-check: fmt-check readme-compose lint
-	cargo test --workspace
+check-static: fmt-check readme-compose lint
+
+# cargo-nextest when installed (`cargo install --locked cargo-nextest`, `.config/nextest.toml`),
+# cargo test otherwise. Nextest runs no doctests: the tests are written as tests, none as docs.
+TEST := $(if $(shell cargo nextest --version 2>/dev/null),cargo nextest run,cargo test)
+
+check: check-static
+	$(TEST) --workspace
 
 # ── Integration tests (Docker) ────────────────────────────────────────────────
 # Tests behind the `integration` feature need Postgres, the end-to-end journeys Redis too, and
@@ -207,9 +213,10 @@ TEST_STORAGE_URL := http://localhost:$(TEST_RUSTFS_PORT)
 
 test-integration:
 	TEST_PG_PORT=$(TEST_PG_PORT) TEST_REDIS_PORT=$(TEST_REDIS_PORT) TEST_RUSTFS_PORT=$(TEST_RUSTFS_PORT) docker compose -f compose.test.yml --project-name pinai-test up -d --wait
-	DATABASE_URL=$(TEST_DATABASE_URL) TEST_REDIS_URL=$(TEST_REDIS_URL) TEST_STORAGE_URL=$(TEST_STORAGE_URL) cargo test --workspace --all-features
+	DATABASE_URL=$(TEST_DATABASE_URL) TEST_REDIS_URL=$(TEST_REDIS_URL) TEST_STORAGE_URL=$(TEST_STORAGE_URL) $(TEST) --workspace --all-features
 
 test-integration-down:
 	docker compose -f compose.test.yml --project-name pinai-test down
 
-check-all: check test-integration
+# One test run: `--all-features` already runs every test `check` would.
+check-all: check-static test-integration
