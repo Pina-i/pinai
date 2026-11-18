@@ -102,8 +102,19 @@ fn is_private(ip: &IpAddr) -> bool {
                 || (segments[0] & 0xfe00) == 0xfc00
                 // fe80::/10 link local
                 || (segments[0] & 0xffc0) == 0xfe80
+                // fec0::/10 site local: deprecated, yet still routed inside some networks
+                || (segments[0] & 0xffc0) == 0xfec0
+                // 100::/64 discard
+                || segments[..4] == [0x100, 0, 0, 0]
+                // 2001:db8::/32 documentation
+                || segments[..2] == [0x2001, 0xdb8]
                 // IPv4-mapped and -compatible addresses are held to the v4 rules
                 || v6.to_ipv4().is_some_and(|v4| is_private(&IpAddr::V4(v4)))
+                // SIIT ::ffff:0:0/96, IPv4-translated, reaches the IPv4 address it ends with
+                || (segments[..6] == [0, 0, 0, 0, 0xffff, 0]
+                    && is_private(&IpAddr::V4(Ipv4Addr::from(
+                        (u32::from(segments[6]) << 16) | u32::from(segments[7]),
+                    ))))
                 // NAT64 64:ff9b::/96 reaches the IPv4 address it ends with
                 || (segments[..6] == [0x64, 0xff9b, 0, 0, 0, 0]
                     && is_private(&IpAddr::V4(Ipv4Addr::from(
@@ -111,6 +122,14 @@ fn is_private(ip: &IpAddr) -> bool {
                     ))))
                 // 64:ff9b:1::/48, local-use NAT64, maps however its network chose
                 || segments[..3] == [0x64, 0xff9b, 1]
+                // 6to4 2002::/16 reaches the IPv4 address in its next 32 bits
+                || (segments[0] == 0x2002
+                    && is_private(&IpAddr::V4(Ipv4Addr::from(
+                        (u32::from(segments[1]) << 16) | u32::from(segments[2]),
+                    ))))
+                // Teredo 2001::/32 whole: deprecated, and its embedded addresses don't say
+                // which host a relay delivers to
+                || segments[..2] == [0x2001, 0]
         }
     }
 }

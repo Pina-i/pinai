@@ -296,8 +296,10 @@ that origin, or one the screen refuses, ends the fetch as a peer that doesn't an
 - the scheme must be `https`;
 - the host — an IP literal as written, a name as it resolves — must not be in loopback, private,
   link-local, carrier-grade-NAT, multicast, reserved, benchmarking or IETF-assigned space, nor be
-  an IPv4-mapped, IPv4-compatible or NAT64 address of one — the classic target being a cloud
-  metadata endpoint.
+  an IPv4-mapped, IPv4-compatible, NAT64 or 6to4 (`2002::/16`) address of one — the classic
+  target being a cloud metadata endpoint. A Teredo address (`2001::/32`) is refused whatever it
+  embeds: the tunnelling is deprecated, and its addresses don't say which host a relay delivers
+  to.
 
 What a service tells its caller of such a refusal names nothing the screen resolved: the
 identity provider answers a friend request, a DM, a group's invitee, a KeyPackage claim or an

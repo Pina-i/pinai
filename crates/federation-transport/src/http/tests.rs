@@ -24,14 +24,26 @@ fn classifies_private_and_public_addresses() {
         "255.255.255.255",
         "198.18.0.1", // benchmarking
         "198.19.255.255",
-        "192.0.0.8",          // IETF protocol assignments
-        "0.1.2.3",            // this network
-        "::ffff:10.0.0.5",    // v4-mapped private
-        "::10.0.0.5",         // v4-compatible private
-        "64:ff9b::a00:5",     // NAT64 of 10.0.0.5
-        "64:ff9b::a9fe:a9fe", // NAT64 of 169.254.169.254
-        "64:ff9b:1::8.8.8.8", // local-use NAT64
-        "ff02::1",            // multicast
+        "192.0.0.8",                            // IETF protocol assignments
+        "0.1.2.3",                              // this network
+        "::ffff:10.0.0.5",                      // v4-mapped private
+        "::10.0.0.5",                           // v4-compatible private
+        "64:ff9b::a00:5",                       // NAT64 of 10.0.0.5
+        "64:ff9b::a9fe:a9fe",                   // NAT64 of 169.254.169.254
+        "64:ff9b:1::8.8.8.8",                   // local-use NAT64
+        "ff02::1",                              // multicast
+        "2002:a00:5::1",                        // 6to4 of 10.0.0.5
+        "2002:7f00:1::",                        // 6to4 of 127.0.0.1
+        "2002:a9fe:a9fe:1::1",                  // 6to4 of 169.254.169.254
+        "2001:0:4136:e378:8000:63bf:3fff:fdd2", // Teredo, its server and client public
+        "2001:0:a00:5:8000:63bf:f5ff:fffa",     // Teredo, its server 10.0.0.5
+        "2001::1",
+        "fec0::1", // site local
+        "fef0::1",
+        "100::1",          // discard
+        "2001:db8::1",     // documentation
+        "::ffff:0:a00:5",  // SIIT of 10.0.0.5
+        "::ffff:0:7f00:1", // SIIT of 127.0.0.1
     ] {
         assert!(is_private(&ip(s)), "{s} should be rejected");
     }
@@ -45,6 +57,11 @@ fn classifies_private_and_public_addresses() {
         "223.255.255.255",
         "::ffff:1.1.1.1",
         "64:ff9b::101:101", // NAT64 of 1.1.1.1
+        "2002:101:101::1",  // 6to4 of 1.1.1.1
+        "2001:4860:4860::8888",
+        "::ffff:0:101:101", // SIIT of 1.1.1.1
+        "100:0:0:1::1",
+        "2001:db9::1",
     ] {
         assert!(!is_private(&ip(s)), "{s} should be allowed");
     }
@@ -116,6 +133,8 @@ async fn an_ip_literal_is_checked_as_written_without_a_lookup() {
         "https://[fe80::1]/actor",
         "https://[::ffff:10.0.0.5]/actor",
         "https://[64:ff9b::a9fe:a9fe]/latest/meta-data",
+        "https://[2002:a9fe:a9fe::1]/latest/meta-data",
+        "https://[2001:0:a00:5:8000:63bf:f5ff:fffa]/actor",
     ] {
         let refused = screen_url(private, p).await;
 
