@@ -358,7 +358,12 @@ async fn a_groups_changes_reach_the_other_instance() {
             .map(|_| ())
     })
     .await;
-    let (_, timeline) = b.get(&dave, &format!("/api/dm/{id}?include=events")).await;
+    // The line is written after the removal itself: wait for it, not for `removed_at`.
+    let timeline = eventually("the removal in dave's timeline", || async {
+        let (_, timeline) = b.get(&dave, &format!("/api/dm/{id}?include=events")).await;
+        (timeline[0]["event"] == "removed").then_some(timeline)
+    })
+    .await;
     assert_eq!(
         (
             &timeline[0]["event"],
