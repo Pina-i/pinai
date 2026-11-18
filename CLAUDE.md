@@ -102,6 +102,9 @@ A test that needs Docker (Postgres, Redis, RustFS) sits in a `[[test]]` target w
 test-integration` runs it against the throwaway Postgres, Redis and RustFS of
 `compose.test.yml`. The identity provider's end-to-end journeys — whole applications spawned
 on loopback ports — are `identity-provider/crates/app/tests/api`.
+Both targets run the tests with cargo-nextest when it is installed (`.config/nextest.toml`:
+a process a test, every binary's tests at once), `cargo test` otherwise; nextest runs no
+doctests, so none are written.
 The test tiers and how to write each are in `.claude/skills/rust-backend-architecture`.
 
 ## Commands

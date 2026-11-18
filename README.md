@@ -650,7 +650,7 @@ All `make` targets are run from the repo root.
 | `make fmt` | `cargo fmt --all` |
 | `make fmt-check` | Check formatting without writing |
 | `make lint` | `cargo clippy --workspace --all-targets --all-features -- -D warnings` |
-| `make check` | `fmt-check` + `readme-compose` + `lint` + `cargo test --workspace` — no Docker; run before every commit |
+| `make check` | `fmt-check` + `readme-compose` + `lint` + the workspace's tests — no Docker; run before every commit. The tests run with [cargo-nextest](https://nexte.st) when it is installed (`cargo install --locked cargo-nextest`), `cargo test` otherwise |
 | `make readme-compose` | Check that the `compose.yaml` this README shows is `deploy/compose.yaml`: change the file, then copy it into the README |
 | `make test-integration` | Throwaway Postgres, Redis and RustFS (`compose.test.yml`), then every test, the Docker-gated ones included |
 | `make check-static` | `fmt-check` + `readme-compose` + `lint`, no test run |
