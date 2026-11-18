@@ -405,6 +405,43 @@ async fn one_deadline_covers_the_body() {
     );
 }
 
+/// A peer on the loopback interface answering every request `200` with a body one byte past the
+/// cap — announced in `Content-Length`, or streamed without it.
+async fn an_oversized_peer(announced: bool) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let at = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let _ = socket.read(&mut [0; 4096]).await;
+            let length = if announced {
+                format!("content-length: {}\r\n", MAX_BODY_BYTES + 1)
+            } else {
+                String::new()
+            };
+            let head = format!("HTTP/1.1 200 OK\r\n{length}connection: close\r\n\r\n");
+            let _ = socket.write_all(head.as_bytes()).await;
+            let _ = socket.write_all(&vec![b' '; MAX_BODY_BYTES + 1]).await;
+        }
+    });
+    format!("http://{at}/.well-known/webfinger")
+}
+
+#[tokio::test]
+async fn an_answer_past_the_body_cap_is_a_peer_failing_not_a_refusal() {
+    for announced in [true, false] {
+        let url = an_oversized_peer(announced).await;
+
+        let oversized = get_json_screened(&url, "application/json", DEVELOPMENT).await;
+
+        assert!(
+            matches!(&oversized, Err(TransportError::Upstream(m)) if m.contains("byte cap")),
+            "announced {announced}: {oversized:?}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn the_shared_client_follows_no_redirect_itself() {
     let (at, mut paths) = a_redirecting_peer(|_| vec![("/a", "302 Found", "/b".to_owned())]).await;

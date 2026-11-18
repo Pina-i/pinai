@@ -3,7 +3,7 @@ use http_signatures::{http_date_now, sha256_digest, sign_request, SignParams};
 use tracing::debug;
 
 use crate::error::TransportError;
-use crate::http::{client, download_client, screen_url, UrlPolicy};
+use crate::http::{client, download_client, refusal_excerpt, screen_url, UrlPolicy};
 
 /// The identity a signed request is made under.
 pub struct Signer<'a> {
@@ -12,11 +12,12 @@ pub struct Signer<'a> {
     pub signing_key: &'a SigningKey,
 }
 
-/// POST a signed body to a peer and return the response; a non-2xx answer is an error.
+/// POST a signed body to a peer and return the response; a non-2xx answer is an error carrying
+/// an excerpt of the peer's refusal.
 ///
 /// Callers choose the content type (`application/activity+json` for AP
 /// delivery, `application/json` for direct peer APIs) and decide what to do
-/// with the body.
+/// with the body, read through [`crate::http::read_capped`].
 pub async fn signed_post(
     signer: &Signer<'_>,
     target_url: &str,
@@ -27,9 +28,9 @@ pub async fn signed_post(
     let resp = send_signed_post(signer, target_url, body, content_type, policy).await?;
     if !resp.status().is_success() {
         let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
+        let excerpt = refusal_excerpt(resp).await;
         return Err(TransportError::Upstream(format!(
-            "peer returned {status}: {text}"
+            "peer returned {status}: {excerpt}"
         )));
     }
     Ok(resp)

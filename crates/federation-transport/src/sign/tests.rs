@@ -202,3 +202,57 @@ async fn a_signed_post_follows_no_redirect() {
     );
     assert_eq!(asked.load(Ordering::SeqCst), 1);
 }
+
+/// A peer on the loopback interface answering `403` with a body that never ends.
+async fn a_ranting_peer() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let at = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let _ = socket.read(&mut [0; 4096]).await;
+            let head = "HTTP/1.1 403 Forbidden\r\ntransfer-encoding: chunked\r\n\r\n";
+            if socket.write_all(head.as_bytes()).await.is_err() {
+                continue;
+            }
+            let line = "denied\r\n\x1b[2Jforged log line\n";
+            let chunk = format!("{:x}\r\n{line}\r\n", line.len());
+            while socket.write_all(chunk.as_bytes()).await.is_ok() {}
+        }
+    });
+    format!("http://{at}/users/bob_k2m9x/inbox")
+}
+
+#[tokio::test]
+async fn a_peers_refusal_is_cut_to_one_short_line_without_reading_it_all() {
+    let signing_key = SigningKey::from_bytes(&[7; 32]);
+    let signer = Signer {
+        key_id: "http://localhost:8080/users/alice_k2m9x#main-key",
+        signing_key: &signing_key,
+    };
+
+    let refused = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        signed_post(
+            &signer,
+            &a_ranting_peer().await,
+            b"{}",
+            "application/activity+json",
+            UrlPolicy::from_issuer("http://localhost:8080"),
+        ),
+    )
+    .await
+    .expect("a refusal is not read to its end");
+
+    let Err(TransportError::Upstream(reason)) = refused else {
+        panic!("{refused:?}");
+    };
+    assert!(
+        reason.starts_with("peer returned 403 Forbidden: denied [2Jforged log line denied"),
+        "{reason}"
+    );
+    assert!(reason.ends_with('…'), "{reason}");
+    assert!(
+        !reason.chars().any(char::is_control) && reason.chars().count() < 260,
+        "{reason}"
+    );
+}

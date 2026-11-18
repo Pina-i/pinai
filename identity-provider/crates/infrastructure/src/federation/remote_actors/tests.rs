@@ -49,6 +49,23 @@ async fn an_instance_answering_webfinger_with_junk_is_unavailable() {
 }
 
 #[tokio::test]
+async fn an_instance_answering_past_the_body_cap_is_unavailable_not_refused() {
+    let padding = " ".repeat(300 * 1024);
+    let oversized = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{{}}{padding}"
+    );
+    let address = peer(Box::leak(oversized.into_boxed_str())).await;
+    let dave = FederatedAddress::parse(&format!("dave_k2m9x@{address}")).unwrap();
+
+    let refused = actors().resolve(&dave).await;
+
+    assert!(
+        matches!(&refused, Err(RemoteActorsError::Unavailable(m)) if m.contains("byte cap")),
+        "{refused:?}"
+    );
+}
+
+#[tokio::test]
 async fn an_instance_that_does_not_know_the_account_says_so() {
     let address =
         peer("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await;

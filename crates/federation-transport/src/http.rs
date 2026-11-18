@@ -16,6 +16,8 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_REDIRECTS: usize = 2;
 const MAX_BODY_BYTES: usize = 256 * 1024;
+const MAX_REFUSAL_BYTES: usize = 1024;
+const REFUSAL_EXCERPT_CHARS: usize = 200;
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// What a peer URL is allowed to be.
@@ -262,7 +264,7 @@ async fn redirect_target(
 pub async fn read_capped(resp: reqwest::Response) -> Result<Vec<u8>, TransportError> {
     if let Some(len) = resp.content_length() {
         if len as usize > MAX_BODY_BYTES {
-            return Err(TransportError::Denied(format!(
+            return Err(TransportError::Upstream(format!(
                 "peer body of {len} bytes exceeds the {MAX_BODY_BYTES} byte cap"
             )));
         }
@@ -270,18 +272,50 @@ pub async fn read_capped(resp: reqwest::Response) -> Result<Vec<u8>, TransportEr
 
     // Content-Length is advisory: a chunked response can omit it and stream
     // forever, so the cap is enforced as the bytes arrive.
+    match read_up_to(resp, MAX_BODY_BYTES).await? {
+        (buf, true) => Ok(buf),
+        (_, false) => Err(TransportError::Upstream(format!(
+            "peer body exceeds the {MAX_BODY_BYTES} byte cap"
+        ))),
+    }
+}
+
+/// What a peer's refusal says, as one short line fit for an error or a log: only its first
+/// [`MAX_REFUSAL_BYTES`] are read, and [`REFUSAL_EXCERPT_CHARS`] of them kept.
+pub async fn refusal_excerpt(resp: reqwest::Response) -> String {
+    let (read, whole) = read_up_to(resp, MAX_REFUSAL_BYTES)
+        .await
+        .unwrap_or_default();
+    let text = String::from_utf8_lossy(&read);
+    let line = text
+        .split(|c: char| c.is_whitespace() || c.is_control())
+        .filter(|word| !word.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut excerpt: String = line.chars().take(REFUSAL_EXCERPT_CHARS).collect();
+    if !whole || excerpt.len() < line.len() {
+        excerpt.push('…');
+    }
+    excerpt
+}
+
+/// A peer's body up to `cap` bytes, and whether that is all of it; nothing past `cap` is read.
+async fn read_up_to(
+    resp: reqwest::Response,
+    cap: usize,
+) -> Result<(Vec<u8>, bool), TransportError> {
     let mut buf: Vec<u8> = Vec::new();
     let mut stream = resp.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| TransportError::Upstream(format!("read failed: {e}")))?;
-        if buf.len() + chunk.len() > MAX_BODY_BYTES {
-            return Err(TransportError::Denied(format!(
-                "peer body exceeds the {MAX_BODY_BYTES} byte cap"
-            )));
+        if buf.len() + chunk.len() > cap {
+            let room = cap - buf.len();
+            buf.extend_from_slice(&chunk[..room]);
+            return Ok((buf, false));
         }
         buf.extend_from_slice(&chunk);
     }
-    Ok(buf)
+    Ok((buf, true))
 }
 
 #[cfg(test)]

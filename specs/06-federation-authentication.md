@@ -268,7 +268,13 @@ supplies, an address a user typed. One shared client applies the same bounds to 
 | Body cap | 256 KiB | A chunked response streams until memory runs out |
 
 The body cap is enforced as bytes arrive rather than by trusting `Content-Length`, which a
-hostile peer can omit.
+hostile peer can omit, and holds for every answer read from a peer — a document, a presence
+poll, a KeyPackage claim. An answer past it is a peer failing to answer (`TransportError::Upstream`:
+the identity provider's `502`), never a refusal of the peer request policy. A refusal is read less
+still: its first 1 KiB, of which one line of at
+most 200 characters, control characters and line breaks made spaces, goes into the error and the
+log — a peer neither holds the reader for its whole body nor writes lines of its own into this
+instance's logs.
 
 Downloads — attachment bytes fetched from a peer's `/content` endpoint through `signed_get` —
 use a second client with the same screen and download-sized bounds:
