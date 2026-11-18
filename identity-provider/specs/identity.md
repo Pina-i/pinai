@@ -133,6 +133,12 @@ DNS can answer —, and a last label of digits only is an IPv4 address or nothin
 it. `x@reef..chat`, `x@a.-b`, `x@reef.123` or `x@reef.chat:+443` is no address (`400`), never an
 instance that didn't answer.
 
+This instance's own domain matches in any case, and with its scheme's default port written out —
+`hoku_xk9mp@idp.alice.com:443` on an `https` instance, `:80` on an `http` one, name the same
+account as `hoku_xk9mp@idp.alice.com` (`InstanceOrigin`): such an address is never looked up as
+another instance's, in a request, a lookup or a WebFinger `resource`. Any other port is another
+instance.
+
 An actor URI is an `http(s)` URL with a host, no user name or password, no query and no fragment,
 of 2 KiB at most once normalised (`domain::identity::ActorUri`) — whether a peer or a user hands it
 over, anything else is refused: `http://reef.chat@evil.example/users/x` is evil.example's, and
@@ -418,7 +424,7 @@ Scenarios:
 `GET /api/users/lookup?address=`, Bearer, 60 a caller then one a second (`429 too_many_requests`,
 `api::LookupLimiter`): each may ask another instance twice and write to its cache. `address` is
 trimmed and read by `InstanceOrigin::sought`: a bare name is this instance's, a leading `@` is
-dropped, and an address on this instance's own domain, in any case, is one of its accounts. Only
+dropped, and an address on this instance's own domain (§ 4) is one of its accounts. Only
 what is no address at all is `400`; a name on this instance that no handle could be — `alice`,
 `Hoku_T3ST0@{domain}` — is `404 No account at this address`, as it would be on any other instance.
 
