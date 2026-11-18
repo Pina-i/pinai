@@ -77,6 +77,80 @@ fn a_malformed_address_is_refused() {
     }
 }
 
+#[test]
+fn a_domain_whose_labels_no_name_server_could_answer_is_refused() {
+    let label_64 = "a".repeat(64);
+    let host_254 = format!("{0}.{0}.{0}.{1}", "a".repeat(63), "a".repeat(62));
+    for raw in [
+        "x@reef..chat",
+        "x@a.-b",
+        "x@a-.b",
+        "x@-reef.chat",
+        "x@reef.chat-",
+        "x@reef.chat.",
+        "x@.reef.chat",
+        "x@reef..chat:8443",
+        "x@reef.123",
+        "x@999.1.1.1",
+        "x@1.2.3",
+        "x@010.0.0.1",
+        &format!("x@{label_64}.chat"),
+        &format!("x@{host_254}"),
+    ] {
+        assert!(
+            FederatedAddress::parse(raw).is_err(),
+            "{raw:?} should be refused"
+        );
+    }
+}
+
+#[test]
+fn a_domain_of_valid_labels_is_kept_as_today() {
+    let label_63 = "a".repeat(63);
+    let host_253 = format!("{0}.{0}.{0}.{1}", "a".repeat(63), "a".repeat(61));
+    for raw in [
+        "x@localhost",
+        "x@localhost:8080",
+        "x@reef.chat",
+        "x@my-reef.chat",
+        "x@xn--hk-8ia.chat",
+        "x@a.b",
+        "x@127.0.0.1:8081",
+        "x@10.0.0.5",
+        "x@123.reef.chat",
+        "x@reef.c0m",
+        &format!("x@{label_63}.chat"),
+        &format!("x@{host_253}"),
+    ] {
+        assert!(
+            FederatedAddress::parse(raw).is_ok(),
+            "{raw:?} should be accepted"
+        );
+    }
+}
+
+#[test]
+fn a_port_is_digits_and_kept_without_its_leading_zeros() {
+    for (raw, kept) in [
+        ("x@reef.chat:0443", "x@reef.chat:443"),
+        ("x@reef.chat:00008443", "x@reef.chat:8443"),
+        ("x@localhost:08080", "x@localhost:8080"),
+    ] {
+        assert_eq!(FederatedAddress::parse(raw).unwrap().to_string(), kept);
+    }
+    for raw in [
+        "x@reef.chat:+443",
+        "x@reef.chat:-1",
+        "x@reef.chat: 443",
+        "x@reef.chat:0",
+    ] {
+        assert!(
+            FederatedAddress::parse(raw).is_err(),
+            "{raw:?} should be refused"
+        );
+    }
+}
+
 mod properties {
     use super::*;
     use proptest::prelude::*;
@@ -85,7 +159,7 @@ mod properties {
         #[test]
         fn a_rendered_address_parses_back_to_itself(
             user in "[A-Za-z0-9_.]{1,20}",
-            host in "[a-z0-9]{1,10}(\\.[a-z0-9]{1,10}){0,2}",
+            host in "([a-z0-9]{1,10}\\.){0,2}[a-z][a-z0-9]{0,9}",
             port in proptest::option::of(1u16..),
         ) {
             let domain = match port {

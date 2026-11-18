@@ -357,7 +357,17 @@ async fn what_is_no_address_is_a_400() {
     let alice = account("alice");
     let app = TestApp::with([alice.clone()], []);
 
-    for address in ["", "@", "hoku@", "a@b@c", "not an address"] {
+    for address in [
+        "",
+        "@",
+        "hoku@",
+        "a@b@c",
+        "not an address",
+        "x@reef..chat",
+        "x@a.-b",
+        "x@reef.123",
+        "x@reef.chat:+443",
+    ] {
         let (status, body) = app
             .call(Method::GET, &lookup_of(address), Some(alice.id), None)
             .await;

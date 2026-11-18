@@ -126,6 +126,13 @@ empty: nothing is published, and whom an account is friends with is not for anyo
 
 The canonical address format used throughout the system is `username@domain` (e.g. `alice_xk9mp@idp.alice.com`), **without** a leading `@` — `/userinfo` answers it as `address`. Clients receive actor URIs (`https://idp.alice.com/users/alice_xk9mp`) in some events and normalise them to `username@domain` via `actorUriToAddress()` before using them as conversation keys.
 
+The domain is a host name, lowercased, then optionally `:port` — 1–65535 in digits, kept without
+leading zeros, so `:0443` is `:443` (`domain::identity::Domain`). The host is 253 characters at
+most, its labels between the dots 1–63 of `a–z0–9-`, none starting or ending with `-` — the names
+DNS can answer —, and a last label of digits only is an IPv4 address or nothing, as a URL reads
+it. `x@reef..chat`, `x@a.-b`, `x@reef.123` or `x@reef.chat:+443` is no address (`400`), never an
+instance that didn't answer.
+
 An actor URI is an `http(s)` URL with a host, no user name or password, no query and no fragment,
 of 2 KiB at most once normalised (`domain::identity::ActorUri`) — whether a peer or a user hands it
 over, anything else is refused: `http://reef.chat@evil.example/users/x` is evil.example's, and

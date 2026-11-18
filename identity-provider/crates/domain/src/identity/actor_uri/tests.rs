@@ -19,6 +19,8 @@ fn anything_but_a_plain_http_url_is_refused() {
         "http://[::1]:8080/users/alice_x1y2z",
         "http://reef.chat@evil.example/users/alice_x1y2z",
         "https://alice:secret@idp.example/users/alice_x1y2z",
+        "https://reef..chat/users/alice_x1y2z",
+        "https://a.-b/users/alice_x1y2z",
         "",
     ] {
         assert!(ActorUri::parse(raw).is_err(), "{raw:?} should be refused");
