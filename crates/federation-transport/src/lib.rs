@@ -2,8 +2,10 @@
 //! ActivityPub: WebFinger actor resolution, signed delivery, and inbound
 //! signature + digest verification.
 //!
-//! Every outbound request goes through one screened, bounded HTTP client, and
-//! inbound verification reads keys through a [`KeyCache`].
+//! Every outbound request goes through a screened, bounded HTTP client — one
+//! shared client and one download client per policy
+//! (`UrlPolicy::allow_private_networks`) — and inbound verification reads keys
+//! through a [`KeyCache`].
 //!
 //! Domain handling — which activity verbs a service accepts and what they do —
 //! stays in the service.

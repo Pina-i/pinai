@@ -1,15 +1,14 @@
 //! Clients as their own documents describe them — the OAuth Client ID Metadata Document draft.
 
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, anyhow, bail};
 use domain::auth::{AuthError, Client, ClientDocument, ClientId, ClientPolicy, Clients};
 use federation_transport::UrlPolicy;
-use federation_transport::http::screen_url;
+use federation_transport::http::{PeerResolver, peer_client_builder, screen_url};
 
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const FETCH_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_DOCUMENT_BYTES: usize = 5 * 1024;
 const MIN_TTL: Duration = Duration::from_secs(5 * 60);
@@ -18,20 +17,6 @@ const MAX_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 const FAILURE_TTL: Duration = Duration::from_secs(60);
 /// Any URL can be offered as a client, so the cache is bounded.
 const MAX_ENTRIES: usize = 1024;
-
-/// A screened `GET` to a URL anyone can name: no redirect is followed, since its target was never
-/// screened.
-fn http() -> &'static reqwest::Client {
-    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .connect_timeout(CONNECT_TIMEOUT)
-            .timeout(FETCH_TIMEOUT)
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .expect("a static client configuration")
-    })
-}
 
 struct Cached {
     client: Option<Client>,
@@ -44,10 +29,16 @@ pub struct MetadataClients {
     /// Described by this instance itself, never fetched: the official desktop app.
     built_in: Vec<Client>,
     cache: Mutex<HashMap<ClientId, Cached>>,
+    /// A `GET` to a URL anyone can name, screened as a peer's is.
+    http: reqwest::Client,
 }
 
 impl MetadataClients {
     pub fn new(urls: UrlPolicy, built_in: Vec<Client>) -> Self {
+        Self::resolving(urls, built_in, PeerResolver::new(urls))
+    }
+
+    fn resolving(urls: UrlPolicy, built_in: Vec<Client>, names: PeerResolver) -> Self {
         Self {
             urls,
             policy: ClientPolicy {
@@ -55,6 +46,10 @@ impl MetadataClients {
             },
             built_in,
             cache: Mutex::new(HashMap::new()),
+            http: peer_client_builder(names)
+                .timeout(FETCH_TIMEOUT)
+                .build()
+                .expect("a static client configuration"),
         }
     }
 
@@ -79,10 +74,9 @@ impl MetadataClients {
     }
 
     async fn fetch(&self, id: &ClientId) -> anyhow::Result<(Client, Duration)> {
-        let url = screen_url(id.as_str(), self.urls)
-            .await
-            .map_err(|e| anyhow!("{e}"))?;
-        let mut response = http()
+        let url = screen_url(id.as_str(), self.urls).map_err(|e| anyhow!("{e}"))?;
+        let mut response = self
+            .http
             .get(url)
             .header(reqwest::header::ACCEPT, "application/json")
             .send()

@@ -180,8 +180,8 @@ impl InMemoryRemoteActors {
         self
     }
 
-    /// `domain` resolves into private space: resolving or discovering anyone there is
-    /// `Refused`, for [`PRIVATE_ADDRESS_REFUSAL`].
+    /// `domain` is an IP literal in private space: resolving or discovering anyone there is
+    /// `Refused`, for [`PRIVATE_ADDRESS_REFUSAL`]. A name resolving there is `Unavailable`.
     pub fn and_refused(self, domain: &str) -> Self {
         self.refused.lock().unwrap().push(domain.to_owned());
         self

@@ -65,7 +65,8 @@ It trusts nothing the document doesn't list:
 Other fields are ignored. A document that breaks a rule leaves its client unknown.
 
 **Fetching:**
-- screened like every peer URL: never a private address on an `https` instance;
+- screened like every peer URL, a name as it resolves to connect: never a private address on an
+  `https` instance (`specs/06-federation-authentication.md` "Peer request policy");
 - no redirect followed;
 - 5 s, and 5 KiB at most.
 

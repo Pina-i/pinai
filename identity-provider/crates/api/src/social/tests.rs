@@ -421,7 +421,7 @@ async fn a_request_to_an_address_this_instance_may_not_ask_says_nothing_of_where
     let alice = account("alice");
     let app = TestApp::knowing(
         [alice.clone()],
-        InMemoryRemoteActors::default().and_refused("db.internal.test"),
+        InMemoryRemoteActors::default().and_refused("10.0.0.5"),
     );
 
     let answer = app
@@ -429,7 +429,7 @@ async fn a_request_to_an_address_this_instance_may_not_ask_says_nothing_of_where
             Method::POST,
             "/api/friends/request",
             Some(alice.id),
-            Some(json!({ "address": "dave_k2m9x@db.internal.test" })),
+            Some(json!({ "address": "dave_k2m9x@10.0.0.5" })),
         )
         .await;
 

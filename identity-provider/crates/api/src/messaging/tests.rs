@@ -143,10 +143,10 @@ async fn a_dm_to_an_address_this_instance_may_not_ask_says_nothing_of_where_it_l
     let alice = account("alice");
     let app = TestApp::knowing(
         [alice.clone()],
-        domain::identity::testing::InMemoryRemoteActors::default().and_refused("db.internal.test"),
+        domain::identity::testing::InMemoryRemoteActors::default().and_refused("10.0.0.5"),
     );
 
-    let answer = dm(&app, &alice, "dave_k2m9x@db.internal.test").await;
+    let answer = dm(&app, &alice, "dave_k2m9x@10.0.0.5").await;
 
     assert_eq!(
         answer,

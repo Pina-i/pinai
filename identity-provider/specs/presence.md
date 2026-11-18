@@ -385,8 +385,8 @@ before it is fetched (`specs/06-federation-authentication.md` § Peer request po
 | | Batch poll | Stream |
 |---|---|---|
 | Client | the shared peer client | the download client |
-| Connect timeout | 3 s | 3 s |
-| Total timeout | 5 s, the screen and the answer's body included | none past the screen's 5 s — a stream stays open |
+| Connect timeout | 3 s, the name's lookup included | 3 s, the name's lookup included |
+| Total timeout | 5 s, the answer's body included | none — a stream stays open |
 | Read timeout | — | 30 s: two missed keep-alives end the stream, which is then opened again |
 | Redirects | none | none |
 | Body cap | 256 KiB | 16 KiB a frame: a longer one ends the stream, which is then opened again |

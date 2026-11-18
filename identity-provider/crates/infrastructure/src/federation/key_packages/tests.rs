@@ -254,3 +254,32 @@ async fn a_long_refusal_is_cut_to_one_short_line() {
     assert!(said.ends_with('…'), "{said}");
     assert!(!said.contains('\n') && said.chars().count() < 300, "{said}");
 }
+
+#[tokio::test]
+async fn a_name_resolving_into_private_space_is_an_instance_that_does_not_answer() {
+    let (address, received) = peer(answer("{}")).await;
+    let named = ActorUri::parse(&format!(
+        "https://localhost:{}/users/bob_t3st0",
+        address.port()
+    ))
+    .unwrap();
+    let literal = ActorUri::parse(&format!("https://{address}/users/bob_t3st0")).unwrap();
+    let production = remote("https://idp.alice.test");
+
+    let unanswered = production.claim(&alice(), &named, None).await;
+    let refused = production.claim(&alice(), &literal, None).await;
+
+    assert!(
+        matches!(unanswered, Err(RemoteClaimError::Unavailable(_))),
+        "{unanswered:?}"
+    );
+    assert!(
+        matches!(refused, Err(RemoteClaimError::NotAllowed(_))),
+        "{refused:?}"
+    );
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(200), received)
+            .await
+            .is_err()
+    );
+}

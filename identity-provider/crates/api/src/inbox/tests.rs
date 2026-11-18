@@ -839,9 +839,9 @@ async fn a_follow_from_an_instance_this_one_may_not_ask_says_nothing_of_where_it
     let alice = account("alice");
     let app = TestApp::knowing(
         [alice.clone()],
-        domain::identity::testing::InMemoryRemoteActors::default().and_refused("db.internal.test"),
+        domain::identity::testing::InMemoryRemoteActors::default().and_refused("10.0.0.5"),
     );
-    let dave = ActorUri::parse("https://db.internal.test/users/dave_k2m9x").unwrap();
+    let dave = ActorUri::parse("https://10.0.0.5/users/dave_k2m9x").unwrap();
     let follow = json!({
         "@context": "https://www.w3.org/ns/activitystreams",
         "id": format!("{dave}/activities/{}", uuid::Uuid::new_v4()),
