@@ -143,3 +143,14 @@ fn a_blank_name_at_creation_leaves_the_group_unnamed() {
     );
     assert!(GroupName::parse_optional(Some(&"a".repeat(51))).is_err());
 }
+
+#[test]
+fn a_group_name_must_read_as_what_it_is() {
+    let refused = |raw: &str| GroupName::parse_optional(Some(raw)).unwrap_err().reason;
+
+    assert_eq!(refused("\u{3164}"), "cannot contain invisible characters");
+    assert_eq!(refused("crew\nmates"), "cannot contain control characters");
+    assert_eq!(refused(" \u{200D} "), "cannot be empty");
+    let coders = "\u{1F469}\u{200D}\u{1F4BB} crew";
+    assert_eq!(GroupName::parse(coders).unwrap().as_str(), coders);
+}

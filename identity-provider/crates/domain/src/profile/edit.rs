@@ -1,6 +1,7 @@
 use crate::ValidationError;
+use crate::validation::{UnreadableName, readable_name};
 
-/// The name an account shows, trimmed: 1–50 characters.
+/// The name an account shows, a name people read: trimmed, 1–50 characters.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DisplayName(String);
 
@@ -8,19 +9,21 @@ impl DisplayName {
     pub const MAX_CHARS: usize = 50;
 
     pub fn parse(raw: &str) -> Result<Self, ValidationError> {
-        let name = raw.trim();
-        if name.is_empty() {
-            return Err(ValidationError::new(
-                "display_name",
-                "display_name cannot be blank",
-            ));
-        }
-        if name.chars().count() > Self::MAX_CHARS {
-            return Err(ValidationError::new(
-                "display_name",
-                format!("display_name must be ≤ {} characters", Self::MAX_CHARS),
-            ));
-        }
+        let name = readable_name(raw, Self::MAX_CHARS).map_err(|why| {
+            let reason = match why {
+                UnreadableName::Blank => "display_name cannot be blank".to_owned(),
+                UnreadableName::ControlCharacter => {
+                    "display_name cannot contain control characters".to_owned()
+                }
+                UnreadableName::InvisibleCharacter => {
+                    "display_name cannot contain invisible characters".to_owned()
+                }
+                UnreadableName::TooLong => {
+                    format!("display_name must be ≤ {} characters", Self::MAX_CHARS)
+                }
+            };
+            ValidationError::new("display_name", reason)
+        })?;
         Ok(Self(name.to_owned()))
     }
 

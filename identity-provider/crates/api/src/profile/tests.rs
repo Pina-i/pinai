@@ -152,6 +152,18 @@ async fn a_profile_edit_outside_the_rules_is_refused_with_the_rule() {
             "display_name cannot be blank",
         ),
         (
+            json!({ "display_name": "\u{3164}" }),
+            "display_name cannot contain invisible characters",
+        ),
+        (
+            json!({ "display_name": "alice\u{202E}" }),
+            "display_name cannot contain invisible characters",
+        ),
+        (
+            json!({ "display_name": "alice\nbob" }),
+            "display_name cannot contain control characters",
+        ),
+        (
             json!({ "display_name": "Aroha", "pronouns": "they" }),
             "pronouns must be one of: he, she, non-binary",
         ),

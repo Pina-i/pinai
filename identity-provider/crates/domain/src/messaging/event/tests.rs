@@ -72,23 +72,54 @@ fn an_event_is_about_the_member_a_change_names_or_the_one_leaving() {
     };
 
     assert_eq!(event(GroupEventKind::Created).subject(), None);
-    for (change, subject) in [
-        (GroupChangeKind::Added(uri("bo")), Some(uri("bo"))),
-        (GroupChangeKind::Removed(uri("bo")), Some(uri("bo"))),
+    for (kind, subject) in [
+        (GroupEventKind::Added(uri("bo")), Some(uri("bo"))),
+        (GroupEventKind::Removed(uri("bo")), Some(uri("bo"))),
         (
-            GroupChangeKind::RoleChanged(uri("bo"), Role::Admin),
+            GroupEventKind::RoleChanged(uri("bo"), Role::Admin),
             Some(uri("bo")),
         ),
-        (GroupChangeKind::Left, Some(uri("ana"))),
+        (GroupEventKind::Left, Some(uri("ana"))),
+        (GroupEventKind::Renamed("crew".to_owned()), None),
+    ] {
+        assert_eq!(event(kind.clone()).subject(), subject.as_ref(), "{kind:?}");
+    }
+}
+
+#[test]
+fn an_event_shows_the_change_it_records() {
+    let change = |kind| GroupChange {
+        group: ConversationId::generate(),
+        by: uri("ana"),
+        at: at(1),
+        kind,
+    };
+
+    for (kind, shown) in [
         (
-            GroupChangeKind::Renamed(GroupName::parse("crew").unwrap()),
-            None,
+            GroupChangeKind::Added(uri("bo")),
+            GroupEventKind::Added(uri("bo")),
+        ),
+        (
+            GroupChangeKind::Removed(uri("bo")),
+            GroupEventKind::Removed(uri("bo")),
+        ),
+        (GroupChangeKind::Left, GroupEventKind::Left),
+        (
+            GroupChangeKind::Renamed(GroupName::parse(" crew ").unwrap()),
+            GroupEventKind::Renamed("crew".to_owned()),
+        ),
+        (
+            GroupChangeKind::RoleChanged(uri("bo"), Role::Admin),
+            GroupEventKind::RoleChanged(uri("bo"), Role::Admin),
         ),
     ] {
+        let change = change(kind);
+        let event = GroupEvent::of(&change);
+
         assert_eq!(
-            event(GroupEventKind::Changed(change.clone())).subject(),
-            subject.as_ref(),
-            "{change:?}"
+            (event.group, &event.by, event.at, &event.kind),
+            (change.group, &change.by, change.at, &shown)
         );
     }
 }

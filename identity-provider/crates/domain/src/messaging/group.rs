@@ -1,9 +1,10 @@
 use crate::ValidationError;
 use crate::identity::ActorUri;
+use crate::validation::{UnreadableName, readable_name};
 
 use super::{Member, MessagingError, Role};
 
-/// A group's name as a user gave it: trimmed, 1 to 50 characters.
+/// A group's name as a user gave it, a name people read: trimmed, 1 to 50 characters.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GroupName(String);
 
@@ -11,16 +12,17 @@ impl GroupName {
     pub const MAX_CHARS: usize = 50;
 
     pub fn parse(raw: &str) -> Result<Self, ValidationError> {
-        let name = raw.trim();
-        if name.is_empty() {
-            return Err(ValidationError::new("name", "cannot be empty"));
-        }
-        if name.chars().count() > Self::MAX_CHARS {
-            return Err(ValidationError::new(
-                "name",
-                format!("is longer than {} characters", Self::MAX_CHARS),
-            ));
-        }
+        let name = readable_name(raw, Self::MAX_CHARS).map_err(|why| {
+            let reason = match why {
+                UnreadableName::Blank => "cannot be empty".to_owned(),
+                UnreadableName::ControlCharacter => "cannot contain control characters".to_owned(),
+                UnreadableName::InvisibleCharacter => {
+                    "cannot contain invisible characters".to_owned()
+                }
+                UnreadableName::TooLong => format!("is longer than {} characters", Self::MAX_CHARS),
+            };
+            ValidationError::new("name", reason)
+        })?;
         Ok(Self(name.to_owned()))
     }
 

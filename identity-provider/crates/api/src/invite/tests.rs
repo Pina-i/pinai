@@ -388,7 +388,10 @@ async fn a_broken_rule_or_a_taken_address_shows_the_form_again_with_what_was_typ
     assert_kept_here(&short_name);
     let (status, page) = TestApp::html_of(short_name).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(page.contains("Display name: 1–50 characters"), "{page}");
+    assert!(
+        page.contains("Display name: 1–50 characters, none hidden"),
+        "{page}"
+    );
     assert!(page.contains(r#"value="hoku@idp.test""#), "{page}");
     assert!(!page.contains("hoku-password"), "{page}");
     let (status, page) = TestApp::html_of(taken).await;

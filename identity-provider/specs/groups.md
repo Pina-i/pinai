@@ -27,8 +27,11 @@ a hard delete, so earlier messages stay attached to the conversation.
   asking for more is `400 A group holds at most 50 members`, before any invitee is looked up; an
   add to a full group is `409 The group is full: it holds at most 50 members`. It also bounds what
   another instance's roster costs this one (§ 7).
-- **Names** are trimmed and 1–50 characters (`GroupName`, 400 otherwise). A blank name at creation leaves
-  the group unnamed, and clients title it by its members.
+- **Names** are names people read, 1–50 characters (`GroupName`;
+  `identity-provider/specs/identity.md § 5`, "Names people read": trimmed, not blank, no control
+  nor invisible character), `400` otherwise, naming the rule: `Group name cannot contain
+  invisible characters`. A name empty once trimmed at creation leaves the group unnamed, and
+  clients title it by its members.
 - **Actor URIs** in a request are validated (400 for one that is not an actor URI); a group is
   created with its whole roster in one step, never half.
 
@@ -42,7 +45,7 @@ a hard delete, so earlier messages stay attached to the conversation.
 | `GET /api/groups/:id/members` | member | Members with `role`, `displayName`, `avatarUrl`. |
 | `POST /api/groups/:id/members` | **admin** | Body `{ actor_uri }`. Adds the member as `member`; a member who left rejoins. Someone already in the group: `409 Already a member`, their role untouched. Emits `member_added`. |
 | `DELETE /api/groups/:id/members/:actor_uri` | **admin** or self | Sets `left_at`. `actor_uri` is percent-encoded; 404 `Member not found` when not a member. Emits `member_removed` to everyone who was a member, the removed one included (`removed_by_actor_uri` is `null` on self-leave). |
-| `PATCH /api/groups/:id` | member | Body `{ name }` (1–50 characters). Renames the group and returns its view. Emits `group_renamed`. |
+| `PATCH /api/groups/:id` | member | Body `{ name }`, a group's name (§ 1). Renames the group and returns its view. Emits `group_renamed`. |
 | `DELETE /api/groups/:id` | removed member | Clears a group the caller was removed from from their list (`dismissed_at`): 204. `409 Leave the group first` for an active member, 404 for anyone else — one who left, a stranger, a DM. |
 | `POST /api/groups/:id/members/:actor_uri/role` | **admin** | Body `{ role: "admin" \| "member" }`. Promote/demote — never the last admin. Emits `member_role_changed`. |
 | `POST /api/groups/:id/messages` | member | Body `{ mls_ciphertext, reply_to_id?, attachment_ids? }`. Attachments follow the DM rules — as many as a DM may carry, each the sender's own upload, unlinked or linked to one of its `'failed'` messages — or the message is refused (400) and nothing is stored. See § 4. |
@@ -175,7 +178,8 @@ CREATE TABLE conversation_events (
   ```
 
   `name` and `role` appear for a rename and a role change; names are this instance's, as a
-  message's sender's are.
+  message's sender's are. A rename's `name` is the one recorded, shown as it is and never
+  checked again (`identity-provider/specs/identity.md § 5`, "Names people read").
 - **Live.** Each is pushed, once recorded, to the local members who see it — those in the group
   after the change, or before a departure — as `group_event`, the same fields in the WebSocket's
   camelCase. A client adds the line to an open conversation and dedupes it against the history by
@@ -280,6 +284,11 @@ An entry without stamps — from an IdP that predates them — only ever adds a
 member never held, stamped on arrival; it changes no role, brings nobody back
 and renames nothing, except a group new here, which takes its name.
 
+A snapshot's name is taken within the rule of § 1, or not at all: one that is no
+group's name — blank, too long, with a control or invisible character — counts
+as none, as a name that is no string does, so a copy taking it holds the group
+unnamed and its clients title it by its members.
+
 No copy holds more than 50 members. A snapshot listing more is refused (400)
 and nothing is mirrored or stored; a copy takes newcomers — added or rejoining —
 only while it holds fewer than 50, in the snapshot's order. A full copy takes
@@ -365,8 +374,8 @@ rest to those in it after — `group_created` to a local account the add brings 
 `member_added` to the others, `group_renamed`, `member_role_changed`. A local account removed this
 way keeps the group as § 3 says. Anything else is answered 202 and
 ignored, so a peer learns nothing of who is in a group here; an activity that doesn't parse — no
-`context`, no `published`, a name outside 1–50 characters, a role neither `admin` nor `member` —
-is 400.
+`context`, no `published`, a name that is no group's name (§ 1), a role neither `admin` nor
+`member` — is 400.
 
 ```mermaid
 sequenceDiagram

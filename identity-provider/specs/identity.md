@@ -158,7 +158,8 @@ would name one account by two URIs.
 
 - `display_name` is the only name shown client-side. The user types it at sign-up — `Hōkū`,
   `Ana Tane` — within the rules of `identity-provider/specs/profile-and-settings.md § 1`
-  (trimmed, 1–50 characters). It has no uniqueness constraint and can be changed at any time.
+  (a name people read, below, of 1–50 characters). It has no uniqueness constraint and can be
+  changed at any time.
   It is also the only name the instance's own pages and its admins' API give an account: an
   invitation's inviter, a reset link's member, the members list
   (`identity-provider/specs/auth.md` § 4, § 5, § 7).
@@ -180,6 +181,46 @@ Example flow at account creation:
 - User inputs: `Hōkū Tane`
 - Backend sets: `username = "hoku_tane_xk9mp"`, `display_name = "Hōkū Tane"`,
   `actor_uri = "https://idp.alice.com/users/hoku_tane_xk9mp"`
+
+### Names people read
+
+An account's display name, a group's name and a device's two names are shown to people, who
+must be able to read them as what they are: a name that shows blank, or turns the text after it
+around, could pass for another or for none. One rule makes them so
+(`domain::validation::readable_name`), each kind of name with its own length and its own words
+for what it breaks:
+
+1. **Trimmed** of whitespace at both ends.
+2. **Not blank**: something is left, and not only zero-width joiners (U+200C, U+200D) — emoji
+   sequences and some scripts need them, so they stay within a name (`👩‍💻 Alice`), but they name
+   nothing alone.
+3. **No control character** (Unicode `Cc`: U+0000–U+001F, U+007F–U+009F — a line break among
+   them).
+4. **No invisible character** — one that shows nothing or changes how the text around it reads:
+   - the zero-width space U+200B and the word joiner U+2060;
+   - the direction marks U+200E, U+200F and the Arabic letter mark U+061C;
+   - the embeddings and overrides U+202A–U+202E, and the isolates U+2066–U+2069;
+   - the invisible operators U+2061–U+2064;
+   - the byte order mark U+FEFF;
+   - the line and paragraph separators U+2028, U+2029;
+   - the soft hyphen U+00AD and the Mongolian vowel separator U+180E;
+   - the Hangul fillers U+115F, U+1160, U+3164, U+FFA0 and the blank braille pattern U+2800,
+     letters that draw nothing.
+5. **At most `max` characters** — characters, not bytes.
+
+| Name | Type | Length | Refused, in its words |
+|---|---|---|---|
+| An account's display name | `domain::profile::DisplayName` | 1–50 | `display_name cannot be blank`, `display_name cannot contain control characters`, `display_name cannot contain invisible characters`, `display_name must be ≤ 50 characters` |
+| A group's name | `domain::messaging::GroupName` | 1–50 | `cannot be empty`, `cannot contain control characters`, `cannot contain invisible characters`, `is longer than 50 characters` — after `Group name ` in a `400` |
+| A device's automatic name | `domain::e2ee::AutomaticName` | 1–100 | `label.name: cannot be blank`, `no control characters`, `no invisible characters`, `at most 100 characters` |
+| A device's chosen name | `domain::e2ee::ChosenName` | 1–50 | `name: cannot be blank`, `no control characters`, `no invisible characters`, `at most 50 characters` |
+
+The rule holds wherever such a name comes in: typed (sign-up, the profile, a group's creation or
+rename, a device's name), configured (`ADMIN_NAME`, which stops the start), or from a peer — a
+peer's display name (`identity-provider/specs/profile-and-settings.md § 3`) and a group's name
+(`identity-provider/specs/groups.md § 7`, § 8) are taken within it, or not at all.
+
+A display name or a group's name is checked as it comes in, never as it is read back.
 
 ## 6. The instance's description
 

@@ -189,9 +189,12 @@ talk with people on other instances.
 `ADMIN_EMAIL` and `ADMIN_PASSWORD` name the first admin. At each start, if no
 account has that address, the instance creates an admin account with that
 password, named `ADMIN_NAME` — "Admin" when unset. Sign in with them from the app,
-no code asked. The password needs at least 8 bytes and the name 1 to 50
-characters: otherwise the account isn't created and the instance doesn't start.
-`ADMIN_NAME` is read only then: rename the account later from the app.
+no code asked. The password needs at least 8 bytes: otherwise the account isn't
+created and the instance doesn't start. The name needs 1 to 50 characters, none
+hidden (a zero-width space, a direction mark…) nor a control one; it is checked at
+each start, whether the account is created or not, so a name breaking the rule
+stops the instance. It names the account only when it is created: rename the
+account later from the app.
 
 - The instance never writes over an existing account's password, and never makes
   an existing account admin: the log warns when `ADMIN_EMAIL` names an account that

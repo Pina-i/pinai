@@ -294,3 +294,47 @@ async fn the_history_shows_the_groups_changes_when_asked_for_them() {
     assert!(with[0]["created_at"].is_string());
     assert_eq!(without, json!([]), "messages only, unless asked");
 }
+
+#[tokio::test]
+async fn a_group_name_that_does_not_read_as_what_it_is_is_refused() {
+    let (alice, bob) = (account("alice"), account("bob"));
+    let app = TestApp::with([alice.clone(), bob.clone()], []);
+    let (_, group) = create(&app, &alice, &[&bob]).await;
+    let group = format!("/api/groups/{}", group["conversationId"].as_str().unwrap());
+    let refused = |rule: &str| {
+        (
+            StatusCode::BAD_REQUEST,
+            json!({ "error": "invalid_request", "error_description": format!("Group name {rule}") }),
+        )
+    };
+
+    for (name, rule) in [
+        ("\u{200B}", "cannot contain invisible characters"),
+        ("crew\u{202E}", "cannot contain invisible characters"),
+        ("crew\u{0}", "cannot contain control characters"),
+        ("\u{200D}", "cannot be empty"),
+    ] {
+        let created = app
+            .call(
+                Method::POST,
+                "/api/groups",
+                Some(alice.id),
+                Some(json!({ "name": name, "member_actor_uris": [bob.actor_uri.as_str()] })),
+            )
+            .await;
+        let renamed = app
+            .call(
+                Method::PATCH,
+                &group,
+                Some(bob.id),
+                Some(json!({ "name": name })),
+            )
+            .await;
+
+        assert_eq!(created, refused(rule), "{name:?}");
+        assert_eq!(renamed, refused(rule), "{name:?}");
+    }
+    let (_, listed) = app.call(Method::GET, "/api/dm", Some(alice.id), None).await;
+    assert_eq!(listed.as_array().unwrap().len(), 1, "{listed}");
+    assert_eq!(listed[0]["name"], "crew");
+}
