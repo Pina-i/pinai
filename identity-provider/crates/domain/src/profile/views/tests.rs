@@ -24,7 +24,16 @@ fn a_peers_name_and_avatar_within_the_limits_are_kept() {
 
 #[test]
 fn a_name_the_display_name_rules_refuse_is_dropped() {
-    for name in ["", "   ", &"é".repeat(51)] {
+    for name in [
+        "",
+        "   ",
+        &"é".repeat(51),
+        "\u{3164}",
+        "\u{200B}",
+        "Bob\u{202E}",
+        "Bob\u{0}",
+        "\u{200D}",
+    ] {
         let kept = claimed(name, "http://idp.carol.test/c.png").within_limits();
 
         assert_eq!(kept.display_name, None, "{name:?}");

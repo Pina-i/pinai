@@ -21,7 +21,12 @@ pub struct GroupEvent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GroupEventKind {
     Created,
-    Changed(GroupChangeKind),
+    Added(ActorUri),
+    Removed(ActorUri),
+    Left,
+    /// The name as recorded: checked as it comes in, never as it is read back.
+    Renamed(String),
+    RoleChanged(ActorUri, Role),
 }
 
 impl GroupEvent {
@@ -36,12 +41,21 @@ impl GroupEvent {
     }
 
     pub fn of(change: &GroupChange) -> Self {
+        let kind = match &change.kind {
+            GroupChangeKind::Added(member) => GroupEventKind::Added(member.clone()),
+            GroupChangeKind::Removed(member) => GroupEventKind::Removed(member.clone()),
+            GroupChangeKind::Left => GroupEventKind::Left,
+            GroupChangeKind::Renamed(name) => GroupEventKind::Renamed(name.as_str().to_owned()),
+            GroupChangeKind::RoleChanged(member, role) => {
+                GroupEventKind::RoleChanged(member.clone(), *role)
+            }
+        };
         Self {
             id: GroupEventId::generate(),
             group: change.group,
             by: change.by.clone(),
             at: change.at,
-            kind: GroupEventKind::Changed(change.kind.clone()),
+            kind,
         }
     }
 
@@ -49,18 +63,18 @@ impl GroupEvent {
     pub fn kind_name(&self) -> &'static str {
         match &self.kind {
             GroupEventKind::Created => "created",
-            GroupEventKind::Changed(GroupChangeKind::Added(_)) => "added",
-            GroupEventKind::Changed(GroupChangeKind::Removed(_)) => "removed",
-            GroupEventKind::Changed(GroupChangeKind::Left) => "left",
-            GroupEventKind::Changed(GroupChangeKind::Renamed(_)) => "renamed",
-            GroupEventKind::Changed(GroupChangeKind::RoleChanged(..)) => "role_changed",
+            GroupEventKind::Added(_) => "added",
+            GroupEventKind::Removed(_) => "removed",
+            GroupEventKind::Left => "left",
+            GroupEventKind::Renamed(_) => "renamed",
+            GroupEventKind::RoleChanged(..) => "role_changed",
         }
     }
 
     /// The group's new name, for a rename.
     pub fn name(&self) -> Option<&str> {
         match &self.kind {
-            GroupEventKind::Changed(GroupChangeKind::Renamed(name)) => Some(name.as_str()),
+            GroupEventKind::Renamed(name) => Some(name),
             _ => None,
         }
     }
@@ -68,7 +82,7 @@ impl GroupEvent {
     /// The member's new role, for a role change.
     pub fn role(&self) -> Option<Role> {
         match &self.kind {
-            GroupEventKind::Changed(GroupChangeKind::RoleChanged(_, role)) => Some(*role),
+            GroupEventKind::RoleChanged(_, role) => Some(*role),
             _ => None,
         }
     }
@@ -76,13 +90,11 @@ impl GroupEvent {
     /// The member it is about: the one added, removed or given a role, or the one leaving.
     pub fn subject(&self) -> Option<&ActorUri> {
         match &self.kind {
-            GroupEventKind::Created | GroupEventKind::Changed(GroupChangeKind::Renamed(_)) => None,
-            GroupEventKind::Changed(GroupChangeKind::Left) => Some(&self.by),
-            GroupEventKind::Changed(
-                GroupChangeKind::Added(member)
-                | GroupChangeKind::Removed(member)
-                | GroupChangeKind::RoleChanged(member, _),
-            ) => Some(member),
+            GroupEventKind::Created | GroupEventKind::Renamed(_) => None,
+            GroupEventKind::Left => Some(&self.by),
+            GroupEventKind::Added(member)
+            | GroupEventKind::Removed(member)
+            | GroupEventKind::RoleChanged(member, _) => Some(member),
         }
     }
 }

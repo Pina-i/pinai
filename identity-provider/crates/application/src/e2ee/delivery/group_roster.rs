@@ -2,8 +2,8 @@ use domain::ConversationId;
 use domain::e2ee::DeliveryError;
 use domain::identity::{Account, Accounts, ActorUri, InstanceOrigin, RemoteActors};
 use domain::messaging::{
-    ConversationKind, Conversations, GroupChangeKind, GroupEvent, GroupEventKind, GroupEvents,
-    GroupNotifier, GroupSnapshot,
+    ConversationKind, Conversations, GroupEvent, GroupEventKind, GroupEvents, GroupNotifier,
+    GroupSnapshot,
 };
 use domain::social::Reachability;
 
@@ -68,7 +68,7 @@ impl Mirror<'_> {
             let at = newcomer.joined_at;
             let added = GroupEvent {
                 at,
-                kind: GroupEventKind::Changed(GroupChangeKind::Added(newcomer.account.actor_uri)),
+                kind: GroupEventKind::Added(newcomer.account.actor_uri),
                 ..GroupEvent::created(id, sender.clone(), at)
             };
             timeline.record(&members, added).await?;

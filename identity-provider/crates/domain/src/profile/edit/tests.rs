@@ -56,3 +56,20 @@ fn an_edit_needs_a_name_and_clears_what_is_left_empty() {
         "display_name is required"
     );
 }
+
+#[test]
+fn a_display_name_must_read_as_what_it_is() {
+    let refused = |raw: &str| DisplayName::parse(raw).unwrap_err().reason;
+
+    assert_eq!(
+        refused("\u{3164}"),
+        "display_name cannot contain invisible characters"
+    );
+    assert_eq!(
+        refused("bob\nalice"),
+        "display_name cannot contain control characters"
+    );
+    assert_eq!(refused(" \u{200D} "), "display_name cannot be blank");
+    let coder = "\u{1F469}\u{200D}\u{1F4BB} alice";
+    assert_eq!(DisplayName::parse(coder).unwrap().as_str(), coder);
+}

@@ -1,3 +1,7 @@
+mod name;
+
+pub use name::{UnreadableName, readable_name};
+
 /// Why a raw value could not become a domain type.
 #[derive(Debug, thiserror::Error)]
 #[error("{field}: {reason}")]

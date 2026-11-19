@@ -175,12 +175,14 @@ fn the_admin_is_named_admin_unless_a_name_is_configured() {
 }
 
 #[test]
-fn a_blank_or_overlong_admin_name_is_refused() {
+fn a_blank_overlong_or_unreadable_admin_name_is_refused() {
     let overlong = "a".repeat(DisplayName::MAX_CHARS + 1);
 
-    assert_eq!(admin_display_name(Some("   ")), Err(AdminRefusal::BadName));
-    assert_eq!(
-        admin_display_name(Some(&overlong)),
-        Err(AdminRefusal::BadName)
-    );
+    for name in ["   ", &overlong, "\u{3164}", "Admin\u{202E}"] {
+        assert_eq!(
+            admin_display_name(Some(name)),
+            Err(AdminRefusal::BadName),
+            "{name:?}"
+        );
+    }
 }

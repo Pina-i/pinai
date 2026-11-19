@@ -2272,14 +2272,14 @@ pub mod contract {
         events: &dyn crate::messaging::GroupEvents,
         alice: &Account,
     ) {
-        use crate::messaging::{EventWindow, GroupChangeKind, GroupEvent, GroupEventKind};
+        use crate::messaging::{EventWindow, GroupEvent, GroupEventKind};
         let crew = crew_of(&[(&alice.actor_uri, Role::Admin)]);
         let group = conversations.create_group(None, &crew).await.unwrap().id;
         let other = conversations.create_group(None, &crew).await.unwrap().id;
         let at = |n: i64| OffsetDateTime::UNIX_EPOCH + time::Duration::minutes(n);
         let event = |id: ConversationId, minute: i64| GroupEvent {
             at: at(minute),
-            kind: GroupEventKind::Changed(GroupChangeKind::Added(remote(&format!("m{minute}")))),
+            kind: GroupEventKind::Added(remote(&format!("m{minute}"))),
             ..GroupEvent::created(id, alice.actor_uri.clone(), at(minute))
         };
         let recorded: Vec<GroupEvent> = [10, 20, 30].map(|m| event(group, m)).to_vec();
@@ -2328,17 +2328,19 @@ pub mod contract {
         events: &dyn crate::messaging::GroupEvents,
         alice: &Account,
     ) {
-        use crate::messaging::{EventWindow, GroupChangeKind, GroupEvent, GroupEventKind};
+        use crate::messaging::{EventWindow, GroupEvent, GroupEventKind};
         let crew = crew_of(&[(&alice.actor_uri, Role::Admin)]);
         let group = conversations.create_group(None, &crew).await.unwrap().id;
         let at = |n: i64| OffsetDateTime::UNIX_EPOCH + time::Duration::minutes(n);
         let kinds = [
             GroupEventKind::Created,
-            GroupEventKind::Changed(GroupChangeKind::Added(remote("bo"))),
-            GroupEventKind::Changed(GroupChangeKind::Removed(remote("bo"))),
-            GroupEventKind::Changed(GroupChangeKind::Left),
-            GroupEventKind::Changed(GroupChangeKind::Renamed(GroupName::parse("crew").unwrap())),
-            GroupEventKind::Changed(GroupChangeKind::RoleChanged(remote("cy"), Role::Admin)),
+            GroupEventKind::Added(remote("bo")),
+            GroupEventKind::Removed(remote("bo")),
+            GroupEventKind::Left,
+            GroupEventKind::Renamed("crew".to_owned()),
+            // Checked as it comes in, never as it is read back.
+            GroupEventKind::Renamed("crew\u{200B}".to_owned()),
+            GroupEventKind::RoleChanged(remote("cy"), Role::Admin),
         ];
         let mut recorded = Vec::new();
         for (minute, kind) in (1..).zip(kinds) {

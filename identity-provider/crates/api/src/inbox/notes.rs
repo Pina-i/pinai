@@ -11,7 +11,8 @@ use base64::engine::general_purpose::STANDARD as B64;
 use domain::e2ee::{CommitBlob, DeliveryError, Epoch, GroupInfoBlob, WelcomeBlob};
 use domain::identity::{Account, ActorUri};
 use domain::messaging::{
-    GroupSnapshot, Member, MessagingError, MlsCiphertext, OfferedAttachment, Role, SnapshotMember,
+    GroupName, GroupSnapshot, Member, MessagingError, MlsCiphertext, OfferedAttachment, Role,
+    SnapshotMember,
 };
 use serde_json::Value;
 use time::OffsetDateTime;
@@ -207,7 +208,7 @@ pub(super) async fn update(
 }
 
 /// The `mlsGroup` roster a group Note carries; entries that name no actor or role are skipped,
-/// and a stamp that is no RFC 3339 time counts as none.
+/// and a name that is no `GroupName` or a stamp that is no RFC 3339 time counts as none.
 fn group_snapshot(note: &Value) -> Option<GroupSnapshot> {
     let snapshot = note.get("mlsGroup")?;
     let stamp = |value: &Value, key: &str| {
@@ -239,7 +240,8 @@ fn group_snapshot(note: &Value) -> Option<GroupSnapshot> {
         name: snapshot
             .get("name")
             .and_then(Value::as_str)
-            .map(str::to_owned),
+            .and_then(|name| GroupName::parse(name).ok())
+            .map(|name| name.as_str().to_owned()),
         name_at: stamp(snapshot, "nameAt"),
         members,
     })

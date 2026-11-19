@@ -19,13 +19,16 @@ anyone loads an avatar at `/avatars/{user_id}.{ext}` (§ 1, Avatar storage):
 
 The form sends every field on every save:
 
-- `display_name` — required; trimmed, 1–50 characters.
+- `display_name` — required; a name people read, 1–50 characters
+  (`identity-provider/specs/identity.md § 5`, "Names people read": trimmed, not blank, no control
+  nor invisible character).
 - `pronouns` — `he`, `she` or `non-binary`; `null` or empty clears. The `users` table checks the
   set too.
 - `bio` — at most 190 characters; empty clears.
 
 A value outside them is `400 invalid_request`, described by the rule it breaks (`display_name
-cannot be blank`, `pronouns must be one of: he, she, non-binary`, …). An avatar is 1 byte to 2 MiB
+cannot be blank`, `display_name cannot contain invisible characters`, `pronouns must be one of:
+he, she, non-binary`, …). An avatar is 1 byte to 2 MiB
 of one of the four types, else `400` (`Content-Type must be image/jpeg, image/png, image/webp, or
 image/gif`, `Body cannot be empty`).
 
@@ -257,9 +260,9 @@ An `Update{Person}` at `POST /users/:username/inbox`, past the three inbound che
   signature binds; one naming any other account, or an account of this instance, is
   `403 access_denied` (`an actor may only update its own profile`). The signature proves who sent
   the activity, not whose profile it names.
-- **Within this instance's limits.** The name is taken as a local display name is (trimmed,
-  1–50 characters), the avatar only at an `http(s)` URL of at most 2048 bytes, since every
-  friend's client loads it. The `summary` is reduced to text — tags dropped, `<br>` and `</p>` as
+- **Within this instance's limits.** The name is taken as a local display name is (§ 1), or not
+  at all — one blank, too long, or with a control or invisible character is none —, the avatar
+  only at an `http(s)` URL of at most 2048 bytes, since every friend's client loads it. The `summary` is reduced to text — tags dropped, `<br>` and `</p>` as
   line breaks, character references decoded — and kept within the bio rule (§ 1); pronouns other
   than the three are none. Anything else is taken as not given. The name an actor document gives
   when the actor is discovered or resolved (`identity-provider/specs/identity.md § 2`) goes through the same rule.

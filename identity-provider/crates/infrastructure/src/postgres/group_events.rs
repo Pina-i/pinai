@@ -1,8 +1,7 @@
 use anyhow::Context;
 use domain::identity::ActorUri;
 use domain::messaging::{
-    EventWindow, GroupChangeKind, GroupEvent, GroupEventKind, GroupEvents, GroupName,
-    HistoryCursor, MessageStoreError,
+    EventWindow, GroupEvent, GroupEventKind, GroupEvents, HistoryCursor, MessageStoreError,
 };
 use domain::{ConversationId, GroupEventId};
 use sqlx::PgPool;
@@ -42,16 +41,16 @@ impl TryFrom<EventRow> for GroupEvent {
             Ok(ActorUri::parse(uri)?)
         };
         let detail = || row.detail.as_deref().context("conversation_events.detail");
-        let change = match row.kind.as_str() {
-            "created" => None,
-            "added" => Some(GroupChangeKind::Added(subject()?)),
-            "removed" => Some(GroupChangeKind::Removed(subject()?)),
-            "left" => Some(GroupChangeKind::Left),
-            "renamed" => Some(GroupChangeKind::Renamed(GroupName::parse(detail()?)?)),
-            "role_changed" => Some(GroupChangeKind::RoleChanged(
+        let kind = match row.kind.as_str() {
+            "created" => GroupEventKind::Created,
+            "added" => GroupEventKind::Added(subject()?),
+            "removed" => GroupEventKind::Removed(subject()?),
+            "left" => GroupEventKind::Left,
+            "renamed" => GroupEventKind::Renamed(detail()?.to_owned()),
+            "role_changed" => GroupEventKind::RoleChanged(
                 subject()?,
                 detail()?.parse().context("conversation_events.detail")?,
-            )),
+            ),
             other => anyhow::bail!("conversation_events.kind {other:?}"),
         };
         Ok(GroupEvent {
@@ -59,7 +58,7 @@ impl TryFrom<EventRow> for GroupEvent {
             group: ConversationId::from(row.conversation_id),
             by: ActorUri::parse(&row.actor_uri).context("conversation_events.actor_uri")?,
             at: row.created_at,
-            kind: change.map_or(GroupEventKind::Created, GroupEventKind::Changed),
+            kind,
         })
     }
 }
@@ -70,7 +69,7 @@ impl GroupEvents for PgGroupEvents {
         let detail = event.name().or(event.role().map(|role| role.as_str()));
         // A leave's subject is its maker, which the row holds already.
         let subject = match &event.kind {
-            GroupEventKind::Changed(GroupChangeKind::Left) => None,
+            GroupEventKind::Left => None,
             _ => event.subject(),
         };
         sqlx::query(

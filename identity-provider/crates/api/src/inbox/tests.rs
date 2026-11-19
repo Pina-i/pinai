@@ -630,6 +630,73 @@ async fn a_group_change_from_its_admin_elsewhere_is_taken_and_a_malformed_one_re
     assert_eq!(refused, StatusCode::BAD_REQUEST);
 }
 
+/// A group's name that reads as nothing, or as something else, is not taken from a peer: a
+/// rename is refused, as one too long is, and a roster's counts as none under its stamp.
+#[tokio::test]
+async fn a_group_name_from_elsewhere_that_does_not_read_as_what_it_is_is_not_taken() {
+    let w = world();
+    let roster = |group: ConversationId, name: &str, name_at: &str| {
+        w.mls_note(
+            "application",
+            json!({
+                "context": group.to_string(),
+                "mlsGroup": {
+                    "name": name,
+                    "nameAt": name_at,
+                    "members": [
+                        { "actorUri": w.carol.actor_uri.as_str(), "role": "admin" },
+                        { "actorUri": w.alice.actor_uri.as_str(), "role": "member" },
+                    ],
+                },
+            }),
+        )
+    };
+    let mirror = |note: Value| w.deliver(&w.carol.actor_uri, w.by_carol("Create", note));
+    let (app, alice) = (&w.app, w.alice.id);
+    let name_of = |group: ConversationId| async move {
+        let (_, listed) = app.call(Method::GET, "/api/dm", Some(alice), None).await;
+        listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["conversation_id"] == json!(group.to_string()))
+            .map(|c| c["name"].clone())
+    };
+
+    let unnamed = ConversationId::generate();
+    let (mirrored, _) = mirror(roster(unnamed, "\u{3164}", "2026-10-01T09:00:00Z")).await;
+    assert_eq!(mirrored, StatusCode::ACCEPTED);
+    assert_eq!(name_of(unnamed).await, Some(Value::Null));
+
+    let crew = ConversationId::generate();
+    mirror(roster(crew, "crew", "2026-10-01T09:00:00Z")).await;
+    assert_eq!(name_of(crew).await, Some(json!("crew")));
+    for (name, rule) in [
+        (
+            "crew\u{202E}",
+            "Group name cannot contain invisible characters",
+        ),
+        (&"é".repeat(51), "Group name is longer than 50 characters"),
+    ] {
+        let mut rename = w.by_carol("Update", json!({ "type": "Group", "name": name }));
+        rename["context"] = json!(crew.to_string());
+        rename["published"] = json!("2026-10-01T10:00:00Z");
+
+        let (status, body) = w.deliver(&w.carol.actor_uri, rename).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{name:?}");
+        assert_eq!(body["error_description"], rule);
+        assert_eq!(name_of(crew).await, Some(json!("crew")));
+    }
+
+    let (older, _) = mirror(roster(crew, "crew\u{200F}", "2026-10-01T08:00:00Z")).await;
+    assert_eq!(older, StatusCode::ACCEPTED);
+    assert_eq!(name_of(crew).await, Some(json!("crew")), "an older roster");
+    let (newer, _) = mirror(roster(crew, "crew\u{200F}", "2026-10-01T10:00:00Z")).await;
+    assert_eq!(newer, StatusCode::ACCEPTED);
+    assert_eq!(name_of(crew).await, Some(Value::Null), "a newer roster");
+}
+
 #[tokio::test]
 async fn a_note_that_is_not_mls_is_dropped() {
     let w = world();
@@ -803,6 +870,36 @@ async fn a_peers_own_profile_update_is_kept_and_anothers_refused() {
         body["error_description"],
         "an actor may only update its own profile"
     );
+}
+
+/// A name that reads as nothing, or as something else, is not taken — as one too long isn't.
+#[tokio::test]
+async fn a_peers_name_that_does_not_read_as_what_it_is_is_not_taken() {
+    let w = world();
+    w.app.profile.profiles.remember(&w.carol).await;
+    let person =
+        |name: &str| json!({ "type": "Person", "id": w.carol.actor_uri.as_str(), "name": name });
+    let update = |name: &str| w.deliver(&w.carol.actor_uri, w.by_carol("Update", person(name)));
+    let shown = || async {
+        let (cached, _) = w.app.profile.profiles.shown(&w.carol.actor_uri).await;
+        cached.unwrap().display_name
+    };
+
+    for name in [
+        "\u{3164}",
+        "\u{200B}",
+        "Bob\u{202E}",
+        "Bob\u{0}",
+        &"é".repeat(51),
+    ] {
+        update("Bob").await;
+        assert_eq!(shown().await.as_deref(), Some("Bob"));
+
+        let (status, _) = update(name).await;
+
+        assert_eq!(status, StatusCode::ACCEPTED, "{name:?}");
+        assert_eq!(shown().await, None, "{name:?}");
+    }
 }
 
 #[tokio::test]

@@ -1430,7 +1430,7 @@ fn report_admin(bootstrap: AdminBootstrap<Email>) -> anyhow::Result<()> {
             anyhow::bail!("ADMIN_EMAIL: {reason}")
         }
         AdminBootstrap::Refused(AdminRefusal::BadName) => anyhow::bail!(
-            "ADMIN_NAME: a name of 1 to {} characters",
+            "ADMIN_NAME: a name of 1 to {} characters, none a control nor an invisible one",
             domain::profile::DisplayName::MAX_CHARS
         ),
         AdminBootstrap::Refused(AdminRefusal::PasswordTooShort) => {

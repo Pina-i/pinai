@@ -168,7 +168,7 @@ print words of its choosing.
 | `/login` | `invalid_credentials` | Invalid email or password |
 | | `rate_limited` | Too many attempts — try again in a minute |
 | | `missing_field` | Fill in every field |
-| | `invalid_display_name` | Display name: 1–50 characters |
+| | `invalid_display_name` | Display name: 1–50 characters, none hidden |
 | | `invalid_email` | Enter a valid email address |
 | | `weak_password` | Password must be at least 8 characters |
 | | `email_taken` | Email already registered |
@@ -818,7 +818,8 @@ sequenceDiagram
 
 ### Registration rules
 
-- **The display name** is what the user types: trimmed, 1–50 characters (`DisplayName`).
+- **The display name** is what the user types: a name people read of 1–50 characters
+  (`DisplayName`; `identity-provider/specs/identity.md § 5`, "Names people read").
 - **The handle** is made from it: the display name in ASCII, lowercase, every run of other
   characters one `_` (`identity-provider/specs/identity.md § 5`), then `_` and 5 characters
   drawn from `a–z0–9`: "Hōkū" is `hoku_xk9mp`. It names the account in its actor URI and its
@@ -1100,7 +1101,8 @@ flowchart TD
   instance's 8 bytes, the instance refuses to start ("ADMIN_PASSWORD is needed to create the admin
   account ADMIN_EMAIL names", "ADMIN_PASSWORD: at least 8 bytes"); an `ADMIN_EMAIL` that is not an
   address stops it too ("ADMIN_EMAIL: an address like name@example.com"), as does an
-  `ADMIN_NAME` blank or over 50 characters ("ADMIN_NAME: a name of 1 to 50 characters").
+  `ADMIN_NAME` that is no display name — blank, over 50 characters, with a control or invisible
+  character ("ADMIN_NAME: a name of 1 to 50 characters, none a control nor an invisible one").
 - **The admin has the address**: the account is left as it is. `ADMIN_PASSWORD` never writes over
   its password, so a password the admin chose is never reverted by a restart. While
   `ADMIN_PASSWORD` is set, each start warns that it is unused once the account exists and can be
