@@ -1,9 +1,9 @@
 use anyhow::Context;
 use domain::e2ee::{
-    Attest, Attestation, ClaimedKeyPackage, Device, DeviceLabel, DeviceRootKey, Devices,
-    Ed25519Signature, HeldHpkeKey, HistoryGeneration, Holding, HpkeKeyWrite, HpkePublicKey,
-    KeyPackageBytes, KeyPackages, KeyStoreError, NewKeyPackage, Revocation,
-    check_history_generation, may_revoke,
+    Attest, Attestation, AutomaticName, ChosenName, ClaimedKeyPackage, Device, DeviceLabel,
+    DeviceRootKey, DeviceTrust, Devices, Ed25519Signature, HeldHpkeKey, HistoryGeneration, Holding,
+    HpkeKeyWrite, HpkePublicKey, KeyPackageBytes, KeyPackages, KeyStoreError, LabelWrite,
+    NewKeyPackage, Renaming, Revocation, check_history_generation, may_rename, may_revoke,
 };
 use domain::{DeviceId, UserId};
 use sqlx::{PgConnection, PgPool};
@@ -25,9 +25,10 @@ impl PgDevices {
     }
 }
 
-const DEVICE_COLUMNS: &str = "device_id, user_id, display_name, kind, paired_at, last_seen_at, \
-     revoked_at, drk_public_key, attestation_signature, attestation_kid, attestation_issued_at, \
-     attestation_expires_at, hpke_public_key, hpke_key_signature, history_generation";
+const DEVICE_COLUMNS: &str = "device_id, user_id, display_name, kind, client, chosen_name, \
+     paired_at, last_seen_at, revoked_at, drk_public_key, attestation_signature, attestation_kid, \
+     attestation_issued_at, attestation_expires_at, hpke_public_key, hpke_key_signature, \
+     history_generation";
 
 #[derive(sqlx::FromRow)]
 struct DeviceRow {
@@ -35,6 +36,8 @@ struct DeviceRow {
     user_id: uuid::Uuid,
     display_name: String,
     kind: String,
+    client: String,
+    chosen_name: Option<String>,
     paired_at: OffsetDateTime,
     last_seen_at: OffsetDateTime,
     revoked_at: Option<OffsetDateTime>,
@@ -87,9 +90,17 @@ impl TryFrom<DeviceRow> for Device {
             id: row.device_id.into(),
             owner: row.user_id.into(),
             label: DeviceLabel {
-                name: row.display_name,
+                name: AutomaticName::parse(&row.display_name)
+                    .context("user_devices.display_name")?,
                 kind: row.kind.parse().context("user_devices.kind")?,
+                client: row.client.parse().context("user_devices.client")?,
             },
+            chosen_name: row
+                .chosen_name
+                .as_deref()
+                .map(ChosenName::parse)
+                .transpose()
+                .context("user_devices.chosen_name")?,
             paired_at: row.paired_at,
             last_seen_at: row.last_seen_at,
             revoked_at: row.revoked_at,
@@ -117,30 +128,56 @@ pub(super) async fn devices_of(c: &mut PgConnection, owner: UserId) -> anyhow::R
     rows.into_iter().map(Device::try_from).collect()
 }
 
-/// Records a device not seen before under `label`, or marks it seen — a known one keeps its
-/// name, unless `relabel`. `DeviceTaken` when another account holds the id: the guarded upsert
-/// touches no row.
+/// The owner's devices, approvals and generation, read under the generation's share lock and the
+/// rows of `id` and of `by`, the device acting on it, taken in one order: two devices acting on
+/// each other queue, and an approval of either — which share-locks it — waits, or is waited for.
+async fn locked_trust(
+    c: &mut PgConnection,
+    owner: UserId,
+    id: DeviceId,
+    by: Option<DeviceId>,
+) -> anyhow::Result<DeviceTrust> {
+    let current = locked_generation(&mut *c, owner).await?;
+    let mut ids = vec![id.as_uuid()];
+    ids.extend(by.filter(|by| *by != id).map(|by| by.as_uuid()));
+    ids.sort();
+    sqlx::query(
+        "SELECT 1 FROM user_devices WHERE device_id = ANY($1) AND user_id = $2 \
+         ORDER BY device_id FOR NO KEY UPDATE",
+    )
+    .bind(&ids)
+    .bind(owner.as_uuid())
+    .execute(&mut *c)
+    .await
+    .context("lock a device and the one acting on it")?;
+    trust_facts(c, owner, current).await
+}
+
+/// Records a device not seen before under `label`, or marks it seen and does `label` to its label.
+/// `DeviceTaken` when another account holds the id: the guarded upsert touches no row.
 async fn record_device(
     c: &mut PgConnection,
     owner: UserId,
     id: DeviceId,
-    label: &DeviceLabel,
-    relabel: bool,
+    write: &LabelWrite,
 ) -> Result<(), KeyStoreError> {
+    let label = write.label();
     let recorded = sqlx::query(
-        "INSERT INTO user_devices (device_id, user_id, display_name, kind) \
-         VALUES ($1, $2, $3, $4) \
+        "INSERT INTO user_devices (device_id, user_id, display_name, kind, client) \
+         VALUES ($1, $2, $3, $4, $5) \
          ON CONFLICT (device_id) DO UPDATE SET last_seen_at = NOW(), \
-             display_name = CASE WHEN $5 THEN EXCLUDED.display_name \
+             display_name = CASE WHEN $6 THEN EXCLUDED.display_name \
                  ELSE user_devices.display_name END, \
-             kind = CASE WHEN $5 THEN EXCLUDED.kind ELSE user_devices.kind END \
+             kind = CASE WHEN $6 THEN EXCLUDED.kind ELSE user_devices.kind END, \
+             client = CASE WHEN $6 THEN EXCLUDED.client ELSE user_devices.client END \
          WHERE user_devices.user_id = EXCLUDED.user_id",
     )
     .bind(id.as_uuid())
     .bind(owner.as_uuid())
-    .bind(&label.name)
+    .bind(label.name.as_str())
     .bind(label.kind.as_str())
-    .bind(relabel)
+    .bind(label.client.as_str())
+    .bind(write.replaces())
     .execute(&mut *c)
     .await
     .context("record a device")?
@@ -173,7 +210,7 @@ impl Devices for PgDevices {
         &self,
         owner: UserId,
         id: DeviceId,
-        label: &DeviceLabel,
+        write: &LabelWrite,
         read: Option<&Device>,
         attestation: &Attestation,
         hpke_key: &HpkeKeyWrite,
@@ -183,15 +220,17 @@ impl Devices for PgDevices {
             HpkeKeyWrite::Set(signed) => (false, Some(signed)),
             HpkeKeyWrite::Clear => (false, None),
         };
+        let label = write.label();
         let mut tx = self.pool.begin().await.context("begin attest")?;
         sqlx::query(
-            "INSERT INTO user_devices (device_id, user_id, display_name, kind) \
-             VALUES ($1, $2, $3, $4) ON CONFLICT (device_id) DO NOTHING",
+            "INSERT INTO user_devices (device_id, user_id, display_name, kind, client) \
+             VALUES ($1, $2, $3, $4, $5) ON CONFLICT (device_id) DO NOTHING",
         )
         .bind(id.as_uuid())
         .bind(owner.as_uuid())
-        .bind(&label.name)
+        .bind(label.name.as_str())
         .bind(label.kind.as_str())
+        .bind(label.client.as_str())
         .execute(&mut *tx)
         .await
         .context("record a device")?;
@@ -199,7 +238,10 @@ impl Devices for PgDevices {
             "UPDATE user_devices SET drk_public_key = $3, attestation_signature = $4, \
                  attestation_kid = $5, attestation_issued_at = $6, attestation_expires_at = $7, \
                  hpke_public_key = CASE WHEN $12 THEN hpke_public_key ELSE $8 END, \
-                 hpke_key_signature = CASE WHEN $12 THEN hpke_key_signature ELSE $9 END \
+                 hpke_key_signature = CASE WHEN $12 THEN hpke_key_signature ELSE $9 END, \
+                 display_name = CASE WHEN $13 THEN $14 ELSE display_name END, \
+                 kind = CASE WHEN $13 THEN $15 ELSE kind END, \
+                 client = CASE WHEN $13 THEN $16 ELSE client END \
              WHERE device_id = $1 AND user_id = $2 AND revoked_at IS NULL \
                  AND drk_public_key IS NOT DISTINCT FROM $10 \
                  AND hpke_public_key IS NOT DISTINCT FROM $11",
@@ -222,6 +264,10 @@ impl Devices for PgDevices {
                 .map(|held| held.key.as_bytes()),
         )
         .bind(keep)
+        .bind(write.replaces())
+        .bind(label.name.as_str())
+        .bind(label.kind.as_str())
+        .bind(label.client.as_str())
         .execute(&mut *tx)
         .await
         .context("store an attestation")?
@@ -272,21 +318,7 @@ impl Devices for PgDevices {
         now: OffsetDateTime,
     ) -> Result<Revocation, KeyStoreError> {
         let mut tx = self.pool.begin().await.context("begin a revoke")?;
-        let current = locked_generation(&mut tx, owner).await?;
-        // The device and the one revoking it, in one order: two revoking each other queue.
-        let mut ids = vec![id.as_uuid()];
-        ids.extend(by.filter(|by| *by != id).map(|by| by.as_uuid()));
-        ids.sort();
-        sqlx::query(
-            "SELECT 1 FROM user_devices WHERE device_id = ANY($1) AND user_id = $2 \
-             ORDER BY device_id FOR NO KEY UPDATE",
-        )
-        .bind(&ids)
-        .bind(owner.as_uuid())
-        .execute(&mut *tx)
-        .await
-        .context("lock the devices of a revoke")?;
-        let trust = trust_facts(&mut tx, owner, current).await?;
+        let trust = locked_trust(&mut tx, owner, id, by).await?;
         match trust.device(id) {
             None => return Ok(Revocation::NotFound),
             Some(device) if device.is_revoked() => return Ok(Revocation::AlreadyRevoked),
@@ -313,6 +345,37 @@ impl Devices for PgDevices {
         let start_over = end_with_revoke(&mut tx, owner, id, now).await?;
         tx.commit().await.context("commit a revoke")?;
         Ok(Revocation::Revoked { closed, start_over })
+    }
+
+    async fn rename(
+        &self,
+        owner: UserId,
+        id: DeviceId,
+        by: Option<DeviceId>,
+        name: Option<&ChosenName>,
+    ) -> Result<Renaming, KeyStoreError> {
+        let mut tx = self.pool.begin().await.context("begin a rename")?;
+        let trust = locked_trust(&mut tx, owner, id, by).await?;
+        let device = match trust.device(id) {
+            None => return Ok(Renaming::NotFound),
+            Some(device) if device.is_revoked() => return Ok(Renaming::Revoked),
+            Some(device) => device,
+        };
+        if let Err(refusal) = may_rename(id, by, &trust) {
+            return Ok(Renaming::Refused(refusal));
+        }
+        let kept = device.chosen_name_after(name);
+        sqlx::query(
+            "UPDATE user_devices SET chosen_name = $3 WHERE device_id = $1 AND user_id = $2",
+        )
+        .bind(id.as_uuid())
+        .bind(owner.as_uuid())
+        .bind(kept.as_ref().map(ChosenName::as_str))
+        .execute(&mut *tx)
+        .await
+        .context("rename a device")?;
+        tx.commit().await.context("commit a rename")?;
+        Ok(Renaming::Renamed)
     }
 
     async fn hold_history_key(
@@ -403,8 +466,7 @@ impl KeyPackages for PgKeyPackages {
         &self,
         owner: UserId,
         device: DeviceId,
-        label: &DeviceLabel,
-        relabel: bool,
+        label: &LabelWrite,
         packages: &[NewKeyPackage],
     ) -> Result<usize, KeyStoreError> {
         let blobs: Vec<&[u8]> = packages.iter().map(|p| p.bytes.as_bytes()).collect();
@@ -422,7 +484,7 @@ impl KeyPackages for PgKeyPackages {
         .await
         .context("stash KeyPackages")?
         .rows_affected();
-        record_device(&mut tx, owner, device, label, relabel).await?;
+        record_device(&mut tx, owner, device, label).await?;
         tx.commit().await.context("commit stash")?;
         Ok(usize::try_from(stored).unwrap_or_default())
     }

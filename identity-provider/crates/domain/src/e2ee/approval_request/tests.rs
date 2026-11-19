@@ -11,6 +11,7 @@ fn device(owner: UserId, attested: bool) -> Device {
         id: DeviceId::generate(),
         owner,
         label: DeviceLabel::unknown(),
+        chosen_name: None,
         paired_at: now(),
         last_seen_at: now(),
         revoked_at: None,

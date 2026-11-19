@@ -7,7 +7,7 @@ use domain::e2ee::testing::{
 use domain::e2ee::{
     ApprovalBy, ApprovalFacts, ApprovalPublicKey, ApprovalRequired, ArchiveError,
     ArchiveStoreError, Attestation, DeviceLabel, DeviceRootKey, HeldHistoryKey, HistoryCheckValue,
-    HistoryGeneration, HistoryKey, HistoryKeys, HistorySalt, HpkeKeyWrite, KeyReplace,
+    HistoryGeneration, HistoryKey, HistoryKeys, HistorySalt, HpkeKeyWrite, KeyReplace, LabelWrite,
     START_OVER_WAIT, StartOverEnd, approval_bytes, may_approve,
 };
 use domain::identity::testing::InMemoryAccounts;
@@ -139,15 +139,13 @@ impl World {
             issued_at: at,
             expires_at: at + Duration::days(365),
         };
-        let label = DeviceLabel {
-            name: format!("Device {root}"),
-            kind: domain::e2ee::DeviceKind::Laptop,
-        };
+        let label =
+            DeviceLabel::from_client(&format!("Device {root}"), "laptop", "browser").unwrap();
         self.devices
             .attest(
                 self.alice,
                 id,
-                &label,
+                &LabelWrite::IfNew(label),
                 None,
                 &attestation,
                 &HpkeKeyWrite::Clear,
@@ -274,6 +272,28 @@ async fn asking_again_answers_the_open_request_and_tells_nobody_again() {
     assert!(!again.opened);
     assert_eq!(again.request, first.request);
     assert_eq!(w.sent().len(), 1);
+}
+
+#[tokio::test]
+async fn a_start_over_shows_its_device_by_the_name_its_user_chose() {
+    let w = world();
+    let t = now();
+    let laptop = w.laptop(t).await;
+    let fresh = w.device(2, t).await;
+    w.devices.choose_name(fresh.id, "Kitchen tablet");
+
+    w.ask.execute(&fresh.bearer, t).await.unwrap();
+    let read = w.load.execute(&laptop.bearer).await.unwrap();
+
+    assert!(
+        matches!(
+            &w.sent()[..],
+            [SentTrust::StartOverRequested { display_name, .. }] if display_name == "Kitchen tablet"
+        ),
+        "{:?}",
+        w.sent()
+    );
+    assert_eq!(read.display_name, "Kitchen tablet");
 }
 
 #[tokio::test]

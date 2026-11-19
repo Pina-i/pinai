@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use application::e2ee::{
-    ClaimKeyPackage, KeyPackageStatus, ListDevices, ListedDevice, RegisterDevice, ReportHistoryKey,
-    RevokeDevice, UploadKeyPackages,
+    ClaimKeyPackage, KeyPackageStatus, ListDevices, ListedDevice, RegisterDevice, RenameDevice,
+    ReportHistoryKey, RevokeDevice, UploadKeyPackages,
 };
 use axum::Json;
 use axum::extract::{Path, State};
@@ -12,9 +12,9 @@ use axum::http::{HeaderMap, StatusCode, header};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use domain::e2ee::{
-    Approval, Approver, Claim, DeviceLabel, DeviceRootKey, Ed25519Signature, HistoryGeneration,
-    HpkePublicKey, KeyDirectoryError, KeyPackageBytes, NewKeyPackage, RequestRefusal,
-    UnverifiedHpkeKey,
+    Approval, Approver, BroughtLabel, ChosenName, Claim, DeviceLabel, DeviceRootKey,
+    Ed25519Signature, HistoryGeneration, HpkePublicKey, KeyDirectoryError, KeyPackageBytes,
+    NewKeyPackage, RequestRefusal, UnverifiedHpkeKey,
 };
 use domain::identity::{ActorUri, Requester};
 use serde::{Deserialize, Serialize};
@@ -32,8 +32,12 @@ use crate::rate_limit::RateLimiter;
 #[derive(Serialize)]
 pub struct DeviceEntry {
     device_id: Uuid,
+    /// The shown name: the chosen one, else the automatic one.
     display_name: String,
+    automatic_name: String,
+    chosen_name: Option<String>,
     kind: &'static str,
+    client: &'static str,
     #[serde(with = "time::serde::rfc3339")]
     paired_at: OffsetDateTime,
     #[serde(with = "time::serde::rfc3339")]
@@ -102,6 +106,24 @@ pub struct RegisterRequest {
     hpke_public_key: Option<String>,
     /// Standard base64 of the root key's 64-byte signature over the HPKE key's canonical bytes.
     hpke_key_signature: Option<String>,
+    /// Omitted, the device is named from the `User-Agent`.
+    label: Option<LabelBody>,
+}
+
+/// The label a client composed for its own device.
+#[derive(Deserialize)]
+pub struct LabelBody {
+    name: String,
+    kind: String,
+    client: String,
+}
+
+/// The key is required: a body without it never clears the name.
+#[derive(Deserialize)]
+pub struct RenameRequest {
+    /// `null`, or empty once trimmed, for the automatic name back.
+    #[serde(deserialize_with = "Option::deserialize")]
+    name: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -123,6 +145,7 @@ pub struct RegisteredBody {
 pub struct UploadRequest {
     device_id: Uuid,
     packages: Vec<UploadEntry>,
+    label: Option<LabelBody>,
 }
 
 #[derive(Deserialize)]
@@ -193,8 +216,14 @@ impl From<ListedDevice> for DeviceEntry {
         let hpke_key = device.hpke_key.as_ref();
         Self {
             device_id: device.id.as_uuid(),
-            display_name: device.label.name,
+            display_name: device.shown_name().to_owned(),
+            automatic_name: device.label.name.as_str().to_owned(),
+            chosen_name: device
+                .chosen_name
+                .as_ref()
+                .map(|name| name.as_str().to_owned()),
             kind: device.label.kind.as_str(),
+            client: device.label.client.as_str(),
             paired_at: device.paired_at,
             last_seen_at: device.last_seen_at,
             revoked_at: device.revoked_at,
@@ -212,12 +241,14 @@ impl From<ListedDevice> for DeviceEntry {
     }
 }
 
-fn user_agent_label(headers: &HeaderMap) -> DeviceLabel {
-    DeviceLabel::from_user_agent(
-        headers
-            .get(header::USER_AGENT)
-            .and_then(|value| value.to_str().ok()),
-    )
+fn brought_label(sent: Option<LabelBody>, headers: &HeaderMap) -> Result<BroughtLabel, ApiError> {
+    let composed = sent
+        .map(|label| DeviceLabel::from_client(&label.name, &label.kind, &label.client))
+        .transpose()?;
+    let user_agent = headers
+        .get(header::USER_AGENT)
+        .and_then(|value| value.to_str().ok());
+    Ok(BroughtLabel::of(composed, user_agent))
 }
 
 fn rfc3339(at: OffsetDateTime) -> Result<String, ApiError> {
@@ -259,13 +290,14 @@ pub async fn register(
         })
         .transpose()?;
     let brought = UnverifiedHpkeKey::from_parts(hpke_public_key, hpke_key_signature)?;
+    let label = brought_label(body.label, &headers)?;
     let registered = register
         .execute(
             &bearer,
             body.device_id.into(),
             key,
             brought,
-            &user_agent_label(&headers),
+            &label,
             OffsetDateTime::now_utc(),
         )
         .await?;
@@ -293,6 +325,20 @@ pub async fn revoke(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// `PUT /api/keys/devices/{device_id}/name` — no recent password: a name is no sensitive action.
+pub async fn rename(
+    State(rename): State<Arc<RenameDevice>>,
+    SignedIn(bearer): SignedIn,
+    Path(device_id): Path<Uuid>,
+    Json(body): Json<RenameRequest>,
+) -> Result<StatusCode, ApiError> {
+    let name = ChosenName::or_none(body.name.as_deref())?;
+    rename
+        .execute(&bearer, device_id.into(), name.as_ref())
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// `PUT /api/keys/devices/{device_id}/history-key`
 pub async fn hold_history_key(
     State(report): State<Arc<ReportHistoryKey>>,
@@ -310,7 +356,7 @@ pub async fn hold_history_key(
 /// `POST /api/keys/packages`
 pub async fn upload(
     State(upload): State<Arc<UploadKeyPackages>>,
-    Authenticated(user): Authenticated,
+    SignedIn(bearer): SignedIn,
     headers: HeaderMap,
     Json(body): Json<UploadRequest>,
 ) -> Result<(StatusCode, Json<UploadedBody>), ApiError> {
@@ -331,17 +377,17 @@ pub async fn upload(
             })
         })
         .collect::<Result<Vec<_>, ApiError>>()?;
-    let label = user_agent_label(&headers);
+    let label = brought_label(body.label, &headers)?;
     let uploaded = upload
         .execute(
-            user,
+            &bearer,
             body.device_id.into(),
             label,
             packages,
             OffsetDateTime::now_utc(),
         )
         .await?;
-    tracing::info!(user_id = %user, device_id = %body.device_id, added = uploaded.uploaded, available_after = uploaded.available_after, "key packages uploaded");
+    tracing::info!(user_id = %bearer.user, device_id = %body.device_id, added = uploaded.uploaded, available_after = uploaded.available_after, "key packages uploaded");
     Ok((
         StatusCode::CREATED,
         Json(UploadedBody {

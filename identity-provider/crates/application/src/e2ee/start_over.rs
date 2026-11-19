@@ -101,7 +101,7 @@ impl AskToStartOver {
                     owner,
                     &approved.sessions(&sessions, now),
                     &request,
-                    &device.label.name,
+                    device.shown_name(),
                     ready_at,
                 );
             }
@@ -174,7 +174,7 @@ impl LoadStartOver {
             ready_at: request.ready_at(&trust, &sessions),
             display_name: trust
                 .device(request.device)
-                .map(|asking| asking.label.name.clone())
+                .map(|asking| asking.shown_name().to_owned())
                 .unwrap_or_default(),
             request,
         })

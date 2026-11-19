@@ -253,25 +253,176 @@ impl FromStr for DeviceKind {
     }
 }
 
-/// How a device is shown in Settings → Devices.
+/// Whether a device is the Pīna'i app or a browser, which its icon tells apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceClient {
+    App,
+    Browser,
+    Unknown,
+}
+
+impl DeviceClient {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::App => "app",
+            Self::Browser => "browser",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// The app runs on Electron, whose `User-Agent` names Chrome too: it is read first.
+    fn from_user_agent(ua: &str) -> Self {
+        if ua.contains("Electron/") {
+            Self::App
+        } else if DESKTOP_BROWSERS
+            .iter()
+            .chain(&MOBILE_BROWSERS)
+            .any(|(token, _)| ua.contains(token))
+        {
+            Self::Browser
+        } else {
+            Self::Unknown
+        }
+    }
+}
+
+impl FromStr for DeviceClient {
+    type Err = ValidationError;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        match raw {
+            "app" => Ok(Self::App),
+            "browser" => Ok(Self::Browser),
+            "unknown" => Ok(Self::Unknown),
+            _ => Err(ValidationError::new(
+                "device client",
+                "app, browser or unknown",
+            )),
+        }
+    }
+}
+
+/// A device's name as people read it: trimmed, 1 to `max` characters, none a control character
+/// nor one that shows nothing or turns the text around it — a name must read as what it is.
+fn device_name(field: &'static str, raw: &str, max: usize) -> Result<String, ValidationError> {
+    let name = raw.trim();
+    if name.chars().all(|c| c.is_whitespace() || is_joiner(c)) {
+        return Err(ValidationError::new(field, "cannot be blank"));
+    }
+    if name.chars().any(char::is_control) {
+        return Err(ValidationError::new(field, "no control characters"));
+    }
+    if name.chars().any(is_invisible) {
+        return Err(ValidationError::new(field, "no invisible characters"));
+    }
+    if name.chars().count() > max {
+        return Err(ValidationError::new(
+            field,
+            format!("at most {max} characters"),
+        ));
+    }
+    Ok(name.to_owned())
+}
+
+/// Emoji sequences and some scripts need them, so they stay — but they name nothing alone.
+fn is_joiner(c: char) -> bool {
+    matches!(c, '\u{200C}' | '\u{200D}')
+}
+
+fn is_invisible(c: char) -> bool {
+    matches!(
+        c,
+        '\u{200B}'
+            | '\u{200E}'..='\u{200F}'
+            | '\u{061C}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{FEFF}'
+            | '\u{2028}'..='\u{2029}'
+            | '\u{00AD}'
+            | '\u{180E}'
+            | '\u{2061}'..='\u{2064}'
+            // Hangul fillers and the blank braille pattern: letters that draw nothing.
+            | '\u{115F}'
+            | '\u{1160}'
+            | '\u{3164}'
+            | '\u{FFA0}'
+            | '\u{2800}'
+    )
+}
+
+/// A device's automatic name, as its client composed it or its `User-Agent` gave it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutomaticName(String);
+
+impl AutomaticName {
+    pub const MAX_CHARS: usize = 100;
+
+    pub fn parse(raw: &str) -> Result<Self, ValidationError> {
+        device_name("label.name", raw, Self::MAX_CHARS).map(Self)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// The name a user gives one of their devices, shown over its automatic one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChosenName(String);
+
+impl ChosenName {
+    /// As a group's name.
+    pub const MAX_CHARS: usize = 50;
+
+    pub fn parse(raw: &str) -> Result<Self, ValidationError> {
+        device_name("name", raw, Self::MAX_CHARS).map(Self)
+    }
+
+    /// What a rename sets: no name, or an empty one once trimmed, gives the automatic name back.
+    pub fn or_none(raw: Option<&str>) -> Result<Option<Self>, ValidationError> {
+        match raw.map(str::trim) {
+            None | Some("") => Ok(None),
+            Some(name) => Self::parse(name).map(Some),
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// What a device says it is: its automatic name, its kind and its client.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceLabel {
-    pub name: String,
+    pub name: AutomaticName,
     pub kind: DeviceKind,
+    pub client: DeviceClient,
 }
 
 impl DeviceLabel {
     /// A device nothing is known about yet.
     pub fn unknown() -> Self {
         Self {
-            name: "Web client".to_owned(),
+            name: AutomaticName("Web client".to_owned()),
             kind: DeviceKind::Unknown,
+            client: DeviceClient::Unknown,
         }
     }
 
-    /// A device recorded before its client said what it is takes the first label that says.
-    pub fn replaces(&self, held: &DeviceLabel) -> bool {
-        *held == Self::unknown() && *self != Self::unknown()
+    /// The label a client composed for its own device; a client is the app or a browser.
+    pub fn from_client(name: &str, kind: &str, client: &str) -> Result<Self, ValidationError> {
+        let name = AutomaticName::parse(name)?;
+        let kind = kind
+            .parse()
+            .map_err(|_| ValidationError::new("label.kind", "laptop, phone, tablet or unknown"))?;
+        let client = match client {
+            "app" => DeviceClient::App,
+            "browser" => DeviceClient::Browser,
+            _ => return Err(ValidationError::new("label.client", "app or browser")),
+        };
+        Ok(Self { name, kind, client })
     }
 
     /// Coarse on purpose — an icon and a "Chrome on macOS" line. An iPadOS Safari claiming to be
@@ -280,7 +431,12 @@ impl DeviceLabel {
         let Some(ua) = user_agent.filter(|ua| !ua.is_empty()) else {
             return Self::unknown();
         };
-        let label = |name: String, kind| Self { name, kind };
+        let client = DeviceClient::from_user_agent(ua);
+        let label = |name: String, kind| Self {
+            name: AutomaticName(name),
+            kind,
+            client,
+        };
         // Before Safari: every iOS browser says Safari too.
         if ua.contains("iPhone") {
             return label(browser_on(ua, "iOS"), DeviceKind::Phone);
@@ -297,21 +453,15 @@ impl DeviceLabel {
             return label(browser_on(ua, "Android"), kind);
         }
         let os = desktop_os(ua);
-        // Most specific first: Edge and Opera say Chrome too, and Chrome says Safari.
-        let browser = [
-            ("Edg/", "Edge"),
-            ("Edge/", "Edge"),
-            ("OPR/", "Opera"),
-            ("Opera/", "Opera"),
-            ("Firefox/", "Firefox"),
-            ("Chrome/", "Chrome"),
-            ("Safari/", "Safari"),
-        ]
-        .into_iter()
-        .find(|(token, _)| ua.contains(token));
+        let browser = DESKTOP_BROWSERS
+            .into_iter()
+            .find(|(token, _)| ua.contains(token));
         match browser {
             Some((_, browser)) => label(format!("{browser} on {os}"), DeviceKind::Laptop),
-            None => Self::unknown(),
+            None => Self {
+                client,
+                ..Self::unknown()
+            },
         }
     }
 }
@@ -328,19 +478,94 @@ fn desktop_os(ua: &str) -> &'static str {
     }
 }
 
+/// Most specific first: Edge and Opera say Chrome too, and Chrome says Safari.
+const DESKTOP_BROWSERS: [(&str, &str); 7] = [
+    ("Edg/", "Edge"),
+    ("Edge/", "Edge"),
+    ("OPR/", "Opera"),
+    ("Opera/", "Opera"),
+    ("Firefox/", "Firefox"),
+    ("Chrome/", "Chrome"),
+    ("Safari/", "Safari"),
+];
+
+const MOBILE_BROWSERS: [(&str, &str); 6] = [
+    ("CriOS/", "Chrome"),
+    ("FxiOS/", "Firefox"),
+    ("EdgiOS/", "Edge"),
+    ("Firefox/", "Firefox"),
+    ("Chrome/", "Chrome"),
+    ("Safari/", "Safari"),
+];
+
 fn browser_on(ua: &str, os: &str) -> String {
-    let browser = [
-        ("CriOS/", "Chrome"),
-        ("FxiOS/", "Firefox"),
-        ("EdgiOS/", "Edge"),
-        ("Firefox/", "Firefox"),
-        ("Chrome/", "Chrome"),
-        ("Safari/", "Safari"),
-    ]
-    .into_iter()
-    .find(|(token, _)| ua.contains(token))
-    .map_or("Browser", |(_, browser)| browser);
+    let browser = MOBILE_BROWSERS
+        .into_iter()
+        .find(|(token, _)| ua.contains(token))
+        .map_or("Browser", |(_, browser)| browser);
     format!("{browser} on {os}")
+}
+
+/// The label a request brings for its device: the one its client composed, else one read from
+/// its `User-Agent` — identity-provider/specs/e2ee.md § 5, "Key directory rules".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BroughtLabel {
+    /// Follows the device: it replaces the label held at each request.
+    Composed(DeviceLabel),
+    /// A guess: it names a device once, or one recorded before its client said what it is.
+    FromUserAgent(DeviceLabel),
+}
+
+impl BroughtLabel {
+    pub fn of(composed: Option<DeviceLabel>, user_agent: Option<&str>) -> Self {
+        match composed {
+            Some(label) => Self::Composed(label),
+            None => Self::FromUserAgent(DeviceLabel::from_user_agent(user_agent)),
+        }
+    }
+
+    /// What the request does to the label of `known`, the device as the directory holds it, from
+    /// a session that named `named`: a device not recorded yet takes the label; a known one only
+    /// from a session that named that very device — a password alone relabels nothing.
+    pub fn write(&self, known: Option<&Device>, named: Option<DeviceId>) -> LabelWrite {
+        let replaces = known.is_some_and(|known| {
+            named == Some(known.id)
+                && match self {
+                    Self::Composed(_) => true,
+                    Self::FromUserAgent(label) => {
+                        known.label == DeviceLabel::unknown() && *label != DeviceLabel::unknown()
+                    }
+                }
+        });
+        let (Self::Composed(label) | Self::FromUserAgent(label)) = self;
+        if replaces {
+            LabelWrite::Always(label.clone())
+        } else {
+            LabelWrite::IfNew(label.clone())
+        }
+    }
+}
+
+/// What a write does to its device's label; a device not recorded yet is recorded under it
+/// either way.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LabelWrite {
+    /// A known device keeps its own.
+    IfNew(DeviceLabel),
+    /// A known device takes it.
+    Always(DeviceLabel),
+}
+
+impl LabelWrite {
+    pub fn label(&self) -> &DeviceLabel {
+        match self {
+            Self::IfNew(label) | Self::Always(label) => label,
+        }
+    }
+
+    pub fn replaces(&self) -> bool {
+        matches!(self, Self::Always(_))
+    }
 }
 
 /// The IdP's signature binding a root key to a device of an account, until `expires_at`.
@@ -357,7 +582,10 @@ pub struct Attestation {
 pub struct Device {
     pub id: DeviceId,
     pub owner: UserId,
+    /// The automatic name, kind and client.
     pub label: DeviceLabel,
+    /// The name its user gave it; `None` until one does.
+    pub chosen_name: Option<ChosenName>,
     pub paired_at: OffsetDateTime,
     pub last_seen_at: OffsetDateTime,
     pub revoked_at: Option<OffsetDateTime>,
@@ -373,6 +601,21 @@ pub struct Device {
 impl Device {
     pub fn is_revoked(&self) -> bool {
         self.revoked_at.is_some()
+    }
+
+    /// What the device is called wherever it is shown: the name its user chose, else its
+    /// automatic one.
+    pub fn shown_name(&self) -> &str {
+        self.chosen_name
+            .as_ref()
+            .map_or(self.label.name.as_str(), ChosenName::as_str)
+    }
+
+    /// The chosen name a rename to `name` leaves: none for the automatic name itself, which a
+    /// chosen name would pin, hiding the names the device gives itself later.
+    pub fn chosen_name_after(&self, name: Option<&ChosenName>) -> Option<ChosenName> {
+        name.filter(|name| name.as_str() != self.label.name.as_str())
+            .cloned()
     }
 
     /// Only its owner registers or stocks a device — device ids are no secret, a claim hands

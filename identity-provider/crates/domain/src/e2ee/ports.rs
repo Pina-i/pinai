@@ -7,12 +7,12 @@ use crate::{ApprovalRequestId, ConversationId, DeviceId, SessionId, StartOverReq
 use super::{
     Append, Approval, ApprovalMessage, ApprovalMessageBody, ApprovalRequest, ApprovalRequired,
     ArchiveCursor, ArchiveEntry, ArchiveStoreError, Attestation, AttestationExpiry,
-    CheckedApproval, CheckedShare, Claim, ClaimedKeyPackage, Commit, DeliveryStoreError, Device,
-    DeviceLabel, DeviceRootKey, DeviceTrust, Ed25519PublicKey, Ed25519Signature, Epoch, GroupInfo,
-    GroupInfoBlob, HeldHistoryKey, HistoryGeneration, HistoryKey, HpkeKeyWrite, KeyShare,
-    KeyStoreError, MessageSeq, NewArchiveEntry, NewCommit, NewKeyPackage, NewWelcome,
-    RemoteClaimError, RequestRefusal, StartOverEnd, StartOverRefusal, StartOverRequest, Welcome,
-    WelcomeBlob,
+    CheckedApproval, CheckedShare, ChosenName, Claim, ClaimedKeyPackage, Commit,
+    DeliveryStoreError, Device, DeviceRootKey, DeviceTrust, Ed25519PublicKey, Ed25519Signature,
+    Epoch, GroupInfo, GroupInfoBlob, HeldHistoryKey, HistoryGeneration, HistoryKey, HpkeKeyWrite,
+    KeyShare, KeyStoreError, LabelWrite, MessageSeq, NewArchiveEntry, NewCommit, NewKeyPackage,
+    NewWelcome, RemoteClaimError, RequestRefusal, StartOverEnd, StartOverRefusal, StartOverRequest,
+    Welcome, WelcomeBlob,
 };
 
 /// The devices accounts registered, and their attestations.
@@ -21,16 +21,16 @@ pub trait Devices: Send + Sync {
     async fn find(&self, id: DeviceId) -> Result<Option<Device>, KeyStoreError>;
     /// The owner's devices: active ones first, each group most recently seen first.
     async fn list(&self, owner: UserId) -> Result<Vec<Device>, KeyStoreError>;
-    /// Store the device's attestation and do `hpke_key` to its HPKE key, recording the device under
-    /// `label` if it is new; only while the device is still as `read` (`None`: not recorded):
-    /// unrevoked, with the same root key and HPKE key. Another root key than the one held drops, in
-    /// the same write, the device's approvals, those it signed and the key shares it sent: none
-    /// verifies any more; another root key or HPKE key, the shares sealed for it.
+    /// Store the device's attestation and do `hpke_key` to its HPKE key, and `label` to its label;
+    /// only while the device is still as `read` (`None`: not recorded): unrevoked, with the same
+    /// root key and HPKE key. Another root key than the one held drops, in the same write, the
+    /// device's approvals, those it signed and the key shares it sent: none verifies any more;
+    /// another root key or HPKE key, the shares sealed for it.
     async fn attest(
         &self,
         owner: UserId,
         id: DeviceId,
-        label: &DeviceLabel,
+        label: &LabelWrite,
         read: Option<&Device>,
         attestation: &Attestation,
         hpke_key: &HpkeKeyWrite,
@@ -47,6 +47,17 @@ pub trait Devices: Send + Sync {
         by: Option<DeviceId>,
         now: OffsetDateTime,
     ) -> Result<Revocation, KeyStoreError>;
+    /// Give the device the name its user chose, or none for its automatic one back, for a session
+    /// whose device is `by`, as [`super::may_rename`] decides on the account's devices, approvals
+    /// and generation as they stand under the locks a revoke takes; the automatic name held then
+    /// counts as none ([`Device::chosen_name_after`]).
+    async fn rename(
+        &self,
+        owner: UserId,
+        id: DeviceId,
+        by: Option<DeviceId>,
+        name: Option<&ChosenName>,
+    ) -> Result<Renaming, KeyStoreError>;
     /// Record that the device holds `generation` of its owner's history key, dropping the share it
     /// was sent; only while that is the owner's current generation (`check_history_generation`),
     /// and the device the owner's and unrevoked.
@@ -89,6 +100,17 @@ pub enum Revocation {
     Refused(ApprovalRequired),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Renaming {
+    Renamed,
+    /// No such device of the owner's.
+    NotFound,
+    /// Nothing was written.
+    Revoked,
+    /// An approved device, and `by` isn't one: nothing was written.
+    Refused(ApprovalRequired),
+}
+
 /// The KeyPackages devices publish ahead of time, each handed out once.
 #[async_trait::async_trait]
 pub trait KeyPackages: Send + Sync {
@@ -99,14 +121,12 @@ pub trait KeyPackages: Send + Sync {
         &self,
         owner: UserId,
     ) -> Result<Vec<(DeviceId, usize)>, KeyStoreError>;
-    /// Store a batch and mark the device seen, recording it under `label` if it is new, and
-    /// relabelling a known one when `relabel`. How many were stored.
+    /// Store a batch and mark the device seen, doing `label` to its label. How many were stored.
     async fn stash(
         &self,
         owner: UserId,
         device: DeviceId,
-        label: &DeviceLabel,
-        relabel: bool,
+        label: &LabelWrite,
         packages: &[NewKeyPackage],
     ) -> Result<usize, KeyStoreError>;
     /// The oldest available KeyPackage of `device`, or of any of the owner's devices; never

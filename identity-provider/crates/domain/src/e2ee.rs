@@ -42,10 +42,10 @@ pub use delivery::{
     may_commit, may_commit_externally,
 };
 pub use device::{
-    ATTESTATION_LIFETIME, Attestation, AttestationExpiry, Device, DeviceKind, DeviceLabel,
-    DeviceRootKey, Ed25519PublicKey, Ed25519Signature, HeldHpkeKey, HpkeKeyWrite, HpkePublicKey,
-    Registration, SignedHpkeKey, UnverifiedHpkeKey, attestation_period, may_register,
-    own_unrevoked,
+    ATTESTATION_LIFETIME, Attestation, AttestationExpiry, AutomaticName, BroughtLabel, ChosenName,
+    Device, DeviceClient, DeviceKind, DeviceLabel, DeviceRootKey, Ed25519PublicKey,
+    Ed25519Signature, HeldHpkeKey, HpkeKeyWrite, HpkePublicKey, LabelWrite, Registration,
+    SignedHpkeKey, UnverifiedHpkeKey, attestation_period, may_register, own_unrevoked,
 };
 pub use error::{
     ArchiveError, ArchiveStoreError, DeliveryError, DeliveryStoreError, KeyDirectoryError,
@@ -68,12 +68,14 @@ pub use ports::{
     ApprovalRequests, Approve, Archived, Attest, Cleared, Close, CommitLog, Deposit,
     DeviceApprovals, DeviceAttester, DeviceNotifier, DeviceTrustNotifier, Devices, Ed25519Verifier,
     GroupInfos, HistoryArchive, HistoryKeys, Holding, KeyPackages, KeyReplace, KeyShares,
-    MlsFederation, MlsNotifier, Opened, OutgoingWelcome, Post, Read, RemoteKeyPackages, Revocation,
-    SignedAttestation, StartOverEnded, StartOverOpened, StartOverRequests, Welcomes,
+    MlsFederation, MlsNotifier, Opened, OutgoingWelcome, Post, Read, RemoteKeyPackages, Renaming,
+    Revocation, SignedAttestation, StartOverEnded, StartOverOpened, StartOverRequests, Welcomes,
 };
 pub use start_over::{
     MaturedStartOver, START_OVER_KEPT, START_OVER_WAIT, StartOverEnd, StartOverEnding,
     StartOverOpening, StartOverRefusal, StartOverRequest, may_open_start_over,
     start_over_sweep_before, start_over_window,
 };
-pub use trust::{ApprovalRequired, DeviceTrust, may_act_beyond_the_password, may_revoke};
+pub use trust::{
+    ApprovalRequired, DeviceTrust, may_act_beyond_the_password, may_rename, may_revoke,
+};

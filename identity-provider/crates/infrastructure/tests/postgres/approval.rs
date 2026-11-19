@@ -3,8 +3,8 @@ use domain::e2ee::{
     ApprovalBy, ApprovalFacts, ApprovalMessageBody, ApprovalPublicKey, ApprovalRequest,
     ApprovalRequests, Approve, Attestation, CheckedApproval, Device, DeviceApprovals, DeviceLabel,
     DeviceRootKey, Devices, HistoryCheckValue, HistoryGeneration, HistoryKey, HistoryKeys,
-    HistorySalt, HpkeKeyWrite, KeyReplace, Opened, Post, RequestRefusal, approval_bytes,
-    may_approve,
+    HistorySalt, HpkeKeyWrite, KeyReplace, LabelWrite, Opened, Post, RequestRefusal,
+    approval_bytes, may_approve,
 };
 use domain::identity::ActorUri;
 use domain::{DeviceId, UserId};
@@ -167,7 +167,7 @@ async fn a_device(devices: &PgDevices, owner: UserId, key: u8) -> DeviceId {
         .attest(
             owner,
             id,
-            &DeviceLabel::unknown(),
+            &LabelWrite::IfNew(DeviceLabel::unknown()),
             None,
             &attestation(key),
             &HpkeKeyWrite::Clear,
@@ -241,7 +241,7 @@ async fn rotate(devices: &PgDevices, owner: UserId, id: DeviceId, key: u8) {
         .attest(
             owner,
             id,
-            &DeviceLabel::unknown(),
+            &LabelWrite::IfNew(DeviceLabel::unknown()),
             read.as_ref(),
             &attestation(key),
             &HpkeKeyWrite::Clear,

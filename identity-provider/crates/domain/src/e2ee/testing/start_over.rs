@@ -781,6 +781,49 @@ pub mod contract {
         assert_eq!(found(s.devices, phone).await.revoked_at, Some(now));
     }
 
+    pub async fn an_approved_device_is_renamed_only_from_an_approved_device(
+        s: StartOverStores<'_>,
+        alice: UserId,
+    ) {
+        let laptop = an_account(s, alice, &history_key(1, 1)).await;
+        let phone = a_new_device(s, alice, 2).await;
+        approved_by(s, alice, laptop, phone).await;
+        let fresh = a_new_device(s, alice, 3).await;
+        let name = |raw: &str| ChosenName::parse(raw).unwrap();
+
+        let refused = s
+            .devices
+            .rename(alice, phone, Some(fresh), Some(&name("Old phone")))
+            .await
+            .unwrap();
+        let unnamed = s
+            .devices
+            .rename(alice, laptop, None, Some(&name("Old laptop")))
+            .await
+            .unwrap();
+        let itself = s
+            .devices
+            .rename(alice, fresh, Some(fresh), Some(&name("Kitchen tablet")))
+            .await
+            .unwrap();
+        let approved = s
+            .devices
+            .rename(alice, phone, Some(laptop), Some(&name("Alice's phone")))
+            .await
+            .unwrap();
+
+        assert_eq!(refused, Renaming::Refused(ApprovalRequired));
+        assert_eq!(unnamed, Renaming::Refused(ApprovalRequired));
+        assert_eq!((itself, approved), (Renaming::Renamed, Renaming::Renamed));
+        assert_eq!(
+            found(s.devices, laptop).await.chosen_name,
+            None,
+            "nothing written"
+        );
+        assert_eq!(found(s.devices, phone).await.shown_name(), "Alice's phone");
+        assert_eq!(found(s.devices, fresh).await.shown_name(), "Kitchen tablet");
+    }
+
     pub async fn an_account_with_no_history_key_revokes_any_device_of_its_own(
         s: StartOverStores<'_>,
         alice: UserId,

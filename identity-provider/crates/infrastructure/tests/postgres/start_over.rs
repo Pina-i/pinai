@@ -175,6 +175,16 @@ async fn an_approved_device_is_revoked_only_from_an_approved_device(pool: PgPool
 }
 
 #[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn an_approved_device_is_renamed_only_from_an_approved_device(pool: PgPool) {
+    let alice = a_user(&pool).await;
+    contract::an_approved_device_is_renamed_only_from_an_approved_device(
+        Stores::of(&pool).view(),
+        alice,
+    )
+    .await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
 async fn an_account_with_no_history_key_revokes_any_device_of_its_own(pool: PgPool) {
     let alice = a_user(&pool).await;
     contract::an_account_with_no_history_key_revokes_any_device_of_its_own(

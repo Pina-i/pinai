@@ -3,7 +3,7 @@ use domain::e2ee::testing::hpke_key;
 use domain::e2ee::{
     ApprovalPublicKey, Attestation, CheckedShare, Deposit, DeviceLabel, DeviceRootKey, Devices,
     HistoryCheckValue, HistoryGeneration, HistoryKey, HistoryKeys, HistorySalt, HpkeKeyWrite,
-    KeyShares,
+    KeyShares, LabelWrite,
 };
 use domain::{DeviceId, UserId};
 use infrastructure::postgres::{PgDeviceApprovals, PgDevices, PgHistoryKeys, PgKeyShares};
@@ -227,7 +227,7 @@ async fn reregister(devices: &PgDevices, owner: UserId, id: DeviceId, root: u8, 
         .attest(
             owner,
             id,
-            &DeviceLabel::unknown(),
+            &LabelWrite::IfNew(DeviceLabel::unknown()),
             read.as_ref(),
             &attestation,
             &HpkeKeyWrite::Set(hpke_key(hpke)),

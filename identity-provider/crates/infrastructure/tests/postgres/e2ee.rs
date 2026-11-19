@@ -32,6 +32,12 @@ async fn registering_again_replaces_the_attestation_and_keeps_the_label(pool: Pg
 }
 
 #[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn a_registration_relabels_a_known_device_when_asked(pool: PgPool) {
+    let alice = a_user(&pool).await;
+    contract::a_registration_relabels_a_known_device_when_asked(&PgDevices::new(pool), alice).await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
 async fn a_device_holds_the_hpke_key_registered_with_its_attestation_until_replaced(pool: PgPool) {
     let alice = a_user(&pool).await;
     contract::a_device_holds_the_hpke_key_registered_with_its_attestation_until_replaced(
@@ -118,6 +124,25 @@ async fn the_table_takes_an_hpke_key_only_whole_and_with_a_root_key(pool: PgPool
 }
 
 #[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn the_table_takes_a_known_client_only(pool: PgPool) {
+    let alice = a_user(&pool).await;
+
+    let refused = sqlx::query(
+        "INSERT INTO user_devices (device_id, user_id, display_name, kind, client) \
+         VALUES ($1, $2, 'laptop', 'laptop', 'desktop')",
+    )
+    .bind(uuid::Uuid::new_v4())
+    .bind(alice.as_uuid())
+    .execute(&pool)
+    .await;
+
+    let Err(sqlx::Error::Database(error)) = refused else {
+        panic!("an unknown client was stored");
+    };
+    assert_eq!(error.constraint(), Some("user_devices_client_check"));
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
 async fn devices_are_listed_active_first_then_most_recently_seen(pool: PgPool) {
     let (alice, bob) = (a_user(&pool).await, a_user(&pool).await);
     contract::devices_are_listed_active_first_then_most_recently_seen(
@@ -133,6 +158,30 @@ async fn devices_are_listed_active_first_then_most_recently_seen(pool: PgPool) {
 async fn a_device_is_revoked_once_and_only_by_its_owner(pool: PgPool) {
     let (alice, bob) = (a_user(&pool).await, a_user(&pool).await);
     contract::a_device_is_revoked_once_and_only_by_its_owner(&PgDevices::new(pool), alice, bob)
+        .await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn a_device_is_named_and_given_its_automatic_name_back_by_its_owner_only(pool: PgPool) {
+    let (alice, bob) = (a_user(&pool).await, a_user(&pool).await);
+    contract::a_device_is_named_and_given_its_automatic_name_back_by_its_owner_only(
+        &PgDevices::new(pool),
+        alice,
+        bob,
+    )
+    .await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn a_revoked_device_is_renamed_no_more(pool: PgPool) {
+    let alice = a_user(&pool).await;
+    contract::a_revoked_device_is_renamed_no_more(&PgDevices::new(pool), alice).await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn a_name_equal_to_the_automatic_one_held_gives_it_back(pool: PgPool) {
+    let alice = a_user(&pool).await;
+    contract::a_name_equal_to_the_automatic_one_held_gives_it_back(&PgDevices::new(pool), alice)
         .await;
 }
 

@@ -54,8 +54,8 @@ use application::e2ee::{
     ClaimWelcomes, ClearArchive, CloseApprovalRequest, EndStartOver, KeyPackageStatus,
     ListApprovalRequests, ListDevices, LoadGroupInfo, LoadHistoryKey, LoadKeyShare, LoadStartOver,
     OpenApprovalRequest, PostApprovalMessage, ReadApprovalMessages, ReadArchive, ReceiveCommit,
-    ReceiveWelcome, RegisterDevice, ReportHistoryKey, RevokeDevice, SendWelcome, SetHistoryKey,
-    ShareHistoryKey, UploadKeyPackages,
+    ReceiveWelcome, RegisterDevice, RenameDevice, ReportHistoryKey, RevokeDevice, SendWelcome,
+    SetHistoryKey, ShareHistoryKey, UploadKeyPackages,
 };
 use application::identity::{DescribeInstance, EditIntro, FindAccount, ShowIntro, WebFinger};
 use application::messaging::{
@@ -208,6 +208,7 @@ pub struct AppState {
     pub register_device: Arc<RegisterDevice>,
     pub list_devices: Arc<ListDevices>,
     pub revoke_device: Arc<RevokeDevice>,
+    pub rename_device: Arc<RenameDevice>,
     pub report_history_key: Arc<ReportHistoryKey>,
     pub approve_device: Arc<ApproveDevice>,
     /// The code handshake's relay between two devices of an account.
@@ -340,6 +341,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/keys/devices/{device_id}/revoke",
             post(key_directory::revoke),
+        )
+        .route(
+            "/api/keys/devices/{device_id}/name",
+            put(key_directory::rename),
         )
         .route(
             "/api/keys/devices/{device_id}/history-key",

@@ -104,6 +104,7 @@ rows below that name the instance don't hold ("What is not protected").
 | The instance starts the history over from a device of its own | The new generation's setter isn't a device the others approved: they refuse the generation and warn — "Your history was reset from a device you haven't approved." —, and never approve that setter, which would hand it everything. The way back is a start over from one of the user's own devices (§ 6.11) |
 | Someone with only the password starts the history over from a device of their own | A device the account's devices haven't approved starts over only through a request (§ 3.12): every approved device is told, any of them cancels it at once, and it matures only once no approved device has been used for 7 days — never while the user uses any of their devices (§ 6.13) |
 | Someone with only the password signs the user's devices out for good | An approved device is revoked only from an approved device (§ 3.12): a device nobody approved revokes only devices nobody approved, and itself |
+| Someone with only the password renames the user's devices to mislead them — which to revoke, which asks to be approved | An approved device is renamed only from an approved device, by Revoke's rule (§ 3.12), and a device's automatic name changes only from a session that named that very device (§ 5, "Key directory rules"). What a device nobody approved is called proves nothing: its automatic name is its own claim, as its `User-Agent` was, so it can call itself "Alice's MacBook Air". What stands is the approval code it shows on its own screen, which the user types on a device of theirs (§ 3.10) |
 | Someone with only the password speaks as one of the user's devices | A session speaks only for a device whose root key it holds: naming a device on a session takes that key's signature over the session, and so does giving the device another root key, which would drop its approvals (`identity-provider/specs/auth.md § 1`, "Sessions and devices") |
 | Someone with only the password turns the second factor on, to lock the user's devices out of signing in until a start over matures | Once the account has a history key, only an approved device turns it on (`identity-provider/specs/auth.md § 3`) |
 | Someone with only the password erases the history backup a device added later restores from, fills it ahead of the user's devices, or signs the user's devices out | Once the account has a history key, only an approved device saves to the backup or clears it (§ 3.8), or signs the other devices out (`identity-provider/specs/auth.md § 1`, "Sessions and devices") |
@@ -874,9 +875,9 @@ Pushes go to the sessions of devices only: a session that named none can take no
 - **Opening.** A session that named its device, which registered a DRK, opens a request for that
   device: open 10 minutes. A device has one open request — a new one closes the one before —, and an
   account opens 10 an hour at most (`429`), counted under the account's lock. The account's other
-  devices get `approval_requested { request_id, device_id, display_name }` — the name the
-  `User-Agent` of its first registration, or of a KeyPackage upload after one that said nothing,
-  gave the device: "Chrome on Android" —; a device coming online lists the open requests instead.
+  devices get `approval_requested { request_id, device_id, display_name }` — the device's shown
+  name (§ 5, "Key directory rules"): "Chrome on Android" —; a device coming online lists the open
+  requests instead.
 - **Binding.** Until another device posts, any device of the account may read or close the
   request. The first message from a device other than the one asking binds the request to it — a
   device with a DRK only (`409 no_root_key`), as answering ends in approving —, and the devices left
@@ -1155,6 +1156,12 @@ approved device, and any of its devices revokes any other. The recent password s
 `domain::e2ee::may_revoke` decides it on the account's devices, approvals and generation as they
 stand under the devices' row locks.
 
+**Renaming a device** (`PUT /api/keys/devices/:device_id/name`) follows the same rule —
+`domain::e2ee::may_rename` is `may_revoke` —, decided the same way under the same locks, without
+the recent password: an approved device is renamed only from an approved device, any device
+names itself, and a device nobody approved renames only devices nobody approved. The user tells
+their devices apart by name, so a password alone renames nothing they trust (§ 2).
+
 **What else takes an approved device.** Once the account has a history key, these actions, which
 a password alone would turn against the user's devices, take a session whose device is approved
 under the current generation, by one rule, `domain::e2ee::may_act_beyond_the_password`:
@@ -1177,9 +1184,9 @@ device commits it into a group; an upload is answered as § 3.8 says. Without an
 the way the instance gives one (`identity-provider/specs/auth.md § 7`, "Changing the password").
 
 **What it holds against.** A thief with the password asks: the user's devices are told, and one tap
-cancels it; while the user uses any approved device, it never matures. Revoking the approved
-devices first is refused. Speaking as an approved device is too: naming a device on a session takes
-its root key's signature over that session, and so does giving it another root key
+cancels it; while the user uses any approved device, it never matures. Revoking or renaming the
+approved devices first is refused. Speaking as an approved device is too: naming a device on a
+session takes its root key's signature over that session, and so does giving it another root key
 (`identity-provider/specs/auth.md § 1`, "Sessions and devices"). So are turning the second
 factor on, saving to the backup or clearing it, signing the other devices out, and joining the
 user's conversations by itself (above). A
@@ -1206,6 +1213,9 @@ devices', the account's, then the request's —, so these queue:
   one asked after it is refused. A revoke racing the write a matured request allows lets one
   through: the request is cancelled and the write refused, or the write lands and the revoke finds
   no request.
+- **A rename and an approval or a revoke.** A rename takes the rows of the device it renames and
+  of its session's device as a revoke takes them: an approval or a revoke of either, under way,
+  lands first and the rename is decided on what it left; one asked after waits for the rename.
 - **A revoke and a replacement.** The revoke reads the generation under its share lock, the
   replacement writes it: an approved device revoked as it replaces the words either writes first,
   or is no longer approved when its write decides, and writes nothing.
@@ -1238,7 +1248,11 @@ direct_messages          — sender_actor_uri, mls_ciphertext, activity_uri,
                             ciphertext, never sees plaintext)
 
 user_devices             — per-device row, one per (user_id, device_id):
-                            display_name, kind (laptop | phone | tablet | unknown),
+                            display_name (the automatic name), kind (laptop |
+                            phone | tablet | unknown), client (app | browser |
+                            unknown), chosen_name TEXT NULL (the name the user
+                            gave it, 1–50 characters, shown over display_name;
+                            NULL gives the automatic name back),
                             paired_at, last_seen_at, revoked_at,
                             drk_public_key BYTEA, attestation_signature BYTEA,
                             attestation_kid TEXT, attestation_issued_at,
@@ -1309,11 +1323,12 @@ All Bearer-auth except where noted. Cross-IdP paths use HTTP Signatures — see
 
 | Endpoint | Description |
 |---|---|
-| `POST /api/keys/devices` | Register/renew/rotate the caller's DRK attestation: `{ device_id, drk_public_key, hpke_public_key?, hpke_key_signature? }`, keys and signature in standard base64. Idempotent on `(device_id, drk_public_key)`. The device's HPKE key comes with the DRK's signature over its canonical bytes, both or neither (§ 3.3). A session that declared its device (`PUT /api/sessions/current/device`) registers that device only; a session that named none registers a new device, or the same root key again, and another root key only from a session that named that very device (`403 device_required`, "Key directory rules"). A device seen for the first time is named from the request's `User-Agent` ("Chrome on Linux"); one recorded unnamed takes the name of its first KeyPackage upload that says. First-time mint emits a `DeviceJoined` WS event to the user's other live sessions; a rotation drops, in the same write, the device's approvals and those it signed (§ 3.9), and the key shares it sent or was sent; a new HPKE key, or one cleared, the share it was sent (§ 3.11). Returns the signature, kid, issued_at, expires_at, and the canonical bytes the IdP signed so the client can re-verify locally |
-| `GET /api/keys/devices` | List the caller's devices with their attestation expiry (the client uses this to schedule silent renewals), and whether each is signed in: `signed_in`, `last_active_at`. With each device, what another device needs to verify its keys itself (§ 3.3): `drk_public_key`, `attestation_signature`, `attestation_kid`, `attestation_expires_at` — the text the attestation signed —, `hpke_public_key`, `hpke_key_signature`; `null` where the device has registered no DRK, or no HPKE key. And `history_generation`, the history key's generation the device says it holds (§ 3.6), `null` until it says: the client compares it with the current generation. And `approvals`, oldest first, those binding the device's `drk_public_key` (§ 3.9): `{ by: "device", device_id, signature, created_at }` — `device_id` the approver — or `{ by: "passphrase", generation, signature, created_at }`, the signature in standard base64 |
+| `POST /api/keys/devices` | Register/renew/rotate the caller's DRK attestation: `{ device_id, drk_public_key, hpke_public_key?, hpke_key_signature?, label? }`, keys and signature in standard base64. Idempotent on `(device_id, drk_public_key)`. The device's HPKE key comes with the DRK's signature over its canonical bytes, both or neither (§ 3.3). A session that declared its device (`PUT /api/sessions/current/device`) registers that device only; a session that named none registers a new device, or the same root key again, and another root key only from a session that named that very device (`403 device_required`, "Key directory rules"). `label` `{ name, kind, client }` names the device, else its `User-Agent` does ("Key directory rules"). First-time mint emits a `DeviceJoined` WS event to the user's other live sessions; a rotation drops, in the same write, the device's approvals and those it signed (§ 3.9), and the key shares it sent or was sent; a new HPKE key, or one cleared, the share it was sent (§ 3.11). Returns the signature, kid, issued_at, expires_at, and the canonical bytes the IdP signed so the client can re-verify locally |
+| `GET /api/keys/devices` | List the caller's devices, each by its shown name: `display_name` — `chosen_name` when set, else `automatic_name` —, with `automatic_name`, `chosen_name` (`null` when none), `kind` and `client` (`app`, `browser` or `unknown`; "Key directory rules"); with their attestation expiry (the client uses this to schedule silent renewals), and whether each is signed in: `signed_in`, `last_active_at`. With each device, what another device needs to verify its keys itself (§ 3.3): `drk_public_key`, `attestation_signature`, `attestation_kid`, `attestation_expires_at` — the text the attestation signed —, `hpke_public_key`, `hpke_key_signature`; `null` where the device has registered no DRK, or no HPKE key. And `history_generation`, the history key's generation the device says it holds (§ 3.6), `null` until it says: the client compares it with the current generation. And `approvals`, oldest first, those binding the device's `drk_public_key` (§ 3.9): `{ by: "device", device_id, signature, created_at }` — `device_id` the approver — or `{ by: "passphrase", generation, signature, created_at }`, the signature in standard base64 |
 | `PUT /api/keys/devices/:device_id/history-key` | `{ generation }`: the device says it holds that generation of the account's history key (§ 3.6). Only from the device's own session: one that has named this very device (`403 device_required` when it named none, `403 device_mismatch` when another; below). The current generation only (`409 stale_history_key`, none set yet included, checked again as it is written); an unrevoked device of the caller's only (`403` revoked, `404` another account's or unknown). The key share the device was sent is deleted in the same write (§ 3.11). `204` |
 | `POST /api/keys/devices/:device_id/revoke` | Sets the directory-level revocation flag, clears the device's HPKE key, drops the approvals it signed (§ 3.9), deletes the key shares it sent or was sent (§ 3.11) and closes the approval requests it asks or answers (§ 3.10, `approval_closed` to the other side) and cancels its start over request (§ 3.12, `start_over_cancelled`) in one write, then signs the device out — its sessions end, a web app's with the browser session it signed in through and that browser's other web apps (`identity-provider/specs/auth.md § 1`, "Sessions and devices"); the MLS Remove commits follow. Takes a password typed in the last 10 minutes (`identity-provider/specs/auth.md § 1`, "Sensitive actions"). A device approved under the current generation only from a session whose device is approved too (`403 approval_required`): a device nobody approved revokes only devices nobody approved, and itself; an account with no history key, any of its devices (§ 3.12). Idempotent; `404` for a device that is not the caller's |
-| `POST /api/keys/packages` | Upload a batch of KeyPackages for one of the caller's devices — refused whole (`400`) when a package is empty or not base64, or would take the device past the cap. An `expires_at` already past or beyond the lifetime (`E2EE_KEYPACKAGE_LIFETIME_SECS`) is the device's clock being off, not a bad package: the IdP stores it as now + the lifetime, by its own clock |
+| `PUT /api/keys/devices/:device_id/name` | `{ name }`, the key required (axum's `422` without it): the name the user gives one of their devices, shown over its automatic one ("Key directory rules"). `null`, a name empty once trimmed, or the device's automatic name itself gives the automatic name back; any other is trimmed, then 1–50 characters, none a control nor an invisible character, as an automatic name (`400` naming the rule: `name: at most 50 characters`). No recent password: a name is no sensitive action. Revoke's rule (§ 3.12), `403 approval_required`. `404` for a device that is not the caller's, `403` for a revoked one. Nothing is pushed: the other devices show it when they read the list again. `204` |
+| `POST /api/keys/packages` | Upload a batch of KeyPackages for one of the caller's devices: `{ device_id, packages, label? }`, `label` naming the device as a registration's does ("Key directory rules") — refused whole (`400`) when a package is empty or not base64, or would take the device past the cap. An `expires_at` already past or beyond the lifetime (`E2EE_KEYPACKAGE_LIFETIME_SECS`) is the device's clock being off, not a bad package: the IdP stores it as now + the lifetime, by its own clock |
 | `POST /api/keys/packages/claim` | Atomically reserve one KeyPackage for `actor_uri` — of `device_id`, or of any device with some left. Bearer or HTTP-Sig (peer IdPs); for remote `actor_uri` the local IdP proxies to the target IdP via HTTP-Sig |
 | `POST /api/keys/packages/claim/devices` | One KeyPackage of each of `actor_uri`'s unrevoked devices that has any, as `{ claims: [...] }` — a contact's first add brings all their devices in (§ 6.5). Asked, proxied, limited and refused as a single claim is; none at all → 409 |
 | `GET /api/keys/packages/status` | Per-device available counts + `needs_refill` flag |
@@ -1345,6 +1360,35 @@ All Bearer-auth except where noted. Cross-IdP paths use HTTP Signatures — see
   one of `hpke_public_key` and `hpke_key_signature` is sent, or when the DRK sent with it doesn't
   verify the signature over the key's canonical bytes for this device of this account; nothing is
   stored then. What a registration does to the key held follows § 3.3.
+- **A device names itself.** A registration or a KeyPackage upload may bring `label:
+  { name, kind, client }`, which the client composes from what only it can read — the phone's
+  model, Windows 11, the computer's model and name: `name` 1–100 characters once trimmed, none a
+  control character nor an invisible one (a zero-width space, a direction mark — the Arabic
+  letter mark included —, embedding, override or isolate, a word joiner, a byte order mark, a
+  line or paragraph separator, a soft hyphen, the Mongolian vowel separator, an invisible
+  operator, a Hangul filler, the blank braille pattern; the zero-width joiners stay, though a
+  name of nothing else is blank); `kind` `laptop`, `phone`, `tablet` or `unknown`; `client` `app`
+  or `browser`. A label whose name, kind or client breaks its rule is refused (`400`, naming the
+  rule: `label.client: app or browser`), nothing stored. A request without one is named from its
+  `User-Agent` — "Chrome on Linux"; `client` `app` when it says `Electron/`, `browser` when it
+  names a browser, else `unknown`. A device not recorded yet takes the label its request comes
+  with, from any session of the owner's. A device recorded already has its automatic name, kind
+  and client replaced only by a request from a session that named that very device — a password
+  alone changes no device's automatic name, as it speaks for none: a renewal takes any session,
+  and device ids are listed —; from that session, a label the client composed replaces them at
+  each request — the name follows the device —, and one read from the `User-Agent` only a device
+  recorded unnamed ("Web client"), never one named already (`domain::e2ee::BroughtLabel::write`).
+  From any other session the label held stays as it is. Wherever a device is named — the devices
+  list, `approval_requested` and the approval requests, `start_over_requested` and the start
+  over request — it is by its shown name: the name its user gave it (`chosen_name`), else the
+  automatic one (`Device::shown_name`).
+- **The user names a device.** A device has two names: the automatic one, which it gives itself
+  (above) and which is its own claim, as its `User-Agent` was; and the one its user chose
+  (`PUT /api/keys/devices/:device_id/name`), `null` until then, shown over it. Clearing the
+  chosen name gives the automatic one back, and so does choosing the automatic name itself —
+  compared with the one held as the write reads it (`Device::chosen_name_after`) —, so the names
+  the device gives itself later show; a new automatic name never replaces a chosen one. Revoke's
+  rule (§ 3.12), `403 approval_required`. A revoked device keeps the name it had (`403`).
 - **A revoked device is out of the directory.** Its KeyPackages are never claimed, and it can
   neither upload more nor renew its attestation (`403`) — a renewal would hand a stolen device
   another year.
