@@ -9,7 +9,7 @@ use domain::e2ee::testing::{
 use domain::e2ee::{
     ApprovalPublicKey, Approver, Attestation, CheckedApproval, DeviceLabel, DeviceRootKey,
     DeviceTrust, HistoryCheckValue, HistoryGeneration, HistoryKey, HistorySalt, HpkeKeyWrite,
-    KeyPackages, KeyStoreError, approval_bytes,
+    KeyPackages, KeyStoreError, LabelWrite, approval_bytes,
 };
 use domain::identity::Account;
 use domain::identity::testing::{InMemoryAccounts, account};
@@ -135,12 +135,16 @@ impl World {
             issued_at: now(),
             expires_at: now() + Duration::days(365),
         };
-        let label = DeviceLabel {
-            name: "Firefox on Linux".to_owned(),
-            kind: domain::e2ee::DeviceKind::Laptop,
-        };
+        let label = DeviceLabel::from_client("Firefox on Linux", "laptop", "browser").unwrap();
         self.devices
-            .attest(who.id, id, &label, None, &attestation, &HpkeKeyWrite::Clear)
+            .attest(
+                who.id,
+                id,
+                &LabelWrite::IfNew(label),
+                None,
+                &attestation,
+                &HpkeKeyWrite::Clear,
+            )
             .await
             .unwrap();
         id
@@ -433,11 +437,42 @@ async fn opening_a_request_tells_the_accounts_other_devices() {
 }
 
 #[tokio::test]
+async fn a_request_shows_its_device_by_the_name_its_user_chose() {
+    let w = world();
+    let (laptop, on_laptop) = w.on_a_device(&w.alice, 1).await;
+    let (_, on_phone) = w.on_a_device(&w.alice, 2).await;
+    w.devices.choose_name(laptop, "Work laptop");
+
+    let request = w.opened(&on_laptop).await;
+
+    assert!(
+        matches!(
+            &w.sent()[..],
+            [SentTrust::Requested { display_name, .. }] if display_name == "Work laptop"
+        ),
+        "{:?}",
+        w.sent()
+    );
+    assert_eq!(
+        w.list.execute(&on_phone, now()).await.unwrap(),
+        vec![ListedRequest {
+            request,
+            display_name: "Work laptop".to_owned()
+        }]
+    );
+}
+
+#[tokio::test]
 async fn a_request_takes_a_named_device_with_a_root_key() {
     let w = world();
     let unattested = DeviceId::generate();
     w.devices
-        .stash(w.alice.id, unattested, &DeviceLabel::unknown(), false, &[])
+        .stash(
+            w.alice.id,
+            unattested,
+            &LabelWrite::IfNew(DeviceLabel::unknown()),
+            &[],
+        )
         .await
         .unwrap();
     let on_unattested = w.session(&w.alice, Some(unattested)).await;
@@ -716,7 +751,12 @@ async fn a_device_without_a_root_key_cannot_answer_a_request() {
     let (_, on_laptop) = w.on_a_device(&w.alice, 1).await;
     let unattested = DeviceId::generate();
     w.devices
-        .stash(w.alice.id, unattested, &DeviceLabel::unknown(), false, &[])
+        .stash(
+            w.alice.id,
+            unattested,
+            &LabelWrite::IfNew(DeviceLabel::unknown()),
+            &[],
+        )
         .await
         .unwrap();
     let on_unattested = w.session(&w.alice, Some(unattested)).await;

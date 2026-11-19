@@ -24,17 +24,18 @@ use super::{
     NewArchiveEntry, check_history_generation,
 };
 use super::{
-    Approval, Approver, ArchiveError, DeviceTrust, Ed25519PublicKey, KeyGate, KeyShare,
-    StartOverEnd, StartOverEnding, StartOverRequest, may_replace_history_key, may_revoke,
+    Approval, Approver, ArchiveError, ChosenName, DeviceTrust, Ed25519PublicKey, KeyGate, KeyShare,
+    Renaming, StartOverEnd, StartOverEnding, StartOverRequest, may_rename, may_replace_history_key,
+    may_revoke,
 };
 use super::{
     Attest, Attestation, AttestationExpiry, Claim, ClaimedKeyPackage, Commit, CommitLog,
     DeliveryStoreError, Device, DeviceAttester, DeviceLabel, DeviceNotifier, DeviceRootKey,
     Devices, Ed25519Signature, Ed25519Verifier, Epoch, GroupInfo, GroupInfoBlob, GroupInfos,
-    HeldHpkeKey, HpkeKeyWrite, HpkePublicKey, KeyPackages, KeyStoreError, MlsFederation,
-    MlsNotifier, NewCommit, NewKeyPackage, NewWelcome, OutgoingWelcome, RemoteClaimError,
-    RemoteKeyPackages, Revocation, SignedAttestation, SignedHpkeKey, UnverifiedHpkeKey, Welcome,
-    Welcomes,
+    HeldHpkeKey, HpkeKeyWrite, HpkePublicKey, KeyPackages, KeyStoreError, LabelWrite,
+    MlsFederation, MlsNotifier, NewCommit, NewKeyPackage, NewWelcome, OutgoingWelcome,
+    RemoteClaimError, RemoteKeyPackages, Revocation, SignedAttestation, SignedHpkeKey,
+    UnverifiedHpkeKey, Welcome, Welcomes,
 };
 use crate::auth::Sessions;
 use crate::auth::testing::InMemorySessions;
@@ -109,6 +110,13 @@ impl InMemoryKeyDirectory {
         }
     }
 
+    /// The device as its user named it.
+    pub fn choose_name(&self, id: DeviceId, name: &str) {
+        let mut state = self.state.lock().unwrap();
+        state.device_mut(id).expect("recorded").chosen_name =
+            Some(ChosenName::parse(name).unwrap());
+    }
+
     pub fn relaying(self, requests: Arc<InMemoryApprovalRequests>) -> Self {
         Self {
             requests: Some(requests),
@@ -155,12 +163,13 @@ impl State {
         self.devices.iter_mut().find(|d| d.id == id)
     }
 
-    /// The device, recorded if new; `DeviceTaken` when another account holds its id.
+    /// The device, recorded if new, labelled as `label` says; `DeviceTaken` when another account
+    /// holds its id.
     fn record(
         &mut self,
         owner: UserId,
         id: DeviceId,
-        label: &DeviceLabel,
+        label: &LabelWrite,
     ) -> Result<&mut Device, KeyStoreError> {
         let now = OffsetDateTime::now_utc();
         if self.device_mut(id).is_some_and(|d| d.owner != owner) {
@@ -170,7 +179,8 @@ impl State {
             self.devices.push(Device {
                 id,
                 owner,
-                label: label.clone(),
+                label: label.label().clone(),
+                chosen_name: None,
                 paired_at: now,
                 last_seen_at: now,
                 revoked_at: None,
@@ -179,7 +189,11 @@ impl State {
                 history_generation: None,
             });
         }
-        Ok(self.device_mut(id).expect("just recorded"))
+        let device = self.device_mut(id).expect("just recorded");
+        if label.replaces() {
+            device.label = label.label().clone();
+        }
+        Ok(device)
     }
 }
 
@@ -206,7 +220,7 @@ impl Devices for InMemoryKeyDirectory {
         &self,
         owner: UserId,
         id: DeviceId,
-        label: &DeviceLabel,
+        label: &LabelWrite,
         read: Option<&Device>,
         attestation: &Attestation,
         hpke_key: &HpkeKeyWrite,
@@ -277,6 +291,28 @@ impl Devices for InMemoryKeyDirectory {
         })
         .pop();
         Ok(Revocation::Revoked { closed, start_over })
+    }
+
+    async fn rename(
+        &self,
+        owner: UserId,
+        id: DeviceId,
+        by: Option<DeviceId>,
+        name: Option<&ChosenName>,
+    ) -> Result<Renaming, KeyStoreError> {
+        let trust = self.trust_of(owner);
+        let device = match trust.device(id) {
+            None => return Ok(Renaming::NotFound),
+            Some(device) if device.is_revoked() => return Ok(Renaming::Revoked),
+            Some(device) => device,
+        };
+        if let Err(refusal) = may_rename(id, by, &trust) {
+            return Ok(Renaming::Refused(refusal));
+        }
+        let kept = device.chosen_name_after(name);
+        let mut state = self.state.lock().unwrap();
+        state.device_mut(id).expect("read just now").chosen_name = kept;
+        Ok(Renaming::Renamed)
     }
 
     async fn hold_history_key(
@@ -381,16 +417,12 @@ impl KeyPackages for InMemoryKeyDirectory {
         &self,
         owner: UserId,
         device: DeviceId,
-        label: &DeviceLabel,
-        relabel: bool,
+        label: &LabelWrite,
         packages: &[NewKeyPackage],
     ) -> Result<usize, KeyStoreError> {
         let mut state = self.state.lock().unwrap();
         let recorded = state.record(owner, device, label)?;
         recorded.last_seen_at = OffsetDateTime::now_utc();
-        if relabel {
-            recorded.label = label.clone();
-        }
         state
             .packages
             .extend(packages.iter().map(|package| Stashed {
@@ -1145,7 +1177,7 @@ pub mod contract {
     pub use super::start_over::contract::*;
 
     use super::*;
-    use crate::e2ee::{DeviceApprovals, DeviceKind, KeyPackageBytes};
+    use crate::e2ee::{AutomaticName, DeviceApprovals, DeviceClient, DeviceKind, KeyPackageBytes};
 
     thread_local! {
         // Read once per test, each on a thread of its own: two times a test names never straddle
@@ -1161,8 +1193,9 @@ pub mod contract {
 
     pub(super) fn label(name: &str) -> DeviceLabel {
         DeviceLabel {
-            name: name.to_owned(),
+            name: AutomaticName::parse(name).unwrap(),
             kind: DeviceKind::Laptop,
+            client: DeviceClient::Browser,
         }
     }
 
@@ -1204,7 +1237,7 @@ pub mod contract {
             .attest(
                 owner,
                 id,
-                &label("laptop"),
+                &LabelWrite::IfNew(label("laptop")),
                 read.as_ref(),
                 attestation,
                 &hpke_key,
@@ -1223,7 +1256,7 @@ pub mod contract {
             .attest(
                 alice,
                 id,
-                &label("Firefox on Linux"),
+                &LabelWrite::IfNew(label("Firefox on Linux")),
                 None,
                 &attested,
                 &HpkeKeyWrite::Clear,
@@ -1251,7 +1284,7 @@ pub mod contract {
             .attest(
                 alice,
                 id,
-                &label("first"),
+                &LabelWrite::IfNew(label("first")),
                 None,
                 &attestation(1),
                 &HpkeKeyWrite::Clear,
@@ -1265,7 +1298,7 @@ pub mod contract {
             .attest(
                 alice,
                 id,
-                &label("second"),
+                &LabelWrite::IfNew(label("second")),
                 read.as_ref(),
                 &renewed,
                 &HpkeKeyWrite::Clear,
@@ -1278,6 +1311,49 @@ pub mod contract {
             (device.label, device.attestation),
             (label("first"), Some(renewed))
         );
+    }
+
+    /// A label the client composed follows the device: name, kind and client, when the write
+    /// happens at all.
+    pub async fn a_registration_relabels_a_known_device_when_asked(
+        devices: &dyn Devices,
+        alice: UserId,
+    ) {
+        let id = DeviceId::generate();
+        register(devices, alice, id, &attestation(1), HpkeKeyWrite::Clear).await;
+        let read = devices.find(id).await.unwrap();
+        let app = DeviceLabel {
+            name: AutomaticName::parse("ThinkPad X1 Carbon Gen 9 (alice-thinkpad)").unwrap(),
+            kind: DeviceKind::Phone,
+            client: DeviceClient::App,
+        };
+
+        let relabelled = devices
+            .attest(
+                alice,
+                id,
+                &LabelWrite::Always(app.clone()),
+                read.as_ref(),
+                &attestation(1),
+                &HpkeKeyWrite::Keep,
+            )
+            .await
+            .unwrap();
+        let stale = devices
+            .attest(
+                alice,
+                id,
+                &LabelWrite::Always(label("stale")),
+                None,
+                &attestation(1),
+                &HpkeKeyWrite::Keep,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!((relabelled, stale), (Attest::Stored, Attest::Stale));
+        let device = devices.find(id).await.unwrap().unwrap();
+        assert_eq!((device.label, device.chosen_name), (app, None));
     }
 
     pub async fn a_device_holds_the_hpke_key_registered_with_its_attestation_until_replaced(
@@ -1317,7 +1393,7 @@ pub mod contract {
                 .attest(
                     alice,
                     id,
-                    &label("laptop"),
+                    &LabelWrite::IfNew(label("laptop")),
                     read.as_ref(),
                     &attestation(3),
                     &HpkeKeyWrite::Keep,
@@ -1458,7 +1534,7 @@ pub mod contract {
         register(devices, alice, id, &attestation(1), set(1)).await;
 
         packages
-            .stash(alice, id, &label("laptop"), false, &[fresh(1)])
+            .stash(alice, id, &LabelWrite::IfNew(label("laptop")), &[fresh(1)])
             .await
             .unwrap();
 
@@ -1493,7 +1569,12 @@ pub mod contract {
             .await
             .unwrap();
         packages
-            .stash(alice, seen, &label("laptop"), false, &[fresh(1)])
+            .stash(
+                alice,
+                seen,
+                &LabelWrite::IfNew(label("laptop")),
+                &[fresh(1)],
+            )
             .await
             .unwrap();
 
@@ -1563,6 +1644,135 @@ pub mod contract {
         );
     }
 
+    pub async fn a_device_is_named_and_given_its_automatic_name_back_by_its_owner_only(
+        devices: &dyn Devices,
+        alice: UserId,
+        bob: UserId,
+    ) {
+        let id = DeviceId::generate();
+        register(devices, alice, id, &attestation(1), HpkeKeyWrite::Clear).await;
+        let work = ChosenName::parse("Work laptop").unwrap();
+
+        let by_bob = devices.rename(bob, id, None, Some(&work)).await.unwrap();
+        let unknown = devices
+            .rename(alice, DeviceId::generate(), Some(id), Some(&work))
+            .await
+            .unwrap();
+        let named = devices
+            .rename(alice, id, Some(id), Some(&work))
+            .await
+            .unwrap();
+        let held = devices.find(id).await.unwrap().unwrap();
+        let listed = devices.list(alice).await.unwrap()[0].chosen_name.clone();
+        devices
+            .attest(
+                alice,
+                id,
+                &LabelWrite::Always(label("ThinkPad X1")),
+                Some(&held),
+                &attestation(1),
+                &HpkeKeyWrite::Keep,
+            )
+            .await
+            .unwrap();
+        let relabelled = devices.find(id).await.unwrap().unwrap();
+        let cleared = devices.rename(alice, id, None, None).await.unwrap();
+
+        assert_eq!((by_bob, unknown), (Renaming::NotFound, Renaming::NotFound));
+        assert_eq!((named, cleared), (Renaming::Renamed, Renaming::Renamed));
+        assert_eq!(
+            (held.label, held.chosen_name),
+            (label("laptop"), Some(work.clone()))
+        );
+        assert_eq!(listed, Some(work.clone()));
+        assert_eq!(
+            (relabelled.label, relabelled.chosen_name),
+            (label("ThinkPad X1"), Some(work)),
+            "a new automatic name keeps the chosen one"
+        );
+        assert_eq!(devices.find(id).await.unwrap().unwrap().chosen_name, None);
+    }
+
+    pub async fn a_name_equal_to_the_automatic_one_held_gives_it_back(
+        devices: &dyn Devices,
+        alice: UserId,
+    ) {
+        let id = DeviceId::generate();
+        register(devices, alice, id, &attestation(1), HpkeKeyWrite::Clear).await;
+        let name = |raw: &str| ChosenName::parse(raw).unwrap();
+        devices
+            .rename(alice, id, Some(id), Some(&name("Work laptop")))
+            .await
+            .unwrap();
+
+        let same = devices
+            .rename(alice, id, Some(id), Some(&name(" laptop ")))
+            .await
+            .unwrap();
+        let cleared = devices.find(id).await.unwrap().unwrap();
+        devices
+            .attest(
+                alice,
+                id,
+                &LabelWrite::Always(label("ThinkPad X1")),
+                Some(&cleared),
+                &attestation(1),
+                &HpkeKeyWrite::Keep,
+            )
+            .await
+            .unwrap();
+        let followed = devices.find(id).await.unwrap().unwrap();
+        devices
+            .rename(alice, id, Some(id), Some(&name("laptop")))
+            .await
+            .unwrap();
+        let the_old_one = devices.find(id).await.unwrap().unwrap();
+
+        assert_eq!(same, Renaming::Renamed);
+        assert_eq!(cleared.chosen_name, None);
+        assert_eq!(
+            followed.shown_name(),
+            "ThinkPad X1",
+            "the name follows the device"
+        );
+        assert_eq!(
+            the_old_one.chosen_name,
+            Some(name("laptop")),
+            "against the automatic name held"
+        );
+    }
+
+    pub async fn a_revoked_device_is_renamed_no_more(devices: &dyn Devices, alice: UserId) {
+        let id = DeviceId::generate();
+        register(devices, alice, id, &attestation(1), HpkeKeyWrite::Clear).await;
+        let work = ChosenName::parse("Work laptop").unwrap();
+        devices
+            .rename(alice, id, Some(id), Some(&work))
+            .await
+            .unwrap();
+        devices
+            .revoke(alice, id, Some(id), time::OffsetDateTime::now_utc())
+            .await
+            .unwrap();
+
+        let renamed = devices
+            .rename(
+                alice,
+                id,
+                None,
+                Some(&ChosenName::parse("Old laptop").unwrap()),
+            )
+            .await
+            .unwrap();
+        let cleared = devices.rename(alice, id, None, None).await.unwrap();
+
+        assert_eq!((renamed, cleared), (Renaming::Revoked, Renaming::Revoked));
+        assert_eq!(
+            devices.find(id).await.unwrap().unwrap().chosen_name,
+            Some(work)
+        );
+    }
+
     pub async fn a_stash_counts_per_device_what_is_neither_claimed_nor_expired(
         packages: &dyn KeyPackages,
         alice: UserId,
@@ -1573,8 +1783,7 @@ pub mod contract {
             .stash(
                 alice,
                 laptop,
-                &label("laptop"),
-                false,
+                &LabelWrite::IfNew(label("laptop")),
                 &[fresh(1), fresh(2), fresh(3)],
             )
             .await
@@ -1583,8 +1792,7 @@ pub mod contract {
             .stash(
                 alice,
                 phone,
-                &label("phone"),
-                false,
+                &LabelWrite::IfNew(label("phone")),
                 &[fresh(4), package(5, -Duration::minutes(1))],
             )
             .await
@@ -1593,8 +1801,7 @@ pub mod contract {
             .stash(
                 bob,
                 DeviceId::generate(),
-                &label("bob's"),
-                false,
+                &LabelWrite::IfNew(label("bob's")),
                 &[fresh(6)],
             )
             .await
@@ -1616,13 +1823,23 @@ pub mod contract {
     ) {
         let id = DeviceId::generate();
         packages
-            .stash(alice, id, &label("Chrome on Android"), false, &[fresh(1)])
+            .stash(
+                alice,
+                id,
+                &LabelWrite::IfNew(label("Chrome on Android")),
+                &[fresh(1)],
+            )
             .await
             .unwrap();
         let recorded = devices.find(id).await.unwrap().expect("recorded");
 
         packages
-            .stash(alice, id, &label("another name"), false, &[fresh(2)])
+            .stash(
+                alice,
+                id,
+                &LabelWrite::IfNew(label("another name")),
+                &[fresh(2)],
+            )
             .await
             .unwrap();
 
@@ -1651,7 +1868,7 @@ pub mod contract {
             .attest(
                 alice,
                 id,
-                &DeviceLabel::unknown(),
+                &LabelWrite::IfNew(DeviceLabel::unknown()),
                 None,
                 &attestation(1),
                 &HpkeKeyWrite::Clear,
@@ -1660,17 +1877,32 @@ pub mod contract {
             .unwrap();
 
         packages
-            .stash(alice, id, &label("Chrome on Linux"), false, &[fresh(1)])
+            .stash(
+                alice,
+                id,
+                &LabelWrite::IfNew(label("Chrome on Linux")),
+                &[fresh(1)],
+            )
             .await
             .unwrap();
         let still_unknown = devices.find(id).await.unwrap().unwrap().label;
         packages
-            .stash(alice, id, &label("Chrome on Linux"), true, &[fresh(2)])
+            .stash(
+                alice,
+                id,
+                &LabelWrite::Always(label("Chrome on Linux")),
+                &[fresh(2)],
+            )
             .await
             .unwrap();
         let named = devices.find(id).await.unwrap().unwrap().label;
         packages
-            .stash(alice, id, &label("Firefox on Linux"), false, &[fresh(3)])
+            .stash(
+                alice,
+                id,
+                &LabelWrite::IfNew(label("Firefox on Linux")),
+                &[fresh(3)],
+            )
             .await
             .unwrap();
 
@@ -1689,7 +1921,12 @@ pub mod contract {
         let (device, oldest) = (DeviceId::generate(), fresh(1));
         for stashed in [oldest.clone(), fresh(2)] {
             packages
-                .stash(alice, device, &label("laptop"), false, &[stashed])
+                .stash(
+                    alice,
+                    device,
+                    &LabelWrite::IfNew(label("laptop")),
+                    &[stashed],
+                )
                 .await
                 .unwrap();
         }
@@ -1719,22 +1956,25 @@ pub mod contract {
             .stash(
                 alice,
                 empty,
-                &label("laptop"),
-                false,
+                &LabelWrite::IfNew(label("laptop")),
                 &[package(1, -Duration::minutes(1))],
             )
             .await
             .unwrap();
         packages
-            .stash(alice, stocked, &label("phone"), false, &[fresh(2)])
+            .stash(
+                alice,
+                stocked,
+                &LabelWrite::IfNew(label("phone")),
+                &[fresh(2)],
+            )
             .await
             .unwrap();
         packages
             .stash(
                 bob,
                 DeviceId::generate(),
-                &label("bob's"),
-                false,
+                &LabelWrite::IfNew(label("bob's")),
                 &[fresh(3)],
             )
             .await
@@ -1757,11 +1997,21 @@ pub mod contract {
     ) {
         let (revoked, laptop) = (DeviceId::generate(), DeviceId::generate());
         packages
-            .stash(alice, revoked, &label("stolen phone"), false, &[fresh(1)])
+            .stash(
+                alice,
+                revoked,
+                &LabelWrite::IfNew(label("stolen phone")),
+                &[fresh(1)],
+            )
             .await
             .unwrap();
         packages
-            .stash(alice, laptop, &label("laptop"), false, &[fresh(2)])
+            .stash(
+                alice,
+                laptop,
+                &LabelWrite::IfNew(label("laptop")),
+                &[fresh(2)],
+            )
             .await
             .unwrap();
         devices
@@ -1793,10 +2043,17 @@ pub mod contract {
         let before = devices.find(id).await.unwrap();
 
         let attested = devices
-            .attest(bob, id, &label("bob's"), None, &attestation(2), &set(2))
+            .attest(
+                bob,
+                id,
+                &LabelWrite::IfNew(label("bob's")),
+                None,
+                &attestation(2),
+                &set(2),
+            )
             .await;
         let stashed = packages
-            .stash(bob, id, &label("bob's"), false, &[fresh(1)])
+            .stash(bob, id, &LabelWrite::IfNew(label("bob's")), &[fresh(1)])
             .await;
 
         assert!(
@@ -1820,14 +2077,18 @@ pub mod contract {
             .stash(
                 alice,
                 device,
-                &label("laptop"),
-                false,
+                &LabelWrite::IfNew(label("laptop")),
                 &[package(1, -Duration::minutes(1)), fresh(2)],
             )
             .await
             .unwrap();
         packages
-            .stash(alice, device, &label("laptop"), false, &[fresh(3)])
+            .stash(
+                alice,
+                device,
+                &LabelWrite::IfNew(label("laptop")),
+                &[fresh(3)],
+            )
             .await
             .unwrap();
         packages.claim(alice, Some(device)).await.unwrap();

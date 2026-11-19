@@ -1,8 +1,8 @@
 use domain::auth::{RevokedReason, Sessions, naming_bytes};
 use domain::e2ee::testing::plain_signature;
 use domain::e2ee::{
-    Attestation, DeviceKind, DeviceLabel, DeviceRootKey, Devices, Ed25519Signature, HpkeKeyWrite,
-    KeyPackages,
+    Attestation, DeviceLabel, DeviceRootKey, Devices, Ed25519Signature, HpkeKeyWrite, KeyPackages,
+    LabelWrite,
 };
 use domain::identity::Bearer;
 use domain::{DeviceId, SessionId, UserId};
@@ -18,10 +18,7 @@ fn root() -> DeviceRootKey {
 /// A device of `owner`'s, its root key registered.
 async fn device_of(w: &World, owner: UserId) -> DeviceId {
     let device = DeviceId::generate();
-    let label = DeviceLabel {
-        name: "Firefox on Linux".to_owned(),
-        kind: DeviceKind::Laptop,
-    };
+    let label = DeviceLabel::from_client("Firefox on Linux", "laptop", "browser").unwrap();
     let attestation = Attestation {
         root_key: root(),
         signature: vec![1; 64],
@@ -33,7 +30,7 @@ async fn device_of(w: &World, owner: UserId) -> DeviceId {
         .attest(
             owner,
             device,
-            &label,
+            &LabelWrite::IfNew(label),
             None,
             &attestation,
             &HpkeKeyWrite::Clear,
@@ -348,7 +345,12 @@ async fn a_device_with_no_root_key_is_named_by_no_session() {
     let w = world().await;
     let device = DeviceId::generate();
     w.devices
-        .stash(w.alice.id, device, &DeviceLabel::unknown(), false, &[])
+        .stash(
+            w.alice.id,
+            device,
+            &LabelWrite::IfNew(DeviceLabel::unknown()),
+            &[],
+        )
         .await
         .unwrap();
     let bearer = w.bearer_of(w.alice.id);

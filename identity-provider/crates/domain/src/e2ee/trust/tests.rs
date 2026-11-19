@@ -16,6 +16,7 @@ fn device(owner: UserId, root: u8) -> Device {
         id: DeviceId::generate(),
         owner,
         label: DeviceLabel::unknown(),
+        chosen_name: None,
         paired_at: at,
         last_seen_at: at,
         revoked_at: None,
@@ -158,6 +159,70 @@ fn an_account_with_no_history_key_keeps_the_rule_of_any_device_of_its_own() {
 
     assert_eq!(may_revoke(a.laptop.id, Some(a.fresh.id), &a.trust), Ok(()));
     assert_eq!(may_revoke(a.laptop.id, None, &a.trust), Ok(()));
+}
+
+#[test]
+fn an_approved_device_renames_any_device_of_the_account() {
+    let a = account();
+
+    for target in [&a.phone, &a.tablet, &a.fresh] {
+        assert_eq!(
+            may_rename(target.id, Some(a.laptop.id), &a.trust),
+            Ok(()),
+            "{:?}",
+            target.id
+        );
+    }
+    assert_eq!(
+        may_rename(a.laptop.id, Some(a.phone.id), &a.trust),
+        Ok(()),
+        "approved through the laptop"
+    );
+}
+
+#[test]
+fn a_device_not_approved_renames_only_unapproved_devices_and_itself() {
+    let a = account();
+
+    assert_eq!(
+        may_rename(a.laptop.id, Some(a.fresh.id), &a.trust),
+        Err(ApprovalRequired)
+    );
+    assert_eq!(
+        may_rename(a.phone.id, Some(a.tablet.id), &a.trust),
+        Err(ApprovalRequired),
+        "approved under an older generation only"
+    );
+    assert_eq!(may_rename(a.tablet.id, Some(a.fresh.id), &a.trust), Ok(()));
+    assert_eq!(may_rename(a.fresh.id, Some(a.fresh.id), &a.trust), Ok(()));
+}
+
+#[test]
+fn a_session_that_named_no_device_renames_no_approved_device() {
+    let a = account();
+
+    assert_eq!(
+        may_rename(a.phone.id, None, &a.trust),
+        Err(ApprovalRequired)
+    );
+    assert_eq!(may_rename(a.fresh.id, None, &a.trust), Ok(()));
+}
+
+#[test]
+fn an_approved_device_renames_itself() {
+    let a = account();
+
+    assert_eq!(may_rename(a.phone.id, Some(a.phone.id), &a.trust), Ok(()));
+}
+
+#[test]
+fn an_account_with_no_history_key_renames_any_device_from_any_session() {
+    let mut a = account();
+    a.trust.current = None;
+
+    for by in [Some(a.fresh.id), Some(a.tablet.id), None] {
+        assert_eq!(may_rename(a.laptop.id, by, &a.trust), Ok(()), "{by:?}");
+    }
 }
 
 #[test]

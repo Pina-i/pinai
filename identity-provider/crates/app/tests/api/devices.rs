@@ -265,3 +265,47 @@ async fn a_session_is_limited_to_the_device_it_declared() {
     );
     app.stop().await.unwrap();
 }
+
+/// A client sending no label is named from its `User-Agent`, `client` included.
+#[tokio::test]
+async fn a_device_without_a_label_is_named_from_its_user_agent() {
+    let app = spawn_app().await;
+    let alice = app.sign_up("alice").await;
+    let device = Uuid::new_v4();
+    let expires_at = (time::OffsetDateTime::now_utc() + time::Duration::days(7))
+        .format(&time::format_description::well_known::Rfc3339)
+        .unwrap();
+
+    let uploaded = app
+        .http
+        .post(format!("{}/api/keys/packages", app.address))
+        .bearer_auth(&alice.token)
+        .header(
+            reqwest::header::USER_AGENT,
+            "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 \
+             (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36",
+        )
+        .json(&json!({
+            "device_id": device,
+            "packages": [{ "key_package": B64.encode([1; 8]), "expires_at": expires_at }],
+        }))
+        .send()
+        .await
+        .unwrap();
+    let devices = listed(&app, &alice).await;
+
+    assert_eq!(uploaded.status(), 201);
+    assert_eq!(
+        [
+            &devices[0]["display_name"],
+            &devices[0]["kind"],
+            &devices[0]["client"]
+        ],
+        [
+            &json!("Chrome on Android"),
+            &json!("phone"),
+            &json!("browser")
+        ]
+    );
+    app.stop().await.unwrap();
+}

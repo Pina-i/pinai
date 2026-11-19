@@ -3,7 +3,7 @@ use std::sync::Arc;
 use domain::DeviceId;
 use domain::auth::Sessions;
 use domain::e2ee::{
-    Attest, Attestation, DeviceAttester, DeviceLabel, DeviceNotifier, DeviceRootKey, Devices,
+    Attest, Attestation, BroughtLabel, DeviceAttester, DeviceNotifier, DeviceRootKey, Devices,
     Ed25519Verifier, KeyDirectoryError, Registration, SignedAttestation, UnverifiedHpkeKey,
     attestation_period, may_register,
 };
@@ -23,7 +23,8 @@ pub struct Registered {
 }
 
 /// `POST /api/keys/devices`: attest a device's root key — the first time, again to renew it, or
-/// another key to rotate — with the HPKE key it signed, when it sends one.
+/// another key to rotate — with the HPKE key it signed, when it sends one, labelling the device as
+/// [`BroughtLabel::write`] says.
 pub struct RegisterDevice {
     accounts: Arc<dyn Accounts>,
     devices: Arc<dyn Devices>,
@@ -58,7 +59,7 @@ impl RegisterDevice {
         device: DeviceId,
         key: DeviceRootKey,
         brought: Option<UnverifiedHpkeKey>,
-        label: &DeviceLabel,
+        label: &BroughtLabel,
         now: OffsetDateTime,
     ) -> Result<Registered, KeyDirectoryError> {
         let owner = bearer.user;
@@ -93,7 +94,7 @@ impl RegisterDevice {
                 .attest(
                     owner,
                     device,
-                    label,
+                    &label.write(existing.as_ref(), session.device),
                     existing.as_ref(),
                     &attestation,
                     &hpke_key,

@@ -202,8 +202,20 @@ async fn the_callers_devices_are_listed_with_their_attestation_expiry() {
     }
     assert_eq!(devices[1]["device_id"], json!(attested));
     assert_eq!(
-        (&devices[1]["display_name"], &devices[1]["kind"]),
-        (&json!("Web client"), &json!("unknown"))
+        (
+            &devices[1]["display_name"],
+            &devices[1]["automatic_name"],
+            &devices[1]["chosen_name"],
+            &devices[1]["kind"],
+            &devices[1]["client"],
+        ),
+        (
+            &json!("Web client"),
+            &json!("Web client"),
+            &Value::Null,
+            &json!("unknown"),
+            &json!("unknown")
+        )
     );
     assert_eq!(
         devices[1]["attestation_expires_at"], registered["expires_at"],
@@ -393,10 +405,187 @@ async fn key_packages_are_uploaded_for_a_device_named_by_its_user_agent() {
     assert_eq!(
         (
             &listed["devices"][0]["display_name"],
-            &listed["devices"][0]["kind"]
+            &listed["devices"][0]["kind"],
+            &listed["devices"][0]["client"],
         ),
-        (&json!("Firefox on Linux"), &json!("laptop"))
+        (
+            &json!("Firefox on Linux"),
+            &json!("laptop"),
+            &json!("browser")
+        )
     );
+}
+
+fn label(name: &str, kind: &str, client: &str) -> Value {
+    json!({ "name": name, "kind": kind, "client": client })
+}
+
+/// The names, kind and client `device` is listed with.
+fn naming(devices: &[Value], device: Uuid) -> [Value; 5] {
+    let listed = devices
+        .iter()
+        .find(|d| d["device_id"] == json!(device))
+        .expect("listed");
+    [
+        "display_name",
+        "automatic_name",
+        "chosen_name",
+        "kind",
+        "client",
+    ]
+    .map(|field| listed[field].clone())
+}
+
+#[tokio::test]
+async fn a_device_takes_the_label_its_own_session_brings_at_each_request() {
+    let w = world();
+    let (session, device) = w.app.on_a_device(w.alice.id).await;
+    let token = w.app.token_in(w.alice.id, session);
+    let app = "ThinkPad X1 Carbon Gen 9 (alice-thinkpad)";
+
+    let (uploaded, _) = w
+        .app
+        .call_in(
+            &token,
+            Method::POST,
+            "/api/keys/packages",
+            Some(json!({
+                "device_id": device,
+                "packages": packages(1),
+                "label": label(app, "laptop", "app"),
+            })),
+        )
+        .await;
+    let after_the_upload = naming(&w.devices(&w.alice).await, device);
+    let (renewed, body) = w
+        .app
+        .call_in(
+            &token,
+            Method::POST,
+            "/api/keys/devices",
+            Some(json!({
+                "device_id": device,
+                "drk_public_key": B64.encode([7; 32]),
+                "label": label("  Chrome on Windows 11 ", "laptop", "browser"),
+            })),
+        )
+        .await;
+
+    assert_eq!(uploaded, StatusCode::CREATED);
+    assert_eq!(
+        after_the_upload,
+        [
+            json!(app),
+            json!(app),
+            Value::Null,
+            json!("laptop"),
+            json!("app")
+        ]
+    );
+    assert_eq!(renewed, StatusCode::CREATED, "{body}");
+    assert_eq!(
+        naming(&w.devices(&w.alice).await, device),
+        [
+            json!("Chrome on Windows 11"),
+            json!("Chrome on Windows 11"),
+            Value::Null,
+            json!("laptop"),
+            json!("browser")
+        ]
+    );
+}
+
+/// A password alone renames no device: a renewal takes any session, and device ids are listed.
+#[tokio::test]
+async fn a_label_from_another_session_leaves_a_known_device_as_it_is() {
+    let w = world();
+    let (session, device) = w.app.on_a_device(w.alice.id).await;
+    let own = label("Pixel 8", "phone", "browser");
+    let (named, _) = w
+        .app
+        .call_in(
+            &w.app.token_in(w.alice.id, session),
+            Method::POST,
+            "/api/keys/packages",
+            Some(json!({ "device_id": device, "packages": packages(1), "label": own })),
+        )
+        .await;
+    let (fresh, misleading) = (Uuid::new_v4(), label("Alice's laptop", "laptop", "app"));
+
+    let (renewed, _) = w
+        .register_with(
+            &w.alice,
+            json!({
+                "device_id": device,
+                "drk_public_key": B64.encode([7; 32]),
+                "label": misleading,
+            }),
+        )
+        .await;
+    let mut uploads = Vec::new();
+    for id in [device, fresh] {
+        let (status, _) = w
+            .app
+            .call(
+                Method::POST,
+                "/api/keys/packages",
+                Some(w.alice.id),
+                Some(json!({ "device_id": id, "packages": packages(1), "label": misleading })),
+            )
+            .await;
+        uploads.push(status);
+    }
+    let devices = w.devices(&w.alice).await;
+
+    assert_eq!(named, StatusCode::CREATED);
+    assert_eq!(renewed, StatusCode::CREATED);
+    assert_eq!(uploads, [StatusCode::CREATED; 2]);
+    assert_eq!(naming(&devices, device)[0], json!("Pixel 8"));
+    assert_eq!(
+        naming(&devices, fresh)[0],
+        json!("Alice's laptop"),
+        "a new device takes the label it comes with"
+    );
+}
+
+#[tokio::test]
+async fn a_label_that_breaks_its_rule_is_refused_and_nothing_is_stored() {
+    let w = world();
+    let device = Uuid::new_v4();
+    let refused = |description: &str| {
+        (
+            StatusCode::BAD_REQUEST,
+            refusal("invalid_request", description),
+        )
+    };
+
+    let registered = w
+        .register_with(
+            &w.alice,
+            json!({
+                "device_id": device,
+                "drk_public_key": B64.encode([7; 32]),
+                "label": label(" ", "laptop", "browser"),
+            }),
+        )
+        .await;
+    let uploaded = w
+        .app
+        .call(
+            Method::POST,
+            "/api/keys/packages",
+            Some(w.alice.id),
+            Some(json!({
+                "device_id": device,
+                "packages": packages(1),
+                "label": label("Pixel 8", "phone", "unknown"),
+            })),
+        )
+        .await;
+
+    assert_eq!(registered, refused("label.name: cannot be blank"));
+    assert_eq!(uploaded, refused("label.client: app or browser"));
+    assert_eq!(w.devices(&w.alice).await, Vec::<Value>::new());
 }
 
 #[tokio::test]
@@ -721,6 +910,10 @@ async fn the_key_directory_needs_a_signed_in_user() {
             Method::PUT,
             "/api/keys/devices/00000000-0000-0000-0000-000000000000/history-key",
         ),
+        (
+            Method::PUT,
+            "/api/keys/devices/00000000-0000-0000-0000-000000000000/name",
+        ),
     ] {
         let (status, _) = w.app.call(method, uri, None, None).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "{uri}");
@@ -905,4 +1098,170 @@ async fn a_claim_from_an_instance_this_one_may_not_ask_says_nothing_of_where_it_
             )
         )
     );
+}
+
+impl World {
+    async fn rename(&self, token: &str, device: Uuid, name: Value) -> (StatusCode, Value) {
+        self.app
+            .call_in(
+                token,
+                Method::PUT,
+                &format!("/api/keys/devices/{device}/name"),
+                Some(json!({ "name": name })),
+            )
+            .await
+    }
+}
+
+#[tokio::test]
+async fn a_device_is_named_and_given_its_automatic_name_back_with_no_recent_password() {
+    let w = world();
+    let (_, device) = w.app.on_a_device(w.alice.id).await;
+    let an_hour_ago = w.app.token_signed_in_at(
+        w.alice.id,
+        OffsetDateTime::now_utc() - time::Duration::hours(1),
+    );
+    let names = |devices: &[Value]| naming(devices, device)[..3].to_vec();
+
+    let named = w
+        .rename(&an_hour_ago, device, json!("  Work laptop "))
+        .await;
+    let shown = names(&w.devices(&w.alice).await);
+    let emptied = w.rename(&an_hour_ago, device, json!("  ")).await;
+    let after_empty = names(&w.devices(&w.alice).await);
+    w.rename(&an_hour_ago, device, json!("Work laptop")).await;
+    let nulled = w.rename(&an_hour_ago, device, Value::Null).await;
+    let after_null = names(&w.devices(&w.alice).await);
+    w.rename(&an_hour_ago, device, json!("Work laptop")).await;
+    let automatic_again = w.rename(&an_hour_ago, device, json!("Web client")).await;
+    let after_automatic = names(&w.devices(&w.alice).await);
+
+    for done in [named, emptied, nulled, automatic_again] {
+        assert_eq!(done, (StatusCode::NO_CONTENT, Value::Null));
+    }
+    assert_eq!(
+        shown,
+        [
+            json!("Work laptop"),
+            json!("Web client"),
+            json!("Work laptop")
+        ]
+    );
+    let automatic = [json!("Web client"), json!("Web client"), Value::Null];
+    assert_eq!(after_empty, automatic);
+    assert_eq!(after_null, automatic);
+    assert_eq!(after_automatic, automatic);
+}
+
+#[tokio::test]
+async fn a_name_that_breaks_its_rule_is_refused_and_the_name_held_kept() {
+    let w = world();
+    let (_, device) = w.app.on_a_device(w.alice.id).await;
+    let token = w.app.token(w.alice.id);
+    w.rename(&token, device, json!("Work laptop")).await;
+    let refused = |description: &str| {
+        (
+            StatusCode::BAD_REQUEST,
+            refusal("invalid_request", description),
+        )
+    };
+
+    let too_long = w.rename(&token, device, json!("a".repeat(51))).await;
+    let invisible = w.rename(&token, device, json!("Work\u{200B}laptop")).await;
+    let joiner_alone = w.rename(&token, device, json!("\u{200D}")).await;
+    let hangul_filler = w.rename(&token, device, json!("\u{3164}")).await;
+    let control = w.rename(&token, device, json!("Work\nlaptop")).await;
+    let (no_key, _) = w
+        .app
+        .call_in(
+            &token,
+            Method::PUT,
+            &format!("/api/keys/devices/{device}/name"),
+            Some(json!({})),
+        )
+        .await;
+
+    assert_eq!(too_long, refused("name: at most 50 characters"));
+    assert_eq!(invisible, refused("name: no invisible characters"));
+    assert_eq!(joiner_alone, refused("name: cannot be blank"));
+    assert_eq!(hangul_filler, refused("name: no invisible characters"));
+    assert_eq!(control, refused("name: no control characters"));
+    assert_eq!(no_key, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        naming(&w.devices(&w.alice).await, device)[2],
+        json!("Work laptop")
+    );
+}
+
+#[tokio::test]
+async fn an_approved_device_is_renamed_only_from_an_approved_device() {
+    let w = world();
+    let (laptop_session, laptop) = w.app.on_a_device(w.alice.id).await;
+    let (fresh_session, fresh) = w.app.on_a_device(w.alice.id).await;
+    let (laptops, freshs, unnamed) = (
+        w.app.token_in(w.alice.id, laptop_session),
+        w.app.token_in(w.alice.id, fresh_session),
+        w.app.token(w.alice.id),
+    );
+    w.app.keyed_from(&w.alice, &laptops, laptop).await;
+
+    let from_fresh = w.rename(&freshs, laptop, json!("Old laptop")).await;
+    let from_unnamed = w.rename(&unnamed, laptop, json!("Old laptop")).await;
+    let fresh_itself = w.rename(&freshs, fresh, json!("Kitchen tablet")).await;
+    let from_laptop = w.rename(&laptops, fresh, json!("Alice's tablet")).await;
+    let laptop_itself = w.rename(&laptops, laptop, json!("Work laptop")).await;
+
+    let approval_required = (
+        StatusCode::FORBIDDEN,
+        refusal(
+            "approval_required",
+            "This takes a device approved under the current history key",
+        ),
+    );
+    assert_eq!(from_fresh, approval_required);
+    assert_eq!(from_unnamed, approval_required);
+    for renamed in [fresh_itself, from_laptop, laptop_itself] {
+        assert_eq!(renamed, (StatusCode::NO_CONTENT, Value::Null));
+    }
+    let devices = w.devices(&w.alice).await;
+    assert_eq!(naming(&devices, laptop)[0], json!("Work laptop"));
+    assert_eq!(naming(&devices, fresh)[0], json!("Alice's tablet"));
+}
+
+#[tokio::test]
+async fn another_accounts_or_an_unknown_device_is_not_found_and_a_revoked_one_refused() {
+    let w = world();
+    let (_, device) = w.app.on_a_device(w.alice.id).await;
+    let old = Uuid::new_v4();
+    w.register(&w.alice, old, &B64.encode([7; 32])).await;
+    w.app
+        .call(
+            Method::POST,
+            &format!("/api/keys/devices/{old}/revoke"),
+            Some(w.alice.id),
+            None,
+        )
+        .await;
+    let (alices, bobs) = (w.app.token(w.alice.id), w.app.token(w.bob.id));
+
+    let by_bob = w.rename(&bobs, device, json!("Bob's laptop")).await;
+    let unknown = w
+        .rename(&alices, Uuid::new_v4(), json!("Work laptop"))
+        .await;
+    let revoked = w.rename(&alices, old, json!("Old laptop")).await;
+    let revoked_cleared = w.rename(&alices, old, Value::Null).await;
+
+    let not_found = (
+        StatusCode::NOT_FOUND,
+        refusal("not_found", "Device not found"),
+    );
+    assert_eq!(by_bob, not_found);
+    assert_eq!(unknown, not_found);
+    let refused = (
+        StatusCode::FORBIDDEN,
+        refusal("access_denied", "Device is revoked"),
+    );
+    assert_eq!(revoked, refused);
+    assert_eq!(revoked_cleared, refused);
+    assert_eq!(naming(&w.devices(&w.alice).await, device)[2], Value::Null);
 }

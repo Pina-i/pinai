@@ -8,7 +8,7 @@ use domain::e2ee::testing::{
 use domain::e2ee::{
     ApprovalBy, ApprovalFacts, ApprovalPublicKey, ArchiveNonce, Archived, Attestation,
     DeviceApprovals, DeviceLabel, DeviceRequired, DeviceRootKey, HistoryArchive, HistoryCheckValue,
-    HistorySalt, HpkeKeyWrite, NewArchiveEntry, approval_bytes, may_approve,
+    HistorySalt, HpkeKeyWrite, LabelWrite, NewArchiveEntry, approval_bytes, may_approve,
 };
 use domain::identity::ActorUri;
 use time::Duration;
@@ -95,7 +95,7 @@ impl World {
             .attest(
                 who,
                 id,
-                &DeviceLabel::unknown(),
+                &LabelWrite::IfNew(DeviceLabel::unknown()),
                 None,
                 &attestation,
                 &HpkeKeyWrite::Clear,

@@ -5,7 +5,7 @@ use domain::e2ee::testing::{InMemoryArchive, InMemoryKeyDirectory};
 use domain::e2ee::{
     ApprovalPublicKey, ApprovalRequired, ArchiveNonce, ArchiveStoreError, Attestation, BatchSize,
     DeviceLabel, DeviceRootKey, Devices, HistoryCheckValue, HistoryKey, HistoryKeys, HistorySalt,
-    HpkeKeyWrite, KeyReplace, StaleHistoryKey,
+    HpkeKeyWrite, KeyReplace, LabelWrite, StaleHistoryKey,
 };
 use domain::identity::Account;
 use domain::identity::testing::{InMemoryAccounts, account};
@@ -126,7 +126,7 @@ async fn registered(devices: &InMemoryKeyDirectory, owner: UserId, device: Devic
         .attest(
             owner,
             device,
-            &DeviceLabel::unknown(),
+            &LabelWrite::IfNew(DeviceLabel::unknown()),
             None,
             &Attestation {
                 root_key: DeviceRootKey::parse(&[1; 32]).unwrap(),

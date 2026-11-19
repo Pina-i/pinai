@@ -1054,6 +1054,10 @@ impl Application {
                 Arc::clone(&session_notifier),
                 Arc::clone(&trust_notifier),
             )),
+            rename_device: Arc::new(application::e2ee::RenameDevice::new(
+                Arc::clone(&devices),
+                Arc::clone(&sessions),
+            )),
             report_history_key: Arc::new(application::e2ee::ReportHistoryKey::new(
                 Arc::clone(&sessions),
                 Arc::clone(&devices),
@@ -1134,6 +1138,7 @@ impl Application {
             )),
             upload_key_packages: Arc::new(application::e2ee::UploadKeyPackages::new(
                 key_package_policy,
+                Arc::clone(&sessions),
                 devices,
                 Arc::clone(&key_packages),
             )),

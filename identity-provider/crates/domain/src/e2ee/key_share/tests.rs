@@ -22,6 +22,7 @@ fn device(owner: UserId, root: u8, holds: Option<i64>) -> Device {
         id: DeviceId::generate(),
         owner,
         label: DeviceLabel::unknown(),
+        chosen_name: None,
         paired_at: at,
         last_seen_at: at,
         revoked_at: None,

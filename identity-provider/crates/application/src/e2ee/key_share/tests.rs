@@ -8,7 +8,7 @@ use domain::e2ee::testing::{
 use domain::e2ee::{
     ApprovalBy, ApprovalFacts, ApprovalPublicKey, Attestation, CheckedShare, DeviceLabel,
     DeviceRootKey, HistoryCheckValue, HistoryKey, HistorySalt, HpkeKeyWrite, KeyStoreError,
-    approval_bytes, may_approve,
+    LabelWrite, approval_bytes, may_approve,
 };
 use domain::identity::Account;
 use domain::identity::testing::{InMemoryAccounts, account};
@@ -91,7 +91,7 @@ impl World {
             .attest(
                 self.alice.id,
                 id,
-                &DeviceLabel::unknown(),
+                &LabelWrite::IfNew(DeviceLabel::unknown()),
                 None,
                 &attestation,
                 &HpkeKeyWrite::Set(hpke_key(root)),

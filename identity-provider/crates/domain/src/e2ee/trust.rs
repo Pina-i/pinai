@@ -1,7 +1,7 @@
 //! Which of the account's devices the instance counts as approved — [`approval_chain`]'s structure
 //! over the stored approvals, identity-provider/specs/e2ee.md § 3.11 — and what that gates on the
-//! instance itself: revoking an approved device, starting over (§ 3.12), turning the second factor
-//! on, saving to and clearing the history backup, signing the other devices out.
+//! instance itself: revoking or renaming an approved device, starting over (§ 3.12), turning the
+//! second factor on, saving to and clearing the history backup, signing the other devices out.
 
 use crate::DeviceId;
 
@@ -64,6 +64,17 @@ pub fn may_revoke(
         return Ok(());
     }
     may_act_beyond_the_password(by, trust)
+}
+
+/// Whether the session whose device is `by` may rename `target`: as it may revoke it. The user
+/// tells their devices apart by name — which to revoke, which asks to be approved —, so a password
+/// alone renames nothing approved.
+pub fn may_rename(
+    target: DeviceId,
+    by: Option<DeviceId>,
+    trust: &DeviceTrust,
+) -> Result<(), ApprovalRequired> {
+    may_revoke(target, by, trust)
 }
 
 /// Whether a session whose device is `named` may do what a password alone must not: turn the

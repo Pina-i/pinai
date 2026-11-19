@@ -12,6 +12,7 @@ mod key_package_status;
 mod key_share;
 mod list_devices;
 mod register_device;
+mod rename_device;
 mod revoke_device;
 mod start_over;
 mod sweep_key_packages;
@@ -34,6 +35,7 @@ pub use key_package_status::{DeviceStash, KeyPackageStatus, StashStatus};
 pub use key_share::{LoadKeyShare, ShareHistoryKey};
 pub use list_devices::{ListDevices, ListedDevice};
 pub use register_device::{RegisterDevice, Registered};
+pub use rename_device::RenameDevice;
 pub use revoke_device::RevokeDevice;
 pub use start_over::{
     AskToStartOver, EndStartOver, LoadStartOver, PendingStartOver, StartOverAsked,

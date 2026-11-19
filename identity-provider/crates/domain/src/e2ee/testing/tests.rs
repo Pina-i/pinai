@@ -25,6 +25,11 @@ async fn registering_again_replaces_the_attestation_and_keeps_the_label() {
 }
 
 #[tokio::test]
+async fn a_registration_relabels_a_known_device_when_asked() {
+    contract::a_registration_relabels_a_known_device_when_asked(&store(), UserId::generate()).await;
+}
+
+#[tokio::test]
 async fn a_device_holds_the_hpke_key_registered_with_its_attestation_until_replaced() {
     contract::a_device_holds_the_hpke_key_registered_with_its_attestation_until_replaced(
         &store(),
@@ -83,6 +88,27 @@ async fn a_device_is_revoked_once_and_only_by_its_owner() {
         UserId::generate(),
     )
     .await;
+}
+
+#[tokio::test]
+async fn a_device_is_named_and_given_its_automatic_name_back_by_its_owner_only() {
+    contract::a_device_is_named_and_given_its_automatic_name_back_by_its_owner_only(
+        &store(),
+        UserId::generate(),
+        UserId::generate(),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_revoked_device_is_renamed_no_more() {
+    contract::a_revoked_device_is_renamed_no_more(&store(), UserId::generate()).await;
+}
+
+#[tokio::test]
+async fn a_name_equal_to_the_automatic_one_held_gives_it_back() {
+    contract::a_name_equal_to_the_automatic_one_held_gives_it_back(&store(), UserId::generate())
+        .await;
 }
 
 #[tokio::test]
@@ -700,6 +726,16 @@ async fn requests_that_ended_are_swept_a_week_after_they_ended() {
 async fn an_approved_device_is_revoked_only_from_an_approved_device() {
     let w = StartOverWorld::new();
     contract::an_approved_device_is_revoked_only_from_an_approved_device(
+        w.stores(),
+        UserId::generate(),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn an_approved_device_is_renamed_only_from_an_approved_device() {
+    let w = StartOverWorld::new();
+    contract::an_approved_device_is_renamed_only_from_an_approved_device(
         w.stores(),
         UserId::generate(),
     )

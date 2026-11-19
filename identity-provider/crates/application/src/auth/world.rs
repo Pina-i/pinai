@@ -16,7 +16,7 @@ use domain::auth::{
 use domain::e2ee::testing::{InMemoryArchive, InMemoryKeyDirectory, PlainEd25519Verifier};
 use domain::e2ee::{
     ApprovalPublicKey, Attestation, DeviceLabel, DeviceRootKey, Devices, HistoryCheckValue,
-    HistoryGeneration, HistoryKey, HistoryKeys, HistorySalt, HpkeKeyWrite,
+    HistoryGeneration, HistoryKey, HistoryKeys, HistorySalt, HpkeKeyWrite, LabelWrite,
 };
 use domain::identity::testing::InMemoryAccounts;
 use domain::identity::{Account, ActorUri, Bearer, InstanceOrigin, IntroText};
@@ -370,7 +370,7 @@ impl World {
             .attest(
                 self.alice.id,
                 device,
-                &DeviceLabel::unknown(),
+                &LabelWrite::IfNew(DeviceLabel::unknown()),
                 None,
                 &attestation,
                 &HpkeKeyWrite::Clear,

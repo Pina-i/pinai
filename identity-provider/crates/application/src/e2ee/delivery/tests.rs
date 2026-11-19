@@ -10,7 +10,7 @@ use domain::e2ee::{
     ApprovalPublicKey, ApprovalRequired, Attestation, CATCH_UP_LIMIT, Commit, CommitBlob,
     CommitLog, DeliveryError, DeviceLabel, DeviceRequired, DeviceRootKey, Devices, Epoch,
     GroupInfo, GroupInfoBlob, GroupInfos, HistoryCheckValue, HistoryGeneration, HistoryKey,
-    HistoryKeys, HistorySalt, HpkeKeyWrite, OutgoingWelcome, WelcomeBlob,
+    HistoryKeys, HistorySalt, HpkeKeyWrite, LabelWrite, OutgoingWelcome, WelcomeBlob,
 };
 use domain::identity::testing::{InMemoryAccounts, InMemoryRemoteActors, account, remote_actor};
 use domain::identity::{Account, ActorUri, Bearer, InstanceOrigin, RemoteActor};
@@ -569,7 +569,7 @@ impl World {
                 .attest(
                     self.alice.id,
                     device,
-                    &DeviceLabel::unknown(),
+                    &LabelWrite::IfNew(DeviceLabel::unknown()),
                     None,
                     &Attestation {
                         root_key: DeviceRootKey::parse(&[1; 32]).unwrap(),

@@ -205,7 +205,7 @@ impl OpenApprovalRequest {
         }
         let to = Audience::AllBut(vec![device.id]).sessions(&sessions, now);
         self.notifier
-            .approval_requested(bearer.user, &to, &request, &device.label.name);
+            .approval_requested(bearer.user, &to, &request, device.shown_name());
         Ok(request)
     }
 }
@@ -252,7 +252,7 @@ impl ListApprovalRequests {
                 display_name: devices
                     .iter()
                     .find(|device| device.id == request.device)
-                    .map(|device| device.label.name.clone())
+                    .map(|device| device.shown_name().to_owned())
                     .unwrap_or_default(),
                 request,
             })

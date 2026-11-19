@@ -11,11 +11,12 @@ use domain::e2ee::testing::{
     plain_signature,
 };
 use domain::e2ee::{
-    ATTESTATION_LIFETIME, ApprovalPublicKey, Attest, Attestation, Claim, ClaimedKeyPackage, Device,
-    DeviceAttester, DeviceKind, DeviceLabel, DeviceRootKey, Devices, HistoryCheckValue,
-    HistoryGeneration, HistoryKey, HistoryKeys, HistorySalt, Holding, HpkeKeyWrite, HpkePublicKey,
-    KeyDirectoryError, KeyPackageBytes, KeyPackagePolicy, KeyPackageRefusal, KeyPackages,
-    KeyStoreError, NewKeyPackage, Revocation, SignedHpkeKey, UnverifiedHpkeKey, attestation_period,
+    ATTESTATION_LIFETIME, ApprovalPublicKey, Attest, Attestation, BroughtLabel, ChosenName, Claim,
+    ClaimedKeyPackage, Device, DeviceAttester, DeviceLabel, DeviceRootKey, Devices,
+    HistoryCheckValue, HistoryGeneration, HistoryKey, HistoryKeys, HistorySalt, Holding,
+    HpkeKeyWrite, HpkePublicKey, KeyDirectoryError, KeyPackageBytes, KeyPackagePolicy,
+    KeyPackageRefusal, KeyPackages, KeyStoreError, LabelWrite, NewKeyPackage, Renaming, Revocation,
+    SignedHpkeKey, UnverifiedHpkeKey, attestation_period,
 };
 use domain::identity::testing::{InMemoryAccounts, account, remote_actor};
 use domain::identity::{Account, ActorUri, Bearer, InstanceOrigin, RemoteActor, Requester};
@@ -82,10 +83,17 @@ fn batch(n: u8) -> Vec<NewKeyPackage> {
 }
 
 fn phone() -> DeviceLabel {
-    DeviceLabel {
-        name: "Chrome on Android".to_owned(),
-        kind: DeviceKind::Phone,
-    }
+    DeviceLabel::from_client("Chrome on Android", "phone", "browser").unwrap()
+}
+
+/// A label read from a `User-Agent`.
+fn guessed(label: DeviceLabel) -> BroughtLabel {
+    BroughtLabel::FromUserAgent(label)
+}
+
+/// What a request without a `User-Agent` brings.
+fn unlabelled() -> BroughtLabel {
+    guessed(DeviceLabel::unknown())
 }
 
 fn world() -> World {
@@ -128,7 +136,7 @@ fn world() -> World {
             ended.clone(),
             Arc::new(RecordingDeviceTrustNotifier::default()),
         ),
-        upload: UploadKeyPackages::new(policy(), store.clone(), store.clone()),
+        upload: UploadKeyPackages::new(policy(), sessions.clone(), store.clone(), store.clone()),
         claim: ClaimKeyPackage::new(
             InstanceOrigin::parse("http://localhost:8080").unwrap(),
             policy(),
@@ -181,14 +189,7 @@ impl World {
     ) -> Result<Registered, KeyDirectoryError> {
         let bearer = self.signed_in(who, None).await;
         self.register
-            .execute(
-                &bearer,
-                device,
-                key(root),
-                brought,
-                &DeviceLabel::unknown(),
-                at,
-            )
+            .execute(&bearer, device, key(root), brought, &unlabelled(), at)
             .await
     }
 
@@ -203,14 +204,7 @@ impl World {
     ) -> Result<Registered, KeyDirectoryError> {
         let bearer = self.signed_in(who, Some(device)).await;
         self.register
-            .execute(
-                &bearer,
-                device,
-                key(root),
-                brought,
-                &DeviceLabel::unknown(),
-                at,
-            )
+            .execute(&bearer, device, key(root), brought, &unlabelled(), at)
             .await
     }
 
@@ -234,7 +228,13 @@ impl World {
 
     async fn upload(&self, owner: &Account, device: DeviceId, packages: Vec<NewKeyPackage>) {
         self.upload
-            .execute(owner.id, device, phone(), packages, now())
+            .execute(
+                &self.signed_in(owner, None).await,
+                device,
+                guessed(phone()),
+                packages,
+                now(),
+            )
             .await
             .unwrap();
     }
@@ -530,31 +530,17 @@ async fn a_session_registers_only_the_device_it_declared() {
             phone,
             key(2),
             Some(hpke(&w.alice, phone, 2, 9)),
-            &DeviceLabel::unknown(),
+            &unlabelled(),
             now(),
         )
         .await;
     let itself = w
         .register
-        .execute(
-            &on_the_laptop,
-            laptop,
-            key(1),
-            None,
-            &DeviceLabel::unknown(),
-            now(),
-        )
+        .execute(&on_the_laptop, laptop, key(1), None, &unlabelled(), now())
         .await;
     let a_new_one = w
         .register
-        .execute(
-            &on_the_laptop,
-            new,
-            key(3),
-            None,
-            &DeviceLabel::unknown(),
-            now(),
-        )
+        .execute(&on_the_laptop, new, key(3), None, &unlabelled(), now())
         .await;
 
     for refused in [the_phone, a_new_one] {
@@ -606,7 +592,7 @@ impl Devices for Racing {
         &self,
         owner: domain::UserId,
         id: DeviceId,
-        label: &DeviceLabel,
+        label: &LabelWrite,
         read: Option<&Device>,
         attestation: &Attestation,
         hpke_key: &HpkeKeyWrite,
@@ -655,6 +641,16 @@ impl Devices for Racing {
         self.store.revoke(owner, id, by, now).await
     }
 
+    async fn rename(
+        &self,
+        owner: domain::UserId,
+        id: DeviceId,
+        by: Option<DeviceId>,
+        name: Option<&ChosenName>,
+    ) -> Result<Renaming, KeyStoreError> {
+        self.store.rename(owner, id, by, name).await
+    }
+
     async fn hold_history_key(
         &self,
         owner: domain::UserId,
@@ -679,14 +675,7 @@ async fn a_device_revoked_while_it_reports_its_history_key_is_refused() {
     let device = DeviceId::generate();
     let unnamed = w.signed_in(&w.alice, None).await;
     w.registering_over(store.clone())
-        .execute(
-            &unnamed,
-            device,
-            key(1),
-            None,
-            &DeviceLabel::unknown(),
-            now(),
-        )
+        .execute(&unnamed, device, key(1), None, &unlabelled(), now())
         .await
         .unwrap();
     let bearer = w.signed_in(&w.alice, Some(device)).await;
@@ -736,14 +725,7 @@ async fn a_registration_that_loses_a_race_decides_again_on_what_won() {
     let bearer = w.signed_in(&w.alice, None).await;
 
     w.registering_over(racing)
-        .execute(
-            &bearer,
-            device,
-            key(1),
-            None,
-            &DeviceLabel::unknown(),
-            now(),
-        )
+        .execute(&bearer, device, key(1), None, &unlabelled(), now())
         .await
         .unwrap();
 
@@ -771,7 +753,7 @@ async fn a_device_revoked_while_it_registers_gets_nothing_written() {
             device,
             key(1),
             Some(hpke(&w.alice, device, 1, 9)),
-            &DeviceLabel::unknown(),
+            &unlabelled(),
             now() + Duration::days(1),
         )
         .await;
@@ -801,7 +783,7 @@ async fn a_device_that_keeps_changing_fails_its_registration() {
             DeviceId::generate(),
             key(1),
             None,
-            &DeviceLabel::unknown(),
+            &unlabelled(),
             now(),
         )
         .await;
@@ -1014,12 +996,24 @@ async fn an_upload_stashes_the_batch_and_names_a_new_device() {
 
     let uploaded = w
         .upload
-        .execute(w.alice.id, device, phone(), batch(2), now())
+        .execute(
+            &w.signed_in(&w.alice, None).await,
+            device,
+            guessed(phone()),
+            batch(2),
+            now(),
+        )
         .await
         .unwrap();
     let again = w
         .upload
-        .execute(w.alice.id, device, DeviceLabel::unknown(), batch(3), now())
+        .execute(
+            &w.signed_in(&w.alice, None).await,
+            device,
+            unlabelled(),
+            batch(3),
+            now(),
+        )
         .await
         .unwrap();
 
@@ -1048,7 +1042,13 @@ async fn an_upload_past_the_cap_is_refused_whole() {
 
     let full = w
         .upload
-        .execute(w.alice.id, device, phone(), batch(2), now())
+        .execute(
+            &w.signed_in(&w.alice, None).await,
+            device,
+            guessed(phone()),
+            batch(2),
+            now(),
+        )
         .await;
 
     assert!(
@@ -1087,7 +1087,13 @@ async fn an_upload_whose_expiries_are_off_is_stored_within_the_lifetime() {
     for (device, packages) in [(ahead, too_long), (behind, gone)] {
         let uploaded = w
             .upload
-            .execute(w.alice.id, device, phone(), packages, at)
+            .execute(
+                &w.signed_in(&w.alice, None).await,
+                device,
+                guessed(phone()),
+                packages,
+                at,
+            )
             .await;
         assert!(
             matches!(
@@ -1317,7 +1323,13 @@ async fn a_revoked_device_neither_renews_its_attestation_nor_publishes_key_packa
         .await;
     let upload = w
         .upload
-        .execute(w.alice.id, device, phone(), batch(1), now())
+        .execute(
+            &w.signed_in(&w.alice, None).await,
+            device,
+            guessed(phone()),
+            batch(1),
+            now(),
+        )
         .await;
 
     for refused in [renewal, with_a_key] {
@@ -1350,7 +1362,13 @@ async fn a_device_id_another_account_holds_is_neither_registered_nor_stocked() {
         .await;
     let uploaded = w
         .upload
-        .execute(w.bob.id, device, phone(), batch(1), now())
+        .execute(
+            &w.signed_in(&w.bob, None).await,
+            device,
+            guessed(phone()),
+            batch(1),
+            now(),
+        )
         .await;
 
     for refused in [registered, with_a_key] {
@@ -1533,18 +1551,11 @@ async fn a_device_is_recorded_under_the_label_of_its_first_registration() {
     let (device, bearer) = (DeviceId::generate(), w.signed_in(&w.alice, None).await);
 
     w.register
-        .execute(&bearer, device, key(1), None, &phone(), now())
+        .execute(&bearer, device, key(1), None, &guessed(phone()), now())
         .await
         .unwrap();
     w.register
-        .execute(
-            &bearer,
-            device,
-            key(1),
-            None,
-            &DeviceLabel::unknown(),
-            now(),
-        )
+        .execute(&bearer, device, key(1), None, &unlabelled(), now())
         .await
         .unwrap();
 
@@ -1556,21 +1567,118 @@ async fn an_upload_names_a_device_registered_unnamed_and_no_other() {
     let w = world();
     let (unnamed, named) = (DeviceId::generate(), DeviceId::generate());
     let bearer = w.signed_in(&w.alice, None).await;
-    let laptop = DeviceLabel {
-        name: "Firefox on Linux".to_owned(),
-        kind: DeviceKind::Laptop,
-    };
+    let laptop = DeviceLabel::from_client("Firefox on Linux", "laptop", "browser").unwrap();
     for (device, label) in [(unnamed, DeviceLabel::unknown()), (named, laptop.clone())] {
         w.register
-            .execute(&bearer, device, key(1), None, &label, now())
+            .execute(&bearer, device, key(1), None, &guessed(label), now())
             .await
             .unwrap();
     }
 
-    w.upload(&w.alice, unnamed, batch(1)).await;
-    w.upload(&w.alice, named, batch(1)).await;
+    for device in [unnamed, named] {
+        w.upload
+            .execute(
+                &w.signed_in(&w.alice, Some(device)).await,
+                device,
+                guessed(phone()),
+                batch(1),
+                now(),
+            )
+            .await
+            .unwrap();
+    }
 
     let found = |device| w.store.find(device);
     assert_eq!(found(unnamed).await.unwrap().unwrap().label, phone());
     assert_eq!(found(named).await.unwrap().unwrap().label, laptop);
+}
+
+#[tokio::test]
+async fn a_registration_names_a_device_recorded_unnamed_as_an_upload_would() {
+    let w = world();
+    let device = DeviceId::generate();
+    w.upload(&w.alice, device, batch(1)).await;
+    w.store
+        .stash(
+            w.alice.id,
+            device,
+            &LabelWrite::Always(DeviceLabel::unknown()),
+            &[],
+        )
+        .await
+        .unwrap();
+
+    w.register
+        .execute(
+            &w.signed_in(&w.alice, Some(device)).await,
+            device,
+            key(1),
+            None,
+            &guessed(phone()),
+            now(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(w.store.find(device).await.unwrap().unwrap().label, phone());
+}
+
+#[tokio::test]
+async fn a_label_the_client_composed_follows_the_device_through_registrations_and_uploads() {
+    let w = world();
+    let device = DeviceId::generate();
+    let bearer = w.signed_in(&w.alice, Some(device)).await;
+    let composed =
+        |name: &str, client: &str| DeviceLabel::from_client(name, "laptop", client).unwrap();
+    let label = || async { w.store.find(device).await.unwrap().unwrap().label };
+
+    w.register
+        .execute(
+            &bearer,
+            device,
+            key(1),
+            None,
+            &BroughtLabel::Composed(composed("Chrome on Windows", "browser")),
+            now(),
+        )
+        .await
+        .unwrap();
+    let registered = label().await;
+    w.register
+        .execute(
+            &bearer,
+            device,
+            key(1),
+            None,
+            &BroughtLabel::Composed(composed("Chrome on Windows 11", "browser")),
+            now(),
+        )
+        .await
+        .unwrap();
+    let renewed = label().await;
+    let app = composed("ThinkPad X1 Carbon Gen 9 (alice-thinkpad)", "app");
+    w.upload
+        .execute(
+            &bearer,
+            device,
+            BroughtLabel::Composed(app.clone()),
+            batch(1),
+            now(),
+        )
+        .await
+        .unwrap();
+    let uploaded = label().await;
+    w.upload
+        .execute(&bearer, device, guessed(phone()), batch(1), now())
+        .await
+        .unwrap();
+
+    assert_eq!(registered, composed("Chrome on Windows", "browser"));
+    assert_eq!(renewed, composed("Chrome on Windows 11", "browser"));
+    assert_eq!(uploaded, app);
+    assert_eq!(
+        label().await,
+        app,
+        "a User-Agent never renames a named device"
+    );
 }
