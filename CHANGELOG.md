@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.3](https://github.com/Pina-i/pinai/compare/v0.4.2...v0.4.3) - 2026-11-20
+
+### Added
+
+- *(idp)* every instance describes the official mobile app
+
 ## [0.4.2](https://github.com/Pina-i/pinai/compare/v0.4.1...v0.4.2) - 2026-11-19
 
 ### Added
