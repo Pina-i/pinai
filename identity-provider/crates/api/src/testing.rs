@@ -318,10 +318,9 @@ impl TestApp {
             sign_in.sessions.clone(),
             sign_in.ended.clone(),
         ));
-        let clients = Arc::new(InMemoryClients::with([
-            web_client(),
-            domain::auth::desktop_client(&origin),
-        ]));
+        let clients = Arc::new(InMemoryClients::with(
+            [vec![web_client()], domain::auth::official_clients(&origin)].concat(),
+        ));
         let shutdown = tokio_util::sync::CancellationToken::new();
         let reach = Arc::new(StubReachability::default());
         let people = Arc::new(InMemoryPeopleSearch::default());

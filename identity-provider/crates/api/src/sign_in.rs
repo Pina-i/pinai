@@ -16,7 +16,7 @@ use axum_extra::extract::cookie::{Cookie, SameSite};
 use domain::SessionId;
 use domain::auth::{
     AuthError, AuthorizationRequest, GRANT_TYPE, REFRESH_GRANT_TYPE, REQUESTED_RESET_TTL,
-    SESSION_IDLE, desktop_client,
+    SESSION_IDLE, desktop_client, mobile_client,
 };
 use domain::identity::InstanceOrigin;
 use serde::{Deserialize, Serialize};
@@ -597,9 +597,19 @@ pub async fn discovery(State(origin): State<InstanceOrigin>) -> Json<serde_json:
 /// `GET /clients/desktop.json` — the official desktop app's client document, as this instance
 /// describes it.
 pub async fn desktop_document(State(origin): State<InstanceOrigin>) -> impl IntoResponse {
+    official_document(desktop_client(&origin))
+}
+
+/// `GET /clients/mobile.json` — the official mobile app's client document, as this instance
+/// describes it.
+pub async fn mobile_document(State(origin): State<InstanceOrigin>) -> impl IntoResponse {
+    official_document(mobile_client(&origin))
+}
+
+fn official_document(client: domain::auth::Client) -> impl IntoResponse {
     (
         [(header::CACHE_CONTROL, "public, max-age=86400")],
-        Json(desktop_client(&origin).document()),
+        Json(client.document()),
     )
 }
 
