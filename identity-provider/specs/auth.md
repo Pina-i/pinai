@@ -78,15 +78,16 @@ Other fields are ignored. A document that breaks a rule leaves its client unknow
 A development instance, whose issuer is plain `http`, also takes `http` clients, and lets a native
 client use any scheme but a reserved one (`http`, `https`, `javascript`, `data`, `file`, `blob`…).
 
-**The official desktop app** is described by every instance itself. `GET /clients/desktop.json`
-serves its document:
-- `client_name` "Pīna'i desktop";
-- native;
-- `io.github.pina-i:/callback`;
-- `offline_access`.
+**The official apps** are described by every instance itself (`domain::auth::official_clients`):
 
-A request naming it is answered without a fetch. So a desktop sign-in depends on nothing but the
-user's own instance, and a new desktop redirect URI or scope ships with the instances.
+| Document | `client_name` |
+|---|---|
+| `GET /clients/desktop.json` | "Pīna'i desktop" |
+| `GET /clients/mobile.json` | "Pīna'i mobile" |
+
+Both are native, list `io.github.pina-i:/callback` and ask `offline_access`. A request naming one
+is answered without a fetch. So an app's sign-in depends on nothing but the user's own instance,
+and a new redirect URI or scope for the apps ships with the instances.
 
 ### `GET /authorize`
 

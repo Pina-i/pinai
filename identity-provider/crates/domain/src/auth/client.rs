@@ -276,18 +276,32 @@ fn redirect_fits(uri: &str, id: &ClientId, kind: ClientKind, policy: ClientPolic
 
 /// Where every instance publishes the official desktop app's document.
 pub const DESKTOP_DOCUMENT_PATH: &str = "/clients/desktop.json";
-/// The desktop app's callback: the Pina-i organisation's GitHub Pages domain, reversed.
-pub const DESKTOP_REDIRECT_URI: &str = "io.github.pina-i:/callback";
+/// Where every instance publishes the official mobile app's document.
+pub const MOBILE_DOCUMENT_PATH: &str = "/clients/mobile.json";
+/// The official apps' callback: the Pina-i organisation's GitHub Pages domain, reversed.
+pub const APP_REDIRECT_URI: &str = "io.github.pina-i:/callback";
 
-/// The official desktop app, as every instance describes it: its document is served here, so a
-/// desktop sign-in depends on nothing but the user's own instance.
+/// The official apps, as every instance describes them: their documents are served here, so an
+/// app's sign-in depends on nothing but the user's own instance.
+pub fn official_clients(origin: &InstanceOrigin) -> Vec<Client> {
+    vec![desktop_client(origin), mobile_client(origin)]
+}
+
 pub fn desktop_client(origin: &InstanceOrigin) -> Client {
+    official_app(origin, DESKTOP_DOCUMENT_PATH, "Pīna'i desktop")
+}
+
+pub fn mobile_client(origin: &InstanceOrigin) -> Client {
+    official_app(origin, MOBILE_DOCUMENT_PATH, "Pīna'i mobile")
+}
+
+fn official_app(origin: &InstanceOrigin, document_path: &str, name: &str) -> Client {
     Client {
-        id: ClientId::parse(&format!("{}{DESKTOP_DOCUMENT_PATH}", origin.base_url()))
+        id: ClientId::parse(&format!("{}{document_path}", origin.base_url()))
             .expect("an instance's base URL and a fixed path"),
-        name: "Pīna'i desktop".to_owned(),
+        name: name.to_owned(),
         kind: ClientKind::Native,
-        redirect_uris: vec![DESKTOP_REDIRECT_URI.to_owned()],
+        redirect_uris: vec![APP_REDIRECT_URI.to_owned()],
         post_logout_redirect_uris: Vec::new(),
         offline_access: true,
     }

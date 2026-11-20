@@ -281,6 +281,10 @@ pub fn router(state: AppState) -> Router {
             domain::auth::DESKTOP_DOCUMENT_PATH,
             get(sign_in::desktop_document),
         )
+        .route(
+            domain::auth::MOBILE_DOCUMENT_PATH,
+            get(sign_in::mobile_document),
+        )
         .route("/.well-known/nodeinfo", get(nodeinfo::discovery))
         .route("/nodeinfo/2.1", get(nodeinfo::document))
         .route("/authorize", get(sign_in::authorize))

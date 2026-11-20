@@ -273,6 +273,31 @@ fn every_instance_describes_the_desktop_app_under_its_own_url() {
 }
 
 #[test]
+fn every_instance_describes_the_mobile_app_under_its_own_url() {
+    let origin = InstanceOrigin::parse("https://idp.alice.com").unwrap();
+
+    let mobile = mobile_client(&origin);
+
+    assert_eq!(
+        mobile.id.as_str(),
+        "https://idp.alice.com/clients/mobile.json"
+    );
+    assert_eq!(mobile.name, "Pīna'i mobile");
+    assert_eq!(mobile.kind, ClientKind::Native);
+    assert!(mobile.allows("io.github.pina-i:/callback"));
+    assert!(mobile.offline_access);
+}
+
+#[test]
+fn the_official_apps_are_the_desktop_and_the_mobile_one() {
+    let origin = InstanceOrigin::parse("https://idp.alice.com").unwrap();
+
+    let official = official_clients(&origin);
+
+    assert_eq!(official, [desktop_client(&origin), mobile_client(&origin)]);
+}
+
+#[test]
 fn a_client_lives_at_its_host_and_any_port_but_the_schemes() {
     for (raw, authority) in [
         ("https://app.example/oauth-client.json", "app.example"),

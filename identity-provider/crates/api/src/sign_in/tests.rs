@@ -461,6 +461,51 @@ async fn every_instance_publishes_the_desktop_apps_document() {
 }
 
 #[tokio::test]
+async fn every_instance_publishes_the_mobile_apps_document() {
+    let app = app_with(&[]).await;
+
+    let response = app.respond(get("/clients/mobile.json", None)).await;
+    let cache = response.headers()[header::CACHE_CONTROL].clone();
+    let (status, document) = TestApp::body_of(response).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(cache, "public, max-age=86400");
+    assert_eq!(
+        document,
+        json!({
+            "client_id": "http://localhost:8080/clients/mobile.json",
+            "client_name": "Pīna'i mobile",
+            "application_type": "native",
+            "redirect_uris": ["io.github.pina-i:/callback"],
+            "scope": "openid profile email offline_access",
+            "token_endpoint_auth_method": "none",
+        })
+    );
+}
+
+#[tokio::test]
+async fn the_mobile_app_signs_in_with_no_document_fetched() {
+    let app = app_with(&[]).await;
+    let request: Vec<_> = desktop_request()
+        .into_iter()
+        .map(|(k, v)| match k {
+            "client_id" => (k, "http://localhost:8080/clients/mobile.json"),
+            _ => (k, v),
+        })
+        .collect();
+
+    let response = app
+        .respond(get(
+            &format!("/authorize?response_type=code&{}", query(&request)),
+            None,
+        ))
+        .await;
+
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    assert!(location(&response).starts_with("/login?"));
+}
+
+#[tokio::test]
 async fn a_bad_flow_from_a_known_client_goes_back_to_it_with_the_error() {
     let app = app_with(&[]).await;
 

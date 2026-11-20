@@ -72,8 +72,8 @@ pub use admin::{
     admin_bootstrap, admin_display_name,
 };
 pub use client::{
-    Client, ClientDocument, ClientId, ClientKind, ClientPolicy, DESKTOP_DOCUMENT_PATH,
-    DESKTOP_REDIRECT_URI, desktop_client,
+    APP_REDIRECT_URI, Client, ClientDocument, ClientId, ClientKind, ClientPolicy,
+    DESKTOP_DOCUMENT_PATH, MOBILE_DOCUMENT_PATH, desktop_client, mobile_client, official_clients,
 };
 pub use client_sign_in::ClientSignIn;
 pub use error::AuthError;

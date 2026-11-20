@@ -2,8 +2,8 @@ use domain::SessionId;
 use domain::UserId;
 use domain::auth::testing::{CLIENT_ID, REDIRECT_URI, VERIFIER, a_request, another_web_app};
 use domain::auth::{
-    AuthorizationCodes, AuthorizationRequest, DESKTOP_REDIRECT_URI, Grant, RefreshToken,
-    RevokedReason, SessionKind, Sessions,
+    APP_REDIRECT_URI, AuthorizationCodes, AuthorizationRequest, Grant, RefreshToken, RevokedReason,
+    SessionKind, Sessions,
 };
 use time::Duration;
 
@@ -195,7 +195,7 @@ async fn a_desktop_code(w: &World, scope: &str) -> (SessionId, TokenCommand) {
     let browser = w.sessions.open_browser(w.alice.id, now()).await.unwrap();
     let request = AuthorizationRequest {
         client: w.desktop.id.clone(),
-        redirect_uri: DESKTOP_REDIRECT_URI.to_owned(),
+        redirect_uri: APP_REDIRECT_URI.to_owned(),
         scope: scope.to_owned(),
         ..a_request()
     };
@@ -208,7 +208,7 @@ async fn a_desktop_code(w: &World, scope: &str) -> (SessionId, TokenCommand) {
         .await
         .unwrap();
     let command = TokenCommand {
-        redirect_uri: DESKTOP_REDIRECT_URI.to_owned(),
+        redirect_uri: APP_REDIRECT_URI.to_owned(),
         client_id: w.desktop.id.as_str().to_owned(),
         ..command(&code)
     };

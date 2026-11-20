@@ -505,11 +505,11 @@ impl Application {
             Arc::clone(&start_overs),
         ));
 
-        // Every client is its own document; the official desktop app's is described here.
+        // Every client is its own document; the official apps' are described here.
         let clients: Arc<dyn domain::auth::Clients> =
             Arc::new(infrastructure::auth::MetadataClients::new(
                 url_policy,
-                vec![domain::auth::desktop_client(&origin)],
+                domain::auth::official_clients(&origin),
             ));
         let sign_in_accounts: Arc<dyn domain::auth::SignInAccounts> = Arc::new(
             infrastructure::postgres::PgSignInAccounts::new(pool.clone()),
