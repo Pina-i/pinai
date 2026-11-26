@@ -479,9 +479,13 @@ impl Application {
             max_lifetime: time::Duration::try_from(config.e2ee_keypackage_lifetime)
                 .map_err(|e| anyhow::anyhow!("KeyPackage lifetime: {e}"))?,
         };
-        let device_notifier: Arc<dyn domain::e2ee::DeviceNotifier> = Arc::new(
-            infrastructure::realtime::HubDeviceNotifier::new(Arc::clone(&hub)),
-        );
+        // A device that arrived, asks a code or asks to start over is told to the approved phones
+        // by a push notice too, as their apps, closed, hear nothing on the WebSocket.
+        let (push_alerts, push_alert_queue) = api::background::push_alerts();
+        let device_notifier: Arc<dyn domain::e2ee::DeviceNotifier> =
+            Arc::new(push_alerts.telling_devices(Arc::new(
+                infrastructure::realtime::HubDeviceNotifier::new(Arc::clone(&hub)),
+            )));
         let sweep_key_packages = Arc::new(application::e2ee::SweepKeyPackages::new(Arc::clone(
             &key_packages,
         )));
@@ -493,9 +497,10 @@ impl Application {
         let approval_requests: Arc<dyn domain::e2ee::ApprovalRequests> = Arc::new(
             infrastructure::postgres::PgApprovalRequests::new(pool.clone()),
         );
-        let trust_notifier: Arc<dyn domain::e2ee::DeviceTrustNotifier> = Arc::new(
-            infrastructure::realtime::HubDeviceTrustNotifier::new(Arc::clone(&hub)),
-        );
+        let trust_notifier: Arc<dyn domain::e2ee::DeviceTrustNotifier> =
+            Arc::new(push_alerts.telling_trust(Arc::new(
+                infrastructure::realtime::HubDeviceTrustNotifier::new(Arc::clone(&hub)),
+            )));
         let key_shares: Arc<dyn domain::e2ee::KeyShares> =
             Arc::new(infrastructure::postgres::PgKeyShares::new(pool.clone()));
         let sweep_approval_requests = Arc::new(application::e2ee::SweepApprovalRequests::new(
@@ -529,6 +534,13 @@ impl Application {
             Arc::new(infrastructure::postgres::PgClientSignIns::new(pool.clone()));
         let sessions: Arc<dyn domain::auth::Sessions> =
             Arc::new(infrastructure::postgres::PgSessions::new(pool.clone()));
+        let notify_devices = Arc::new(application::e2ee::NotifyDevices::new(
+            Arc::clone(&approvals),
+            Arc::clone(&approval_requests),
+            Arc::clone(&sessions),
+            Arc::clone(&push_registrations),
+            Arc::new(infrastructure::push::ExpoRelays::new(url_policy)),
+        ));
         let session_notifier: Arc<dyn domain::auth::SessionNotifier> = Arc::new(
             infrastructure::realtime::HubSessionNotifier::new(Arc::clone(&hub)),
         );
@@ -1319,6 +1331,18 @@ impl Application {
         ));
 
         // Reap MLS KeyPackages and Welcomes past their use.
+        // The push notices, an arrival's once it waited its delay.
+        tasks.spawn(api::background::serve_push_alerts(
+            push_alert_queue,
+            move |alert| {
+                let notify = Arc::clone(&notify_devices);
+                async move { notify.execute(alert, time::OffsetDateTime::now_utc()).await }
+            },
+            std::time::Duration::try_from(domain::e2ee::ARRIVAL_NOTICE_DELAY)
+                .expect("a positive delay"),
+            stop.clone(),
+        ));
+
         tasks.spawn(api::background::sweep_key_packages(
             sweep_key_packages,
             stop.clone(),
