@@ -12,6 +12,7 @@ use time::OffsetDateTime;
 use super::approval::{close_requests_of, drop_approvals_by, drop_approvals_of, trust_facts};
 use super::archive::locked_generation;
 use super::key_share::{delete_shares_from, delete_shares_to};
+use super::push::delete_push_registration;
 use super::start_over::end_with_revoke;
 
 /// `user_devices`.
@@ -151,6 +152,21 @@ async fn locked_trust(
     .await
     .context("lock a device and the one acting on it")?;
     trust_facts(c, owner, current).await
+}
+
+/// The device, its row share-locked: a revoke, which locks it first, is decided before or after.
+pub(super) async fn locked_device(
+    c: &mut PgConnection,
+    id: DeviceId,
+) -> anyhow::Result<Option<Device>> {
+    let row: Option<DeviceRow> = sqlx::query_as(&format!(
+        "SELECT {DEVICE_COLUMNS} FROM user_devices WHERE device_id = $1 FOR SHARE"
+    ))
+    .bind(id.as_uuid())
+    .fetch_optional(c)
+    .await
+    .context("lock a device")?;
+    row.map(Device::try_from).transpose()
 }
 
 /// Records a device not seen before under `label`, or marks it seen and does `label` to its label.
@@ -341,6 +357,7 @@ impl Devices for PgDevices {
         drop_approvals_by(&mut tx, id).await?;
         delete_shares_to(&mut tx, id).await?;
         delete_shares_from(&mut tx, id).await?;
+        delete_push_registration(&mut tx, id).await?;
         let closed = close_requests_of(&mut tx, owner, id, now).await?;
         let start_over = end_with_revoke(&mut tx, owner, id, now).await?;
         tx.commit().await.context("commit a revoke")?;

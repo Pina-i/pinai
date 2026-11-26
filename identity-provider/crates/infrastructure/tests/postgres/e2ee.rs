@@ -5,7 +5,7 @@ use domain::e2ee::{
 };
 use infrastructure::postgres::{
     PgCommitLog, PgDeviceApprovals, PgDevices, PgGroupInfos, PgHistoryArchive, PgHistoryKeys,
-    PgKeyPackages, PgWelcomes,
+    PgKeyPackages, PgPushRegistrations, PgWelcomes,
 };
 use sqlx::PgPool;
 
@@ -705,4 +705,49 @@ async fn two_uploads_of_the_same_entries_at_once_never_deadlock(pool: PgPool) {
         };
         assert_eq!(stored(one) + stored(other), 50, "each entry once");
     }
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn a_device_keeps_the_last_push_registration_its_session_set(pool: PgPool) {
+    let alice = a_user(&pool).await;
+    contract::a_device_keeps_the_last_push_registration_its_session_set(
+        &PgDevices::new(pool.clone()),
+        &PgPushRegistrations::new(pool),
+        alice,
+    )
+    .await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn a_device_removes_its_push_registration(pool: PgPool) {
+    let alice = a_user(&pool).await;
+    contract::a_device_removes_its_push_registration(
+        &PgDevices::new(pool.clone()),
+        &PgPushRegistrations::new(pool),
+        alice,
+    )
+    .await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn only_a_devices_own_session_writes_its_push_registration(pool: PgPool) {
+    let (alice, bob) = (a_user(&pool).await, a_user(&pool).await);
+    contract::only_a_devices_own_session_writes_its_push_registration(
+        &PgDevices::new(pool.clone()),
+        &PgPushRegistrations::new(pool),
+        alice,
+        bob,
+    )
+    .await;
+}
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn a_revoked_device_holds_no_push_registration(pool: PgPool) {
+    let alice = a_user(&pool).await;
+    contract::a_revoked_device_holds_no_push_registration(
+        &PgDevices::new(pool.clone()),
+        &PgPushRegistrations::new(pool),
+        alice,
+    )
+    .await;
 }
