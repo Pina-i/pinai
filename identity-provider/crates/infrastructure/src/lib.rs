@@ -6,6 +6,7 @@ pub mod email;
 pub mod federation;
 pub mod postgres;
 pub mod presence;
+pub mod push;
 pub mod realtime;
 pub mod storage;
 
