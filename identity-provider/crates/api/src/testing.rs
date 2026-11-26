@@ -14,8 +14,8 @@ use application::e2ee::{
     ClaimWelcomes, ClearArchive, CloseApprovalRequest, EndStartOver, KeyPackageStatus,
     ListApprovalRequests, ListDevices, LoadGroupInfo, LoadHistoryKey, LoadKeyShare, LoadStartOver,
     OpenApprovalRequest, PostApprovalMessage, ReadApprovalMessages, ReadArchive, ReceiveCommit,
-    ReceiveWelcome, RegisterDevice, RenameDevice, ReportHistoryKey, RevokeDevice, SendWelcome,
-    SetHistoryKey, ShareHistoryKey, UploadKeyPackages,
+    ReceiveWelcome, RegisterDevice, RegisterPush, RenameDevice, ReportHistoryKey, RevokeDevice,
+    SendWelcome, SetHistoryKey, ShareHistoryKey, UnregisterPush, UploadKeyPackages,
 };
 use application::identity::{
     DescribeInstance, EditIntro, FindAccount, IntroInForce, ShowIntro, WebFinger,
@@ -856,6 +856,8 @@ impl TestApp {
                 trust_notifier.clone(),
             )),
             rename_device: Arc::new(RenameDevice::new(keys.clone(), sign_in.sessions.clone())),
+            register_push: Arc::new(RegisterPush::new(keys.clone(), sign_in.sessions.clone())),
+            unregister_push: Arc::new(UnregisterPush::new(keys.clone(), sign_in.sessions.clone())),
             report_history_key: Arc::new(ReportHistoryKey::new(
                 sign_in.sessions.clone(),
                 keys.clone(),

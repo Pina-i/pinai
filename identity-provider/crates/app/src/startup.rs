@@ -468,6 +468,9 @@ impl Application {
         let key_cache = Arc::new(KeyCache::new(url_policy));
         let devices: Arc<dyn domain::e2ee::Devices> =
             Arc::new(infrastructure::postgres::PgDevices::new(pool.clone()));
+        let push_registrations: Arc<dyn domain::e2ee::PushRegistrations> = Arc::new(
+            infrastructure::postgres::PgPushRegistrations::new(pool.clone()),
+        );
         let key_packages: Arc<dyn domain::e2ee::KeyPackages> =
             Arc::new(infrastructure::postgres::PgKeyPackages::new(pool.clone()));
         let key_package_policy = domain::e2ee::KeyPackagePolicy {
@@ -1056,6 +1059,14 @@ impl Application {
             )),
             rename_device: Arc::new(application::e2ee::RenameDevice::new(
                 Arc::clone(&devices),
+                Arc::clone(&sessions),
+            )),
+            register_push: Arc::new(application::e2ee::RegisterPush::new(
+                Arc::clone(&push_registrations),
+                Arc::clone(&sessions),
+            )),
+            unregister_push: Arc::new(application::e2ee::UnregisterPush::new(
+                Arc::clone(&push_registrations),
                 Arc::clone(&sessions),
             )),
             report_history_key: Arc::new(application::e2ee::ReportHistoryKey::new(

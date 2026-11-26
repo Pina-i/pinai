@@ -1682,3 +1682,77 @@ async fn a_label_the_client_composed_follows_the_device_through_registrations_an
         "a User-Agent never renames a named device"
     );
 }
+
+mod push {
+    use domain::e2ee::{DeviceRequired, PushRegistration, PushRegistrations, PushRelay, PushToken};
+
+    use super::*;
+
+    fn registration() -> PushRegistration {
+        PushRegistration {
+            relay: PushRelay::parse("https://exp.host/--/api/v2/push/send").unwrap(),
+            token: PushToken::parse("ExponentPushToken[phone]").unwrap(),
+        }
+    }
+
+    fn register(w: &World) -> RegisterPush {
+        RegisterPush::new(w.store.clone(), w.sessions.clone())
+    }
+
+    fn unregister(w: &World) -> UnregisterPush {
+        UnregisterPush::new(w.store.clone(), w.sessions.clone())
+    }
+
+    #[tokio::test]
+    async fn a_device_registers_its_pushes_from_its_own_session_then_removes_them() {
+        let w = world();
+        let phone = DeviceId::generate();
+        w.register_as(&w.alice, phone, 1, None, now())
+            .await
+            .unwrap();
+        let bearer = w.signed_in(&w.alice, Some(phone)).await;
+
+        register(&w)
+            .execute(&bearer, phone, &registration(), now())
+            .await
+            .unwrap();
+        let held = w.store.held(w.alice.id).await.unwrap();
+        unregister(&w).execute(&bearer, phone).await.unwrap();
+
+        assert_eq!(held, vec![(phone, registration())]);
+        assert!(w.store.held(w.alice.id).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_session_that_named_no_device_or_another_registers_nothing() {
+        let w = world();
+        let (phone, laptop) = (DeviceId::generate(), DeviceId::generate());
+        w.register_as(&w.alice, phone, 1, None, now())
+            .await
+            .unwrap();
+        w.register_as(&w.alice, laptop, 2, None, now())
+            .await
+            .unwrap();
+        let (unnamed, laptops) = (
+            w.signed_in(&w.alice, None).await,
+            w.signed_in(&w.alice, Some(laptop)).await,
+        );
+
+        let none = register(&w)
+            .execute(&unnamed, phone, &registration(), now())
+            .await;
+        let another = register(&w)
+            .execute(&laptops, phone, &registration(), now())
+            .await;
+
+        assert!(
+            matches!(none, Err(KeyDirectoryError::DeviceRequired(DeviceRequired))),
+            "{none:?}"
+        );
+        assert!(
+            matches!(another, Err(KeyDirectoryError::NotTheSessionsDevice)),
+            "{another:?}"
+        );
+        assert!(w.store.held(w.alice.id).await.unwrap().is_empty());
+    }
+}

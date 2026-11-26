@@ -1,7 +1,8 @@
 //! Devices, their attestations, and the KeyPackages peers claim to add them to MLS groups; the
 //! approvals the account's devices give each other, and the requests relaying their handshake;
 //! the Delivery Service's commits and Welcomes; each account's history archive, its key, the
-//! passphrase shared between its devices, and the requests to start it over.
+//! passphrase shared between its devices, and the requests to start it over; where each device's
+//! push notices go.
 
 mod approval;
 mod archive;
@@ -11,6 +12,7 @@ mod history_key;
 mod key_package_status;
 mod key_share;
 mod list_devices;
+mod push_registration;
 mod register_device;
 mod rename_device;
 mod revoke_device;
@@ -34,6 +36,7 @@ pub use history_key::{LoadHistoryKey, ReportHistoryKey, SetHistoryKey};
 pub use key_package_status::{DeviceStash, KeyPackageStatus, StashStatus};
 pub use key_share::{LoadKeyShare, ShareHistoryKey};
 pub use list_devices::{ListDevices, ListedDevice};
+pub use push_registration::{RegisterPush, UnregisterPush};
 pub use register_device::{RegisterDevice, Registered};
 pub use rename_device::RenameDevice;
 pub use revoke_device::RevokeDevice;
