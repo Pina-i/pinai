@@ -1,7 +1,13 @@
 use time::OffsetDateTime;
 
 use super::*;
-use crate::e2ee::{DeviceLabel, DeviceRequired};
+use crate::auth::SessionKind;
+use crate::auth::testing::web_client;
+use crate::e2ee::{
+    ATTESTATION_LIFETIME, Approval, Approver, Attestation, DeviceLabel, DeviceRequired,
+    DeviceRootKey, Ed25519Signature, HistoryGeneration,
+};
+use crate::{ApprovalRequestId, SessionId};
 
 fn device(owner: UserId, revoked: bool) -> Device {
     let now = OffsetDateTime::from_unix_timestamp(1_788_000_000).unwrap();
@@ -137,4 +143,152 @@ fn only_an_unrevoked_device_of_the_callers_registers() {
         matches!(gone, Err(KeyDirectoryError::DeviceRevoked)),
         "{gone:?}"
     );
+}
+
+fn at() -> OffsetDateTime {
+    OffsetDateTime::from_unix_timestamp(1_788_000_000).unwrap()
+}
+
+fn attested(owner: UserId, root: u8) -> Device {
+    Device {
+        attestation: Some(Attestation {
+            root_key: DeviceRootKey::parse(&[root; 32]).unwrap(),
+            signature: vec![7; 64],
+            kid: "key-1".into(),
+            issued_at: at(),
+            expires_at: at() + ATTESTATION_LIFETIME,
+        }),
+        ..device(owner, false)
+    }
+}
+
+fn by_the_words(device: &Device) -> Approval {
+    Approval {
+        device: device.id,
+        root_key: device.attestation.as_ref().unwrap().root_key.clone(),
+        approver: Approver::Passphrase(HistoryGeneration::FIRST),
+        signature: Ed25519Signature::parse("signature", &[9; 64]).unwrap(),
+        created_at: at(),
+    }
+}
+
+fn session(user: UserId, device: DeviceId, revoked: bool) -> Session {
+    Session {
+        id: SessionId::generate(),
+        user,
+        kind: SessionKind::App(web_client().id),
+        device: Some(device),
+        created_at: at(),
+        last_used_at: at(),
+        authenticated_at: at(),
+        revoked_at: revoked.then(at),
+    }
+}
+
+fn registration(token: &str) -> PushRegistration {
+    PushRegistration {
+        relay: PushRelay::parse("https://exp.host/--/api/v2/push/send").unwrap(),
+        token: PushToken::parse(token).unwrap(),
+    }
+}
+
+/// Alice's phone and tablet approved, the tablet signed out; a laptop nobody approved yet.
+struct Account {
+    alice: UserId,
+    phone: Device,
+    tablet: Device,
+    laptop: Device,
+    trust: DeviceTrust,
+}
+
+fn account() -> Account {
+    let alice = UserId::generate();
+    let (phone, tablet, laptop) = (attested(alice, 1), attested(alice, 2), attested(alice, 3));
+    let trust = DeviceTrust {
+        approvals: vec![by_the_words(&phone), by_the_words(&tablet)],
+        devices: vec![phone.clone(), tablet.clone(), laptop.clone()],
+        current: Some(HistoryGeneration::FIRST),
+    };
+    Account {
+        alice,
+        phone,
+        tablet,
+        laptop,
+        trust,
+    }
+}
+
+#[test]
+fn a_notice_says_nothing_of_the_account_and_one_of_a_kind_replaces_the_last() {
+    let alert = |what| {
+        PushAlert {
+            owner: UserId::generate(),
+            device: DeviceId::generate(),
+            what,
+        }
+        .notice()
+    };
+
+    assert_eq!(alert(Happened::Arrived), PushNotice::DeviceWaiting);
+    assert_eq!(alert(Happened::AsksACode), PushNotice::DeviceWaiting);
+    assert_eq!(alert(Happened::AsksToStartOver), PushNotice::StartOver);
+    assert_eq!(PushNotice::DeviceWaiting.title(), "Is this you?");
+    assert_eq!(PushNotice::StartOver.tag(), "start_over");
+    assert_ne!(PushNotice::DeviceWaiting.tag(), PushNotice::StartOver.tag());
+}
+
+#[test]
+fn the_approved_devices_signed_in_with_a_registration_are_told_never_the_one_concerned() {
+    let a = account();
+    let held = vec![
+        (a.phone.id, registration("ExponentPushToken[phone]")),
+        (a.tablet.id, registration("ExponentPushToken[tablet]")),
+        (a.laptop.id, registration("ExponentPushToken[laptop]")),
+    ];
+    let sessions = vec![
+        session(a.alice, a.phone.id, false),
+        session(a.alice, a.tablet.id, true),
+        session(a.alice, a.laptop.id, false),
+    ];
+
+    let about_the_laptop = push_recipients(&a.trust, &held, &sessions, a.laptop.id, at());
+    let about_the_phone = push_recipients(&a.trust, &held, &sessions, a.phone.id, at());
+
+    assert_eq!(about_the_laptop, vec![&held[0]]);
+    assert!(about_the_phone.is_empty());
+}
+
+#[test]
+fn nobody_is_told_before_the_account_has_a_history_key() {
+    let a = account();
+    let trust = DeviceTrust {
+        current: None,
+        ..a.trust
+    };
+    let held = vec![(a.phone.id, registration("ExponentPushToken[phone]"))];
+    let sessions = vec![session(a.alice, a.phone.id, false)];
+
+    assert!(push_recipients(&trust, &held, &sessions, a.laptop.id, at()).is_empty());
+}
+
+#[test]
+fn an_arrival_waits_while_unapproved_unrevoked_and_asking_no_code() {
+    let a = account();
+    let asking = ApprovalRequest {
+        id: ApprovalRequestId::generate(),
+        owner: a.alice,
+        device: a.laptop.id,
+        approver: None,
+        created_at: at(),
+        expires_at: at() + time::Duration::minutes(10),
+        closed_at: None,
+    };
+    let mut revoked = a.trust.clone();
+    revoked.devices[2].revoked_at = Some(at());
+
+    assert!(arrival_still_waits(&a.trust, a.laptop.id, &[]));
+    assert!(!arrival_still_waits(&a.trust, a.laptop.id, &[asking]));
+    assert!(!arrival_still_waits(&a.trust, a.phone.id, &[]));
+    assert!(!arrival_still_waits(&revoked, a.laptop.id, &[]));
+    assert!(!arrival_still_waits(&a.trust, DeviceId::generate(), &[]));
 }

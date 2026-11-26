@@ -812,3 +812,14 @@ async fn a_revoked_device_holds_no_push_registration() {
     )
     .await;
 }
+
+#[tokio::test]
+async fn a_registration_is_forgotten_only_while_it_holds_the_token_gone() {
+    let directory = store();
+    contract::a_registration_is_forgotten_only_while_it_holds_the_token_gone(
+        &directory,
+        &directory,
+        UserId::generate(),
+    )
+    .await;
+}

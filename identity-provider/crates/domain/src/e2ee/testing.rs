@@ -18,6 +18,7 @@ use crate::{CommitId, ConversationId, WelcomeId};
 
 pub use approval::{InMemoryApprovalRequests, RecordingDeviceTrustNotifier, SentTrust};
 pub use key_share::sealed_share;
+pub use push::RecordingPushRelays;
 
 use super::{
     Append, ArchiveCursor, ArchiveEntry, ArchiveStoreError, Archived, Cleared, HeldHistoryKey,

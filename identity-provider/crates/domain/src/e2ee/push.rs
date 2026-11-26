@@ -3,12 +3,16 @@
 
 use std::fmt;
 
+use time::{Duration, OffsetDateTime};
 use url::{Host, Url};
 
+use crate::auth::Session;
 use crate::validation::ValidationError;
 use crate::{DeviceId, UserId};
 
-use super::{Device, KeyDirectoryError, own_unrevoked, sessions_device};
+use super::{
+    ApprovalRequest, Device, DeviceTrust, KeyDirectoryError, own_unrevoked, sessions_device,
+};
 
 /// A relay's address and a token are at most this long, in bytes.
 pub const PUSH_FIELD_MAX_BYTES: usize = 512;
@@ -111,6 +115,120 @@ pub fn may_register_push(
     }
     own_unrevoked(caller, device)?;
     Ok(())
+}
+
+/// How long a device that arrived is left to be approved, or to ask a code, before the approved
+/// devices are told it waits: a device restored by the 24 words is approved by then.
+pub const ARRIVAL_NOTICE_DELAY: Duration = Duration::minutes(2);
+
+/// How long a relay keeps a notice for a phone out of reach: past that, the app shows what is
+/// current when opened anyway.
+pub const PUSH_NOTICE_TTL: Duration = Duration::hours(1);
+
+/// The phone's notification channel the notices go to, which its app creates.
+pub const PUSH_CHANNEL: &str = "sign-ins";
+
+/// What a notice says: fixed words, no name nor identifier — the relay and the platform's service
+/// learn only that this phone was told something then.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PushNotice {
+    /// A device asks a code, or arrived and waits.
+    DeviceWaiting,
+    /// A device asks to start the history over.
+    StartOver,
+}
+
+impl PushNotice {
+    pub fn kind(self) -> &'static str {
+        match self {
+            Self::DeviceWaiting => "device_waiting",
+            Self::StartOver => "start_over",
+        }
+    }
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::DeviceWaiting => "Is this you?",
+            Self::StartOver => "Start your history over?",
+        }
+    }
+
+    pub fn body(self) -> &'static str {
+        match self {
+            Self::DeviceWaiting => {
+                "A device is signing in to your account. Open Pīna'i to approve it or sign it out."
+            }
+            Self::StartOver => {
+                "Someone asked to start your history over. If it wasn't you, open Pīna'i to cancel it."
+            }
+        }
+    }
+
+    /// A notice replaces the one of its kind shown already: a device's arrival then its code
+    /// leave one.
+    pub fn tag(self) -> &'static str {
+        self.kind()
+    }
+}
+
+/// What happened, on its way to the devices to tell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PushAlert {
+    pub owner: UserId,
+    /// The device it is about, never told.
+    pub device: DeviceId,
+    pub what: Happened,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Happened {
+    /// Registered for the first time: told only if it still waits [`ARRIVAL_NOTICE_DELAY`] on.
+    Arrived,
+    /// Opened an approval request.
+    AsksACode,
+    /// Asked to start the history over.
+    AsksToStartOver,
+}
+
+impl PushAlert {
+    pub fn notice(&self) -> PushNotice {
+        match self.what {
+            Happened::Arrived | Happened::AsksACode => PushNotice::DeviceWaiting,
+            Happened::AsksToStartOver => PushNotice::StartOver,
+        }
+    }
+}
+
+/// Who is sent a notice about `concerned`: the devices approved under the current generation —
+/// they can answer —, with a live session that named them — one signed out would open on a
+/// sign-in —, and a registration; never `concerned` itself.
+pub fn push_recipients<'a>(
+    trust: &DeviceTrust,
+    held: &'a [(DeviceId, PushRegistration)],
+    sessions: &[Session],
+    concerned: DeviceId,
+    now: OffsetDateTime,
+) -> Vec<&'a (DeviceId, PushRegistration)> {
+    held.iter()
+        .filter(|(id, _)| *id != concerned && trust.is_approved(*id))
+        .filter(|(id, _)| {
+            sessions
+                .iter()
+                .any(|session| session.device == Some(*id) && session.is_live(now))
+        })
+        .collect()
+}
+
+/// Whether a device that arrived still waits: known, unrevoked, not approved, and asking no code —
+/// a request's own notice went as it opened.
+pub fn arrival_still_waits(
+    trust: &DeviceTrust,
+    device: DeviceId,
+    open_requests: &[ApprovalRequest],
+) -> bool {
+    trust.device(device).is_some_and(|held| !held.is_revoked())
+        && !trust.is_approved(device)
+        && !open_requests.iter().any(|request| request.device == device)
 }
 
 #[cfg(test)]

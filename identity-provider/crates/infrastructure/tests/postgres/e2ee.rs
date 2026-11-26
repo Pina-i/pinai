@@ -751,3 +751,14 @@ async fn a_revoked_device_holds_no_push_registration(pool: PgPool) {
     )
     .await;
 }
+
+#[sqlx::test(migrator = "infrastructure::MIGRATOR")]
+async fn a_registration_is_forgotten_only_while_it_holds_the_token_gone(pool: PgPool) {
+    let alice = a_user(&pool).await;
+    contract::a_registration_is_forgotten_only_while_it_holds_the_token_gone(
+        &PgDevices::new(pool.clone()),
+        &PgPushRegistrations::new(pool),
+        alice,
+    )
+    .await;
+}

@@ -103,6 +103,25 @@ impl PushRegistrations for PgPushRegistrations {
             .collect::<anyhow::Result<_>>()?;
         Ok(held)
     }
+
+    async fn forget(
+        &self,
+        owner: UserId,
+        id: DeviceId,
+        token: &PushToken,
+    ) -> Result<(), KeyStoreError> {
+        sqlx::query(
+            "DELETE FROM device_push_registrations \
+             WHERE device_id = $1 AND user_id = $2 AND token = $3",
+        )
+        .bind(id.as_uuid())
+        .bind(owner.as_uuid())
+        .bind(token.as_str())
+        .execute(&self.pool)
+        .await
+        .context("forget a push registration")?;
+        Ok(())
+    }
 }
 
 /// Within a revoke's write too: a revoked device is sent nothing.

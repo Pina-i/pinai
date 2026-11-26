@@ -1,7 +1,10 @@
 //! The push registrations in memory, and the contract every store of them must satisfy.
 
 use super::*;
-use crate::e2ee::{KeyDirectoryError, PushRegistrations, PushWrite, may_register_push};
+use crate::e2ee::{
+    Delivery, KeyDirectoryError, PushNotice, PushRegistrations, PushRelays, PushToken, PushWrite,
+    may_register_push,
+};
 
 #[async_trait::async_trait]
 impl PushRegistrations for InMemoryKeyDirectory {
@@ -51,6 +54,55 @@ impl PushRegistrations for InMemoryKeyDirectory {
             .filter(|(of, _, _)| *of == owner)
             .map(|(_, id, registration)| (*id, registration.clone()))
             .collect())
+    }
+
+    async fn forget(
+        &self,
+        owner: UserId,
+        id: DeviceId,
+        token: &PushToken,
+    ) -> Result<(), KeyStoreError> {
+        self.state
+            .lock()
+            .unwrap()
+            .pushes
+            .retain(|(of, device, held)| !(*of == owner && *device == id && held.token == *token));
+        Ok(())
+    }
+}
+
+/// Sends nothing: records each notice, and answers [`Delivery::Gone`] for the tokens it is told
+/// to.
+#[derive(Default)]
+pub struct RecordingPushRelays {
+    pub sent: Mutex<Vec<(PushRegistration, PushNotice)>>,
+    gone: Mutex<Vec<PushToken>>,
+}
+
+impl RecordingPushRelays {
+    pub fn no_longer_reaching(&self, token: &PushToken) {
+        self.gone.lock().unwrap().push(token.clone());
+    }
+
+    pub fn tokens_sent(&self) -> Vec<(String, PushNotice)> {
+        self.sent
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(to, notice)| (to.token.as_str().to_owned(), *notice))
+            .collect()
+    }
+}
+
+#[async_trait::async_trait]
+impl PushRelays for RecordingPushRelays {
+    async fn send(&self, to: &PushRegistration, notice: PushNotice) -> anyhow::Result<Delivery> {
+        self.sent.lock().unwrap().push((to.clone(), notice));
+        Ok(if self.gone.lock().unwrap().contains(&to.token) {
+            Delivery::Gone
+        } else {
+            Delivery::Sent
+        })
     }
 }
 
@@ -214,6 +266,25 @@ pub mod contract {
             vec![(phone, registration("ExponentPushToken[kept]"))]
         );
         assert!(pushes.held(bob).await.unwrap().is_empty());
+    }
+
+    pub async fn a_registration_is_forgotten_only_while_it_holds_the_token_gone(
+        devices: &dyn Devices,
+        pushes: &dyn PushRegistrations,
+        alice: UserId,
+    ) {
+        let phone = a_device(devices, alice, 1).await;
+        set(pushes, alice, phone, Some(phone), "ExponentPushToken[old]").await;
+        set(pushes, alice, phone, Some(phone), "ExponentPushToken[new]").await;
+
+        let old = PushToken::parse("ExponentPushToken[old]").unwrap();
+        pushes.forget(alice, phone, &old).await.unwrap();
+        let kept = pushes.held(alice).await.unwrap();
+        let new = PushToken::parse("ExponentPushToken[new]").unwrap();
+        pushes.forget(alice, phone, &new).await.unwrap();
+
+        assert_eq!(kept, vec![(phone, registration("ExponentPushToken[new]"))]);
+        assert!(pushes.held(alice).await.unwrap().is_empty());
     }
 
     pub async fn a_revoked_device_holds_no_push_registration(

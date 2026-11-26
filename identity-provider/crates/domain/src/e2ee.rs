@@ -67,14 +67,18 @@ pub use key_share::{
     ShareFacts, may_share, share_aad, share_signed_bytes,
 };
 pub use ports::{
-    ApprovalRequests, Approve, Archived, Attest, Cleared, Close, CommitLog, Deposit,
+    ApprovalRequests, Approve, Archived, Attest, Cleared, Close, CommitLog, Delivery, Deposit,
     DeviceApprovals, DeviceAttester, DeviceNotifier, DeviceTrustNotifier, Devices, Ed25519Verifier,
     GroupInfos, HistoryArchive, HistoryKeys, Holding, KeyPackages, KeyReplace, KeyShares,
-    MlsFederation, MlsNotifier, Opened, OutgoingWelcome, Post, PushRegistrations, PushWrite, Read,
-    RemoteKeyPackages, Renaming, Revocation, SignedAttestation, StartOverEnded, StartOverOpened,
-    StartOverRequests, Welcomes,
+    MlsFederation, MlsNotifier, Opened, OutgoingWelcome, Post, PushRegistrations, PushRelays,
+    PushWrite, Read, RemoteKeyPackages, Renaming, Revocation, SignedAttestation, StartOverEnded,
+    StartOverOpened, StartOverRequests, Welcomes,
 };
-pub use push::{PUSH_FIELD_MAX_BYTES, PushRegistration, PushRelay, PushToken, may_register_push};
+pub use push::{
+    ARRIVAL_NOTICE_DELAY, Happened, PUSH_CHANNEL, PUSH_FIELD_MAX_BYTES, PUSH_NOTICE_TTL, PushAlert,
+    PushNotice, PushRegistration, PushRelay, PushToken, arrival_still_waits, may_register_push,
+    push_recipients,
+};
 pub use start_over::{
     MaturedStartOver, START_OVER_KEPT, START_OVER_WAIT, StartOverEnd, StartOverEnding,
     StartOverOpening, StartOverRefusal, StartOverRequest, may_open_start_over,
