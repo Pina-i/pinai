@@ -2,6 +2,7 @@
 
 mod approval;
 mod key_share;
+mod push;
 mod start_over;
 
 use std::sync::{Arc, Mutex};
@@ -25,8 +26,8 @@ use super::{
 };
 use super::{
     Approval, Approver, ArchiveError, ChosenName, DeviceTrust, Ed25519PublicKey, KeyGate, KeyShare,
-    Renaming, StartOverEnd, StartOverEnding, StartOverRequest, may_rename, may_replace_history_key,
-    may_revoke,
+    PushRegistration, Renaming, StartOverEnd, StartOverEnding, StartOverRequest, may_rename,
+    may_replace_history_key, may_revoke,
 };
 use super::{
     Attest, Attestation, AttestationExpiry, Claim, ClaimedKeyPackage, Commit, CommitLog,
@@ -143,6 +144,7 @@ impl InMemoryKeyDirectory {
 struct State {
     devices: Vec<Device>,
     packages: Vec<Stashed>,
+    pushes: Vec<(UserId, DeviceId, PushRegistration)>,
 }
 
 struct Stashed {
@@ -279,6 +281,7 @@ impl Devices for InMemoryKeyDirectory {
         let device = state.device_mut(id).expect("read just now");
         device.revoked_at = Some(now);
         device.hpke_key = None;
+        state.pushes.retain(|(_, of, _)| *of != id);
         self.drop_approvals(|approval| approval.approver == Approver::Device(id));
         self.drop_shares(|share| share.sender == id || share.recipient == id);
         let closed = self
@@ -1174,6 +1177,7 @@ pub mod contract {
 
     pub use super::approval::contract::*;
     pub use super::key_share::contract::*;
+    pub use super::push::contract::*;
     pub use super::start_over::contract::*;
 
     use super::*;
