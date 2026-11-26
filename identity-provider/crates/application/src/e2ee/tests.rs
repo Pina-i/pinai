@@ -1684,7 +1684,11 @@ async fn a_label_the_client_composed_follows_the_device_through_registrations_an
 }
 
 mod push {
-    use domain::e2ee::{DeviceRequired, PushRegistration, PushRegistrations, PushRelay, PushToken};
+    use domain::e2ee::testing::{InMemoryApprovalRequests, RecordingPushRelays};
+    use domain::e2ee::{
+        ApprovalRequest, ApprovalRequests, DeviceRequired, Happened, PushAlert, PushNotice,
+        PushRegistration, PushRegistrations, PushRelay, PushToken,
+    };
 
     use super::*;
 
@@ -1754,5 +1758,160 @@ mod push {
             "{another:?}"
         );
         assert!(w.store.held(w.alice.id).await.unwrap().is_empty());
+    }
+
+    fn at_token(token: &str) -> PushRegistration {
+        PushRegistration {
+            relay: PushRelay::parse("https://exp.host/--/api/v2/push/send").unwrap(),
+            token: PushToken::parse(token).unwrap(),
+        }
+    }
+
+    /// Alice's phone, approved by her words and signed in, with its registration; her tablet,
+    /// approved too but signed out; a laptop nobody approved, signed in and registered.
+    struct Told {
+        w: World,
+        store: Arc<InMemoryKeyDirectory>,
+        requests: Arc<InMemoryApprovalRequests>,
+        relays: Arc<RecordingPushRelays>,
+        notify: NotifyDevices,
+        phone: DeviceId,
+        laptop: DeviceId,
+    }
+
+    async fn told() -> Told {
+        let w = world();
+        let keys = Arc::new(InMemoryArchive::default());
+        let requests = Arc::new(InMemoryApprovalRequests::default());
+        let store =
+            Arc::new(InMemoryKeyDirectory::keyed_by(keys.clone()).relaying(requests.clone()));
+        let (phone, tablet, laptop) = (
+            DeviceId::generate(),
+            DeviceId::generate(),
+            DeviceId::generate(),
+        );
+        let unnamed = w.signed_in(&w.alice, None).await;
+        for (device, root) in [(phone, 1), (tablet, 2), (laptop, 3)] {
+            w.registering_over(store.clone())
+                .execute(&unnamed, device, key(root), None, &unlabelled(), now())
+                .await
+                .unwrap();
+        }
+        keys.replace(w.alice.id, &first_history_key(), phone, now())
+            .await
+            .unwrap();
+        for device in [phone, tablet] {
+            store
+                .approved_by_words(w.alice.id, device, &first_history_key())
+                .await;
+        }
+        for (device, token) in [
+            (phone, "ExponentPushToken[phone]"),
+            (tablet, "ExponentPushToken[tablet]"),
+            (laptop, "ExponentPushToken[laptop]"),
+        ] {
+            store
+                .set(w.alice.id, device, Some(device), &at_token(token), now())
+                .await
+                .unwrap();
+        }
+        w.signed_in(&w.alice, Some(phone)).await;
+        w.signed_in(&w.alice, Some(laptop)).await;
+        let relays = Arc::new(RecordingPushRelays::default());
+        let notify = NotifyDevices::new(
+            store.clone(),
+            requests.clone(),
+            w.sessions.clone(),
+            store.clone(),
+            relays.clone(),
+        );
+        Told {
+            w,
+            store,
+            requests,
+            relays,
+            notify,
+            phone,
+            laptop,
+        }
+    }
+
+    impl Told {
+        fn alert(&self, device: DeviceId, what: Happened) -> PushAlert {
+            PushAlert {
+                owner: self.w.alice.id,
+                device,
+                what,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_device_asking_a_code_wakes_the_approved_phone_signed_in_and_no_other() {
+        let t = told().await;
+
+        t.notify
+            .execute(t.alert(t.laptop, Happened::AsksACode), now())
+            .await;
+        t.notify
+            .execute(t.alert(t.laptop, Happened::AsksToStartOver), now())
+            .await;
+
+        assert_eq!(
+            t.relays.tokens_sent(),
+            vec![
+                (
+                    "ExponentPushToken[phone]".to_owned(),
+                    PushNotice::DeviceWaiting
+                ),
+                ("ExponentPushToken[phone]".to_owned(), PushNotice::StartOver),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn an_arrival_is_told_only_while_the_device_still_waits() {
+        let t = told().await;
+        t.notify
+            .execute(t.alert(t.laptop, Happened::Arrived), now())
+            .await;
+        let laptop = t.store.find(t.laptop).await.unwrap().unwrap();
+        t.requests
+            .open(&ApprovalRequest::open_for(&laptop, now()).unwrap())
+            .await
+            .unwrap();
+
+        t.notify
+            .execute(t.alert(t.laptop, Happened::Arrived), now())
+            .await;
+        t.notify
+            .execute(t.alert(t.phone, Happened::Arrived), now())
+            .await;
+
+        assert_eq!(
+            t.relays.tokens_sent(),
+            vec![(
+                "ExponentPushToken[phone]".to_owned(),
+                PushNotice::DeviceWaiting
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_registration_the_relay_no_longer_reaches_is_forgotten() {
+        let t = told().await;
+        t.relays
+            .no_longer_reaching(&PushToken::parse("ExponentPushToken[phone]").unwrap());
+
+        t.notify
+            .execute(t.alert(t.laptop, Happened::AsksACode), now())
+            .await;
+
+        let held = t.store.held(t.w.alice.id).await.unwrap();
+        assert!(
+            held.iter().all(|(device, _)| *device != t.phone),
+            "{held:?}"
+        );
+        assert_eq!(held.len(), 2);
     }
 }
