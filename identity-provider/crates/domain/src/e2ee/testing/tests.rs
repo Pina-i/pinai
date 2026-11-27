@@ -771,3 +771,55 @@ fn the_times_a_test_names_agree_across_a_second_boundary() {
 
     assert_eq!(contract::at(time::Duration::ZERO), before);
 }
+
+#[tokio::test]
+async fn a_device_keeps_the_last_push_registration_its_session_set() {
+    let directory = store();
+    contract::a_device_keeps_the_last_push_registration_its_session_set(
+        &directory,
+        &directory,
+        UserId::generate(),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_device_removes_its_push_registration() {
+    let directory = store();
+    contract::a_device_removes_its_push_registration(&directory, &directory, UserId::generate())
+        .await;
+}
+
+#[tokio::test]
+async fn only_a_devices_own_session_writes_its_push_registration() {
+    let directory = store();
+    contract::only_a_devices_own_session_writes_its_push_registration(
+        &directory,
+        &directory,
+        UserId::generate(),
+        UserId::generate(),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_revoked_device_holds_no_push_registration() {
+    let directory = store();
+    contract::a_revoked_device_holds_no_push_registration(
+        &directory,
+        &directory,
+        UserId::generate(),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_registration_is_forgotten_only_while_it_holds_the_token_gone() {
+    let directory = store();
+    contract::a_registration_is_forgotten_only_while_it_holds_the_token_gone(
+        &directory,
+        &directory,
+        UserId::generate(),
+    )
+    .await;
+}

@@ -4,7 +4,8 @@
 //! their devices — and
 //! each account's encrypted history archive, with the key it is sealed under; the approvals the
 //! account's devices give each other, the requests their handshake is relayed over, the
-//! passphrase shared between them, and the requests to start the history over. Every key,
+//! passphrase shared between them, the requests to start the history over, and where each
+//! device's push notices go. Every key,
 //! package, MLS message, archive entry, handshake message and key share is opaque here — see
 //! identity-provider/specs/e2ee.md.
 
@@ -18,6 +19,7 @@ mod history_key;
 mod key_package;
 mod key_share;
 mod ports;
+mod push;
 mod start_over;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod testing;
@@ -65,11 +67,17 @@ pub use key_share::{
     ShareFacts, may_share, share_aad, share_signed_bytes,
 };
 pub use ports::{
-    ApprovalRequests, Approve, Archived, Attest, Cleared, Close, CommitLog, Deposit,
+    ApprovalRequests, Approve, Archived, Attest, Cleared, Close, CommitLog, Delivery, Deposit,
     DeviceApprovals, DeviceAttester, DeviceNotifier, DeviceTrustNotifier, Devices, Ed25519Verifier,
     GroupInfos, HistoryArchive, HistoryKeys, Holding, KeyPackages, KeyReplace, KeyShares,
-    MlsFederation, MlsNotifier, Opened, OutgoingWelcome, Post, Read, RemoteKeyPackages, Renaming,
-    Revocation, SignedAttestation, StartOverEnded, StartOverOpened, StartOverRequests, Welcomes,
+    MlsFederation, MlsNotifier, Opened, OutgoingWelcome, Post, PushRegistrations, PushRelays,
+    PushWrite, Read, RemoteKeyPackages, Renaming, Revocation, SignedAttestation, StartOverEnded,
+    StartOverOpened, StartOverRequests, Welcomes,
+};
+pub use push::{
+    ARRIVAL_NOTICE_DELAY, Happened, PUSH_CHANNEL, PUSH_FIELD_MAX_BYTES, PUSH_NOTICE_TTL, PushAlert,
+    PushNotice, PushRegistration, PushRelay, PushToken, arrival_still_waits, may_register_push,
+    push_recipients,
 };
 pub use start_over::{
     MaturedStartOver, START_OVER_KEPT, START_OVER_WAIT, StartOverEnd, StartOverEnding,

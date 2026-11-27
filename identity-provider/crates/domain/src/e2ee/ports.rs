@@ -10,9 +10,9 @@ use super::{
     CheckedApproval, CheckedShare, ChosenName, Claim, ClaimedKeyPackage, Commit,
     DeliveryStoreError, Device, DeviceRootKey, DeviceTrust, Ed25519PublicKey, Ed25519Signature,
     Epoch, GroupInfo, GroupInfoBlob, HeldHistoryKey, HistoryGeneration, HistoryKey, HpkeKeyWrite,
-    KeyShare, KeyStoreError, LabelWrite, MessageSeq, NewArchiveEntry, NewCommit, NewKeyPackage,
-    NewWelcome, RemoteClaimError, RequestRefusal, StartOverEnd, StartOverRefusal, StartOverRequest,
-    Welcome, WelcomeBlob,
+    KeyDirectoryError, KeyShare, KeyStoreError, LabelWrite, MessageSeq, NewArchiveEntry, NewCommit,
+    NewKeyPackage, NewWelcome, PushNotice, PushRegistration, PushToken, RemoteClaimError,
+    RequestRefusal, StartOverEnd, StartOverRefusal, StartOverRequest, Welcome, WelcomeBlob,
 };
 
 /// The devices accounts registered, and their attestations.
@@ -109,6 +109,60 @@ pub enum Renaming {
     Revoked,
     /// An approved device, and `by` isn't one: nothing was written.
     Refused(ApprovalRequired),
+}
+
+/// Where each device's push notices go — see identity-provider/specs/push.md.
+#[async_trait::async_trait]
+pub trait PushRegistrations: Send + Sync {
+    /// Keep `registration` as the device's, replacing the one held, for a session whose device is
+    /// `named`, as [`super::may_register_push`] decides on the device as it stands under its row
+    /// lock: a revoke committed first leaves nothing written.
+    async fn set(
+        &self,
+        owner: UserId,
+        id: DeviceId,
+        named: Option<DeviceId>,
+        registration: &PushRegistration,
+        now: OffsetDateTime,
+    ) -> Result<PushWrite, KeyStoreError>;
+    /// Drop the device's registration, decided as [`Self::set`] is; none held is done too.
+    async fn remove(
+        &self,
+        owner: UserId,
+        id: DeviceId,
+        named: Option<DeviceId>,
+    ) -> Result<PushWrite, KeyStoreError>;
+    /// The account's registrations, each with its device: a revoked device holds none.
+    async fn held(&self, owner: UserId)
+    -> Result<Vec<(DeviceId, PushRegistration)>, KeyStoreError>;
+    /// Drop the device's registration while it still holds `token`: the relay said it no longer
+    /// reaches it, and a token the device registered since is kept.
+    async fn forget(
+        &self,
+        owner: UserId,
+        id: DeviceId,
+        token: &PushToken,
+    ) -> Result<(), KeyStoreError>;
+}
+
+/// The relays devices named: hand a notice over for one device.
+#[async_trait::async_trait]
+pub trait PushRelays: Send + Sync {
+    async fn send(&self, to: &PushRegistration, notice: PushNotice) -> anyhow::Result<Delivery>;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Delivery {
+    Sent,
+    /// The relay no longer reaches the device by that token: an app uninstalled, notices off.
+    Gone,
+}
+
+#[derive(Debug)]
+pub enum PushWrite {
+    Done,
+    /// Nothing was written.
+    Refused(KeyDirectoryError),
 }
 
 /// The KeyPackages devices publish ahead of time, each handed out once.

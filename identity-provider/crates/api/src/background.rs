@@ -405,5 +405,12 @@ async fn take_reset_requests(
     queue.queue.len() + usize::from(under_way.load(Ordering::Relaxed))
 }
 
+mod push;
+
+pub use push::{
+    AlertingDeviceNotifier, AlertingTrustNotifier, PushAlertQueue, PushAlerts, push_alerts,
+    serve_push_alerts,
+};
+
 #[cfg(test)]
 mod tests;

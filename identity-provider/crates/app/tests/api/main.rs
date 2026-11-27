@@ -16,6 +16,7 @@ mod invitations;
 mod key_shares;
 mod password_resets;
 mod people;
+mod push;
 mod sessions;
 mod shutdown;
 mod sign_up;

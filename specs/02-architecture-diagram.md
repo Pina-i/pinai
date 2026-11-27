@@ -5,7 +5,10 @@ flowchart TD
     subgraph ClientAlice["Alice's Clients"]
         WEB_A["🖥️ Web\nReact + Vite"]
         DESK_A["🖱️ Desktop\nElectron"]
+        MOB_A["📱 Mobile\nExpo"]
     end
+
+    RELAY["🔔 Push relay\nthe app's: Expo's push service\n→ FCM · APNs"]
 
     subgraph ClientBob["Bob's Clients"]
         WEB_B["🖥️ Web\nReact + Vite"]
@@ -55,6 +58,9 @@ flowchart TD
     DESK_A <-->|"OIDC + WebSocket"| OIDC_A
     WEB_A  <-->|WebSocket| WS_A
     DESK_A <-->|WebSocket| WS_A
+    MOB_A  <-->|"OIDC + WebSocket\nwhile open"| WS_A
+    MSG_A  -->|"push notice:\na device waits · a start over"| RELAY
+    RELAY  -->|"wakes the closed app"| MOB_A
 
     WEB_B  <-->|"OIDC + WebSocket"| OIDC_B
     DESK_B <-->|"OIDC + WebSocket"| OIDC_B
